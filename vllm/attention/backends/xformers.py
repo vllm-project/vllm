@@ -148,6 +148,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         # from xformer API.
         # will not appear in the __repr__ and __init__
         self.attn_bias: Optional[List[AttentionBias]] = None
+        self.encoder_attn_bias: Optional[List[AttentionBias]] = None
+        self.cross_attn_bias: Optional[List[AttentionBias]] = None
 
     @property
     def is_all_cross_attn_metadata_set(self):
