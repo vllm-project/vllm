@@ -98,7 +98,7 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
             initialize_dummy_weights(model)
         else:
             load_ammo_quantized_weights = getattr(model, "load_ammo_quantized_weights", None)
-            if quant_config is not None and load_ammo_quantized_weights is not None:
+            if model_config.quantization is not None and load_ammo_quantized_weights is not None:
                 load_ammo_quantized_weights(model_config.model, model_config.download_dir,
                                model_config.load_format, model_config.revision,
                                quant_config)
