@@ -137,13 +137,16 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
             rejection.
             
         """
+        device = target_probs.device
         candidates_prob = torch.gather(
             target_probs, dim=-1,
-            index=draft_token_ids.unsqueeze(-1)).squeeze(-1)
+            index=draft_token_ids.unsqueeze(-1).to(device)).squeeze(-1)
         posterior_entropy = -torch.sum(
             target_probs * torch.log(target_probs + 1e-5), dim=-1)
         threshold = torch.minimum(
-            torch.ones_like(posterior_entropy) * self._posterior_threshold,
+            torch.ones_like(
+                posterior_entropy,
+                device=device) * self._posterior_threshold,
             torch.exp(-posterior_entropy) * self._posterior_alpha,
         )
         accepted_mask = candidates_prob > threshold
@@ -175,6 +178,7 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         """
         max_indices = torch.argmax(target_probs[:, 0, :], dim=1)
         output = -torch.ones((target_probs.shape[0], target_probs.shape[1]),
-                             dtype=self.token_id_dtype)
+                             dtype=self.token_id_dtype).to(
+                                target_probs.device)
         output[:, 0] = max_indices
         return output
