@@ -339,6 +339,29 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 cross_block_tables=self.cross_block_tables)
             return self._cross_cached_decode_metadata
 
+def _get_attn_bias(attn_metadata: XFormersMetadata) -> \
+    Optional[List[Optional[AttentionBias]]]:
+    attn_type = attn_metadata.attention_type
+    if attn_type == AttentionType.DECODER:
+        return attn_metadata.attn_bias
+    elif attn_type == AttentionType.ENCODER:
+        return attn_metadata.encoder_attn_bias
+    elif attn_type == AttentionType.ENCODER_DECODER:
+        return attn_metadata.cross_attn_bias
+    else:
+        raise AttributeError(f"Invalid attn_metadata.attention_type {attn_type}")
+
+def _set_attn_bias(attn_metadata: XFormersMetadata, 
+                   attn_bias: List[Optional[AttentionBias]]) -> None:
+    attn_type = attn_metadata.attention_type
+    if attn_type == AttentionType.DECODER:
+        attn_metadata.attn_bias = attn_bias
+    elif attn_type == AttentionType.ENCODER:
+        attn_metadata.encoder_attn_bias = attn_bias
+    elif attn_type == AttentionType.ENCODER_DECODER:
+        attn_metadata.cross_attn_bias = attn_bias
+    else:
+        raise AttributeError(f"Invalid attn_metadata.attention_type {attn_type}")
 
 class XFormersImpl(AttentionImpl[XFormersMetadata]):
     """
@@ -606,7 +629,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # Set attention bias if not provided. This typically happens at
         # the very attention layer of every iteration.
         # FIXME(woosuk): This is a hack.
-        if attn_metadata.attn_bias is None:
+        attn_bias = _get_attn_bias(attn_metadata)
+        if attn_bias is None:
             if self.alibi_slopes is None:
                 if attn_metadata.attention_type == \
                     AttentionType.ENCODER_DECODER:
@@ -625,11 +649,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
-                attn_metadata.attn_bias = [attn_bias]
+                attn_bias = [attn_bias]
             else:
-                attn_metadata.attn_bias = _make_alibi_bias(
+                attn_bias = _make_alibi_bias(
                     self.alibi_slopes, self.num_kv_heads, query.dtype,
                     attn_metadata.seq_lens)
+
+            _set_attn_bias(attn_metadata,attn_bias)
 
         # No alibi slopes.
         # TODO(woosuk): Too many view operations. Let's try to reduce
@@ -643,7 +669,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 query,
                 key,
                 value,
-                attn_bias=attn_metadata.attn_bias[0],
+                attn_bias=attn_bias[0],
                 p=0.0,
                 scale=self.scale)
             return out.view_as(original_query)
