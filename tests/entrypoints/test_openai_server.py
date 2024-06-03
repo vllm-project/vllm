@@ -1032,8 +1032,9 @@ number: "1" | "2"
     "model_name",
     [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
 )
+@pytest.mark.parametrize("logprobs_arg", [1, 0])
 async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
-                                       model_name: str):
+                                       model_name: str, logprobs_arg: int):
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
     # test using text and token IDs
     for prompt in ("Hello, my name is", [0, 0, 0, 0, 0]):
@@ -1042,7 +1043,7 @@ async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
                                                      max_tokens=5,
                                                      temperature=0.0,
                                                      echo=True,
-                                                     logprobs=1)
+                                                     logprobs=logprobs_arg)
 
         prompt_text = tokenizer.decode(prompt) if isinstance(prompt,
                                                              list) else prompt
