@@ -17,11 +17,6 @@ from vllm.utils import is_hip, make_tensor_with_pad
 
 logger = init_logger(__name__)
 
-# If not is_hip(): supported head sizes are [64, 80, 96, 112, 128, 256]
-#
-# TODO: FlashAttention forward only supports head dimension at most 128
-# https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d0
-# 37782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
 HEAD_SIZES = [64, 256]
 
 NUM_HEADS = [1, 16]
