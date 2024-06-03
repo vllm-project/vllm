@@ -1,28 +1,21 @@
 from typing import List, Optional, Tuple, Type
 
+import contextlib
 import torch
 
-# TODO: try torch.ops.load_library here
-
 try:
-    # ruff: noqa: SIM105
     import vllm._C
 except ImportError as e:
     from vllm.logger import init_logger
     logger = init_logger(__name__)
     logger.warning("Failed to import from vllm._C with %r", e)
 
-try:
-    # ruff: noqa: SIM105
+with contextlib.suppress(ImportError):
     import vllm._moe_C
-except ImportError:
-    pass
 
-try:
-    # ruff: noqa: SIM105, F401
+with contextlib.suppress(ImportError):
+    # ruff: noqa: F401
     import vllm._punica_C
-except ImportError:
-    pass
 
 
 def is_custom_op_supported(op_name: str) -> bool:

@@ -5,6 +5,16 @@
 
 #include <torch/library.h>
 
+// Note on op signatures:
+// The X_meta signatures are for the meta functions corresponding to op X.
+// They must be kept in sync with the signature for X. Generally, only
+// functions that return Tensors require a meta function.
+//
+// See the following links for detailed docs on op registration and function
+// schemas.
+// https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
+// https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
@@ -243,25 +253,34 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
 #ifndef USE_ROCM
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Custom all-reduce kernels
-  custom_ar.def("init_custom_ar", &init_custom_ar);  // modify inputs?
-  custom_ar.def("should_custom_ar", &should_custom_ar);
-  custom_ar.def("all_reduce_reg", &all_reduce_reg);      // has out
-  custom_ar.def("all_reduce_unreg", &all_reduce_unreg);  // has out
-  custom_ar.def("dispose", &dispose);
-  custom_ar.def("meta_size", &meta_size);
-  custom_ar.def("register_buffer", &register_buffer);
-  custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
-  custom_ar.def("register_graph_buffers", &register_graph_buffers);
-
+  custom_ar.def("init_custom_ar", &init_custom_ar);
   custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
+
+  custom_ar.def("should_custom_ar", &should_custom_ar);
   custom_ar.impl("should_custom_ar", torch::kCUDA, &should_custom_ar);
+
+  custom_ar.def("all_reduce_reg(int fa, Tensor inp, Tensor! out) -> ()");
   custom_ar.impl("all_reduce_reg", torch::kCUDA, &all_reduce_reg);
+
+  custom_ar.def(
+      "all_reduce_unreg(int fa, Tensor inp, Tensor reg_buffer, Tensor! out) -> "
+      "()");
   custom_ar.impl("all_reduce_unreg", torch::kCUDA, &all_reduce_unreg);
+
+  custom_ar.def("dispose", &dispose);
   custom_ar.impl("dispose", torch::kCPU, &dispose);
+
+  custom_ar.def("meta_size", &meta_size);
   custom_ar.impl("meta_size", torch::kCPU, &meta_size);
+
+  custom_ar.def("register_buffer", &register_buffer);
   custom_ar.impl("register_buffer", torch::kCUDA, &register_buffer);
+
+  custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
   custom_ar.impl("get_graph_buffer_ipc_meta", torch::kCPU,
                  &get_graph_buffer_ipc_meta);
+
+  custom_ar.def("register_graph_buffers", &register_graph_buffers);
   custom_ar.impl("register_graph_buffers", torch::kCPU,
                  &register_graph_buffers);
 }

@@ -7,7 +7,10 @@ import torch
 from vllm import _custom_ops as ops
 
 
-def _raise_import_error():
+def _check_punica_support():
+    if ops.is_custom_op_supported("_punica_C::dispatch_bgmv"):
+        return
+
     if torch.cuda.get_device_capability() < (8, 0):
         raise ImportError(
             "punica LoRA kernels require compute capability >= 8.0")
@@ -16,11 +19,6 @@ def _raise_import_error():
             "punica LoRA kernels could not be imported. If you built vLLM "
             "from source, make sure VLLM_INSTALL_PUNICA_KERNELS=1 env var "
             "was set.")
-
-
-def _check_punica_support():
-    if not ops.is_custom_op_supported("_punica_C::dispatch_bgmv"):
-        _raise_import_error()
 
 
 def bgmv(

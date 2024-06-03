@@ -17,7 +17,7 @@ try:
     import pynvml
 
     # Simulate ImportError if custom_ar ops are not supported.
-    if not ops.is_custom_op_supported("custom_ar::meta_size"):
+    if not ops.is_custom_op_supported("_C_custom_ar::meta_size"):
         raise ImportError("custom_ar", __file__)
 
     custom_ar = True
@@ -260,7 +260,6 @@ class CustomAllreduce:
 
     def register_graph_buffers(self):
         handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
-        #handles, offsets = self._gather_ipc_meta((bytes(handle), offset))
         handles, offsets = self._gather_ipc_meta((handle, offset))
         logger.info("Registering %d cuda graph addresses", len(offset))
         ops.register_graph_buffers(self._ptr, handles, offsets)
