@@ -40,6 +40,8 @@ steps:
 
   - label: "Intel Test"
     depends_on: ~
+    agents:
+      queue: intel
     command: bash .buildkite/run-cpu-test.sh
 
   {% for step in steps %}
