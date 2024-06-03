@@ -1,8 +1,10 @@
 """Kernel test utils"""
 
-from tests.utils import env_var_fixture
 from contextlib import contextmanager
 from typing import Iterator
+
+from tests.utils import env_var_fixture
+
 
 @contextmanager
 def backend_override_fixture(backend_name: str) -> Iterator[None]:

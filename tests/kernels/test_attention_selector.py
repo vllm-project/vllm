@@ -3,8 +3,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.attention.selector import which_attn_to_use
 from tests.kernels.utils import backend_override_fixture
+from vllm.attention.selector import which_attn_to_use
 
 
 @pytest.mark.parametrize(
