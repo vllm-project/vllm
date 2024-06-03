@@ -11,25 +11,36 @@ from tqdm import tqdm
 from vllm.model_executor.layers.fused_moe import (fused_moe,
                                                   get_config_file_name)
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
-
-def main(dtype: str):
+def main(model, tp_size, gpu, dtype: str):
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
     method = fused_moe
     for bs in [
             1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 1536,
             2048, 3072, 4096
     ]:
-        run_grid(bs, method=method, dtype=dtype)
+        run_grid(bs,
+                 model=model,
+                 method=method,
+                 gpu=gpu,
+                 tp_size=tp_size,
+                 dtype=dtype)
 
 
-def run_grid(bs, method, dtype: str):
-    d_model = 4096
+def run_grid(bs, model, method, gpu, tp_size, dtype: str):
+    if model == '8x7B':
+        d_model = 4096
+        model_intermediate_size = 14336
+        num_layers = 32
+    elif model == '8x22B':
+        d_model = 6144
+        model_intermediate_size = 16384
+        num_layers = 56
+    else:
+        raise ValueError(f'Unsupported Mixtral model {model}')
     num_total_experts = 8
     top_k = 2
-    tp_size = 2
-    model_intermediate_size = 14336
-    num_layers = 32
+    # tp_size = 2
     num_calls = 100
 
     num_warmup_trials = 1
@@ -211,5 +222,18 @@ if __name__ == "__main__":
         choices=['float8', 'float16'],
         help='Data type used for fused_moe kernel computations',
     )
+    parser.add_argument('--model',
+                        type=str,
+                        default='8x7B',
+                        choices=['8x7B', '8x22B'],
+                        help='The Mixtral model to benchmark')
+    parser.add_argument('--tp-size',
+                        type=int,
+                        default=2,
+                        help='Tensor paralleli size')
+    parser.add_argument('--gpu',
+                        type=int,
+                        default=0,
+                        help="GPU ID for benchmarking")
     args = parser.parse_args()
-    sys.exit(main(args.dtype))
+    sys.exit(main(args.model, args.tp_size, args.gpu, args.dtype))

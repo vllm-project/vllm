@@ -70,13 +70,6 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
-   :caption: Offline Inference
-
-   offline_inference/llm
-   offline_inference/sampling_params
-
-.. toctree::
-   :maxdepth: 1
    :caption: Serving
 
    serving/openai_compatible_server
@@ -95,6 +88,7 @@ Documentation
    models/adding_model
    models/engine_args
    models/lora
+   models/vlm
    models/performance
 
 .. toctree::
@@ -106,18 +100,22 @@ Documentation
    quantization/fp8_e4m3_kvcache
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Developer Documentation
-
+   
+   dev/sampling_params
+   dev/offline_inference/offline_index
    dev/engine/engine_index
    dev/kernel/paged_attention
+   dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Community
 
    community/meetups
+   community/sponsors
 
 Indices and tables
 ==================
