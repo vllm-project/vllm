@@ -280,7 +280,7 @@ class InputRegistry:
 
         return processor(model_config, inputs)
 
-    def create_input_processor(self, model_config: ModelConfig):
+    def create_input_processor(self, model_config: "ModelConfig"):
         """
         Create an input processor (see :meth:`process_input`) for a
         specific model.

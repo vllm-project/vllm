@@ -227,8 +227,8 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
     def get_data_type(self) -> Type[ImagePixelData]:
         return ImagePixelData
 
-    def _get_hf_image_processor(self, model_config: ModelConfig,
-                                vlm_config: VisionLanguageConfig):
+    def _get_hf_image_processor(self, model_config: ModelConfig):
+        vlm_config = model_config.multimodal_config
         if vlm_config is None or vlm_config.image_processor is None:
             return None
 
@@ -238,12 +238,10 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
             revision=vlm_config.image_processor_revision,
         )
 
-    def _default_input_mapper(
-            self, data: ImagePixelData, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+    def _default_input_mapper(self, model_config: ModelConfig,
+                              data: ImagePixelData) -> Dict[str, torch.Tensor]:
         image = data.image
-        image_processor = self._get_hf_image_processor(model_config,
-                                                       vlm_config)
+        image_processor = self._get_hf_image_processor(model_config)
 
         if isinstance(image, Image.Image):
             if image_processor is None:
@@ -280,8 +278,8 @@ class ImageFeaturePlugin(MultiModalPlugin[ImageFeatureData]):
         return ImageFeatureData
 
     def _default_input_mapper(
-            self, data: ImageFeatureData, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+            self, model_config: ModelConfig,
+            data: ImageFeatureData) -> Dict[str, torch.Tensor]:
         image_features = data.image_features.to(model_config.dtype)
 
         return {"image_features": image_features}

@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import (TYPE_CHECKING, Callable, Dict, Generic, Optional, Type,
                     TypeVar)
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -32,8 +32,7 @@ class MultiModalData:
 D = TypeVar("D", bound=MultiModalData)
 N = TypeVar("N", bound=Type["nn.Module"])
 
-MultiModalInputMapper = Callable[[D, ModelConfig, VisionLanguageConfig],
-                                 Dict[str, "torch.Tensor"]]
+MultiModalInputMapper = Callable[[ModelConfig, D], Dict[str, "torch.Tensor"]]
 """Return a dictionary to be passed as keyword arguments to
 :meth:`torch.nn.Module.forward`. This is similar in concept to tokenizers
 and processors in HuggingFace Transformers."""
@@ -63,9 +62,8 @@ class MultiModalPlugin(ABC, Generic[D]):
         raise NotImplementedError
 
     @abstractmethod
-    def _default_input_mapper(
-            self, data: D, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, "torch.Tensor"]:
+    def _default_input_mapper(self, model_config: ModelConfig,
+                              data: D) -> Dict[str, "torch.Tensor"]:
         """Return a dictionary to be passed as keyword arguments to
         :meth:`torch.nn.Module.forward`. This is similar in concept to
         tokenizers and processors in HuggingFace Transformers.
@@ -99,16 +97,11 @@ class MultiModalPlugin(ABC, Generic[D]):
 
         return wrapper
 
-    def map_input(
-            self, data: D, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, "torch.Tensor"]:
+    def map_input(self, model_config: ModelConfig,
+                  data: D) -> Dict[str, "torch.Tensor"]:
         """
         Apply an input mapper to a :class:`~MultiModalData` instance passed
         to the model, transforming the data into a dictionary of model inputs.
-
-        The model is identified by ``model_config``. ``vlm_config`` is
-        for compatibility purposes and may be merged into ``model_config``
-        in the near future.
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
@@ -120,4 +113,4 @@ class MultiModalPlugin(ABC, Generic[D]):
             raise KeyError(f"No input mapper in {self} is registered for "
                            f"model class {model_cls.__name__}.")
 
-        return mapper(data, model_config, vlm_config)
+        return mapper(model_config, data)

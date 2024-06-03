@@ -23,15 +23,14 @@ def test_clip_image_processor(hf_images, dtype):
         seed=0,
         dtype=dtype,
         revision=None,
-    )
-    vlm_config = VisionLanguageConfig(
-        image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-        image_token_id=32000,
-        image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
-        image_feature_size=576,
-        image_processor=MODEL_NAME,
-        image_processor_revision=None,
-    )
+        multimodal_config=VisionLanguageConfig(
+            image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
+            image_token_id=32000,
+            image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
+            image_feature_size=576,
+            image_processor=MODEL_NAME,
+            image_processor_revision=None,
+        ))
 
     for image in hf_images:
         hf_result = hf_processor.preprocess(
@@ -39,9 +38,8 @@ def test_clip_image_processor(hf_images, dtype):
             return_tensors="np",
         )
         vllm_result = MULTIMODAL_REGISTRY.map_input(
+            model_config,
             ImagePixelData(image),
-            model_config=model_config,
-            vlm_config=vlm_config,
         )
 
         assert hf_result.keys() == vllm_result.keys()
@@ -65,26 +63,23 @@ def test_image_pixel_types(hf_images, vllm_image_tensors, dtype):
         seed=0,
         dtype=dtype,
         revision=None,
-    )
-    vlm_config = VisionLanguageConfig(
-        image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-        image_token_id=32000,
-        image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
-        image_feature_size=576,
-        image_processor=MODEL_NAME,
-        image_processor_revision=None,
-    )
+        multimodal_config=VisionLanguageConfig(
+            image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
+            image_token_id=32000,
+            image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
+            image_feature_size=576,
+            image_processor=MODEL_NAME,
+            image_processor_revision=None,
+        ))
 
     for image, tensor in zip(hf_images, vllm_image_tensors):
         image_result = MULTIMODAL_REGISTRY.map_input(
+            model_config,
             ImagePixelData(image),
-            model_config=model_config,
-            vlm_config=vlm_config,
         )
         tensor_result = MULTIMODAL_REGISTRY.map_input(
+            model_config,
             ImagePixelData(tensor),
-            model_config=model_config,
-            vlm_config=vlm_config,
         )
 
         assert image_result.keys() == tensor_result.keys()

@@ -3,7 +3,7 @@ from typing import Any, Optional, Sequence, Type, TypeVar
 
 from torch import nn
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 
 from .base import MultiModalData, MultiModalInputMapper, MultiModalPlugin
@@ -86,8 +86,7 @@ class MultiModalRegistry:
         """
         return self.register_input_mapper(ImageFeatureData, mapper)
 
-    def map_input(self, data: MultiModalData, model_config: ModelConfig,
-                  vlm_config: VisionLanguageConfig):
+    def map_input(self, model_config: ModelConfig, data: MultiModalData):
         """
         Apply an input mapper to a :class:`~MultiModalData` instance passed
         to the model.
@@ -95,13 +94,10 @@ class MultiModalRegistry:
         See :meth:`MultiModalPlugin.map_input` for more details.
         """
         return self._get_plugin_for_data_type(type(data)) \
-            .map_input(data, model_config, vlm_config)
+            .map_input(model_config, data)
 
-    def create_input_mapper(self, model_config: ModelConfig,
-                            vlm_config: VisionLanguageConfig):
+    def create_input_mapper(self, model_config: ModelConfig):
         """
         Create an input mapper (see :meth:`map_input`) for a specific model.
         """
-        return functools.partial(self.map_input,
-                                 model_config=model_config,
-                                 vlm_config=vlm_config)
+        return functools.partial(self.map_input, model_config=model_config)
