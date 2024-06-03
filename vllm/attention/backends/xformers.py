@@ -148,15 +148,14 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         self.encoder_attn_bias: Optional[List[AttentionBias]] = None
         self.cross_attn_bias: Optional[List[AttentionBias]] = None
 
-        # if self.is_all_encoder_attn_metadata_set:
-        #     self._maybe_compute_implicit_encoder_attrs()
-
     @property
     def is_all_encoder_attn_metadata_set(self):
         '''
         All attention metadata required for encoder attention is set.
         '''
-        return self.encoder_seq_lens is not None
+        return (self.encoder_seq_lens is not None) and \
+               (self.encoder_seq_lens_tensor is not None) and \
+               (self.max_encoder_seq_len is not None)
 
     @property
     def is_all_cross_attn_metadata_set(self):
@@ -168,19 +167,6 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self.is_all_encoder_attn_metadata_set and \
                (self.cross_slot_mapping is not None) and \
                (self.cross_block_tables is not None)
-
-    def _maybe_compute_implicit_encoder_attrs(self):
-        '''
-        Encoder attention and cross-attention require some encoder-related
-        metadata attributes which may or may not be been provided by the user.
-        This method infers the implicit attributes from provided attributes
-        '''
-        if self.encoder_seq_lens_tensor is None:
-            self.encoder_seq_lens_tensor = torch.tensor(self.encoder_seq_lens,
-                                                        dtype=torch.int32,
-                                                        device="cuda:0")
-        if self.max_encoder_seq_len is None:
-            self.max_encoder_seq_len = max(self.encoder_seq_lens)
 
     @property
     def attention_type(self) -> AttentionType:
@@ -194,14 +180,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             "Must set self.encoder_seq_lens, self.cross_slot_mapping, " + \
             "self.cross_block_tables in order to perform cross-attention"
 
-            # self._maybe_compute_implicit_encoder_attrs()
-
             self._attn_type = AttentionType.ENCODER_DECODER
         elif atype == AttentionType.ENCODER:
             assert self.is_all_encoder_attn_metadata_set, \
             "Must set self.encoder_seq_lens in order to perform cross-attention"
-
-            # self._maybe_compute_implicit_encoder_attrs()
 
             self._attn_type = AttentionType.ENCODER
         else:

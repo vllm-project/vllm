@@ -397,11 +397,16 @@ def make_metadata_tensors(seq_lens: List[int],
     * query_start_loc: start idx of each query
     '''
     seq_lens_tensor = None if seq_lens is None else \
-      torch.tensor(seq_lens, dtype=torch.int, device=device)
+      torch.tensor(seq_lens, dtype=torch.int, device=device)  
     context_lens_tensor = None if context_lens is None else torch.tensor(
         context_lens, dtype=torch.int, device=device)
     max_context_len = None if context_lens is None else max(context_lens)
     max_seq_len = None if seq_lens is None else max(seq_lens)
+
+    encoder_seq_lens_tensor = None if encoder_seq_lens is None else \
+      torch.tensor(encoder_seq_lens, dtype=torch.int, device=device)
+    max_encoder_seq_len = None if encoder_seq_lens is None else \
+                            max(encoder_seq_lens)
 
     seq_start_loc = None
 
@@ -409,7 +414,9 @@ def make_metadata_tensors(seq_lens: List[int],
            context_lens_tensor, \
            max_context_len, \
            max_seq_len, \
-           seq_start_loc
+           seq_start_loc, \
+           encoder_seq_lens_tensor, \
+           max_encoder_seq_len
 
 
 def make_kv_cache(num_blocks: int,
@@ -622,9 +629,12 @@ def make_test_metadata(
         context_lens_tensor, \
         _, \
         _, \
-        _ = make_metadata_tensors(seq_lens,
-                                              context_lens,
-                                              device=device)
+        _, \
+        encoder_seq_lens_tensor, \
+        max_encoder_seq_len = make_metadata_tensors(seq_lens,
+                              context_lens,
+                              encoder_seq_lens,
+                              device=device)
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
@@ -640,6 +650,8 @@ def make_test_metadata(
             use_cuda_graph=False,
             _attn_type=default_attn_type,
             encoder_seq_lens=encoder_seq_lens,
+            encoder_seq_lens_tensor=encoder_seq_lens_tensor,
+            max_encoder_seq_len=max_encoder_seq_len,
             cross_slot_mapping=cross_slot_mapping,
             cross_block_tables=cross_block_tables)
 
@@ -653,9 +665,12 @@ def make_test_metadata(
         context_lens_tensor, \
         _, \
         _, \
-        _ = make_metadata_tensors(seq_lens,
-                                              context_lens,
-                                              device=device)
+        _, \
+        encoder_seq_lens_tensor, \
+        max_encoder_seq_len = make_metadata_tensors(seq_lens,
+                                  context_lens,
+                                  encoder_seq_lens,
+                                  device=device)
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
@@ -671,6 +686,8 @@ def make_test_metadata(
             use_cuda_graph=False,
             _attn_type=default_attn_type,
             encoder_seq_lens=encoder_seq_lens,
+            encoder_seq_lens_tensor=encoder_seq_lens_tensor,
+            max_encoder_seq_len=max_encoder_seq_len,
             cross_slot_mapping=cross_slot_mapping,
             cross_block_tables=cross_block_tables)
 
