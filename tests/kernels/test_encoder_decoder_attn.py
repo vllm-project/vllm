@@ -35,7 +35,7 @@ MAX_Q_SEQ_LENS = [128]
 MAX_K_SEQ_LENS = [128]
 
 
-def basic_setup(num_heads: int, head_size: int, num_blocks: int,
+def _basic_setup(num_heads: int, head_size: int, num_blocks: int,
                 block_size: int, backend_name: str) -> tuple:
     '''
     Compute & build entities required for the self-/cross-attention test.
@@ -79,7 +79,7 @@ def basic_setup(num_heads: int, head_size: int, num_blocks: int,
     return scale, attn_backend, attn, kv_cache
 
 
-def encoder_attn_setup(batch_size: int,
+def _encoder_attn_setup(batch_size: int,
                        num_heads: int,
                        head_size: int,
                        block_size: int,
@@ -187,7 +187,7 @@ def encoder_attn_setup(batch_size: int,
     q_seq_lens
 
 
-def decoder_attn_setup(batch_size: int,
+def _decoder_attn_setup(batch_size: int,
                        num_heads: int,
                        head_size: int,
                        block_size: int,
@@ -373,7 +373,7 @@ def decoder_attn_setup(batch_size: int,
     max_block_idx
 
 
-def enc_dec_cross_attn_setup_reuses_query(query: torch.Tensor,
+def _enc_dec_cross_attn_setup_reuses_query(query: torch.Tensor,
                                           q_seq_lens: List,
                                           prefill_q_seq_lens: List,
                                           batch_size: int,
@@ -527,7 +527,7 @@ def enc_dec_cross_attn_setup_reuses_query(query: torch.Tensor,
     max_block_idx
 
 
-def run_encoder_or_decoder_self_attention_test(
+def _run_encoder_or_decoder_self_attention_test(
         attn: Attention, packed_query: torch.Tensor, packed_key: torch.Tensor,
         packed_value: torch.Tensor, kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
@@ -562,7 +562,7 @@ def run_encoder_or_decoder_self_attention_test(
                         attn_metadata)
 
 
-def run_encoder_decoder_cross_attention_test(
+def _run_encoder_decoder_cross_attention_test(
         attn: Attention, packed_query: torch.Tensor, packed_key: torch.Tensor,
         packed_value: torch.Tensor, kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata) -> torch.Tensor:
@@ -633,7 +633,7 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     scale, \
     attn_backend, \
     attn, \
-    _ = basic_setup(num_heads,
+    _ = _basic_setup(num_heads,
                     head_size,
                     None,
                     None,
@@ -651,7 +651,7 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     packed_ideal_output, \
     block_tables, \
     slot_mapping, \
-    q_seq_lens = encoder_attn_setup(batch_size,
+    q_seq_lens = _encoder_attn_setup(batch_size,
                                     num_heads,
                                     head_size,
                                     block_size,
@@ -680,7 +680,7 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
         device=CUDA_DEVICE)
 
     packed_actual_output: torch.Tensor = \
-      run_encoder_or_decoder_self_attention_test(
+      _run_encoder_or_decoder_self_attention_test(
         attn,
         packed_query,
         packed_key,
@@ -743,7 +743,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     scale, \
     attn_backend, \
     attn, \
-    kv_cache = basic_setup(num_heads,
+    kv_cache = _basic_setup(num_heads,
                           head_size,
                           num_blocks,
                           block_size,
@@ -772,7 +772,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     self_decode_slot_mapping, \
     self_prefill_slot_mapping, \
     self_prefill_block_tables, \
-    cross_block_base_addr = decoder_attn_setup(batch_size,
+    cross_block_base_addr = _decoder_attn_setup(batch_size,
                                                 num_heads,
                                                 head_size,
                                                 block_size,
@@ -791,7 +791,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     cross_decode_slot_mapping, \
     cross_prefill_slot_mapping, \
     cross_prefill_block_tables, \
-    _ = enc_dec_cross_attn_setup_reuses_query(query,
+    _ = _enc_dec_cross_attn_setup_reuses_query(query,
                                       q_seq_lens,
                                       prefill_q_seq_lens,
                                       batch_size,
@@ -823,7 +823,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         device=CUDA_DEVICE)
 
     self_prefill_packed_actual_output: torch.Tensor = \
-      run_encoder_or_decoder_self_attention_test(
+      _run_encoder_or_decoder_self_attention_test(
         attn,
         prefill_packed_query,
         self_prefill_packed_key,
@@ -839,7 +839,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
             self_prefill_packed_ideal_output))
 
     cross_prefill_packed_actual_output: torch.Tensor = \
-      run_encoder_decoder_cross_attention_test(
+      _run_encoder_decoder_cross_attention_test(
         attn, prefill_packed_query, cross_prefill_packed_key,
         cross_prefill_packed_value, kv_cache, prefill_attn_metadata)
 
@@ -869,7 +869,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         device=CUDA_DEVICE)
 
     self_decode_packed_actual_output: torch.Tensor = \
-      run_encoder_or_decoder_self_attention_test(
+      _run_encoder_or_decoder_self_attention_test(
         attn,
         decode_packed_query,
         self_decode_packed_key,
@@ -885,7 +885,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
             self_decode_packed_ideal_output))
 
     cross_decode_packed_actual_output: torch.Tensor = \
-      run_encoder_decoder_cross_attention_test(
+      _run_encoder_decoder_cross_attention_test(
         attn, decode_packed_query, None,
         None, kv_cache, decode_attn_metadata)
 
@@ -912,7 +912,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     # of prefill and decode tokens.
     decode_attn_metadata.num_prefill_tokens = 1
     with pytest.raises(NotImplementedError) as exc_info:
-        run_encoder_decoder_cross_attention_test(attn, decode_packed_query,
+        _run_encoder_decoder_cross_attention_test(attn, decode_packed_query,
                                                  None, None, kv_cache,
                                                  decode_attn_metadata)
 
@@ -969,7 +969,7 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
     scale, \
     attn_backend, \
     attn, \
-    kv_cache = basic_setup(num_heads,
+    kv_cache = _basic_setup(num_heads,
                           head_size,
                           num_blocks,
                           block_size,
@@ -998,7 +998,7 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
     self_decode_slot_mapping, \
     self_prefill_slot_mapping, \
     self_prefill_block_tables, \
-    cross_block_base_addr = decoder_attn_setup(batch_size,
+    cross_block_base_addr = _decoder_attn_setup(batch_size,
                                                 num_heads,
                                                 head_size,
                                                 block_size,
@@ -1017,7 +1017,7 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
     cross_decode_slot_mapping, \
     cross_prefill_slot_mapping, \
     cross_prefill_block_tables, \
-    _ = enc_dec_cross_attn_setup_reuses_query(query,
+    _ = _enc_dec_cross_attn_setup_reuses_query(query,
                                       q_seq_lens,
                                       prefill_q_seq_lens,
                                       batch_size,
@@ -1049,7 +1049,7 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
         device=CUDA_DEVICE)
 
     with pytest.raises(NotImplementedError) as exc_info:
-        run_encoder_decoder_cross_attention_test(attn, prefill_packed_query,
+        _run_encoder_decoder_cross_attention_test(attn, prefill_packed_query,
                                                  cross_prefill_packed_key,
                                                  cross_prefill_packed_value,
                                                  kv_cache,
