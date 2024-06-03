@@ -17,6 +17,7 @@ from vllm.utils import is_hip, make_tensor_with_pad
 
 logger = init_logger(__name__)
 
+
 HEAD_SIZES = [64, 256]
 
 NUM_HEADS = [1, 16]
@@ -348,13 +349,6 @@ def pack_qkv(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
         packed_query, q_start_loc_list = pack_tensor(query, q_seq_lens)
     packed_key, kv_start_loc_list = pack_tensor(key, kv_seq_lens)
     packed_value, _ = pack_tensor(value, kv_seq_lens)
-    if packed_query is not None:
-        packed_query = packed_query.view(
-            -1, packed_query.shape[-1] * packed_query.shape[-2])
-    packed_key = packed_key.view(-1,
-                                 packed_key.shape[-1] * packed_key.shape[-2])
-    packed_value = packed_value.view(
-        -1, packed_value.shape[-1] * packed_value.shape[-2])
     return packed_query, \
            packed_key, \
            packed_value, \
