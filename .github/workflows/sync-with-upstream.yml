@@ -1,0 +1,91 @@
+name: "Sync with upstream"
+
+on:
+  schedule:
+    - cron: 20 4 * * *
+
+  workflow_dispatch:
+
+
+env:
+  # repo to fetch changes from
+  UPSTREAM_REPO: vllm-project/vllm
+ # branch to sync
+  BRANCH: main
+
+jobs:
+  upstream-sync:
+    name: Sync with upstream
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream repo
+        run: |
+          git remote add upstream https://github.com/${UPSTREAM_REPO}
+          git fetch upstream
+
+      - name: Check diff
+        id: diff
+        shell: bash
+        run: |
+          echo 'diff<<EOF' >> $GITHUB_OUTPUT
+          git diff --stat upstream/${BRANCH} | tee -a >(cat >> $GITHUB_OUTPUT)
+          echo 'EOF' >> $GITHUB_OUTPUT
+
+      - name: Create PR
+        if: ${{ steps.diff.outputs.diff != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -xeu
+
+          git_hash="$(git rev-parse upstream/${BRANCH})"
+          echo "git_hash=$git_hash" >> $GITHUB_OUTPUT
+          git_describe="$(git describe --tags upstream/${BRANCH})"
+          echo "git_describe=$git_describe" >> $GITHUB_OUTPUT
+
+          # echo 'commits<<EOF' >> $GITHUB_OUTPUT
+          # git log --oneline ..upstream/${BRANCH} >> $GITHUB_OUTPUT
+          # echo 'EOF' >> $GITHUB_OUTPUT
+
+          upstream_url="https://github.com/${UPSTREAM_REPO}"
+          upstream_branch="$upstream_url/tree/${BRANCH}"
+
+          title="Sync with upstream@${git_describe}"
+          body="Merge [${UPSTREAM_REPO}]($upstream_url):[${BRANCH}]($upstream_branch)@[${git_describe}](${upstream_url}/commit/$git_hash) into $BRANCH"
+
+          gh repo set-default $GITHUB_REPOSITORY
+          pr_number=$(gh pr list -S "Sync with upstream@" --json number --jq '.[0].number')
+
+          if [[ -z $pr_number ]]; then
+            echo "Creating PR"
+            gh pr create \
+              --head $(echo $UPSTREAM_REPO | sed 's|/|:|g'):${BRANCH} \
+              --base ${BRANCH} \
+              --label code-sync \
+              --title "$title" \
+              --body "$body" \
+              --no-maintainer-edit
+            exit 0
+          fi
+
+          echo "Checking if PR is up-to-date"
+
+          git fetch ${upstream_url} refs/pull/${pr_number}/head
+          if git diff --stat --exit-code upstream/main FETCH_HEAD; then
+            echo "PR is up-to-date"
+            exit 0
+          fi
+
+          echo "Updating PR \#${pr_number}"
+          gh pr edit \
+            $pr_number \
+            --body "$body" \
+            --title "$title"
