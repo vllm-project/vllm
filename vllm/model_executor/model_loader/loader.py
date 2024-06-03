@@ -1,13 +1,18 @@
 # ruff: noqa: SIM117
 import collections
 import copy
+import fnmatch
 import glob
+import json
+import math
 import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, List, Optional, Tuple, Type
 
 import huggingface_hub
+import numpy as np
 import torch
+from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
@@ -28,6 +33,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
+from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
@@ -125,7 +131,7 @@ class DefaultModelLoader(BaseModelLoader):
     def _maybe_download_from_modelscope(
             self, model: str, revision: Optional[str]) -> Optional[str]:
         """Download model from ModelScope hub if VLLM_USE_MODELSCOPE is True.
-        
+
         Returns the path to the downloaded model, or None if the model is not
         downloaded from ModelScope."""
         if VLLM_USE_MODELSCOPE:
@@ -247,6 +253,7 @@ class DefaultModelLoader(BaseModelLoader):
                                                model,
                                                "fall_back_to_pt_during_load",
                                                True)), )
+
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
@@ -539,6 +546,241 @@ class ShardedStateLoader(BaseModelLoader):
             )
 
 
+class BitsAndBytesModelLoader(BaseModelLoader):
+    """Model loader to load model weights with BitAndBytes quantization."""
+
+    default_target_modules = [
+        "gate_proj", "down_proj", "up_proj", "q_proj", "k_proj", "v_proj",
+        "o_proj"
+    ]
+
+    possible_config_file_names = ["adapter_config.json"]
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+
+        # we don't need to quantize the whole model, only the target modules
+        # that are specified in the adapter config file. If the adapter config
+        # file is not provided, we will quantize the default modules.
+        if (not load_config.model_loader_extra_config
+                or "qlora_adapter_name_or_path"
+                not in load_config.model_loader_extra_config):
+            self.target_modules = self.default_target_modules
+            return
+
+        qlora_adapter = load_config.model_loader_extra_config[
+            "qlora_adapter_name_or_path"]
+
+        config_file_path = self._get_config_file(qlora_adapter)
+
+        with open(config_file_path, "r") as f:
+            config = json.load(f)
+            self.target_modules = config["target_modules"]
+
+    def _get_config_file(self, qlora_adapter: str) -> str:
+        is_local = os.path.isdir(qlora_adapter)
+        config_file_path = None
+        if is_local:
+            for file in self.possible_config_file_names:
+                config_file_path = os.path.join(qlora_adapter, file)
+                if os.path.exists(config_file_path):
+                    break
+        else:
+            hf_api = HfApi()
+            repo_files = hf_api.list_repo_files(repo_id=qlora_adapter)
+            for file in self.possible_config_file_names:
+                if file in repo_files:
+                    config_file_path = hf_hub_download(repo_id=qlora_adapter,
+                                                       filename=file)
+                    break
+
+        if not config_file_path:
+            raise ValueError(
+                f"Cannot find adapter config file in {qlora_adapter}")
+
+        return config_file_path
+
+    def _get_weight_files(
+            self,
+            model_name_or_path: str,
+            allowed_patterns: List[str],
+            revision: Optional[str] = None) -> Tuple[List[str], str]:
+        """Retrieve weight files. Download the files if necessary. 
+        
+        Return the weight files and the file pattern."""
+        is_local = os.path.isdir(model_name_or_path)
+
+        if is_local:
+            for pattern in allowed_patterns:
+                weight_files = glob.glob(
+                    os.path.join(model_name_or_path, pattern))
+                if weight_files:
+                    return weight_files, pattern
+        else:
+            hf_api = HfApi()
+            repo_files = hf_api.list_repo_files(repo_id=model_name_or_path)
+            for pattern in allowed_patterns:
+                matching_files = fnmatch.filter(repo_files, pattern)
+                if matching_files:
+                    hf_folder = download_weights_from_hf(
+                        model_name_or_path, self.load_config.download_dir,
+                        [pattern], revision)
+                    return glob.glob(os.path.join(hf_folder, pattern)), pattern
+
+        raise RuntimeError(
+            f"No model weights found in: `{model_name_or_path}`")
+
+    def _prepare_weights(self, model_name_or_path: str,
+                         revision: Optional[str]) -> Tuple[List[str], bool]:
+        """Prepare weight files for the model."""
+
+        allowed_patterns = ["*.safetensors", "*.bin", "*.pt"]
+
+        hf_weights_files, matched_pattern = self._get_weight_files(
+            model_name_or_path, allowed_patterns, revision)
+
+        if matched_pattern != "*.safetensors":
+            hf_weights_files = filter_files_not_needed_for_inference(
+                hf_weights_files)
+
+        if len(hf_weights_files) == 0:
+            raise RuntimeError(
+                f"Cannot find any model weights with `{model_name_or_path}`")
+
+        return hf_weights_files, matched_pattern == "*.safetensors"
+
+    def _get_quantized_weights_iterator(
+        self, model_name_or_path: str, revision: Optional[str]
+    ) -> Tuple[Generator[Tuple[str, torch.Tensor], None, None], Dict[str,
+                                                                     Any]]:
+        """Get an iterator to the model weights with bitsandbytes quantization,
+        as well as the quantization state dictionary."""
+
+        # only load the bitsandbytes module when needed
+        try:
+            import bitsandbytes
+            if bitsandbytes.__version__ < "0.42.0":
+                raise ImportError("bitsandbytes version is wrong. Please "
+                                  "install bitsandbytes>=0.42.0.")
+            from bitsandbytes.functional import quantize_4bit
+        except ImportError as err:
+            raise ImportError("Please install bitsandbytes>=0.42.0 via "
+                              "`pip install bitsandbytes>=0.42.0` to use "
+                              "bitsandbytes quantizer.") from err
+
+        hf_weights_files, use_safetensors = self._prepare_weights(
+            model_name_or_path, revision)
+
+        quant_state_dict = {}
+        if use_safetensors:
+            weight_iterator = safetensors_weights_iterator(hf_weights_files)
+        else:
+            weight_iterator = pt_weights_iterator(hf_weights_files)
+
+        def generator():
+            for weight_name, weight_tensor in weight_iterator:
+                if any(target_module in weight_name
+                       for target_module in self.target_modules):
+                    weight_name = weight_name.replace(".weight", ".qweight")
+                    #  bitsandbytes requires data in GPU
+                    loaded_weight = weight_tensor.cuda().data
+                    with set_default_torch_dtype(torch.float32):
+                        processed_weight, quant_state = quantize_4bit(
+                            loaded_weight,
+                            compress_statistics=True,
+                            quant_type="nf4")
+
+                    quant_state_dict[weight_name] = quant_state
+                else:
+                    processed_weight = weight_tensor
+
+                yield weight_name, processed_weight
+
+        return generator(), quant_state_dict
+
+    def _load_weights(self, model_config: ModelConfig,
+                      model: nn.Module) -> None:
+        if not hasattr(model, 'load_weights'):
+            raise AttributeError(
+                "The required method 'load_weights' is not defined in class"
+                f" {type(self).__name__}.")
+
+        if not hasattr(model, 'bitsandbytes_stacked_params_mapping'):
+            raise AttributeError(
+                f"Model {type(self).__name__} does not support BitsAndBytes "
+                "quantization yet.")
+
+        logger.info("Loading weights with BitsAndBytes quantization. "
+                    " May take a while ...")
+
+        qweight_iterator, quant_state_dict = (
+            self._get_quantized_weights_iterator(model_config.model,
+                                                 model_config.revision))
+
+        model.load_weights(qweight_iterator)
+
+        param_dict = dict(model.named_parameters())
+        stacked_quant_state_dict: Dict[str, Dict[int, Any]] = {}
+        for quant_param_name in quant_state_dict:
+            non_stacked_param_name = quant_param_name
+
+            shard_index = 0
+            for shard_name, (
+                    weight_name, index
+            ) in model.bitsandbytes_stacked_params_mapping.items():
+                if shard_name in quant_param_name:
+                    shard_index = index
+                    quant_param_name = quant_param_name.replace(
+                        shard_name, weight_name)
+                    break
+
+            if quant_param_name not in param_dict:
+                raise ValueError(
+                    f"Parameter {quant_param_name} not found in the model.")
+
+            if quant_param_name not in stacked_quant_state_dict:
+                stacked_quant_state_dict[quant_param_name] = {}
+
+            stacked_quant_state_dict[quant_param_name][shard_index] = (
+                quant_state_dict[non_stacked_param_name])
+
+        # save quant_states and offsets as the attributes of the parameters
+        for param_name, param in param_dict.items():
+            if param_name in stacked_quant_state_dict:
+                quant_states = stacked_quant_state_dict[param_name]
+                set_weight_attrs(param, {"bnb_quant_state": quant_states})
+
+                pack_ratio = getattr(param, "pack_factor", -1)
+                if pack_ratio == -1:
+                    raise ValueError(
+                        f"pack_factor not set for parameter {param_name}.")
+
+                num_elements = [0] * len(quant_states)
+                for seq, quant_state in enumerate(quant_states.items()):
+                    num_elements[seq] = math.prod(
+                        quant_state[1].shape) // pack_ratio
+
+                offsets = np.concatenate(([0], np.cumsum(num_elements)))
+                set_weight_attrs(param, {"bnb_shard_offsets": offsets})
+
+    def load_model(self, *, model_config: ModelConfig,
+                   device_config: DeviceConfig,
+                   lora_config: Optional[LoRAConfig],
+                   vision_language_config: Optional[VisionLanguageConfig],
+                   parallel_config: ParallelConfig,
+                   scheduler_config: SchedulerConfig,
+                   cache_config: CacheConfig) -> nn.Module:
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device(device_config.device):
+                model = _initialize_model(model_config, self.load_config,
+                                          lora_config, vision_language_config,
+                                          cache_config)
+
+                self._load_weights(model_config, model)
+
+        return model.eval()
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
@@ -553,5 +795,8 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.SHARDED_STATE:
         return ShardedStateLoader(load_config)
+
+    if load_config.load_format == LoadFormat.BITSANDBYTES:
+        return BitsAndBytesModelLoader(load_config)
 
     return DefaultModelLoader(load_config)
