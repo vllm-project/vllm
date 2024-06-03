@@ -256,164 +256,43 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             cross_block_tables=self.cross_block_tables)
         return self._self_cached_prefill_metadata
 
-        # if self._attn_type != AttentionType.ENCODER_DECODER:
-        #     # Decoder or encoder self-attention prefill
-
-        #     if self._self_cached_prefill_metadata is not None:
-        #         return self._self_cached_prefill_metadata
-
-        #     assert (self.seq_lens is not None) or \
-        #         (self.encoder_seq_lens is not None)
-        #     assert (self.seq_lens_tensor is not None) or \
-        #         (self.encoder_seq_lens_tensor is not None)
-        #     assert self.context_lens_tensor is not None
-        #     assert self.block_tables is not None
-
-        #     query_start_loc = None if self.query_start_loc is None \
-        #         else self.query_start_loc[:self.num_prefills + 1]
-
-        #     self._self_cached_prefill_metadata = XFormersMetadata(
-        #         num_prefills=self.num_prefills,
-        #         num_prefill_tokens=self.num_prefill_tokens,
-        #         num_decode_tokens=0,
-        #         slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
-        #         seq_lens=None if self.seq_lens is None else
-        #         self.seq_lens[:self.num_prefills],
-        #         seq_lens_tensor=None if self.seq_lens_tensor is None else
-        #         self.seq_lens_tensor[:self.num_prefills],
-        #         max_query_len=self.max_query_len,
-        #         max_prefill_seq_len=self.max_prefill_seq_len,
-        #         max_decode_seq_len=0,
-        #         query_start_loc=query_start_loc,
-        #         seq_start_loc=None,
-        #         context_lens_tensor=self.context_lens_tensor[:self.
-        #                                                      num_prefills],
-        #         block_tables=self.block_tables[:self.num_prefills],
-        #         use_cuda_graph=False,
-        #         _attn_type=self.
-        #         _attn_type,  # Begin cross-attention fields below...
-        #         encoder_seq_lens=self.encoder_seq_lens,
-        #         encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
-        #         max_encoder_seq_len=self.max_encoder_seq_len,
-        #         cross_block_tables=None,
-        #         cross_slot_mapping=None)
-        #     return self._self_cached_prefill_metadata
-
-        # else:
-        #     # Encoder/decoder cross-attention prefill
-
-        #     if self._cross_cached_prefill_metadata is not None:
-        #         return self._cross_cached_prefill_metadata
-
-        #     assert (self.seq_lens is not None) or \
-        #         (self.encoder_seq_lens is not None)
-        #     assert (self.seq_lens_tensor is not None) or \
-        #         (self.encoder_seq_lens_tensor is not None)
-        #     assert self.context_lens_tensor is not None
-        #     assert self.block_tables is not None
-
-        #     query_start_loc = None if self.query_start_loc is None \
-        #         else self.query_start_loc[:self.num_prefills + 1]
-
-        #     self._cross_cached_prefill_metadata = XFormersMetadata(
-        #         num_prefills=self.num_prefills,
-        #         num_prefill_tokens=self.num_prefill_tokens,
-        #         num_decode_tokens=0,
-        #         slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
-        #         seq_lens=None if self.seq_lens is None else
-        #         self.seq_lens[:self.num_prefills],
-        #         seq_lens_tensor=None if self.seq_lens_tensor is None else
-        #         self.seq_lens_tensor[:self.num_prefills],
-        #         max_query_len=self.max_query_len,
-        #         max_prefill_seq_len=self.max_prefill_seq_len,
-        #         max_decode_seq_len=0,
-        #         query_start_loc=query_start_loc,
-        #         seq_start_loc=None,
-        #         context_lens_tensor=self.context_lens_tensor[:self.
-        #                                                      num_prefills],
-        #         block_tables=self.block_tables[:self.num_prefills],
-        #         use_cuda_graph=False,
-        #         _attn_type=AttentionType.ENCODER_DECODER,
-        #         # Begin cross-attention fields below...
-        #         encoder_seq_lens=self.encoder_seq_lens,
-        #         encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
-        #         max_encoder_seq_len=self.max_encoder_seq_len,
-        #         cross_slot_mapping=self.cross_slot_mapping,
-        #         cross_block_tables=self.cross_block_tables)
-        #     return self._cross_cached_prefill_metadata
-
     @property
     def decode_metadata(self) -> Optional["XFormersMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
-        if self._attn_type != AttentionType.ENCODER_DECODER:
-            # Decoder or encoder self-attention prefill
-
-            if self._self_cached_decode_metadata is not None:
-                return self._self_cached_decode_metadata
-            assert self.block_tables is not None
-            assert (self.seq_lens_tensor is not None) or \
-                (self.encoder_seq_lens_tensor is not None)
-
-            self._self_cached_decode_metadata = XFormersMetadata(
-                num_prefills=0,
-                num_prefill_tokens=0,
-                num_decode_tokens=self.num_decode_tokens,
-                slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
-                seq_lens=None,
-                seq_lens_tensor=None if self.seq_lens_tensor is None else
-                self.seq_lens_tensor[self.num_prefills:],
-                max_query_len=None,
-                max_prefill_seq_len=0,
-                max_decode_seq_len=self.max_decode_seq_len,
-                query_start_loc=None,
-                seq_start_loc=None,
-                context_lens_tensor=None,
-                block_tables=self.block_tables[self.num_prefills:],
-                use_cuda_graph=self.use_cuda_graph,
-                _attn_type=self.
-                _attn_type,  # Begin cross-attention fields below...
-                encoder_seq_lens=self.encoder_seq_lens,
-                encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
-                max_encoder_seq_len=self.max_encoder_seq_len,
-                cross_block_tables=None,
-                cross_slot_mapping=None)
+        if self._self_cached_decode_metadata is not None:
+            self._self_cached_decode_metadata.attention_type = \
+                self.attention_type
             return self._self_cached_decode_metadata
+        assert self.block_tables is not None
+        assert (self.seq_lens_tensor is not None) or \
+            (self.encoder_seq_lens_tensor is not None)
 
-        else:
-            # Encoder/decoder cross-attention decode
-
-            if self._cross_cached_decode_metadata is not None:
-                return self._cross_cached_decode_metadata
-            assert self.block_tables is not None
-            assert (self.seq_lens_tensor is not None) or \
-                (self.encoder_seq_lens_tensor is not None)
-
-            self._cross_cached_decode_metadata = XFormersMetadata(
-                num_prefills=0,
-                num_prefill_tokens=0,
-                num_decode_tokens=self.num_decode_tokens,
-                slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
-                seq_lens=None,
-                seq_lens_tensor=None if self.seq_lens_tensor is None else
-                self.seq_lens_tensor[self.num_prefills:],
-                max_query_len=None,
-                max_prefill_seq_len=0,
-                max_decode_seq_len=self.max_decode_seq_len,
-                query_start_loc=None,
-                seq_start_loc=None,
-                context_lens_tensor=None,
-                block_tables=self.block_tables[self.num_prefills:],
-                use_cuda_graph=self.use_cuda_graph,
-                _attn_type=AttentionType.ENCODER_DECODER,
-                # Begin cross-attention fields below...
-                encoder_seq_lens=self.encoder_seq_lens,
-                encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
-                max_encoder_seq_len=self.max_encoder_seq_len,
-                cross_slot_mapping=self.cross_slot_mapping,
-                cross_block_tables=self.cross_block_tables)
-            return self._cross_cached_decode_metadata
+        self._self_cached_decode_metadata = XFormersMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=self.num_decode_tokens,
+            slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            seq_lens=None,
+            seq_lens_tensor=None if self.seq_lens_tensor is None else
+            self.seq_lens_tensor[self.num_prefills:],
+            max_query_len=None,
+            max_prefill_seq_len=0,
+            max_decode_seq_len=self.max_decode_seq_len,
+            query_start_loc=None,
+            seq_start_loc=None,
+            context_lens_tensor=None,
+            block_tables=self.block_tables[self.num_prefills:],
+            use_cuda_graph=self.use_cuda_graph,
+            _attn_type=self.
+            _attn_type,  # Begin cross-attention fields below...
+            encoder_seq_lens=self.encoder_seq_lens,
+            encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
+            max_encoder_seq_len=self.max_encoder_seq_len,
+            cross_slot_mapping=self.cross_slot_mapping,
+            cross_block_tables=self.cross_block_tables)
+        return self._self_cached_decode_metadata
 
 def _get_attn_bias(attn_metadata: XFormersMetadata) -> \
     Optional[List[Optional[AttentionBias]]]:
