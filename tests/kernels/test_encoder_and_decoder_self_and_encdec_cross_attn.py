@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import copy
 import itertools
 import random
@@ -6,6 +8,8 @@ from typing import List, Optional, Union
 import pytest
 import torch
 
+from tests.kernels.utils import STR_BACKEND_ENV_VAR
+
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.utils import (
@@ -13,7 +17,6 @@ from vllm.attention.backends.utils import (
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import is_hip, make_tensor_with_pad
 
-_BACKEND_ENV_VAR = "VLLM_ATTENTION_BACKEND"
 
 HEAD_SIZES = [64, 256]
 
@@ -1195,8 +1198,7 @@ def run_encoder_decoder_cross_attention_test(
     '''
     attn_metadata.attention_type = AttentionType.ENCODER_DECODER
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
-                        attn_metadata)
-
+                        attn_metadata)    
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -1207,7 +1209,7 @@ def run_encoder_decoder_cross_attention_test(
 @pytest.mark.parametrize("max_seq_len", MAX_Q_SEQ_LENS)
 def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
                            batch_size: int, block_size: int,
-                           max_seq_len: int) -> None:
+                           max_seq_len: int, monkeypatch) -> None:
     '''
     Encoder-only attention test:
 
@@ -1234,73 +1236,73 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     layer output.)
     '''
 
-    with backend_override_fixture(backend_name):
-        # Force Attention wrapper backend
+    # Force Attention wrapper backend
+    monkeypatch.setenv(STR_BACKEND_ENV_VAR,backend_name)
 
-        # Attention scale factor, attention backend instance, attention wrapper
-        # instance. Encoder attention does not require KV cache.
-        scale, \
-        attn_backend, \
-        attn, \
-        _ = basic_setup(num_heads,
-                        head_size,
-                        None,
-                        None,
-                        backend_name)
+    # Attention scale factor, attention backend instance, attention wrapper
+    # instance. Encoder attention does not require KV cache.
+    scale, \
+    attn_backend, \
+    attn, \
+    _ = basic_setup(num_heads,
+                    head_size,
+                    None,
+                    None,
+                    backend_name)
 
-        # Self-attention setup
-        # Let encoder_attn_setup() choose default block table
-        # base address; the block_tables and slot_mapping
-        # tensors are not actually utilized by encoder attention
-        # anyway but are required to be present & valid by the
-        # backend.
-        packed_query, \
-        packed_key, \
-        packed_value, \
-        packed_ideal_output, \
-        block_tables, \
-        slot_mapping, \
-        q_seq_lens = encoder_attn_setup(batch_size,
-                                        num_heads,
-                                        head_size,
-                                        block_size,
-                                        scale,
-                                        max_seq_len)
+    # Self-attention setup
+    # Let encoder_attn_setup() choose default block table
+    # base address; the block_tables and slot_mapping
+    # tensors are not actually utilized by encoder attention
+    # anyway but are required to be present & valid by the
+    # backend.
+    packed_query, \
+    packed_key, \
+    packed_value, \
+    packed_ideal_output, \
+    block_tables, \
+    slot_mapping, \
+    q_seq_lens = encoder_attn_setup(batch_size,
+                                    num_heads,
+                                    head_size,
+                                    block_size,
+                                    scale,
+                                    max_seq_len)
 
-        context_lens = [0 for _ in range(batch_size)]
+    context_lens = [0 for _ in range(batch_size)]
 
-        # Metadata config for encoder attention:
-        #
-        # * Use prefill kernel
-        # * Signal that this is an encoder-only test so that
-        #   metadata attention_type property is correctly
-        #   configured as AttentionType.ENCODER
-        attn_metadata: AttentionMetadata = make_test_metadata(
-            attn_backend,
-            True,
-            None,
-            context_lens,
-            block_tables,
-            slot_mapping,
-            is_encoder_only_test=True,
-            num_prefills_or_decodes=len(q_seq_lens),
-            num_prefill_or_decode_tokens=sum(q_seq_lens),
-            encoder_seq_lens=q_seq_lens)
+    # Metadata config for encoder attention:
+    #
+    # * Use prefill kernel
+    # * Signal that this is an encoder-only test so that
+    #   metadata attention_type property is correctly
+    #   configured as AttentionType.ENCODER
+    attn_metadata: AttentionMetadata = make_test_metadata(
+        attn_backend,
+        True,
+        None,
+        context_lens,
+        block_tables,
+        slot_mapping,
+        is_encoder_only_test=True,
+        num_prefills_or_decodes=len(q_seq_lens),
+        num_prefill_or_decode_tokens=sum(q_seq_lens),
+        encoder_seq_lens=q_seq_lens)
 
-        packed_actual_output: torch.Tensor = \
-          run_encoder_or_decoder_self_attention_test(
-            attn,
-            packed_query,
-            packed_key,
-            packed_value,
-            None,
-            attn_metadata,
-            attn_type=AttentionType.ENCODER)
+    packed_actual_output: torch.Tensor = \
+      run_encoder_or_decoder_self_attention_test(
+        attn,
+        packed_query,
+        packed_key,
+        packed_value,
+        None,
+        attn_metadata,
+        attn_type=AttentionType.ENCODER)
 
-        # - Is encoder attention result correct?
-        assert torch.allclose(
-            packed_ideal_output,
-            packed_actual_output.view_as(packed_ideal_output))
+    # - Is encoder attention result correct?
+    assert torch.allclose(
+        packed_ideal_output,
+        packed_actual_output.view_as(packed_ideal_output))
 
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
