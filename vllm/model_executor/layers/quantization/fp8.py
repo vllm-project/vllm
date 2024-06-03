@@ -189,6 +189,7 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.logical_widths = None
             layer.act_scale = None
+            return
 
         # If checkpoint is fp8, requantize the separately quantized logical
         # weights into a single fp8 weight with a single weight scale.
@@ -253,20 +254,6 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         return torch.narrow(output, 0, 0, x.shape[0])
-
-    # def apply(self,
-    #           layer: torch.nn.Module,
-    #           x: torch.Tensor,
-    #           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    #     qinput, x_scale = ops.scaled_fp8_quant(x, layer.act_scale)
-    #     output = ops.cutlass_scaled_mm_dq(
-    #         qinput,
-    #         layer.weight,
-    #         x_scale,
-    #         layer.weight_scale,
-    #         out_dtype=x.dtype
-    #     )
-    #     return output
 
 
 class Fp8KVCacheMethod(QuantizeMethodBase):

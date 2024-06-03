@@ -208,6 +208,10 @@ class MixtralMoE(nn.Module):
                                           dtype=torch.float8_e4m3fn)
             w2_weight = torch.empty_like(self.w2_weight.data,
                                          dtype=torch.float8_e4m3fn)
+
+            self.w13_scale = nn.Parameter(torch.zeros(self.num_total_experts,
+                                                      dtype=torch.float32),
+                                          requires_grad=False)
             for expert in range(self.num_total_experts):
                 w13_weight[expert, :, :], self.w13_scale[
                     expert] = ops.scaled_fp8_quant(
@@ -240,9 +244,10 @@ class MixtralMoE(nn.Module):
                 self.a2_scale = nn.Parameter(self.a2_scale.max(),
                                              requires_grad=False)
 
+            assert self.w13_scale is not None
             shard_size = self.intermediate_size
-            max_w_scales = self.w13_scale.max(dim=1).values
-            for expert_id in range(8):
+            max_w13_scales = self.w13_scale.max(dim=1).values
+            for expert_id in range(self.num_total_experts):
                 start = 0
                 for shard_id in range(2):
                     dq_weight = per_tensor_dequantize(
@@ -251,10 +256,10 @@ class MixtralMoE(nn.Module):
                         self.w13_scale[expert_id][shard_id])
                     self.w13_weight[expert_id][
                         start:start + shard_size, :] = per_tensor_quantize(
-                            dq_weight, max_w_scales[expert_id])
+                            dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 
-            self.w13_scale = nn.Parameter(max_w_scales, requires_grad=False)
+            self.w13_scale = nn.Parameter(max_w13_scales, requires_grad=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
