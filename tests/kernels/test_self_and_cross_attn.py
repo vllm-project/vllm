@@ -513,17 +513,13 @@ def make_block_tables_slot_mapping(block_size: int,
         num_blocks = num_blocks_list[sdx]
         block_table = list(
             range(block_base_idx, block_base_idx - num_blocks, -1))
-        for idx in range(num_tokens - 1):
-            prefill_slot_mapping.append((idx % block_size) +
-                                        block_table[idx // block_size] *
-                                        block_size)
-            slot_mapping.append((idx % block_size) +
-                                block_table[idx // block_size] * block_size)
-        idx = num_tokens - 1
-        decode_slot_mapping.append((idx % block_size) +
-                                   block_table[idx // block_size] * block_size)
-        slot_mapping.append((idx % block_size) +
-                            block_table[idx // block_size] * block_size)
+        for idx in range(num_tokens):
+            mapping_value = (idx % block_size) + block_table[idx // block_size] * block_size
+            slot_mapping.append(mapping_value)
+            if idx < num_tokens - 1:
+                prefill_slot_mapping.append(mapping_value)
+            elif idx == num_tokens - 1:
+                decode_slot_mapping.append(mapping_value)
 
         block_base_idx -= num_blocks
         block_tables.append(block_table)
