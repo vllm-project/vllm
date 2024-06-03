@@ -84,7 +84,7 @@ def test_decode_streaming(tokenizer_id, truth, with_prompt,
     assert decoded_text == generated
 
     decoded_text = _run_incremental_decode(
-        tokenizer, [tokenizer.vocab_size],
+        tokenizer, [len(tokenizer)],
         skip_special_tokens=skip_special_tokens,
         starting_index=starting_index)
 

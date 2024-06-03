@@ -266,7 +266,7 @@ def detokenize_incrementally(
     assert prev_tokens is not None
 
     # If the new token id is out of bounds, return an empty string.
-    if new_token_id >= tokenizer.vocab_size:
+    if new_token_id >= len(tokenizer):
         new_tokens = [""]
     else:
         # Put new_token_id in a list so skip_special_tokens is respected
