@@ -48,7 +48,7 @@ def create_dummy_prompt_encoder_decoder(
     lora_request: Optional[LoRARequest] = None,
     use_beam_search: bool = False,
     best_of: int = 1,
-) -> Tuple[Sequence, SequenceGroup]:
+) -> Tuple[Sequence, Sequence, SequenceGroup]:
     if not block_size:
         block_size = decoder_prompt_length
 
