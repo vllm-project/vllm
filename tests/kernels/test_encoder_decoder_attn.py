@@ -36,7 +36,7 @@ MAX_K_SEQ_LENS = [128]
 
 
 def _basic_setup(num_heads: int, head_size: int, num_blocks: int,
-                block_size: int, backend_name: str) -> tuple:
+                 block_size: int, backend_name: str) -> tuple:
     '''
     Compute & build entities required for the self-/cross-attention test.
 
@@ -80,12 +80,12 @@ def _basic_setup(num_heads: int, head_size: int, num_blocks: int,
 
 
 def _encoder_attn_setup(batch_size: int,
-                       num_heads: int,
-                       head_size: int,
-                       block_size: int,
-                       scale: float,
-                       max_q_seq_len: int,
-                       block_base_addr: int = 0) -> tuple:
+                        num_heads: int,
+                        head_size: int,
+                        block_size: int,
+                        scale: float,
+                        max_q_seq_len: int,
+                        block_base_addr: int = 0) -> tuple:
     '''
     Set up test vectors & data structures for encoder attention test.
 
@@ -188,12 +188,12 @@ def _encoder_attn_setup(batch_size: int,
 
 
 def _decoder_attn_setup(batch_size: int,
-                       num_heads: int,
-                       head_size: int,
-                       block_size: int,
-                       scale: float,
-                       max_q_seq_len: int,
-                       block_base_addr: int = 0) -> tuple:
+                        num_heads: int,
+                        head_size: int,
+                        block_size: int,
+                        scale: float,
+                        max_q_seq_len: int,
+                        block_base_addr: int = 0) -> tuple:
     '''
     Set up test vectors & data structures for self-attention test.
 
@@ -913,8 +913,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     decode_attn_metadata.num_prefill_tokens = 1
     with pytest.raises(NotImplementedError) as exc_info:
         _run_encoder_decoder_cross_attention_test(attn, decode_packed_query,
-                                                 None, None, kv_cache,
-                                                 decode_attn_metadata)
+                                                  None, None, kv_cache,
+                                                  decode_attn_metadata)
 
     # "Encoder decoder models do not currently support chunked prefill"
     assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL
@@ -1050,10 +1050,10 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
 
     with pytest.raises(NotImplementedError) as exc_info:
         _run_encoder_decoder_cross_attention_test(attn, prefill_packed_query,
-                                                 cross_prefill_packed_key,
-                                                 cross_prefill_packed_value,
-                                                 kv_cache,
-                                                 prefill_attn_metadata)
+                                                  cross_prefill_packed_key,
+                                                  cross_prefill_packed_value,
+                                                  kv_cache,
+                                                  prefill_attn_metadata)
 
     # "Encoder decoder models do not currently support ROCm/HIP"
     assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_ROCM_HIP

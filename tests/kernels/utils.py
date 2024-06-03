@@ -353,8 +353,8 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
 
 def _make_metadata_tensors(seq_lens: List[int], context_lens: List[int],
-                          encoder_seq_lens: List[int],
-                          device: Union[torch.device, str]) -> tuple:
+                           encoder_seq_lens: List[int],
+                           device: Union[torch.device, str]) -> tuple:
     '''
     Build scalar & tensor values required to build attention metadata structure.
 
