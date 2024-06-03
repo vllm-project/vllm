@@ -224,7 +224,7 @@ class HfRunner:
             inputs = self.processor(**processor_kwargs)
 
             output_ids = self.model.generate(
-                self.wrap_device(**inputs),
+                **self.wrap_device(inputs),
                 use_cache=True,
                 **kwargs,
             )
