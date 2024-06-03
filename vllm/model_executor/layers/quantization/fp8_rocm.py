@@ -126,17 +126,12 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         layer.process_after_load = True
         layer.logical_widths = output_partition_sizes
 
-        # orig_weight = Parameter(torch.empty(output_size_per_partition,
-        #                        input_size_per_partition,
-        #                        dtype=params_dtype),
-        #                        requires_grad=False)
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, {
             **extra_weight_attrs, 
             "input_dim": 1, 
             "output_dim": 0
         })
-        # set_weight_attrs(orig_weight, {"input_dim": 1, "output_dim": 0})
         
         self._create_scale_param(
                 scale_name="weights_scaling_factor",
