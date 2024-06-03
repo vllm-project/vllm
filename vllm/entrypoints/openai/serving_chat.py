@@ -1,8 +1,8 @@
 import codecs
 import time
 from dataclasses import dataclass
-from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable, List,
-                    Optional)
+from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
+                    List, Optional)
 from typing import Sequence as GenericSequence
 from typing import TypedDict, Union, cast, final
 
@@ -26,7 +26,7 @@ from vllm.model_executor.guided_decoding import (
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
-from vllm.multimodal.utils import async_get_and_parse_image
+from vllm.multimodal.utils import async_get_and_parse_image, get_full_image_text_prompt
 from vllm.multimodal.image import ImagePixelData
 
 logger = init_logger(__name__)
@@ -97,6 +97,10 @@ class OpenAIServingChat(OpenAIServing):
         texts: List[str] = []
         image_futures: List[Awaitable[ImagePixelData]] = []
 
+        vlm_config: Optional[VisionLanguageConfig] = getattr(
+            self.engine.engine, "vision_language_config", None)
+        model_config = getattr(self.engine.engine, "model_config", None)
+
         image_count = 0
         for _, part in enumerate(parts):
             part_type = part["type"]
@@ -105,26 +109,32 @@ class OpenAIServingChat(OpenAIServing):
 
                 texts.append(text)
             elif part_type == "image_url":
-                config = getattr(self.engine.engine, "vision_language_config", None)
-                if not isinstance(config, VisionLanguageConfig):
-                    raise ValueError("'image_url' input is not supported as the loaded model is not multimodal.")
+                if vlm_config is None:
+                    raise ValueError(
+                        "'image_url' input is not supported as the loaded model is not multimodal."
+                    )
 
                 elif image_count == 0:
                     assert self.tokenizer is not None
                     image_future = async_get_and_parse_image(part["image_url"])
-                    image_futures.appned(image_future)
-                    text = config.get_image_token_text(config, self.tokenizer)
-
-                    #NOTE: For now we assume image tokens are always concatenated at the beginning
-                    texts.insert(0, text)
+                    image_futures.append(image_future)
+                    image_text = vlm_config.get_image_token_text(
+                        self.tokenizer)
                     image_count += 1
+
                 else:
-                    raise NotImplementedError("Multiple 'image_url' input is currently not supported.")
+                    raise NotImplementedError(
+                        "Multiple 'image_url' input is currently not supported."
+                    )
 
             else:
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 
-        messages = [ConversationMessage(role=role, content="\n".join(texts))]
+        text_prompt = "\n".join(texts)
+        full_prompt = get_full_image_text_prompt(image_prompt=image_text,
+                                                 text_prompt=text_prompt,
+                                                 config=model_config)
+        messages = [ConversationMessage(role=role, content=full_prompt)]
 
         return ChatMessageParseResult(messages=messages)
 

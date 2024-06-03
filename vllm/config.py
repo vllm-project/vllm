@@ -1108,12 +1108,11 @@ class VisionLanguageConfig:
             raise ValueError(f"{value} is not a valid choice. "
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
-        
-    def get_image_token_text(self, config: "VisionLanguageConfig",
-                             tokenizer: PreTrainedTokenizerBase) -> str:
-        
-        image_token_str = tokenizer.decode(config.image_token_id)
-        return image_token_str * config.image_feature_size
+
+    def get_image_token_text(self, tokenizer: PreTrainedTokenizerBase) -> str:
+
+        image_token_str = tokenizer.decode(self.image_token_id)
+        return image_token_str * self.image_feature_size
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

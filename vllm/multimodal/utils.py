@@ -10,6 +10,7 @@ from PIL import Image
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.utils import make_async
 from vllm.multimodal.image import ImagePixelData
+from vllm.config import ModelConfig
 
 
 def encode_image_base64(image: Image.Image) -> str:
@@ -26,7 +27,7 @@ def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
 
 def fetch_image(image_url: str) -> Image.Image:
     """load image from url, local path or openai GPT4V."""
-    
+
     # Avoid circular import
     from vllm import __version__ as VLLM_VERSION
 
@@ -42,12 +43,29 @@ def fetch_image(image_url: str) -> Image.Image:
     elif image_url.startswith('data:image'):
         img = load_image_from_base64(image_url.split(',')[1])
     else:
-        raise ValueError("Invalid image url: A valid image url must start with either 'data:image' or 'http'.")
+        raise ValueError(
+            "Invalid image url: A valid image url must start with either 'data:image' or 'http'."
+        )
 
     return img
 
-async_fetch_image = make_async(fetch_image) # type: ignore
+
+async_fetch_image = make_async(fetch_image)  # type: ignore
+
 
 async def async_get_and_parse_image(image_url: str) -> ImagePixelData:
     with await async_fetch_image(image_url) as image:
         return ImagePixelData(image)
+
+
+def get_full_image_text_prompt(image_prompt, text_prompt,
+                               config: ModelConfig) -> str:
+    """Combine image and text prompts for vision language model depending on
+    the  model architecture."""
+
+    if config.hf_config.model_type == "llava":
+        full_prompt = f"{image_prompt}\n{text_prompt}"
+    else:
+        raise ValueError(
+            f"Unsupported model type: {config.hf_config.model_type}")
+    return full_prompt
