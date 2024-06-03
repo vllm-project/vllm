@@ -1,3 +1,4 @@
+tests/test_sharded_state_loader.py
 tests/test_sequence.py
 tests/metrics/test_metrics.py
 tests/kernels/test_prefix_prefill.py

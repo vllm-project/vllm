@@ -42,9 +42,11 @@ def mock_causal_accepted_tensor(k: int, last_accepted_indices: torch.Tensor,
 @pytest.mark.parametrize(
     "which_tokens_accepted",
     ["all_tokens_accepted", "no_tokens_accepted", "some_tokens_accepted"])
+@pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_correct_output_format(which_tokens_accepted: str, seed: int,
+def test_correct_output_format(which_tokens_accepted: str,
+                               disable_bonus_tokens: bool, seed: int,
                                device: str):
     """Verify the output has correct format given predetermined accepted matrix.
     """
@@ -86,7 +88,8 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
 
-    rejection_sampler = RejectionSampler()
+    rejection_sampler = RejectionSampler(
+        disable_bonus_tokens=disable_bonus_tokens)
     device_rank = int(device[-1])
     rejection_sampler.init_gpu_tensors(rank=device_rank)
     output_token_ids = rejection_sampler._create_output(  # pylint: disable=protected-access
@@ -96,9 +99,11 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
         bonus_token_ids,
     )
 
-    # Bonus tokens are currently disabled. Verify they're set to -1.
+    expected_bonus_token_ids = bonus_token_ids.clone()
+    # If bonus tokens disabled. Verify they are set to -1.
     # See https://github.com/vllm-project/vllm/issues/4212
-    expected_bonus_token_ids = bonus_token_ids.clone() * 0 - 1
+    if disable_bonus_tokens:
+        expected_bonus_token_ids = expected_bonus_token_ids * 0 - 1
 
     if which_tokens_accepted == "all_tokens_accepted":
         # Expect all tokens to be equal to draft tokens.

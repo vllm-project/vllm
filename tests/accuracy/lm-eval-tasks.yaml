@@ -83,14 +83,14 @@
 #       value: 0.5041698256254739
 
 # Llama 2 7B: 2:4 marlin
-- model_name: "nm-testing/Llama-2-7b-pruned2.4-Marlin"
-  tasks:
-  - name: "gsm8k"
-    metrics:
-    - name: "exact_match,strict-match"
-      value: 0.1857
-    - name: "exact_match,flexible-extract"
-      value: 0.0425
+# - model_name: "nm-testing/Llama-2-7b-pruned2.4-Marlin"
+#   tasks:
+#   - name: "gsm8k"
+#     metrics:
+#     - name: "exact_match,strict-match"
+#       value: 0.2214
+#     - name: "exact_match,flexible-extract"
+#       value: 0.0425
 
 # Mixtral: FP16
 # g5.12xlarge runner (4x 24GB A10 GPUs) has insufficient VRAM

@@ -79,7 +79,7 @@ def run_vllm(requests: List[Tuple[str, int, int]],
         llm._add_request(
             prompt=prompt,
             prompt_token_ids=None,
-            sampling_params=sampling_params,
+            params=sampling_params,
         )
 
     start = time.perf_counter()

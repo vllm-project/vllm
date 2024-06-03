@@ -53,7 +53,15 @@ class CPUCacheEngine:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # Get attention backend.
-        self.attn_backend = get_attn_backend(model_config.dtype)
+        self.attn_backend = get_attn_backend(
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            cache_config.cache_dtype,
+            self.block_size,
+        )
 
         # Initialize the cache.
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks)
@@ -151,6 +159,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             parallel_config,
             scheduler_config,
             device_config,
+            cache_config,
             load_config=self.load_config,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
@@ -248,9 +257,9 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
     def cache_copy(
         self,
-        blocks_to_copy: Dict[int, List[int]],
+        blocks_to_copy: torch.Tensor,
     ) -> None:
-        if blocks_to_copy:
+        if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
 
     @torch.inference_mode()
@@ -269,6 +278,9 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             num_seq_groups: int = len(seq_group_metadata_list)
             assert execute_model_req is not None
             blocks_to_copy = execute_model_req.blocks_to_copy
+            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                          device="cpu",
+                                          dtype=torch.int64).view(-1, 2)
             assert len(execute_model_req.blocks_to_swap_in) == 0
             assert len(execute_model_req.blocks_to_swap_out) == 0
             data: Dict[str, Any] = {

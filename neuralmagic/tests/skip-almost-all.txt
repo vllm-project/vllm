@@ -82,7 +82,9 @@ tests/engine/test_stop_reason.py
 tests/engine/test_stop_strings.py
 tests/engine/test_detokenization.py
 tests/engine/test_computed_prefix_blocks.py
+tests/engine/test_multiproc_workers.py
 tests/basic_correctness/test_chunked_prefill.py
 tests/basic_correctness/test_basic_correctness.py
 tests/basic_correctness/test_basic_server_correctness.py
 tests/test_cache_block_hashing.py
+tests/test_sharded_state_loader.py

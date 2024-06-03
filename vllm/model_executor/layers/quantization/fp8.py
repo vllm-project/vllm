@@ -231,9 +231,14 @@ class Fp8LinearMethod(LinearMethodBase):
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.act_scale is None and x_scale computed from x.
         #   If static,  layer.act_scale is scalar and x_scale set to act_scale.
-        qinput, x_scale = ops.scaled_fp8_quant(x, layer.act_scale)
+        qinput, x_scale = ops.scaled_fp8_quant(x,
+                                               layer.act_scale,
+                                               batch_dim_padding=17)
 
-        # Fused GEMM_DQ
+        # Fused GEMM_DQ -- note we padded the input above because
+        # torch._scaled_mm is more performant for matrices with
+        # batch dimension > 16. Note that this could change
+        # in the future.
         output, _ = torch._scaled_mm(
             qinput,
             layer.weight,
@@ -243,7 +248,7 @@ class Fp8LinearMethod(LinearMethodBase):
             bias=bias,
         )
 
-        return output
+        return torch.narrow(output, 0, 0, x.shape[0])
 
 
 def all_close_1d(x: torch.Tensor) -> bool:

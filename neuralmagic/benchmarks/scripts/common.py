@@ -141,7 +141,7 @@ def warmup_vllm_engine(engine: LLM,
         engine._add_request(
             prompt=prompt,
             prompt_token_ids=None,
-            sampling_params=sampling_params,
+            params=sampling_params,
         )
 
     engine._run_engine(use_tqdm=False)

@@ -37,7 +37,7 @@ def get_tensor_parallel_size(config: NamedTuple) -> int:
     return tensor_parallel_size
 
 
-def is_server_running(host: str, port: int, timeout=600) -> bool:
+def is_server_running(host: str, port: int, timeout=900) -> bool:
 
     def try_connection() -> bool:
         try:

@@ -10,7 +10,7 @@ import ray
 import requests
 import torch
 
-from tests.utils.logging import log_banner
+from tests.nm_utils.logging import log_banner
 
 MAX_SERVER_START_WAIT = 15 * 60  # time (seconds) to wait for server to start
 

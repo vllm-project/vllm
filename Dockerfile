@@ -87,23 +87,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip cache remove vllm_nccl*
 #################### EXTENSION Build IMAGE ####################
 
-#################### FLASH_ATTENTION Build IMAGE ####################
-FROM dev as flash-attn-builder
-# max jobs used for build
-ARG max_jobs=2
-ENV MAX_JOBS=${max_jobs}
-# flash attention version
-ARG flash_attn_version=v2.5.8
-ENV FLASH_ATTN_VERSION=${flash_attn_version}
-
-WORKDIR /usr/src/flash-attention-v2
-
-# Download the wheel or build it if a pre-compiled release doesn't exist
-RUN pip --verbose wheel flash-attn==${FLASH_ATTN_VERSION} \
-    --no-build-isolation --no-deps --no-cache-dir
-
-#################### FLASH_ATTENTION Build IMAGE ####################
-
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS vllm-base
@@ -118,20 +101,17 @@ RUN apt-get update -y \
 # or future versions of triton.
 RUN ldconfig /usr/local/cuda-12.4/compat/
 
-# install vllm wheel first, so that torch etc will be installed
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=cache,target=/root/.cache/pip \
-    pip install dist/*.whl --verbose
-
 # UPSTREAM SYNC: Install sparsity extras
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     pip install nm-magic-wand-nightly --extra-index-url https://pypi.neuralmagic.com/simple
 
-RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
+# install vllm wheel first, so that torch etc will be installed
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
-    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
+    pip install dist/*.whl --verbose
 #################### vLLM installation IMAGE ####################
+
 
 #################### TEST IMAGE ####################
 # image to run unit testing suite

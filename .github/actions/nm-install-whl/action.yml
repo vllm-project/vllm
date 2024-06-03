@@ -25,5 +25,13 @@ runs:
         BASE=$(./.github/scripts/convert-version ${{ inputs.python }})
         WHL=$(find . -type f -iname "*${BASE}*.whl")
         WHL_BASENAME=$(basename ${WHL})
+        echo "whl=${WHL_BASENAME}" >> "$GITHUB_OUTPUT"
         pip3 install ${WHL}[sparse] --extra-index-url https://pypi.neuralmagic.com/simple
+        # report magic_wand version
+        MAGIC_WAND=$(pip3 show nm-magic-wand-nightly | grep "Version" | cut -d' ' -f2) || echo "nightly not installed"
+        if [ -z "${MAGIC_WAND}" ]; then
+          # if neither magic-wand nor magic-wand-nightly is installed stop here with error
+          MAGIC_WAND=$(pip3 show nm-magic-wand | grep "Version" | cut -d' ' -f2)
+        fi
+        echo "magic_wand=${MAGIC_WAND}" >> "$GITHUB_OUTPUT"
       shell: bash

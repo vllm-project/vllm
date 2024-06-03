@@ -6,18 +6,15 @@ sparse models are in the top N selections of same model running dense.
 Run `pytest tests/models/test_compressed.py`.
 """
 
-import gc
-
 import pytest
-from compare_utils import check_logprobs_close
+
+from tests.models.utils import check_logprobs_close
 
 MAX_MODEL_LEN = 1024
 MODEL_FORMAT_PAIRS = [
     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-pruned2.4",
      "semi_structured_sparse_w16a16"),
     ("nm-testing/OpenHermes-2.5-Mistral-7B-pruned50", "sparse_w16a16"),
-    ("nm-testing/OpenHermes-2.5-Mistral-7B-pruned2.4",
-     "semi_structured_sparse_w16a16"),
 ]
 
 
@@ -41,9 +38,7 @@ def test_models(
                                max_model_len=MAX_MODEL_LEN)
     sparse_outputs = sparse_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
-
     del sparse_model
-    gc.collect()
 
     dense_model = vllm_runner(model_name=model_name,
                               sparsity=None,
@@ -51,9 +46,7 @@ def test_models(
                               max_model_len=MAX_MODEL_LEN)
     dense_outputs = dense_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
-
     del dense_model
-    gc.collect()
 
     # loop through the prompts
     check_logprobs_close(

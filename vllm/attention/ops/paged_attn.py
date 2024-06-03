@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -16,8 +16,8 @@ class PagedAttentionMetadata:
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
     seq_lens_tensor: Optional[torch.Tensor]
-    # Maximum sequence length in the batch.
-    max_seq_len: Optional[int]
+    # Maximum sequence length in the batch. 0 if it is prefill-only batch.
+    max_decode_seq_len: int
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
@@ -166,7 +166,7 @@ class PagedAttention:
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
-        subquery_start_loc: torch.Tensor,
+        query_start_loc: torch.Tensor,
         seq_lens_tensor: torch.Tensor,
         context_lens: torch.Tensor,
         max_query_len: int,
@@ -182,8 +182,8 @@ class PagedAttention:
             key_cache,
             value_cache,
             block_tables,
-            # subquery_start_loc is (batch_size + 1,)
-            subquery_start_loc[:-1],
+            # query_start_loc is (batch_size + 1,)
+            query_start_loc[:-1],
             seq_lens_tensor,
             context_lens,
             max_query_len,
@@ -196,7 +196,7 @@ class PagedAttention:
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: torch.Tensor,
     ) -> None:
         src_key_cache = src_kv_cache[0]
         dst_key_cache = dst_kv_cache[0]
@@ -209,7 +209,7 @@ class PagedAttention:
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dists: torch.Tensor,
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]

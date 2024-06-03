@@ -98,6 +98,7 @@ class cmake_build_ext(build_ext):
             # when it is set, we reduce `num_jobs` to avoid
             # overloading the system.
             nvcc_threads = envs.NVCC_THREADS
+            print(f"NVCC THREADS {nvcc_threads}")
             if nvcc_threads is not None:
                 nvcc_threads = int(nvcc_threads)
                 logger.info(
@@ -379,14 +380,18 @@ def get_requirements() -> List[str]:
 
     if _is_cuda():
         requirements = _read_requirements("requirements-cuda.txt")
-        cuda_major = torch.version.cuda.split(".")[0]
+        cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
             if "vllm-nccl-cu12" in req:
-                modified_requirements.append(
-                    req.replace("vllm-nccl-cu12", f"vllm-nccl-cu{cuda_major}"))
-            else:
-                modified_requirements.append(req)
+                req = req.replace("vllm-nccl-cu12",
+                                  f"vllm-nccl-cu{cuda_major}")
+            elif ("vllm-flash-attn" in req
+                  and not (cuda_major == "12" and cuda_minor == "1")):
+                # vllm-flash-attn is built only for CUDA 12.1.
+                # Skip for other versions.
+                continue
+            modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
         requirements = _read_requirements("requirements-rocm.txt")
@@ -405,11 +410,11 @@ ext_modules = []
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
-    if _install_punica():
-        ext_modules.append(CMakeExtension(name="vllm._punica_C"))
-
 if not _is_neuron():
     ext_modules.append(CMakeExtension(name="vllm._C"))
+
+    if _install_punica():
+        ext_modules.append(CMakeExtension(name="vllm._punica_C"))
 
 # UPSTREAM SYNC: needed for sparsity
 _sparsity_deps = ["nm-magic-wand-nightly"]
@@ -462,7 +467,7 @@ setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
-        "tensorizer": ["tensorizer==2.9.0"],
+        "tensorizer": ["tensorizer>=2.9.0"],
         # UPSTREAM SYNC: required for sparsity
         "sparse": _sparsity_deps,
         "sparsity": _sparsity_deps,

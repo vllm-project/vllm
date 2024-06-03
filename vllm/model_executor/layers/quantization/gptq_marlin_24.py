@@ -4,10 +4,13 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
+
+logger = init_logger(__name__)
 
 
 class GPTQMarlin24Config(QuantizationConfig):
@@ -78,6 +81,23 @@ class GPTQMarlin24Config(QuantizationConfig):
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(weight_bits, group_size)
 
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        is_marlin_24_format = (
+            hf_quant_cfg.get("checkpoint_format") == "marlin_24")
+
+        is_valid_user_quant = (user_quant is None or user_quant == "gptq"
+                               or user_quant == "gptq_marlin_24")
+
+        if is_marlin_24_format and is_valid_user_quant:
+            msg = ("The model is serialized in {} format. "
+                   "Using {} kernel.".format(cls.get_name(), cls.get_name()))
+            logger.info(msg)
+            return cls.get_name()
+
+        return None
+
     def get_quant_method(
             self,
             layer: torch.nn.Module) -> Optional["GPTQMarlin24LinearMethod"]:
@@ -91,6 +111,7 @@ class GPTQMarlin24Config(QuantizationConfig):
 
 class GPTQMarlin24LinearMethod(LinearMethodBase):
     """Linear method for Marlin24.
+
     Args:
         quant_config: The Marlin24 quantization config.
     """

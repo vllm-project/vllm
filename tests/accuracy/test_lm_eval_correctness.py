@@ -7,7 +7,7 @@ import pytest
 import torch
 import yaml
 
-from tests.utils.server import ServerContext
+from tests.nm_utils.server import ServerContext
 
 if TYPE_CHECKING:
     import lm_eval as lm_eval_t

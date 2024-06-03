@@ -1,3 +1,4 @@
+tests/test_sharded_state_loader.py
 tests/test_sequence.py
 tests/metrics/test_metrics.py
 tests/kernels/test_prefix_prefill.py
@@ -49,5 +50,6 @@ tests/lora/test_lora.py
 tests/worker/test_model_runner.py
 tests/engine/test_detokenize.py
 tests/engine/test_computed_prefix_blocks.py
+tests/engine/test_multiproc_workers.py
 tests/basic_correctness/test_basic_server_correctness.py
 tests/accuracy/test_lm_eval_correctness.py

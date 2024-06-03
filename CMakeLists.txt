@@ -167,12 +167,22 @@ set(VLLM_EXT_SRC
   "csrc/layernorm_kernels.cu"
   "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
   "csrc/quantization/gptq/q_gemm.cu"
-  "csrc/quantization/fp8/fp8_cuda_kernels.cu"
+  "csrc/quantization/fp8/common.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
   "csrc/pybind.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
+  include(FetchContent)
+  SET(CUTLASS_ENABLE_HEADERS_ONLY=ON)
+  FetchContent_Declare(
+        cutlass 
+        GIT_REPOSITORY https://github.com/nvidia/cutlass.git
+        # CUTLASS 3.5.0
+        GIT_TAG 7d49e6c7e2f8896c47f586706e67e1fb215529dc
+  )
+  FetchContent_MakeAvailable(cutlass)
+
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
@@ -180,7 +190,21 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
-    "csrc/custom_all_reduce.cu")
+    "csrc/custom_all_reduce.cu"
+    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_entry.cu"
+    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c2x.cu"
+    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu")
+
+  #
+  # The CUTLASS kernels for Hopper require sm90a to be enabled.
+  # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
+  # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
+  set_source_files_properties(
+      "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu"
+      PROPERTIES
+      COMPILE_FLAGS
+      "-gencode arch=compute_90a,code=sm_90a")
+
 endif()
 
 define_gpu_extension_target(
@@ -190,6 +214,7 @@ define_gpu_extension_target(
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   WITH_SOABI)
 
 #
@@ -220,7 +245,8 @@ set(VLLM_PUNICA_EXT_SRC
   "csrc/punica/bgmv/bgmv_fp16_fp32_fp16.cu"
   "csrc/punica/bgmv/bgmv_fp32_bf16_bf16.cu"
   "csrc/punica/bgmv/bgmv_fp32_fp16_fp16.cu"
-  "csrc/punica/punica_ops.cc")
+  "csrc/punica/punica_ops.cu"
+  "csrc/punica/punica_pybind.cpp")
 
 #
 # Copy GPU compilation flags+update for punica
@@ -243,6 +269,9 @@ if (${VLLM_GPU_LANG} STREQUAL "CUDA")
       list(APPEND VLLM_PUNICA_GPU_ARCHES ${ARCH})
     endif()
   endforeach()
+  message(STATUS "Punica target arches: ${VLLM_PUNICA_GPU_ARCHES}")
+elseif(${VLLM_GPU_LANG} STREQUAL "HIP")
+  set(VLLM_PUNICA_GPU_ARCHES ${VLLM_GPU_ARCHES})
   message(STATUS "Punica target arches: ${VLLM_PUNICA_GPU_ARCHES}")
 endif()
 
@@ -278,11 +307,6 @@ add_custom_target(default)
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
-endif()
-
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  message(STATUS "Enabling moe extension.")
-  add_dependencies(default _moe_C)
 
   # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=ON or
   # VLLM_INSTALL_PUNICA_KERNELS is set in the environment and
@@ -292,4 +316,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Enabling punica extension.")
     add_dependencies(default _punica_C)
   endif()
+endif()
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  message(STATUS "Enabling moe extension.")
+  add_dependencies(default _moe_C)
 endif()

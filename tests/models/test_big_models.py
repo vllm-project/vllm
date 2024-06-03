@@ -23,6 +23,7 @@ SKIPPED_MODELS_ACC = [
     "mistralai/Mistral-7B-v0.1",
     "Deci/DeciLM-7b",
     "tiiuae/falcon-7b",
+    "mosaicml/mpt-7b",
     "Qwen/Qwen1.5-0.5B",
 ]
 

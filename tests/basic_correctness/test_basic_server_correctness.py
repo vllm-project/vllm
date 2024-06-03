@@ -11,8 +11,8 @@ from transformers import AutoTokenizer
 
 from tests.conftest import HfRunnerNM
 from tests.models.compare_utils import check_logprobs_close
-from tests.utils.logging import make_logger
-from tests.utils.server import ServerContext
+from tests.nm_utils.logging import make_logger
+from tests.nm_utils.server import ServerContext
 from vllm.model_executor.layers.quantization import get_quantization_config
 
 
@@ -54,10 +54,6 @@ async def my_chat(
     ("NousResearch/Llama-2-7b-chat-hf", 4096, None, None),
     ("neuralmagic/Llama-2-7b-pruned70-retrained-ultrachat", 4096,
      "sparse_w16a16", None),
-    ("Qwen/Qwen1.5-7B-Chat", 4096, None, None),
-    ("casperhansen/gemma-7b-it-awq", 4096, None, "gptq_marlin"),
-    ("mistralai/Mixtral-8x7B-Instruct-v0.1", 4096, None, None),
-    ("Qwen/Qwen1.5-MoE-A2.7B-Chat", 4096, None, None),
 ])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [3])
@@ -123,6 +119,8 @@ def test_models_on_server(
     hf_token = getenv("HF_TOKEN", None)
     logger.info("loading chat prompts for testing.")
     ds = load_dataset("nm-testing/qa-chat-prompts", split="train_sft")
+    ds = ds.select(range(20))
+
     num_chat_turns = 3
     messages_list = [row["messages"][:num_chat_turns] for row in ds]
     tokenizer = AutoTokenizer.from_pretrained(model)

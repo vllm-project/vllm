@@ -19,7 +19,7 @@ on:
       build_timeout:
         description: "time limit for build in minutes "
         type: string
-        default: "60"
+        default: "120"
       Gi_per_thread:
         description: 'requested GiB to reserve per thread'
         type: string

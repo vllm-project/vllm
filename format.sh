@@ -112,12 +112,13 @@ mypy vllm/model_executor --config-file pyproject.toml
 
 
 CODESPELL_EXCLUDES=(
-    '--skip' '*docs/source/_build/**'
+    '--skip' '*docs/source/_build/**,*tests/lora/data/*'
 )
+
 
 # check spelling of specified files
 spell_check() {
-    codespell "$@"
+    codespell "$@ ${CODESPELL_EXCLUDES[@]}"
 }
 
 spell_check_all(){
@@ -133,10 +134,9 @@ spell_check_changed() {
     # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
     # exist on both branches.
     MERGEBASE="$(git merge-base origin/main HEAD)"
-
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             codespell "${CODESPELL_EXCLUDES[@]}"
+            codespell "${CODESPELL_EXCLUDES[@]}"
     fi
 }
 
@@ -151,6 +151,7 @@ elif [[ "$1" == '--all' ]]; then
    spell_check_all
 else
    # Check spelling only of the files that changed in last commit.
+   echo "${CODESPELL_EXCLUDES[@]}"
    spell_check_changed
 fi
 echo 'vLLM codespell: Done'
