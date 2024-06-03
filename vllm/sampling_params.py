@@ -147,9 +147,9 @@ class SamplingParams:
         self.repetition_penalty = repetition_penalty
         if 0 < temperature < _MAX_TEMP:
             logger.warning(
-                f'temperature {temperature} is less than {_MAX_TEMP}, '
-                f'which may cause numerical errors nan or inf in tensors. '
-                f'We will max it out to {_MAX_TEMP}')
+                "temperature %s is less than %s, which may cause numerical "
+                "errors nan or inf in tensors. We have maxed it out to %s.",
+                temperature, _MAX_TEMP, _MAX_TEMP)
             temperature = max(temperature, _MAX_TEMP)
         self.temperature = temperature
         self.top_p = top_p
