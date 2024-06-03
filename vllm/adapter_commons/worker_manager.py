@@ -3,8 +3,6 @@ from typing import Any, Optional, Set
 
 import torch
 
-from vllm.adapter_commons.models import AdapterModelManager
-
 
 class AbstractWorkerManager(ABC):
 
@@ -14,7 +12,7 @@ class AbstractWorkerManager(ABC):
     @abstractproperty
     def _model_manager(self):
         ...
-        
+
     @abstractproperty
     def is_enabled(self) -> bool:
         ...
