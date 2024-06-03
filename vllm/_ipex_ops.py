@@ -57,6 +57,11 @@ class ipex_ops:
         alibi_slopes: Optional[torch.Tensor],
         kv_cache_dtype: str,
         kv_scale: float,
+        tp_rank: int = 0,
+        blocksparse_local_blocks: int = 0,
+        blocksparse_vert_stride: int = 0,
+        blocksparse_block_size: int = 64,
+        blocksparse_head_sliding_step: int = 0,
     ) -> None:
         assert kv_cache_dtype == "auto"
         num_heads = out.size(1)
@@ -92,6 +97,11 @@ class ipex_ops:
         alibi_slopes: Optional[torch.Tensor],
         kv_cache_dtype: str,
         kv_scale: float,
+        tp_rank: int = 0,
+        blocksparse_local_blocks: int = 0,
+        blocksparse_vert_stride: int = 0,
+        blocksparse_block_size: int = 64,
+        blocksparse_head_sliding_step: int = 0,
     ) -> None:
         assert kv_cache_dtype == "auto"
         num_heads = out.size(1)

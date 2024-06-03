@@ -11,10 +11,9 @@ from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import CudaMemoryProfiler, make_tensor_with_pad
-from vllm.worker.model_runner import (AttentionMetadata, SamplingMetadata,
-                                      _prepare_fake_inputs)
+from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -114,8 +113,9 @@ class XPUModelRunner:
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_data, fake_multi_modal_input = _prepare_fake_inputs(
-                seq_len, None)
+
+            seq_data = SequenceData([0] * seq_len)
+            dummy_multi_modal_data = None
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -123,7 +123,7 @@ class XPUModelRunner:
                 sampling_params=sampling_params,
                 block_tables=None,
                 lora_request=None,
-                multi_modal_data=fake_multi_modal_input,
+                multi_modal_data=dummy_multi_modal_data,
             )
             seqs.append(seq)
 
