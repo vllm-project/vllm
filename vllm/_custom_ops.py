@@ -265,7 +265,7 @@ def scaled_fp8_quant(
 
 # int8
 def static_scaled_int8_quant(input: torch.Tensor,
-                             scale: float) -> torch.Tensor:
+                             scale: torch.Tensor) -> torch.Tensor:
     """
     Quantize the input tensor to int8 and return the quantized tensor.
 

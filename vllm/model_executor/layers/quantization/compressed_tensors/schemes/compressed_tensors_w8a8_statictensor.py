@@ -97,7 +97,7 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         act_scale = layer.input_scale
 
         # Input quantize
-        x_q = custom_ops.static_scaled_int8_quant(x, act_scale[0].item())
+        x_q = custom_ops.static_scaled_int8_quant(x, act_scale)
 
         return custom_ops.cutlass_scaled_mm_dq(x_q, weight.t(), act_scale,
                                                weight_scale, x.dtype)
