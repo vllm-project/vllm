@@ -600,9 +600,21 @@ class ParallelConfig:
                                  f"'{self.distributed_executor_backend}'.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
-            from vllm.executor import ray_utils
-            ray_found = ray_utils.ray is not None
-            self.distributed_executor_backend = "ray" if ray_found else "mp"
+            from torch.cuda import device_count
+            num_devices = device_count()
+            if num_devices >= self.world_size:
+                # If world_size fits on the current node, we use
+                # mutliprocessing by default
+                self.distributed_executor_backend = "mp"
+            else:
+                # Otherwise we use Ray
+                from vllm.executor import ray_utils
+                if ray_utils.ray is None:
+                    raise ValueError("Unable to load Ray which is "
+                                     "required for multi-node inference")
+                self.distributed_executor_backend = "ray"
+            logger.info("Defaulting to use %s for distributed inference",
+                        self.distributed_executor_backend)
 
         self._verify_args()
 
