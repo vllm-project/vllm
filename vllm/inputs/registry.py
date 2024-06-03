@@ -234,7 +234,8 @@ class InputRegistry:
 
         return dummy_factory(model_config, seq_len)
 
-    def _default_input_processor(self, inputs: LLMInputs) -> LLMInputs:
+    def _default_input_processor(self, model_config: "ModelConfig",
+                                 inputs: LLMInputs) -> LLMInputs:
         """Preprocess the inputs to the model."""
         return inputs
 
@@ -273,10 +274,8 @@ class InputRegistry:
 
         model_cls, _ = get_model_architecture(model_config)
 
-        processor = self._input_processors_by_model_type.get(model_cls)
-        if processor is None:
-            raise KeyError(f"No input processor in {self} is registered for "
-                           f"model class {model_cls.__name__}.")
+        processor = self._input_processors_by_model_type \
+            .get(model_cls, self._default_input_processor)
 
         return processor(model_config, inputs)
 
