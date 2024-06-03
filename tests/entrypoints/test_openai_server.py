@@ -1084,14 +1084,14 @@ async def test_long_seed(server, client: openai.AsyncOpenAI):
 )
 async def test_single_embedding(embedding_server, client: openai.AsyncOpenAI,
                                 model_name: str):
-    input = [
+    input_texts = [
         "The chef prepared a delicious meal.",
     ]
 
     # test single embedding
     embeddings = await client.embeddings.create(
         model=model_name,
-        input=input,
+        input=input_texts,
         encoding_format="float",
     )
     assert embeddings.id is not None
@@ -1102,10 +1102,10 @@ async def test_single_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert embeddings.usage.total_tokens == 9
 
     # test using token IDs
-    input = [1, 1, 1, 1, 1]
+    input_tokens = [1, 1, 1, 1, 1]
     embeddings = await client.embeddings.create(
         model=model_name,
-        input=input,
+        input=input_tokens,
         encoding_format="float",
     )
     assert embeddings.id is not None
@@ -1124,13 +1124,13 @@ async def test_single_embedding(embedding_server, client: openai.AsyncOpenAI,
 async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
                                model_name: str):
     # test List[str]
-    inputs = [
+    input_texts = [
         "The cat sat on the mat.", "A feline was resting on a rug.",
         "Stars twinkle brightly in the night sky."
     ]
     embeddings = await client.embeddings.create(
         model=model_name,
-        input=inputs,
+        input=input_texts,
         encoding_format="float",
     )
     assert embeddings.id is not None
@@ -1138,11 +1138,11 @@ async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert len(embeddings.data[0].embedding) == 4096
 
     # test List[List[int]]
-    inputs = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
-              [25, 32, 64, 77]]
+    input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
+                    [25, 32, 64, 77]]
     embeddings = await client.embeddings.create(
         model=model_name,
-        input=inputs,
+        input=input_tokens,
         encoding_format="float",
     )
     assert embeddings.id is not None
