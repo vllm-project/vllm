@@ -4,6 +4,20 @@ set -e
 
 # Try building the docker image
 aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 763104351884.dkr.ecr.us-west-2.amazonaws.com
+
+# prune old image and containers to save disk space, and only once a day
+# by using a timestamp file in tmp.
+if [ -f /tmp/neuron-docker-build-timestamp ]; then
+    last_build=$(cat /tmp/neuron-docker-build-timestamp)
+    current_time=$(date +%s)
+    if [ $((current_time - last_build)) -gt 86400 ]; then
+        docker system prune -f
+        echo $current_time > /tmp/neuron-docker-build-timestamp
+    fi
+else
+    echo $(date +%s) > /tmp/neuron-docker-build-timestamp
+fi
+
 docker build -t neuron -f Dockerfile.neuron .
 
 # Setup cleanup

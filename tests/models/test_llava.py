@@ -1,7 +1,7 @@
 import gc
 from dataclasses import fields
 from enum import Enum
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pytest
 import torch
@@ -58,14 +58,14 @@ model_and_vl_config = [
 ]
 
 
-def as_dict(vision_language_config: VisionLanguageConfig) -> Dict:
+def as_dict(vlm_config: VisionLanguageConfig) -> Dict[str, Any]:
     """Flatten vision language config to pure args.
 
     Compatible with what llm entrypoint expects.
     """
     result = {}
-    for field in fields(vision_language_config):
-        value = getattr(vision_language_config, field.name)
+    for field in fields(vlm_config):
+        value = getattr(vlm_config, field.name)
         if isinstance(value, Enum):
             result[field.name] = value.name.lower()
         elif isinstance(value, tuple):
@@ -73,8 +73,7 @@ def as_dict(vision_language_config: VisionLanguageConfig) -> Dict:
         else:
             result[field.name] = value
 
-    result[
-        "no_image_processor"] = vision_language_config.image_processor is None
+    result["disable_image_processor"] = vlm_config.image_processor is None
 
     return result
 
@@ -104,8 +103,8 @@ def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
-                vllm_image_prompts, vllm_images, model_and_config: tuple,
-                dtype: str, max_tokens: int, worker_use_ray: bool) -> None:
+                vllm_image_prompts, vllm_images, model_and_config, dtype: str,
+                max_tokens: int, worker_use_ray: bool) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.

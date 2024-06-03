@@ -1,5 +1,4 @@
-from typing import (ClassVar, Iterable, List, Literal, Optional, Tuple,
-                    TypedDict, Union)
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 from torch import nn
@@ -8,16 +7,21 @@ from torch import nn
 from transformers import CLIPVisionModel, LlavaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import VisionLanguageConfig
+from vllm.config import CacheConfig, VisionLanguageConfig
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import get_dummy_image_data
 from vllm.sequence import SamplerOutput
+
+from .vlm_base import VisionLanguageModelBase
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -78,8 +82,28 @@ class LlavaImageFeatureInputs(TypedDict):
 
 LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
 
+    return inputs_embeds
 
-class LlavaForConditionalGeneration(nn.Module):
+
+class LlavaImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: (batch_size, num_channels, height, width)"""
+
+
+class LlavaImageFeatureInputs(TypedDict):
+    type: Literal["image_features"]
+    data: torch.Tensor
+    """Shape: (batch_size, image_feature_size, hidden_size)"""
+
+
+LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
+
+
+@MULTIMODAL_REGISTRY.register_image_feature_input()
+@MULTIMODAL_REGISTRY.register_image_pixel_input()
+@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
+class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     is_vlm: ClassVar[bool] = True
     """Indicates that the model is a vision-language model and thus accepts
@@ -89,17 +113,11 @@ class LlavaForConditionalGeneration(nn.Module):
     def __init__(self,
                  config: LlavaConfig,
                  vision_language_config: VisionLanguageConfig,
-                 linear_method: Optional[LinearMethodBase] = None) -> None:
-        super().__init__()
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
+        super().__init__(vision_language_config)
 
         self.config = config
-
-        self.vision_language_config = vision_language_config
-
-        assert self.vision_language_config, (
-            "Provide `image_input_type` and other vision "
-            "related configurations through LLM entrypoint "
-            "or engine arguments.")
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
@@ -112,8 +130,9 @@ class LlavaForConditionalGeneration(nn.Module):
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
 
-        self.linear_method = linear_method
-        self.language_model = LlamaModel(config.text_config, linear_method)
+        self.quant_config = quant_config
+        self.language_model = LlamaModel(config.text_config, cache_config,
+                                         quant_config)
         self.unpadded_vocab_size = config.text_config.vocab_size
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
@@ -247,10 +266,10 @@ class LlavaForConditionalGeneration(nn.Module):
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
 
-        The model takes two types of image inputs: 
+        The model takes two types of image inputs:
         PIXEL_VALUES and IMAGE_FEATURES.
         The following shows how each maps to huggingface implementation.
-        PIXEL_VALUES: 
+        PIXEL_VALUES:
         - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L353
         IMAGE_FEATURES:
         - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L430
