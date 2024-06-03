@@ -16,9 +16,9 @@ on:
         type: string
         default: 'main'
       build_type:
-        description: "type of nm-vllm to install for the docker image: nightly (default) or release"
+        description: "type of nm-vllm to install for the docker image: NIGHTLY (default) or RELEASE"
         type: string
-        default: 'nightly'
+        default: 'NIGHTLY'
       build_version:
         description: "version of nm-vllm to install for the docker image: latest (default) or specific version e.g. 0.4.0, 0.4.0.20240531"
         type: string
@@ -65,3 +65,12 @@ jobs:
               target: vllm-openai
               push: true
               tags: ghcr.io/neuralmagic/nm-vllm-openai:${{ inputs.docker_tag }}
+
+          - name: Push image (latest for RELEASE)
+            uses: docker/build-push-action@v5
+            if: ${{ inputs.push_to_repository == 'yes' && steps.build.outputs.status == 0 && inputs.build_type == 'RELEASE' }}
+            with:
+              context: .
+              target: vllm-openai
+              push: true
+              tags: ghcr.io/neuralmagic/nm-vllm-openai:latest
