@@ -1,7 +1,7 @@
 import gc
 from dataclasses import fields
 from enum import Enum
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pytest
 import torch
@@ -9,36 +9,50 @@ from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
 
+
+def iter_llava_configs(model_name: str):
+    image_hw_to_feature_size = {
+        (336, 336): 576,
+    }
+
+    for (h, w), f in image_hw_to_feature_size.items():
+        for input_type, input_shape in [
+            (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
+            (VisionLanguageConfig.ImageInputType.IMAGE_FEATURES, (1, f, 1024)),
+        ]:
+            yield (model_name,
+                   VisionLanguageConfig(image_input_type=input_type,
+                                        image_feature_size=f,
+                                        image_token_id=32000,
+                                        image_input_shape=input_shape,
+                                        image_processor=model_name,
+                                        image_processor_revision=None))
+
+
 model_and_vl_config = [
-    ("llava-hf/llava-1.5-7b-hf",
-     VisionLanguageConfig(
-         image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-         image_feature_size=576,
-         image_token_id=32000,
-         image_input_shape=(1, 3, 336, 336))),
-    ("llava-hf/llava-1.5-7b-hf",
-     VisionLanguageConfig(
-         image_input_type=VisionLanguageConfig.ImageInputType.IMAGE_FEATURES,
-         image_feature_size=576,
-         image_token_id=32000,
-         image_input_shape=(1, 576, 1024)))
+    *iter_llava_configs("llava-hf/llava-1.5-7b-hf"),
+    # Not enough memory
+    # *iter_llava_configs("llava-hf/llava-1.5-13b-hf"),
 ]
 
 
-def as_dict(vision_language_config: VisionLanguageConfig) -> Dict:
+def as_dict(vlm_config: VisionLanguageConfig) -> Dict[str, Any]:
     """Flatten vision language config to pure args.
 
     Compatible with what llm entrypoint expects.
     """
     result = {}
-    for field in fields(vision_language_config):
-        value = getattr(vision_language_config, field.name)
+    for field in fields(vlm_config):
+        value = getattr(vlm_config, field.name)
         if isinstance(value, Enum):
             result[field.name] = value.name.lower()
         elif isinstance(value, tuple):
             result[field.name] = ",".join([str(item) for item in value])
         else:
             result[field.name] = value
+
+    result["disable_image_processor"] = vlm_config.image_processor is None
+
     return result
 
 
@@ -67,18 +81,19 @@ def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
-                vllm_image_prompts, vllm_images, model_and_config: tuple,
-                dtype: str, max_tokens: int, worker_use_ray: bool) -> None:
+                vllm_image_prompts, vllm_images, model_and_config, dtype: str,
+                max_tokens: int, worker_use_ray: bool) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
-    For huggingface runner, we provide the raw images as input.
-    For vllm runner, we provide image tensors and corresponding
+    For huggingface runner, we provide the PIL images as input.
+    For vllm runner, we provide MultiModalData objects and corresponding
     vision language config as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
     model_id, vision_language_config = model_and_config
+
     hf_model = hf_runner(model_id, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(hf_image_prompts,
                                           max_tokens,
@@ -88,6 +103,7 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
     vllm_model = vllm_runner(model_id,
                              dtype=dtype,
                              worker_use_ray=worker_use_ray,
+                             enforce_eager=True,
                              **as_dict(vision_language_config))
     vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
                                               max_tokens,
@@ -105,3 +121,7 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+
+
+# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
+# (Requires multiple GPUs)
