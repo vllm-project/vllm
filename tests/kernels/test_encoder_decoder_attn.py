@@ -669,7 +669,6 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
         True,
-        None,
         context_lens,
         block_tables,
         slot_mapping,
@@ -805,13 +804,10 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 
     # PREFILL: self- and cross-attention tests
 
-    context_lens = [0 for _ in range(batch_size)]
-
     prefill_attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
         True,
         prefill_q_seq_lens,
-        context_lens,
         self_prefill_block_tables,
         self_prefill_slot_mapping,
         is_encoder_only_test=False,
@@ -857,10 +853,10 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         attn_backend,
         False,
         q_seq_lens,
-        context_lens,
         self_decode_block_tables,
         self_decode_slot_mapping,
         is_encoder_only_test=False,
+        context_lens=context_lens,
         num_prefills_or_decodes=len(q_seq_lens),
         num_prefill_or_decode_tokens=len(q_seq_lens),
         encoder_seq_lens=encoder_kv_seq_lens,
@@ -1037,7 +1033,6 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
         attn_backend,
         True,
         prefill_q_seq_lens,
-        context_lens,
         self_prefill_block_tables,
         self_prefill_slot_mapping,
         is_encoder_only_test=False,
