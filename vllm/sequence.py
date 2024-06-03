@@ -3,7 +3,9 @@ import copy
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
+
+import torch
 
 from vllm.block import LogicalTokenBlock
 from vllm.inputs import LLMInputs
@@ -12,8 +14,6 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
-    import torch
-
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -31,11 +31,102 @@ class Logprob:
     decoded_token: Optional[str] = None
 
 
+class TensorData:
+
+    def __init__(self, **kwargs) -> None:
+        self._dict: Dict[str, "torch.Tensor"] = kwargs
+
+    def __getitem__(self, key: str) -> "torch.Tensor":
+        return self._dict[key]
+
+    def __setitem__(self, key: str, value: "torch.Tensor"):
+        self._dict[key] = value
+
+    def __iter__(self):
+        return iter(self._dict)
+
+    def __bool__(self) -> bool:
+        return bool(self._dict)
+
+    def asdict(self) -> Dict[str, torch.Tensor]:
+        return self._dict
+
+    def items(self):
+        return self._dict.items()
+
+    def clear(self):
+        self._dict.clear()
+
+    def index(self, *idx: int) -> "TensorData":
+        return TensorData(**{k: v[idx] for k, v in self._dict.items()})
+
+    def index_select(self,
+                     dim=int,
+                     index=Union["torch.IntTensor",
+                                 "torch.LongTensor"]) -> "TensorData":
+        return TensorData(**{
+            k: v.index_select(dim=dim, index=index)
+            for k, v in self._dict.items()
+        })
+
+    def split(self, split_sizes=List[int]) -> Tuple["TensorData", ...]:
+        chunked = tuple(TensorData() for _ in split_sizes)
+        for k, v in self.items():
+            if v is None:
+                chunked_v = [None] * len(split_sizes)
+            else:
+                chunked_v = v.split(split_sizes)
+
+            for c, cv in zip(chunked, chunked_v):
+                c[k] = cv
+
+        return chunked
+
+    @classmethod
+    def create_empty_like(
+            cls,
+            ref: "TensorData",
+            size: Tuple[int, ...] = (),
+            device: Union[str, torch.device] = None) -> "TensorData":
+        return TensorData(
+            **{
+                k: torch.zeros((*size, v.shape[-1]),
+                               device=v.device if device is None else device,
+                               dtype=v.dtype)
+                for k, v in ref.items()
+            })
+
+    @staticmethod
+    def stack(
+        data: List["TensorData"],
+        dim: int = 0,
+    ) -> "TensorData":
+        if len(data) == 0:
+            return TensorData()
+
+        assert isinstance(data[0], TensorData)
+
+        to_stack: Dict[str, torch.Tensor] = {k: [] for k in data[0]}
+        for d in data:
+            for k, v in d.items():
+                to_stack[k].append(v)
+
+        return TensorData(
+            **{k: torch.stack(v, dim=dim)
+               for k, v in to_stack.items()})
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(" + ", ".join(
+            [f"{k}={v.size()}" for k, v in self._dict.items()])
+
+
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
 # {token_id -> logprob} for each sequence group.
 SampleLogprobs = List[Dict[int, Logprob]]
+# {sequence -> extra_tensor_data} for each sequence group.
+SampleExtraOutputData = List[TensorData]
 
 
 class SequenceStatus(enum.Enum):
@@ -803,6 +894,14 @@ class SamplerOutput:
     # On-device tensor containing the logprobs of each token.
     logprobs: Optional["torch.Tensor"] = None
 
+    # On-device tensors containing extra output data. This should
+    # be a mapping from seq_id -> TensorData.
+    extra_tensors: Dict[int, TensorData] = field(default_factory=dict)
+
+    # On-device tensors containing extra output data. This is the raw
+    # version of above data, useful to avoid redundant rearrangement.
+    raw_extra_tensors: TensorData = field(default_factory=TensorData)
+
     # On-device tensor containing the sampled token ids.
     sampled_token_ids: Optional["torch.Tensor"] = None
 
@@ -872,6 +971,10 @@ class ExecuteModelRequest:
     num_lookahead_slots: int = 0
     # The number of requests in the running queue.
     running_queue_size: int = 0
+    # Extra outputs to return from the model
+    extra_outputs: Set[str] = field(default_factory=set)
+    # Extra inputs to pass to model
+    extra_inputs: Union[TensorData, Dict[int, TensorData]] = TensorData()
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -884,4 +987,6 @@ class ExecuteModelRequest:
             blocks_to_copy=self.blocks_to_copy.copy(),
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
+            extra_outputs=self.extra_outputs,
+            extra_inputs=self.extra_inputs,
         )

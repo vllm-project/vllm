@@ -1,3 +1,4 @@
+import contextlib
 from typing import Dict, Optional
 
 from transformers import AutoConfig, PretrainedConfig
@@ -16,6 +17,10 @@ _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
 }
+
+for name, cls in _CONFIG_REGISTRY.items():
+    with contextlib.suppress(ValueError):
+        AutoConfig.register(name, cls)
 
 
 def get_config(model: str,

@@ -10,6 +10,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
+from vllm.transformers_utils.configs.inputs_spec import (ExtraModelInputsSpec,
+                                                         ModelInputSpec)
 from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
 
 if TYPE_CHECKING:
@@ -142,6 +144,13 @@ class ModelConfig:
         self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
+
+        self.extra_inputs_spec: ExtraModelInputsSpec = getattr(
+            self.hf_config, "extra_inputs_spec", {})
+        for input_name, input_spec in self.extra_inputs_spec.items():
+            if input_spec.dtype is None:
+                self.extra_inputs_spec[input_name] = ModelInputSpec(
+                    input_spec.shape, self.dtype)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -279,7 +288,8 @@ class ModelConfig:
             return self.hf_text_config.head_dim
         # FIXME(woosuk): This may not be true for all models.
         return (self.hf_text_config.hidden_size //
-                self.hf_text_config.num_attention_heads)
+                self.hf_text_config.num_attention_heads
+                ) if self.hf_text_config.num_attention_heads else 0
 
     def get_total_num_kv_heads(self) -> int:
         """Returns the total number of KV heads."""
@@ -338,6 +348,10 @@ class ModelConfig:
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
+
+    def set_num_lookahead_tokens(self, num_lookahead_tokens: int):
+        if hasattr(self.hf_config, "set_num_lookahead_tokens"):
+            self.hf_config.set_num_lookahead_tokens(num_lookahead_tokens)
 
 
 class CacheConfig:
@@ -870,6 +884,10 @@ class SpeculativeConfig:
                 max_seq_len_to_capture,
                 max_logprobs=target_model_config.max_logprobs,
             )
+
+            if num_speculative_tokens is not None:
+                draft_model_config.set_num_lookahead_tokens(
+                    num_speculative_tokens)
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(

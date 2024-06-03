@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 import torch
 
@@ -12,7 +12,8 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
-from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
+from vllm.sequence import (PoolerOutput, SequenceData, SequenceGroupMetadata,
+                           TensorData)
 from vllm.worker.model_runner import ModelRunner
 
 logger = init_logger(__name__)
@@ -49,10 +50,12 @@ class EmbeddingModelRunner(ModelRunner):
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
+        extra_inputs: Union[TensorData, Dict[int, TensorData], None] = None,
+        extra_outputs: Optional[Set[str]] = None,
     ) -> Optional[PoolerOutput]:
         (input_tokens, input_positions, attn_metadata, pooling_metadata,
-         lora_requests, lora_mapping, multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+         lora_requests, lora_mapping, multi_modal_input,
+         _) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -89,8 +92,10 @@ class EmbeddingModelRunner(ModelRunner):
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        extra_inputs: Union[TensorData, Dict[int, TensorData], None] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
-               Set[LoRARequest], LoRAMapping, torch.Tensor]:
+               Set[LoRARequest], LoRAMapping, torch.Tensor,
+               Optional[TensorData]]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
@@ -143,7 +148,7 @@ class EmbeddingModelRunner(ModelRunner):
                                                prompt_lens=None)
 
         return (input_tokens, input_positions, attn_metadata, pooling_metadata,
-                lora_requests, lora_mapping, multi_modal_input)
+                lora_requests, lora_mapping, multi_modal_input, None)
 
     def _prepare_pooling(
         self,
