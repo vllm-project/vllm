@@ -1026,7 +1026,6 @@ async def test_required_tool_use_not_yet_supported(
                 }
             }],
             tool_choice="required")
-        ...
 
     with pytest.raises(openai.BadRequestError):
         await client.chat.completions.create(
@@ -1070,7 +1069,6 @@ async def test_inconsistent_tool_choice_and_tools(
                                                      "dummy_function_name"
                                                  }
                                              })
-        ...
 
     with pytest.raises(openai.BadRequestError):
         await client.chat.completions.create(
@@ -1091,7 +1089,6 @@ async def test_inconsistent_tool_choice_and_tools(
                     "name": "nondefined_function_name"
                 }
             })
-        ...
 
 
 @pytest.mark.asyncio

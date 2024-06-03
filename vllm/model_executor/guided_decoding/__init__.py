@@ -31,7 +31,7 @@ async def get_guided_decoding_logits_processor(
 def _adapt_request_for_tool_use(request: Union[CompletionRequest,
                                                ChatCompletionRequest]):
     # the legacy completion API does not support tool use
-    if type(request) == CompletionRequest:
+    if type(request) is CompletionRequest:
         return request
 
     # user has chosen to not use any tool
@@ -39,7 +39,7 @@ def _adapt_request_for_tool_use(request: Union[CompletionRequest,
         return request
 
     # user has chosen to use a named tool
-    if type(request.tool_choice) == ChatCompletionNamedToolChoiceParam:
+    if type(request.tool_choice) is ChatCompletionNamedToolChoiceParam:
         tool_name = request.tool_choice.function.name
         tools = {tool.function.name: tool.function for tool in request.tools}
         if tool_name not in tools:
