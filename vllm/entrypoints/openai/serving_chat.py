@@ -14,10 +14,11 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionContentPartParam, ChatCompletionLogProb,
     ChatCompletionLogProbs, ChatCompletionLogProbsContent,
-    ChatCompletionMessageParam, ChatCompletionRequest, ChatCompletionResponse,
+    ChatCompletionMessageParam, ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-    UsageInfo)
+    FunctionCall, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
@@ -298,11 +299,24 @@ class OpenAIServingChat(OpenAIServing):
                     delta_text = output.text[len(previous_texts[i]):]
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
+
+                    if request.tool_choice and type(
+                            request.tool_choice
+                    ) is ChatCompletionNamedToolChoiceParam:
+                        delta_message = DeltaMessage(tool_calls=[
+                            ToolCall(function=FunctionCall(
+                                name=request.tool_choice.function.name,
+                                arguments=delta_text))
+                        ])
+                    else:
+                        delta_message = DeltaMessage(content=delta_text)
+
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
+
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
-                            delta=DeltaMessage(content=delta_text),
+                            delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=None)
                         chunk = ChatCompletionStreamResponse(
@@ -324,7 +338,7 @@ class OpenAIServingChat(OpenAIServing):
                         )
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
-                            delta=DeltaMessage(content=delta_text),
+                            delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=output.finish_reason,
                             stop_reason=output.stop_reason)
@@ -381,9 +395,22 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
+            if request.tool_choice and type(
+                    request.tool_choice) is ChatCompletionNamedToolChoiceParam:
+                message = ChatMessage(
+                    role=role,
+                    content="",
+                    tool_calls=[
+                        ToolCall(function=FunctionCall(
+                            name=request.tool_choice.function.name,
+                            arguments=output.text))
+                    ])
+            elif not request.tool_choice or request.tool_choice == "none":
+                message = ChatMessage(role=role, content=output.text)
+
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
-                message=ChatMessage(role=role, content=output.text),
+                message=message,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason,
                 stop_reason=output.stop_reason)

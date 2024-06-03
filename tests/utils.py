@@ -24,7 +24,8 @@ class ServerRunner:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         self.proc = subprocess.Popen(
-            ["python3", "-m", "vllm.entrypoints.openai.api_server"] + args,
+            [sys.executable, "-m", "vllm.entrypoints.openai.api_server"] +
+            args,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,

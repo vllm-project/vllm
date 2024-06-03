@@ -102,6 +102,26 @@ class ResponseFormat(OpenAIBaseModel):
     type: Literal["text", "json_object"]
 
 
+class FunctionDefinition(OpenAIBaseModel):
+    name: str
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+class ChatCompletionToolsParam(OpenAIBaseModel):
+    type: Literal["function"] = "function"
+    function: FunctionDefinition
+
+
+class ChatCompletionNamedFunction(OpenAIBaseModel):
+    name: str
+
+
+class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
+    function: ChatCompletionNamedFunction
+    type: Literal["function"] = "function"
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -122,6 +142,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     stream: Optional[bool] = False
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
+    tools: Optional[List[ChatCompletionToolsParam]] = None
+    tool_choice: Optional[Union[Literal["none"],
+                                ChatCompletionNamedToolChoiceParam]] = "none"
     user: Optional[str] = None
 
     # doc: begin-chat-completion-sampling-params
@@ -245,10 +268,27 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "guided_regex" in data and data["guided_regex"] is not None,
             "guided_choice" in data and data["guided_choice"] is not None
         ])
+        # you can only use one kind of guided decoding
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
+        # you can only either use guided decoding or tools, not both
+        if guide_count > 1 and "tool_choice" in data and data[
+                "tool_choice"] != "none":
+            raise ValueError(
+                "You can only either use guided decoding or tools, not both.")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_tool_choice(cls, data):
+        if "tool_choice" in data and data["tool_choice"] != "none":
+            if not isinstance(data["tool_choice"], dict):
+                raise ValueError("Currently only named tools are supported.")
+            if "tools" not in data or data["tools"] is None:
+                raise ValueError(
+                    "When using `tool_choice`, `tools` must be set.")
         return data
 
     @model_validator(mode="before")
@@ -506,9 +546,21 @@ class EmbeddingResponse(BaseModel):
     usage: UsageInfo
 
 
+class FunctionCall(OpenAIBaseModel):
+    name: str
+    arguments: str
+
+
+class ToolCall(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
+
 class ChatMessage(OpenAIBaseModel):
     role: str
     content: str
+    tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
 class ChatCompletionLogProb(OpenAIBaseModel):
@@ -535,7 +587,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
 
 class ChatCompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
-    object: str = "chat.completion"
+    object: Literal["chat.completion"] = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseChoice]
@@ -545,6 +597,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -557,7 +610,7 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
-    object: str = "chat.completion.chunk"
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
