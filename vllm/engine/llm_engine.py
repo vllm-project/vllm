@@ -7,8 +7,8 @@ from typing import Set, Type, TypeVar, Union
 from transformers import GenerationConfig, PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
@@ -42,8 +42,6 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
-
-tracer = init_tracer("vllm.llm_engine")
 
 
 def _load_generation_config_dict(model_config: ModelConfig):
@@ -157,6 +155,7 @@ class LLMEngine:
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
+        observability_config: Optional[ObservabilityConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -171,9 +170,9 @@ class LLMEngine:
             "disable_custom_all_reduce=%s, quantization=%s, "
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
-            "decoding_config=%r, seed=%d, served_model_name=%s)",
+            "decoding_config=%r, observability_config=%r, "
+            "seed=%d, served_model_name=%s)",
             VLLM_VERSION,
-            model_config.model,
             speculative_config,
             model_config.tokenizer,
             model_config.skip_tokenizer_init,
@@ -195,6 +194,7 @@ class LLMEngine:
             model_config.quantization_param_path,
             device_config.device,
             decoding_config,
+            observability_config,
             model_config.seed,
             model_config.served_model_name,
         )
@@ -210,6 +210,8 @@ class LLMEngine:
         self.speculative_config = speculative_config
         self.load_config = load_config
         self.decoding_config = decoding_config or DecodingConfig()
+        self.observability_config = observability_config or ObservabilityConfig(
+        )
         self.log_stats = log_stats
 
         if not self.model_config.skip_tokenizer_init:
@@ -290,6 +292,11 @@ class LLMEngine:
                 labels=dict(model_name=model_config.served_model_name),
                 max_model_len=self.model_config.max_model_len)
             self.stat_logger.info("cache_config", self.cache_config)
+
+        self.tracer = None
+        if self.observability_config.otlp_endpoint:
+            self.tracer = init_tracer("vllm.llm_engine",
+                                      self.observability_config.otlp_endpoint)
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
@@ -994,13 +1001,13 @@ class LLMEngine:
         self.model_executor.check_health()
 
     def create_trace_span(self, seq_group: SequenceGroup, now: float) -> None:
-        if tracer is None:
+        if self.tracer is None:
             return
         if seq_group.trace_context is None:
             return
         arrival_time_nano_seconds = int(seq_group.metrics.arrival_time * 1e9)
 
-        with tracer.start_as_current_span(
+        with self.tracer.start_as_current_span(
                 "llm_request",
                 kind=SpanKind.SERVER,
                 context=seq_group.trace_context,

@@ -1,6 +1,6 @@
 from typing import Mapping, Optional
 
-otel_installed = False
+_is_otel_installed = False
 try:
     from opentelemetry.context.context import Context
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
@@ -11,7 +11,7 @@ try:
     from opentelemetry.trace import SpanKind, Tracer, set_tracer_provider
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator)
-    otel_installed = True
+    _is_otel_installed = True
 except ImportError:
 
     class Context:  # type: ignore
@@ -27,16 +27,19 @@ except ImportError:
         pass
 
 
-def init_tracer(instrumenting_module_name: str) -> Optional[Tracer]:
-    if not otel_installed:
-        return None
+def is_otel_installed() -> bool:
+    return _is_otel_installed
 
+
+def init_tracer(instrumenting_module_name: str,
+                otlp_endpoint: str) -> Optional[Tracer]:
     trace_provider = TracerProvider()
 
     # The endpoint of OTLPSpanExporter is set from envvars:
     #  OTEL_EXPORTER_OTLP_ENDPOINT
     #  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-    trace_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+    trace_provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint)))
     set_tracer_provider(trace_provider)
 
     tracer = trace_provider.get_tracer(instrumenting_module_name)
@@ -44,7 +47,7 @@ def init_tracer(instrumenting_module_name: str) -> Optional[Tracer]:
 
 
 def extract_trace_context(headers: Mapping[str, str]) -> Optional[Context]:
-    if otel_installed:
+    if is_otel_installed():
         return TraceContextTextMapPropagator().extract(headers)
     else:
         return None
