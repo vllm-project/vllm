@@ -12,11 +12,7 @@ from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.utils import (
     STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL, STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 from vllm.attention.backends.xformers import XFormersBackend
-from vllm.logger import init_logger
 from vllm.utils import is_hip, make_tensor_with_pad
-
-logger = init_logger(__name__)
-
 
 HEAD_SIZES = [64, 256]
 
