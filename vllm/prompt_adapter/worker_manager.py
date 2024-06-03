@@ -44,6 +44,9 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
     def is_enabled(self) -> bool:
         return True
 
+    def reset_adapter(self):
+        self._adapter_manager.reset_adapter()
+
     def create_prompt_adapter_manager(
         self,
         model: torch.nn.Module,

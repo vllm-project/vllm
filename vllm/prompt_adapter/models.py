@@ -157,6 +157,14 @@ class PromptAdapterModelManager(AdapterModelManager):
     def capacity(self) -> int:
         return self.prompt_adapter_config.max_cpu_prompt_adapters
 
+    def reset_adapter(self):
+        try:
+            for module_name, module in self.model.named_modules():
+                if 'Model' in (module.__class__.__name__):
+                    del module.prefix_encoder
+        except Exception:
+            pass
+
     def activate_prompt_adapter(
         self,
         prompt_adapter_id: int,

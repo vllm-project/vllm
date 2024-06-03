@@ -747,7 +747,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         """List all registered LoRAModels."""
         return dict(self._registered_adapters.cache)
 
-    def add_adapter(self, lora: LoRAModel) -> bool:
+    def add_lora(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
         logger.debug(
             "Adding lora. Model id: %d, "
@@ -762,7 +762,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             was_added = False
         return was_added
 
-    def activate_adapter(
+    def activate_lora(
         self,
         lora_id: int,
     ) -> bool:

@@ -775,8 +775,11 @@ class ModelRunner:
             self.set_active_loras(lora_requests, lora_mapping)
 
         if self.prompt_adapter_config:
-            self.set_active_prompt_adapters(prompt_adapter_requests,
-                                            prompt_adapter_mapping)
+            if len(prompt_adapter_requests) >= 1:
+                self.set_active_prompt_adapters(prompt_adapter_requests,
+                                                prompt_adapter_mapping)
+            else:
+                self.reset_adapter()
 
         # Currently cuda graph is only supported by the decode phase.
         prefill_meta = attn_metadata.prefill_metadata
@@ -911,6 +914,11 @@ class ModelRunner:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
+
+    def reset_adapter(self):
+        if not self.prompt_adapter_manager:
+            raise RuntimeError("PromptAdapter is not enabled.")
+        self.prompt_adapter_manager.reset_adapter()
 
     def remove_all_prompt_adapters(self):
         if not self.prompt_adapter_manager:
