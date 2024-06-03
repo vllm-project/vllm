@@ -12,6 +12,7 @@ aiohttp
 openai
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
+pillow  # Required for image processing
 prometheus_client >= 0.18.0
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer

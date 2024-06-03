@@ -14,7 +14,6 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
@@ -164,7 +163,6 @@ class LLM:
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -177,7 +175,6 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -191,7 +188,6 @@ class LLM:
         prompt_token_ids: List[int],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -205,7 +201,6 @@ class LLM:
         prompt_token_ids: List[List[int]],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -217,7 +212,6 @@ class LLM:
         prompt_token_ids: Union[List[int], List[List[int]]],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -236,7 +230,6 @@ class LLM:
 
     @deprecate_kwargs("prompts",
                       "prompt_token_ids",
-                      "multi_modal_data",
                       is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
                       additional_message="Please use the 'inputs' parameter "
                       "instead.")
@@ -249,7 +242,6 @@ class LLM:
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -281,11 +273,10 @@ class LLM:
                 "LLM.generate() is only supported for generation models "
                 "(XForCausalLM).")
 
-        if prompt_token_ids is not None or multi_modal_data is not None:
+        if prompt_token_ids is not None:
             inputs = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
             )
         else:
             inputs = cast(
@@ -314,7 +305,6 @@ class LLM:
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -327,7 +317,6 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -341,7 +330,6 @@ class LLM:
         prompt_token_ids: List[int],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -355,7 +343,6 @@ class LLM:
         prompt_token_ids: List[List[int]],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -367,7 +354,6 @@ class LLM:
         prompt_token_ids: Union[List[int], List[List[int]]],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -386,7 +372,6 @@ class LLM:
 
     @deprecate_kwargs("prompts",
                       "prompt_token_ids",
-                      "multi_modal_data",
                       is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
                       additional_message="Please use the 'inputs' parameter "
                       "instead.")
@@ -399,7 +384,6 @@ class LLM:
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -430,11 +414,10 @@ class LLM:
                 "LLM.encode() is only supported for embedding models (XModel)."
             )
 
-        if prompt_token_ids is not None or multi_modal_data is not None:
+        if prompt_token_ids is not None:
             inputs = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
             )
         else:
             inputs = cast(
@@ -459,7 +442,6 @@ class LLM:
         self,
         prompts: Optional[Union[str, List[str]]],
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]],
-        multi_modal_data: Optional[MultiModalData],
     ):
         # skip_tokenizer_init is now checked in engine
 
@@ -498,9 +480,6 @@ class LLM:
                     item = TokensPrompt(prompt_token_ids=prompt_token_ids[i])
                 else:
                     raise AssertionError
-
-            if multi_modal_data is not None:
-                item["multi_modal_data"] = multi_modal_data
 
             inputs.append(item)
 

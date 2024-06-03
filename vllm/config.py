@@ -1094,10 +1094,12 @@ class VisionLanguageConfig:
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
+    # The image processor to load from HuggingFace
+    image_processor: Optional[str]
+    image_processor_revision: Optional[str]
 
     @classmethod
-    def get_image_input_enum_type(
-            cls, value: str) -> "VisionLanguageConfig.ImageInputType":
+    def get_image_input_enum_type(cls, value: str) -> ImageInputType:
         """Get the image input type from a string."""
         try:
             return cls.ImageInputType[value.upper()]

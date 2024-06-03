@@ -37,6 +37,7 @@ jobs:
         mypy vllm/distributed --config-file pyproject.toml
         mypy vllm/entrypoints --config-file pyproject.toml
         mypy vllm/executor --config-file pyproject.toml
+        mypy vllm/multimodal --config-file pyproject.toml
         mypy vllm/usage --config-file pyproject.toml
         mypy vllm/*.py --config-file pyproject.toml
         mypy vllm/transformers_utils --config-file pyproject.toml
