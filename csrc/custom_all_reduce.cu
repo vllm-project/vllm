@@ -134,10 +134,14 @@ void register_buffer(fptr_t _fa, torch::Tensor& t,
   fa->register_buffer(handles, offsets, t.data_ptr());
 }
 
-std::tuple<std::vector<std::string>, std::vector<int64_t>>
-get_graph_buffer_ipc_meta(fptr_t _fa) {
+std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
+    fptr_t _fa) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
-  return fa->get_graph_buffer_ipc_meta();
+  auto [handle_bytes, offsets] = fa->get_graph_buffer_ipc_meta();
+  auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+  auto handles = torch::empty({static_cast<int64_t>(handle_bytes.size())}, options);
+  std::memcpy(handles.data_ptr(), handle_bytes.data(), handle_bytes.size());
+  return {handles, std::move(offsets)};
 }
 
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,

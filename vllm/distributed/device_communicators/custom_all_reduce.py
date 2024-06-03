@@ -260,7 +260,7 @@ class CustomAllreduce:
 
     def register_graph_buffers(self):
         handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
-        handles, offsets = self._gather_ipc_meta((handle, offset))
+        handles, offsets = self._gather_ipc_meta((bytes(handle), offset))
         logger.info("Registering %d cuda graph addresses", len(offset))
         ops.register_graph_buffers(self._ptr, handles, offsets)
 
