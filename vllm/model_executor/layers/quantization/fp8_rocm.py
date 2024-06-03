@@ -26,17 +26,10 @@ class Fp8RocmConfig(QuantizationConfig):
         self._tuned = {}
         self._stats = {}
         gemm_type = os.getenv("FP8_GEMM", "fp8_16")
-        self.i1 = torch.tensor(1 / 16, dtype=torch.float32, device="cuda")
-        self.i2 = torch.tensor(16, dtype=torch.float32, device="cuda")
-        self.i = torch.tensor(1, dtype=torch.float32, device="cuda")
-        self.factor = int(os.getenv("FACTOR", 240))
         #print(f"Integral Cross factor = {self.factor}")
         if gemm_type == "fp8_8":
             self.gemm_method = Fp8RocmLinearMethod.apply_fp8_8
             tuned_filename = "/projects/tuned_fp8_8.csv"
-        elif gemm_type == "fp8_8_new":
-            self.gemm_method = Fp8RocmLinearMethod.apply_fp8_8_new
-            tuned_filename = "/projects/tuned_fp8_8_new.csv"
         elif gemm_type == "fp8_16":
             self.gemm_method = Fp8RocmLinearMethod.apply_fp8_16
             tuned_filename = "/projects/tuned_fp8_16.csv"
@@ -213,77 +206,6 @@ class Fp8RocmLinearMethod(LinearMethodBase):
 
         return param[shard_id], loaded_weight
 
-
-    def test(
-        self,
-        weight: torch.Tensor,
-        asf: torch.Tensor,
-        wsf: torch.Tensor,
-        osf: torch.Tensor,
-        x: torch.Tensor,
-        my_osf: torch.Tensor, 
-        bias: Optional[torch.Tensor] = None,
-    ):
-        x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        ops.convert_fp8(x, x8, asf)
-
-        #####
-        # res8 = ops.fp8_gemm_16_1(x8, weight.t(), wsf, asf, torch.tensor(1, dtype=torch.float32, device='cuda'), 0)
-        i = torch.tensor(1, dtype=torch.float32, device="cuda")
-        ideal = ops.fp8_gemm_16(x8, weight.t(), asf, wsf, 0)
-        # ideal = ideal.to(torch.float16)
-        # ideal = ops.fp8_gemm_16(x8, weight.t(), asf, wsf, 0)
-        i1 = torch.tensor(10, dtype=torch.float32, device="cuda")
-
-        path1 = ops.fp8_gemm(x8, weight.t(), asf, wsf, i / 16, 0)
-        res16_1 = torch.empty_like(path1, dtype=x.dtype)
-        ops.convert_fp8(path1, res16_1, i * 16)
-
-        path3 = ops.fp8_gemm_16(x8, weight.t(), asf, wsf, 0)
-        res16_3 = path3.to(torch.float8_e4m3fnuz).to(torch.float16)
-
-        path5 = ops.fp8_gemm(x8, weight.t(), i, i, asf * wsf * i1, 0)
-        res16_5 = torch.empty_like(path5, dtype=x.dtype)
-        ops.convert_fp8(path5, res16_5, 1 / i1)
-
-
-        #i2 = torch.amax(ideal)
-        #if i2 > my_osf:
-        #    my_osf.data.copy_(i2)
-        i2 = 240 / my_osf
-        path6 = ops.fp8_gemm(x8, weight.t(), asf, wsf, i2, 0)
-        res16_6 = torch.empty_like(path6, dtype=x.dtype)
-        ops.convert_fp8(path6, res16_6, 1/i2)
-
-        path9 = ops.fp8_gemm(x8, weight.t(), asf, wsf, osf/2, 0)
-        res16_9 = torch.empty_like(path9, dtype=x.dtype)
-        ops.convert_fp8(path9, res16_9, 2/osf)
-
-        path10 = ops.fp8_gemm(x8, weight.t(), asf, wsf, osf, 0)
-        res16_10 = torch.empty_like(path10, dtype=x.dtype)
-        ops.convert_fp8(path10, res16_10, 1/osf)
-
-        w16 = weight.to(torch.float16)
-        w16 *= wsf
-
-        orig_res = F.linear(x, w16, bias)
-        b = {
-            "ideal": torch.allclose(orig_res, ideal, atol=0.1, rtol=0.05),
-            "path1": torch.allclose(orig_res, res16_1, atol=0.1, rtol=0.05),
-            "path3": torch.allclose(orig_res, res16_3, atol=0.1, rtol=0.05),
-            "path5": torch.allclose(orig_res, res16_5, atol=0.1, rtol=0.05),
-            "path6": torch.allclose(orig_res, res16_6, atol=0.1, rtol=0.05),
-            "path9": torch.allclose(orig_res, res16_9, atol=0.1, rtol=0.05),
-            "path10": torch.allclose(orig_res, res16_10, atol=0.1, rtol=0.05),
-        }
-        for iter, v in b.items():
-            if not v:
-                self._config._stats[iter] = self._config._stats.get(iter, 0) + 1
-
-        # assert torch.allclose(orig_res, res16, atol=0.1, rtol=0.01)
-
-        return res16_6
-
     def apply_fp8_16(
         self,
         x: torch.Tensor,
@@ -302,17 +224,15 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         if algo is None:
             import os
 
-            # print(f"Not found: {m} {n} {k}")
             if os.getenv("TUNE_FP8") == "1":
                 try:
-                    df = pd.read_csv("/projects/fp8_tune.csv")
+                    df = pd.read_csv("/projects/fp8_shapes.csv")
                 except:
                     df = pd.DataFrame(columns=["M", "N", "K"])
                 df = pd.concat(
                     [df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]
                 ).drop_duplicates()
-                df.to_csv("/projects/fp8_tune.csv", index=False)
-                # print(f"{m},{n},{k}")
+                df.to_csv("/projects/fp8_shapes.csv", index=False)
             algo = 0
         res = ops.fp8_gemm_16(x8, weight.t(), asf, wsf, int(algo))
         return res
@@ -337,65 +257,21 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         if algo is None:
             import os
 
-            # print(f"Not found: {m} {n} {k}")
             if os.getenv("TUNE_FP8") == "1":
                 try:
-                    df = pd.read_csv("/projects/fp8_tune.csv")
+                    df = pd.read_csv("/projects/fp8_shapes.csv")
                 except:
                     df = pd.DataFrame(columns=["M", "N", "K"])
                 df = pd.concat(
                     [df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]
                 ).drop_duplicates()
-                df.to_csv("/projects/fp8_tune.csv", index=False)
-                # print(f"{m},{n},{k}")
+                df.to_csv("/projects/fp8_shapese.csv", index=False)
             algo = 0
 
         res = ops.fp8_gemm(x8, weight.t(), asf, wsf, osf, int(algo))
         res16 = torch.empty_like(res, dtype=torch.float16)
         ops.convert_fp8(res, res16, 1/osf)
         return res16
-
-    def apply_fp8_8_new(
-        self,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        asf: torch.Tensor,
-        wsf: torch.Tensor,
-        osf: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert not bias
-        x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        ops.convert_fp8(x, x8, asf)
-
-        m = weight.shape[0]
-        n = x.shape[0]
-        k = x.shape[1]
-
-        algo = self._config._tuned.get((m, n, k))
-        if algo is None:
-            import os
-
-            # print(f"Not found: {m} {n} {k}")
-            if os.getenv("TUNE_FP8") == "1":
-                try:
-                    df = pd.read_csv("/projects/fp8_tune.csv")
-                except:
-                    df = pd.DataFrame(columns=["M", "N", "K"])
-                df = pd.concat(
-                    [df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]
-                ).drop_duplicates()
-                df.to_csv("/projects/fp8_tune.csv", index=False)
-                # print(f"{m},{n},{k}")
-            algo = 0
-
-        path11 = ops.fp8_gemm_new(
-            x8, weight.t(), asf, wsf, self._config.i1, int(algo)
-        )
-        res16_11 = torch.empty_like(path11, dtype=x.dtype)
-        ops.convert_fp8(path11, res16_11, self._config.i2)
-        # res8 = ops.fp8_gemm(x8, weight.t(), wsf, asf, 0)
-        return res16_11
 
     def apply(
         self,
@@ -408,75 +284,9 @@ class Fp8RocmLinearMethod(LinearMethodBase):
             asf: torch.Tensor = layer.activation_scaling_factor * 2
             wsf: torch.Tensor = layer.weights_scaling_factor * 2
             osf: torch.Tensor = layer.output_scaling_factor / 2
-            #my_osf: torch.Tensor = self._config.factor / weights["my_osf"]
-            #with open("ratio.txt", "a") as f:
-            #    f.write(f'{weights["output_scaling_factor"].item()},{weights["my_osf"].item()}\n')
-            #return self.test(weight, asf, wsf, osf, x, weights["my_osf"], bias)
+
             return self._config.gemm_method(self, x, weight, asf, wsf, osf)
 
-            assert not bias
-            x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-            ops.convert_fp8(x, x8, asf)
-            i1 = torch.tensor(1 / 16, dtype=torch.float32, device="cuda")
-            i2 = torch.tensor(16, dtype=torch.float32, device="cuda")
-            # path11 = ops.fp8_gemm_16_1(x8, weight.t(), asf, wsf, i1, 30805)
-            # res16_11 = torch.empty_like(path11, dtype=x.dtype)
-            # ops.convert_fp8(path11, res16_11, i2)
-            # return res16_11
-            # return self.test(weight, weights["orig_weight"], asf, wsf, x, bias)
-            #####
-
-            m = weight.shape[0]
-            n = x.shape[0]
-            k = x.shape[1]
-            # df = pd.concat([df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]).drop_duplicates()
-            # df.to_csv("/projects/fp8_tune.csv", index=False)
-            # x8 = (x/asf).to(torch.float8_e4m3fnuz)
-            algo = self._config._tuned.get((m, n, k))
-            if algo is None:
-                import os
-
-                # print(f"Not found: {m} {n} {k}")
-                if os.getenv("TUNE_FP8") == "1":
-                    try:
-                        df = pd.read_csv("/projects/fp8_tune.csv")
-                    except:
-                        df = pd.DataFrame(columns=["M", "N", "K"])
-                    df = pd.concat(
-                        [df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]
-                    ).drop_duplicates()
-                    df.to_csv("/projects/fp8_tune.csv", index=False)
-                    # print(f"{m},{n},{k}")
-                algo = 30800
-
-            path11 = ops.fp8_gemm_new(x8, weight.t(), asf, wsf, i1, int(algo))
-            res16_11 = torch.empty_like(path11, dtype=x.dtype)
-            ops.convert_fp8(path11, res16_11, i2)
-            # res8 = ops.fp8_gemm(x8, weight.t(), wsf, asf, 0)
-            return res16_11
-
-            # res = F.linear(x8, weight)
-            # res16 = torch.empty_like(res8, dtype=x.dtype)
-            # ops.convert_fp8(res8, res16, asf * wsf)
-            # assert torch.allclose(res, res16, atol=0.1, rtol=0.01)
-            # return res16
-
-            # w16 = torch.empty_like(weight, dtype=torch.float16)
-            # ops.convert_fp8(weight, w16, wsf)
-
-            # orig_weight = weights["orig_weight"]
-            # assert torch.allclose(w16, orig_weight, atol=0.1, rtol=0.01)
-            # w16 = weight.to(torch.float16)
-            # w16 *= wsf
-
-            # x16 = torch.empty_like(x, dtype=torch.float16)
-            # ops.convert_fp8(x8, x16, asf)
-            # x16_1 = x8.to(torch.float16)
-            # x16_1 *= asf
-
-            # orig_res = F.linear(x, w16, bias)
-            # assert torch.allclose(orig_res, res16, atol=0.1, rtol=0.01)
-            # return orig_res
         return F.linear(x, weight, bias)
     
 
