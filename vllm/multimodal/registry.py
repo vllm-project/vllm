@@ -100,4 +100,4 @@ class MultiModalRegistry:
         """
         Create an input mapper (see :meth:`map_input`) for a specific model.
         """
-        return functools.partial(self.map_input, model_config=model_config)
+        return functools.partial(self.map_input, model_config)

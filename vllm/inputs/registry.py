@@ -285,4 +285,4 @@ class InputRegistry:
         Create an input processor (see :meth:`process_input`) for a
         specific model.
         """
-        return functools.partial(self.process_input, model_config=model_config)
+        return functools.partial(self.process_input, model_config)
