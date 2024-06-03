@@ -332,6 +332,7 @@ class CohereForCausalLM(nn.Module):
     }
     embedding_padding_modules = ["lm_head"]
 
+
     def __init__(
         self,
         config: CohereConfig,
