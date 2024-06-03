@@ -5,6 +5,8 @@ import time
 import warnings
 from contextlib import contextmanager
 
+from typing import Iterator
+
 import ray
 import requests
 
@@ -101,3 +103,28 @@ def error_on_warning():
         warnings.simplefilter("error")
 
         yield
+
+
+@contextmanager
+def env_var_fixture(var_name: str, value: str) -> Iterator[None]:
+    '''
+    Text fixture, temporarily assigns value var_name environment variable,
+    then resets environment variable outside of test fixture.
+
+    Usage:
+
+        with env_var_fixture("my_var","my_val"):
+            # code that depends on my_val == "my_val"
+
+        # my_var is returned to original value or unset
+    '''
+    original_value = os.environ.get(var_name)  # Store the original value
+    os.environ[var_name] = value  # Set the new value
+    try:
+        yield
+    finally:
+        # Restore the original value
+        if original_value is None:
+            del os.environ[var_name]
+        else:
+            os.environ[var_name] = original_value
