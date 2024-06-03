@@ -6,7 +6,6 @@ class AdapterRequest:
     """
     Base class for adapter requests.
     """
-    adapter_id: int
 
     def __post_init__(self):
         if self.adapter_id < 1:
