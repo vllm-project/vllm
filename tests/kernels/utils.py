@@ -352,7 +352,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
         f"Unrecognized backend_name {backend_name} for unit test")
 
 
-def make_metadata_tensors(seq_lens: List[int], context_lens: List[int],
+def _make_metadata_tensors(seq_lens: List[int], context_lens: List[int],
                           encoder_seq_lens: List[int],
                           device: Union[torch.device, str]) -> tuple:
     '''
@@ -425,7 +425,7 @@ def make_kv_cache(num_blocks: int,
     return kv_cache
 
 
-def num_tokens_to_min_blocks(num_tokens: int, block_size: int) -> int:
+def _num_tokens_to_min_blocks(num_tokens: int, block_size: int) -> int:
     '''
     Compute the minimum number of blocks required to hold num_tokens tokens,
     given block_size
@@ -483,7 +483,7 @@ def make_block_tables_slot_mapping(block_size: int,
 
     # Provision minimum number of KV cache blocks
     num_blocks_list = [
-        num_tokens_to_min_blocks(num_tokens, block_size)
+        _num_tokens_to_min_blocks(num_tokens, block_size)
         for num_tokens in seq_lens
     ]
     max_block_table_len = max(num_blocks_list)
@@ -599,7 +599,7 @@ def make_test_metadata(
         _, \
         _, \
         encoder_seq_lens_tensor, \
-        max_encoder_seq_len = make_metadata_tensors(seq_lens,
+        max_encoder_seq_len = _make_metadata_tensors(seq_lens,
                               context_lens,
                               encoder_seq_lens,
                               device=device)
@@ -635,7 +635,7 @@ def make_test_metadata(
         _, \
         _, \
         encoder_seq_lens_tensor, \
-        max_encoder_seq_len = make_metadata_tensors(seq_lens,
+        max_encoder_seq_len = _make_metadata_tensors(seq_lens,
                                   context_lens,
                                   encoder_seq_lens,
                                   device=device)
