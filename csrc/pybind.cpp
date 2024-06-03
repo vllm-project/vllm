@@ -67,6 +67,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Aligning the number of tokens to be processed by each expert such "
           "that it is divisible by the block size.");
 
+  ops.def("static_scaled_int8_quant", &static_scaled_int8_quant,
+          "Compute int8 quantized tensor for given scaling factor");
+
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
   cache_ops.def("swap_blocks", &swap_blocks,
