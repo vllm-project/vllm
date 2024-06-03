@@ -179,13 +179,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         This method infers the implicit attributes from provided attributes
         '''
         if self.encoder_seq_lens_tensor is None:
-            assert self.seq_lens_tensor is not None
             self.encoder_seq_lens_tensor = torch.tensor(
                 self.encoder_seq_lens,
-                dtype=self.seq_lens_tensor.dtype,
-                device=self.seq_lens_tensor.device)
+                dtype=torch.int32,
+                device="cuda:0")
         if self.max_encoder_seq_len is None:
-            assert self.encoder_seq_lens is not None
             self.max_encoder_seq_len = max(self.encoder_seq_lens)
 
     @property
@@ -225,8 +223,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             if self._self_cached_prefill_metadata is not None:
                 return self._self_cached_prefill_metadata
 
-            assert self.seq_lens is not None
-            assert self.seq_lens_tensor is not None
+            assert (self.seq_lens is not None) or \
+                (self.encoder_seq_lens is not None)
+            assert (self.seq_lens_tensor is not None) or \
+                (self.encoder_seq_lens_tensor is not None)
             assert self.context_lens_tensor is not None
             assert self.block_tables is not None
 
@@ -238,8 +238,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 num_prefill_tokens=self.num_prefill_tokens,
                 num_decode_tokens=0,
                 slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
-                seq_lens=self.seq_lens[:self.num_prefills],
-                seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
+                seq_lens=None if self.seq_lens is None else self.seq_lens[:self.num_prefills],
+                seq_lens_tensor=None if self.seq_lens_tensor is None else self.seq_lens_tensor[:self.num_prefills],
                 max_query_len=self.max_query_len,
                 max_prefill_seq_len=self.max_prefill_seq_len,
                 max_decode_seq_len=0,
@@ -264,8 +264,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             if self._cross_cached_prefill_metadata is not None:
                 return self._cross_cached_prefill_metadata
 
-            assert self.seq_lens is not None
-            assert self.seq_lens_tensor is not None
+            assert (self.seq_lens is not None) or \
+                (self.encoder_seq_lens is not None)
+            assert (self.seq_lens_tensor is not None) or \
+                (self.encoder_seq_lens_tensor is not None)
             assert self.context_lens_tensor is not None
             assert self.block_tables is not None
 
@@ -277,8 +279,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 num_prefill_tokens=self.num_prefill_tokens,
                 num_decode_tokens=0,
                 slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
-                seq_lens=self.seq_lens[:self.num_prefills],
-                seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
+                seq_lens=None if self.seq_lens is None else self.seq_lens[:self.num_prefills],
+                seq_lens_tensor=None if self.seq_lens_tensor is None else self.seq_lens_tensor[:self.num_prefills],
                 max_query_len=self.max_query_len,
                 max_prefill_seq_len=self.max_prefill_seq_len,
                 max_decode_seq_len=0,
@@ -308,7 +310,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             if self._self_cached_decode_metadata is not None:
                 return self._self_cached_decode_metadata
             assert self.block_tables is not None
-            assert self.seq_lens_tensor is not None
+            assert (self.seq_lens_tensor is not None) or \
+                (self.encoder_seq_lens_tensor is not None)
 
             self._self_cached_decode_metadata = XFormersMetadata(
                 num_prefills=0,
@@ -316,7 +319,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 num_decode_tokens=self.num_decode_tokens,
                 slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
                 seq_lens=None,
-                seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
+                seq_lens_tensor=None if self.seq_lens_tensor is None else self.seq_lens_tensor[self.num_prefills:],
                 max_query_len=None,
                 max_prefill_seq_len=0,
                 max_decode_seq_len=self.max_decode_seq_len,
@@ -340,7 +343,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             if self._cross_cached_decode_metadata is not None:
                 return self._cross_cached_decode_metadata
             assert self.block_tables is not None
-            assert self.seq_lens_tensor is not None
+            assert (self.seq_lens_tensor is not None) or \
+                (self.encoder_seq_lens_tensor is not None)
 
             self._cross_cached_decode_metadata = XFormersMetadata(
                 num_prefills=0,
@@ -348,7 +352,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 num_decode_tokens=self.num_decode_tokens,
                 slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
                 seq_lens=None,
-                seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
+                seq_lens_tensor=None if self.seq_lens_tensor is None else self.seq_lens_tensor[self.num_prefills:],
                 max_query_len=None,
                 max_prefill_seq_len=0,
                 max_decode_seq_len=self.max_decode_seq_len,
@@ -736,7 +740,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     if attn_metadata.attention_type == AttentionType.ENCODER:
                         # Default encoder self-attention mask is non-causal
                         attn_bias = BlockDiagonalMask.from_seqlens(
-                            attn_metadata.seq_lens)
+                            attn_metadata.encoder_seq_lens)
                     else:
                         # Default decoder self-attention mask is causal
                         attn_bias = BlockDiagonalCausalMask.from_seqlens(

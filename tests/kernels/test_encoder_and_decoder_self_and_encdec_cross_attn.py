@@ -387,16 +387,18 @@ def make_metadata_tensors(seq_lens: List[int],
     * seq_start_loc: start idx of each sequence
     * query_start_loc: start idx of each query
     '''
-    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
+    seq_lens_tensor = None if seq_lens is None else \
+      torch.tensor(seq_lens, dtype=torch.int, device=device)
     context_lens_tensor = None if context_lens is None else torch.tensor(
         context_lens, dtype=torch.int, device=device)
     max_context_len = None if context_lens is None else max(context_lens)
     max_seq_len = None if seq_lens is None else max(seq_lens)
 
-    seq_start_loc = torch.cat([
-        torch.tensor([0], dtype=torch.int32, device=device),
-        torch.cumsum(seq_lens_tensor, dim=0, dtype=torch.int32)
-    ])
+    seq_start_loc = None
+    # seq_start_loc = torch.cat([
+    #     torch.tensor([0], dtype=torch.int32, device=device),
+    #     torch.cumsum(seq_lens_tensor, dim=0, dtype=torch.int32)
+    # ])
 
     return seq_lens_tensor, \
            context_lens_tensor, \
@@ -563,6 +565,8 @@ def make_test_metadata(
     block_tables: torch.Tensor,
     slot_mapping: torch.Tensor,
     is_encoder_only_test: bool,
+    num_prefills_or_decodes: int,
+    num_prefill_or_decode_tokens: int,
     device: Union[torch.device, str] = CUDA_DEVICE,
     encoder_seq_lens: Optional[List[int]] = None,
     cross_block_tables: Optional[torch.Tensor] = None,
@@ -605,8 +609,8 @@ def make_test_metadata(
                           else AttentionType.DECODER
 
     if is_prompt:
-        num_prefills = len(seq_lens)
-        num_prefill_tokens = sum(seq_lens)
+        num_prefills = num_prefills_or_decodes
+        num_prefill_tokens = num_prefill_or_decode_tokens
         num_decode_tokens = 0
 
         seq_lens_tensor, \
@@ -624,9 +628,9 @@ def make_test_metadata(
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
-            max_prefill_seq_len=max(seq_lens),
+            max_prefill_seq_len=None if seq_lens is None else max(seq_lens),
             max_decode_seq_len=0,
-            seq_start_loc=seq_start_loc,
+            # seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
@@ -639,7 +643,7 @@ def make_test_metadata(
 
         num_prefills = 0
         num_prefill_tokens = 0
-        num_decode_tokens = len(seq_lens)
+        num_decode_tokens = num_prefill_or_decode_tokens
 
         seq_lens_tensor, \
         context_lens_tensor, \
@@ -658,7 +662,7 @@ def make_test_metadata(
             seq_lens_tensor=seq_lens_tensor,
             max_prefill_seq_len=0,
             max_decode_seq_len=max(seq_lens),
-            seq_start_loc=seq_start_loc,
+            # seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
@@ -1273,11 +1277,13 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
         attn_metadata: AttentionMetadata = make_test_metadata(
             attn_backend,
             True,
-            q_seq_lens,
+            None,
             context_lens,
             block_tables,
             slot_mapping,
             is_encoder_only_test=True,
+            num_prefills_or_decodes=len(q_seq_lens),
+            num_prefill_or_decode_tokens=sum(q_seq_lens),
             encoder_seq_lens=q_seq_lens)
 
         packed_actual_output: torch.Tensor = \
@@ -1416,6 +1422,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
             self_prefill_block_tables,
             self_prefill_slot_mapping,
             is_encoder_only_test=False,
+            num_prefills_or_decodes=len(prefill_q_seq_lens),
+            num_prefill_or_decode_tokens=sum(prefill_q_seq_lens),
             encoder_seq_lens=encoder_kv_seq_lens,
             cross_block_tables=cross_prefill_block_tables,
             cross_slot_mapping=cross_prefill_slot_mapping,
@@ -1460,6 +1468,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
             self_decode_block_tables,
             self_decode_slot_mapping,
             is_encoder_only_test=False,
+            num_prefills_or_decodes=len(q_seq_lens),
+            num_prefill_or_decode_tokens=len(q_seq_lens),
             encoder_seq_lens=encoder_kv_seq_lens,
             cross_block_tables=cross_decode_block_tables,
             cross_slot_mapping=cross_decode_slot_mapping,
@@ -1638,6 +1648,8 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
             self_prefill_block_tables,
             self_prefill_slot_mapping,
             is_encoder_only_test=False,
+            num_prefills_or_decodes=len(prefill_q_seq_lens),
+            num_prefill_or_decode_tokens=sum(prefill_q_seq_lens),
             encoder_seq_lens=encoder_kv_seq_lens,
             cross_block_tables=cross_prefill_block_tables,
             cross_slot_mapping=cross_prefill_slot_mapping,
