@@ -6,6 +6,7 @@ from typing import List, Optional, Union
 import pytest
 import torch
 
+from tests.kernels.utils import backend_override_fixture
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.utils import (
@@ -13,7 +14,6 @@ from vllm.attention.backends.utils import (
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.logger import init_logger
 from vllm.utils import is_hip, make_tensor_with_pad
-from tests.kernels.utils import backend_override_fixture
 
 logger = init_logger(__name__)
 
@@ -1351,8 +1351,9 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
             attn_type=AttentionType.ENCODER)
 
         # - Is encoder attention result correct?
-        assert torch.allclose(packed_ideal_output,
-                              packed_actual_output.view_as(packed_ideal_output))
+        assert torch.allclose(
+            packed_ideal_output,
+            packed_actual_output.view_as(packed_ideal_output))
 
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
@@ -1542,7 +1543,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 
         cross_decode_packed_actual_output: torch.Tensor = \
           run_encoder_decoder_cross_attention_test(
-            attn, decode_packed_query, None, None, kv_cache, decode_attn_metadata)
+            attn, decode_packed_query, None,
+            None, kv_cache, decode_attn_metadata)
 
         # - Decode cross-attention correct?
         assert torch.allclose(
@@ -1551,7 +1553,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
                 cross_decode_packed_ideal_output))
 
         # The following test conditions could in principle be a
-        # standalone test, however the test setup is so involved that it is easier
+        # standalone test, however the test setup is
+        # so involved that it is easier
         # to piggyback off of the test vectors & other data structures
         # created for testing decode-phase encoder/decoder cross-
         # attention above.
@@ -1567,8 +1570,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         decode_attn_metadata.num_prefill_tokens = 1
         with pytest.raises(NotImplementedError) as exc_info:
             run_encoder_decoder_cross_attention_test(attn, decode_packed_query,
-                                                    None, None, kv_cache,
-                                                    decode_attn_metadata)
+                                                     None, None, kv_cache,
+                                                     decode_attn_metadata)
 
         # "Encoder decoder models do not currently support chunked prefill"
         assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL
@@ -1701,11 +1704,9 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
         )
 
         with pytest.raises(NotImplementedError) as exc_info:
-            run_encoder_decoder_cross_attention_test(attn, prefill_packed_query,
-                                                    cross_prefill_packed_key,
-                                                    cross_prefill_packed_value,
-                                                    kv_cache,
-                                                    prefill_attn_metadata)
+            run_encoder_decoder_cross_attention_test(
+                attn, prefill_packed_query, cross_prefill_packed_key,
+                cross_prefill_packed_value, kv_cache, prefill_attn_metadata)
 
         # "Encoder decoder models do not currently support ROCm/HIP"
         assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_ROCM_HIP
