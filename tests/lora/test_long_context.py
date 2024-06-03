@@ -8,7 +8,6 @@ import vllm
 from vllm import SamplingParams
 from vllm.lora.layers import LinearScalingRotaryEmbeddingWithLora
 from vllm.lora.request import LoRARequest
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding)
 
@@ -32,6 +31,7 @@ def _create_lora_request(lora_id, long_context_infos):
     return LoRARequest(context_len, lora_id,
                        long_context_infos[lora_id]["lora"],
                        4096 * scaling_factor)
+
 
 def evaluate_json_response(model_response, golden_response):
     """Evaluates the model response against the golden response.
@@ -92,12 +92,10 @@ def batched_generate(
     for input in inputs:
         prompt, sampling_param, lora_req = input
         # Add requests to the engine and run the engine
-        llm._validate_and_add_requests(
-            prompt,
-            sampling_param,
-            lora_request=lora_req,
-            prompt_adapter_request=None
-        )
+        llm._validate_and_add_requests(prompt,
+                                       sampling_param,
+                                       lora_request=lora_req,
+                                       prompt_adapter_request=None)
 
     outputs = llm._run_engine(use_tqdm=True)
     return [outputs[i].outputs[0].text.strip() for i in range(len(outputs))]
