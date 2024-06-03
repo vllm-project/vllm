@@ -24,15 +24,50 @@ C = TypeVar("C", bound=PretrainedConfig)
 
 
 class DummyDataFactories:
+    """Contains factories for dummy data factories."""
+
+    @classmethod
+    def for_hf(cls, hf_config_type: Type[C]):
+        """
+        Decorate a dummy data factory that uses a specific type of
+        HuggingFace config.
+        
+        The returned function satisfies the interface of
+        :data:`DummyDataFactory`, with runtime checks being made to ensure
+        the validity of the inputs.
+        """
+
+        def wrapper(
+            factory: Callable[[int, C], Tuple["SequenceData",
+                                              Optional["MultiModalData"]]],
+        ) -> DummyDataFactory:
+
+            def inner(
+                seq_len: int,
+                model_config: "ModelConfig",
+            ) -> Tuple["SequenceData", Optional["MultiModalData"]]:
+                hf_config = model_config.hf_config
+                if not isinstance(hf_config, hf_config_type):
+                    raise TypeError("Invalid type of HuggingFace config. "
+                                    f"Expected type: {hf_config_type}, but "
+                                    f"received type: {type(hf_config)}")
+
+                return factory(seq_len, hf_config)
+
+            return inner
+
+        return wrapper
 
     @classmethod
     def for_multimodal_hf(cls, hf_config_type: Type[C]):
-        """Decorates a dummy data factory that uses multimodal config as well
+        """
+        Decorate a dummy data factory that uses multimodal config as well
         as a specific type of HuggingFace config.
         
         The returned function satisfies the interface of
         :data:`DummyDataFactory`, with runtime checks being made to ensure
-        the validity of the inputs."""
+        the validity of the inputs.
+        """
 
         def wrapper(
             factory: Callable[[int, "VisionLanguageConfig", C],

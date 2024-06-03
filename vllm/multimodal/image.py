@@ -35,6 +35,7 @@ def _get_dummy_seq_data(
 
 
 class DummyImageDataFactories:
+    """Contains factories for dummy image data factories."""
 
     @classmethod
     def _get_clip_num_patches(
@@ -188,6 +189,10 @@ class DummyImageDataFactories:
         cls,
         hf_config_type: Type[PretrainedConfig],
     ) -> DummyDataFactory:
+        """
+        Create an dummy image data factory for a model as identified
+        by the config type.
+        """
         if hf_config_type == LlavaConfig:
             return DummyDataFactories.for_multimodal_hf(LlavaConfig) \
                 (cls._dummy_data_for_llava)
