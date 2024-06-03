@@ -51,9 +51,9 @@ class DummyImageDataFactories:
     @classmethod
     def _dummy_data_for_clip(
         cls,
-        seq_len: int,
         multimodal_config: VisionLanguageConfig,
         hf_config: CLIPVisionConfig,
+        seq_len: int,
         *,
         image_token_id: int,
         image_feature_size_override: Optional[int] = None,
@@ -95,17 +95,17 @@ class DummyImageDataFactories:
     @classmethod
     def _dummy_data_for_llava(
         cls,
-        seq_len: int,
         multimodal_config: VisionLanguageConfig,
         hf_config: LlavaConfig,
+        seq_len: int,
     ):
         vision_config = hf_config.vision_config
 
         if isinstance(vision_config, CLIPVisionConfig):
             return cls._dummy_data_for_clip(
-                seq_len=seq_len,
                 multimodal_config=multimodal_config,
                 hf_config=vision_config,
+                seq_len=seq_len,
                 image_token_id=hf_config.image_token_index,
             )
 
@@ -141,9 +141,9 @@ class DummyImageDataFactories:
     @classmethod
     def _dummy_data_for_llava_next(
         cls,
-        seq_len: int,
         multimodal_config: VisionLanguageConfig,
         hf_config: LlavaNextConfig,
+        seq_len: int,
     ):
         vision_config = hf_config.vision_config
 
@@ -174,9 +174,9 @@ class DummyImageDataFactories:
                 + base_feature_size
 
             return cls._dummy_data_for_clip(
-                seq_len=seq_len,
                 multimodal_config=multimodal_config,
                 hf_config=vision_config,
+                seq_len=seq_len,
                 image_token_id=hf_config.image_token_index,
                 image_feature_size_override=image_feature_size,
             )
