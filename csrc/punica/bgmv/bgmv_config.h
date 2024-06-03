@@ -9,7 +9,6 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                  int64_t layer_idx, float scale);
 
 // clang-format off
-
 #define FOR_BGMV_WIDE(f, in_T, out_T, W_T, narrow) \
     f(in_T, out_T, W_T, narrow, 128) \
     f(in_T, out_T, W_T, narrow, 256) \
