@@ -32,3 +32,6 @@ sentence-transformers # required for embedding
 
 # Benchmarking
 aiohttp
+
+# quantization
+bitsandbytes==0.42.0
