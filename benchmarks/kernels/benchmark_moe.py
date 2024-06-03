@@ -14,7 +14,7 @@ def benchmark_config(
     config: Dict[str, int],
     num_tokens: int,
     num_experts: int,
-    fused_intermediate_size: int,
+    shard_intermediate_size: int,
     hidden_size: int,
     topk: int,
     dtype: torch.dtype,
@@ -24,12 +24,12 @@ def benchmark_config(
     init_dtype = torch.float16 if use_fp8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
     w1 = torch.randn(num_experts,
-                     fused_intermediate_size,
+                     shard_intermediate_size,
                      hidden_size,
                      dtype=init_dtype).to(dtype)
     w2 = torch.randn(num_experts,
                      hidden_size,
-                     fused_intermediate_size,
+                     shard_intermediate_size // 2,
                      dtype=init_dtype).to(dtype)
     gating_output = torch.randn(num_iters,
                                 num_tokens,
@@ -41,10 +41,10 @@ def benchmark_config(
     a1_scale = None
     a2_scale = None
     if use_fp8:
-        w1_scale = torch.ones(num_experts, dtype=torch.float32)
-        w2_scale = torch.ones(num_experts, dtype=torch.float32)
-        a1_scale = torch.ones(1, dtype=torch.float32)
-        a2_scale = torch.ones(1, dtype=torch.float32)
+        w1_scale = torch.randn(num_experts, dtype=torch.float32)
+        w2_scale = torch.randn(num_experts, dtype=torch.float32)
+        a1_scale = torch.randn(1, dtype=torch.float32)
+        a2_scale = torch.randn(1, dtype=torch.float32)
 
     input_gating = torch.empty(num_tokens, num_experts, dtype=torch.float32)
 
@@ -145,7 +145,7 @@ class BenchmarkWorker:
     ) -> Tuple[Dict[str, int], float]:
         torch.cuda.manual_seed_all(self.seed)
 
-        dtype_str = "float8" if use_fp8 else str(dtype)
+        dtype_str = "float8" if use_fp8 else None
         op_config = get_moe_configs(num_experts, shard_intermediate_size,
                                     dtype_str)
         if op_config is None:
@@ -174,7 +174,6 @@ class BenchmarkWorker:
         best_config = None
         best_time = float("inf")
         for config in search_space:
-            print(config)
             try:
                 kernel_time = benchmark_config(config,
                                                num_tokens,
@@ -210,13 +209,16 @@ def sort_config(config: Dict[str, int]) -> Dict[str, int]:
 
 def save_configs(
     configs: Dict[int, Dict[str, int]],
-    E: int,
-    N: int,
-    K: int,
+    num_experts: int,
+    shard_intermediate_size: int,
+    hidden_size: int,
     topk: int,
-    dtype: str,
+    dtype: torch.dtype,
+    use_fp8: bool,
 ) -> None:
-    filename = get_config_file_name(E, N, K, topk, dtype)
+    dtype_str = "float8" if use_fp8 else None
+    filename = get_config_file_name(num_experts, shard_intermediate_size,
+                                    dtype_str)
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
         json.dump(configs, f, indent=4)
@@ -277,7 +279,7 @@ def main(args: argparse.Namespace):
             for M, config in zip(batch_sizes, configs)
         }
         save_configs(best_configs, E, shard_intermediate_size, hidden_size,
-                     topk, str(dtype))
+                     topk, dtype, use_fp8)
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
     else:
