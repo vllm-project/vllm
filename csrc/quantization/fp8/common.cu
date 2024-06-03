@@ -195,9 +195,7 @@ void convert_fp8(torch::Tensor& src_data, torch::Tensor& dst_data, torch::Tensor
     at::cuda::OptionalCUDAGuard device_guard(src_device);
     auto t1 = src_data.dtype();
     auto t2 = dst_data.dtype();
-    if (src_data.dtype() == at::ScalarType::Char) {
-        hipMemcpy(dst_data.data_ptr(), src_data.data_ptr(), src_data.numel(), hipMemcpyDeviceToDevice);
-    } else if (src_data.dtype() == at::ScalarType::Float) {
+    if (src_data.dtype() == at::ScalarType::Float) {
         call_convert_fp8<uint8_t, float, 2>{}(src_data, dst_data, scale);
     } else if (src_data.dtype() == at::ScalarType::Half) {
         call_convert_fp8<uint8_t, uint16_t, 2>{}(src_data, dst_data, scale);
