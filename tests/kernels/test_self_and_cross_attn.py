@@ -564,7 +564,7 @@ def make_test_metadata(
     slot_mapping: torch.Tensor,
     is_encoder_only_test: bool,
     device: Union[torch.device, str] = CUDA_DEVICE,
-    cross_seq_lens: Optional[List[int]] = None,
+    encoder_seq_lens: Optional[List[int]] = None,
     cross_block_tables: Optional[torch.Tensor] = None,
     cross_slot_mapping: Optional[List[int]] = None,
 ) -> AttentionMetadata:
@@ -591,7 +591,7 @@ def make_test_metadata(
     * is_encoder_only_test: True if testing encoder; False if testing
       decoder self-attention or encoder/decoder cross-attention.
     * device: CPU or CUDA device
-    * cross_seq_lens: list of token counts for each encoder sequence, if any
+    * encoder_seq_lens: list of token counts for each encoder sequence, if any
       exist
     * cross_block_tables: cross-attention block tables, if required
     * cross_slot_mapping: cross-attention slot mapping, if required
@@ -631,7 +631,7 @@ def make_test_metadata(
             block_tables=block_tables,
             use_cuda_graph=False,
             _attn_type=default_attn_type,
-            cross_seq_lens=cross_seq_lens,
+            encoder_seq_lens=encoder_seq_lens,
             cross_slot_mapping=cross_slot_mapping,
             cross_block_tables=cross_block_tables)
 
@@ -663,7 +663,7 @@ def make_test_metadata(
             block_tables=block_tables,
             use_cuda_graph=False,
             _attn_type=default_attn_type,
-            cross_seq_lens=cross_seq_lens,
+            encoder_seq_lens=encoder_seq_lens,
             cross_slot_mapping=cross_slot_mapping,
             cross_block_tables=cross_block_tables)
 
@@ -1387,7 +1387,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         cross_prefill_packed_value, \
         cross_prefill_packed_ideal_output, \
         cross_decode_packed_ideal_output, \
-        cross_kv_seq_lens, \
+        encoder_kv_seq_lens, \
         cross_decode_block_tables, \
         cross_decode_slot_mapping, \
         cross_prefill_slot_mapping, \
@@ -1416,7 +1416,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
             self_prefill_block_tables,
             self_prefill_slot_mapping,
             is_encoder_only_test=False,
-            cross_seq_lens=cross_kv_seq_lens,
+            encoder_seq_lens=encoder_kv_seq_lens,
             cross_block_tables=cross_prefill_block_tables,
             cross_slot_mapping=cross_prefill_slot_mapping,
         )
@@ -1460,7 +1460,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
             self_decode_block_tables,
             self_decode_slot_mapping,
             is_encoder_only_test=False,
-            cross_seq_lens=cross_kv_seq_lens,
+            encoder_seq_lens=encoder_kv_seq_lens,
             cross_block_tables=cross_decode_block_tables,
             cross_slot_mapping=cross_decode_slot_mapping,
         )
@@ -1609,7 +1609,7 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
         cross_prefill_packed_value, \
         cross_prefill_packed_ideal_output, \
         cross_decode_packed_ideal_output, \
-        cross_kv_seq_lens, \
+        encoder_kv_seq_lens, \
         cross_decode_block_tables, \
         cross_decode_slot_mapping, \
         cross_prefill_slot_mapping, \
@@ -1638,7 +1638,7 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
             self_prefill_block_tables,
             self_prefill_slot_mapping,
             is_encoder_only_test=False,
-            cross_seq_lens=cross_kv_seq_lens,
+            encoder_seq_lens=encoder_kv_seq_lens,
             cross_block_tables=cross_prefill_block_tables,
             cross_slot_mapping=cross_prefill_slot_mapping,
         )

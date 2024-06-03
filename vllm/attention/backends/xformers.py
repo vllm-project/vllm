@@ -128,13 +128,13 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # (batch_size,). The "cross-sequence-length" per sequence,i.e. the key/value
     # sequence length (usually encoder sequence length) in the cross-attention
     # computation. None if this is self-attention
-    cross_seq_lens: Optional[List[int]] = None
-    cross_seq_lens_tensor: Optional[torch.Tensor] = None
+    encoder_seq_lens: Optional[List[int]] = None
+    encoder_seq_lens_tensor: Optional[torch.Tensor] = None
 
     # The maximum cross-sequence-length, if cross_seq_lens is specified.
     # Note that for cross-attention there is no difference in key/value
     # sequence length between prefill and decode
-    max_cross_seq_len: Optional[int] = None
+    max_encoder_seq_len: Optional[int] = None
 
     # Cross-attention memory-mapping data structures: slot mapping
     # and block tables
@@ -152,7 +152,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     @property
     def is_all_cross_attn_metadata_set(self):
         # No cross-attention metadata is present whatsoever
-        return (self.cross_seq_lens is not None) and \
+        return (self.encoder_seq_lens is not None) and \
                (self.cross_slot_mapping is not None) and \
                (self.cross_block_tables is not None)
 
@@ -170,15 +170,15 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
             # Infer implicit cross-attention fields
             # from user-provided fields, if needed
-            if self.cross_seq_lens_tensor is None:
+            if self.encoder_seq_lens_tensor is None:
                 assert self.seq_lens_tensor is not None
-                self.cross_seq_lens_tensor = torch.tensor(
-                    self.cross_seq_lens,
+                self.encoder_seq_lens_tensor = torch.tensor(
+                    self.encoder_seq_lens,
                     dtype=self.seq_lens_tensor.dtype,
                     device=self.seq_lens_tensor.device)
-            if self.max_cross_seq_len is None:
-                assert self.cross_seq_lens is not None
-                self.max_cross_seq_len = max(self.cross_seq_lens)
+            if self.max_encoder_seq_len is None:
+                assert self.encoder_seq_lens is not None
+                self.max_encoder_seq_len = max(self.encoder_seq_lens)
 
             self._attn_type = AttentionType.ENCODER_DECODER
         else:
@@ -222,9 +222,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 use_cuda_graph=False,
                 _attn_type=self.
                 _attn_type,  # Begin cross-attention fields below...
-                cross_seq_lens=None,
-                cross_seq_lens_tensor=None,
-                max_cross_seq_len=None,
+                encoder_seq_lens=None,
+                encoder_seq_lens_tensor=None,
+                max_encoder_seq_len=None,
                 cross_block_tables=None,
                 cross_slot_mapping=None)
             return self._self_cached_prefill_metadata
@@ -261,9 +261,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 use_cuda_graph=False,
                 _attn_type=AttentionType.ENCODER_DECODER,
                 # Begin cross-attention fields below...
-                cross_seq_lens=self.cross_seq_lens,
-                cross_seq_lens_tensor=self.cross_seq_lens_tensor,
-                max_cross_seq_len=self.max_cross_seq_len,
+                encoder_seq_lens=self.encoder_seq_lens,
+                encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
+                max_encoder_seq_len=self.max_encoder_seq_len,
                 cross_slot_mapping=self.cross_slot_mapping,
                 cross_block_tables=self.cross_block_tables)
             return self._cross_cached_prefill_metadata
@@ -298,9 +298,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 use_cuda_graph=self.use_cuda_graph,
                 _attn_type=self.
                 _attn_type,  # Begin cross-attention fields below...
-                cross_seq_lens=None,
-                cross_seq_lens_tensor=None,
-                max_cross_seq_len=None,
+                encoder_seq_lens=None,
+                encoder_seq_lens_tensor=None,
+                max_encoder_seq_len=None,
                 cross_block_tables=None,
                 cross_slot_mapping=None)
             return self._self_cached_decode_metadata
@@ -330,9 +330,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 use_cuda_graph=self.use_cuda_graph,
                 _attn_type=AttentionType.ENCODER_DECODER,
                 # Begin cross-attention fields below...
-                cross_seq_lens=self.cross_seq_lens,
-                cross_seq_lens_tensor=self.cross_seq_lens_tensor,
-                max_cross_seq_len=self.max_cross_seq_len,
+                encoder_seq_lens=self.encoder_seq_lens,
+                encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
+                max_encoder_seq_len=self.max_encoder_seq_len,
                 cross_slot_mapping=self.cross_slot_mapping,
                 cross_block_tables=self.cross_block_tables)
             return self._cross_cached_decode_metadata
@@ -540,8 +540,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if decode_meta := attn_metadata.decode_metadata:
             if attn_type == AttentionType.ENCODER_DECODER:
                 # Paged attention against cross-attention KV cache
-                seq_lens_arg = decode_meta.cross_seq_lens_tensor
-                max_seq_len_arg = decode_meta.max_cross_seq_len
+                seq_lens_arg = decode_meta.encoder_seq_lens_tensor
+                max_seq_len_arg = decode_meta.max_encoder_seq_len
                 block_tables_arg = decode_meta.cross_block_tables
             else:
                 # Paged attention against self-attention KV cache
@@ -610,7 +610,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     AttentionType.ENCODER_DECODER:
                     # Default enc/dec cross-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
-                        attn_metadata.seq_lens, attn_metadata.cross_seq_lens)
+                        attn_metadata.seq_lens, attn_metadata.encoder_seq_lens)
                 else:
                     if attn_metadata.attention_type == AttentionType.ENCODER:
                         # Default encoder self-attention mask is non-causal
