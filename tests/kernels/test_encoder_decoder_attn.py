@@ -8,6 +8,7 @@ Test
 
 import copy
 import itertools
+import numbers
 import random
 from typing import List, Optional, Union
 
@@ -34,6 +35,46 @@ CUDA_DEVICE = "cuda:0"
 MAX_Q_SEQ_LENS = [128]
 MAX_K_SEQ_LENS = [128]
 
+
+def maybe_list_to_int_tensor(_list: List[int],
+                              device: Union[torch.device, str] \
+                                = CUDA_DEVICE) \
+  -> torch.Tensor:
+    '''
+    Convert Python int list to a 1D int torch.Tensor on `device`
+
+    Returns:
+
+    * If _list is not None: 1D int torch.Tensor on `device`
+    * None otherwise
+    '''
+    return None if _list is None else torch.tensor(
+        _list, dtype=torch.int, device=device)
+
+def maybe_list_to_long_tensor(_list: List[int],
+                               device: Union[torch.device, str] \
+                                = CUDA_DEVICE) \
+  -> torch.Tensor:
+    '''
+    Convert Python int list to a 1D long torch.Tensor on `device`
+
+    Returns:
+
+    * If _list is not None: 1D long torch.Tensor on `device`
+    * None otherwise
+    '''
+    return None if _list is None else torch.tensor(
+        _list, dtype=torch.long, device=device)
+
+
+def maybe_max(_list: List) -> Optional[numbers.Number]:
+    '''
+    Returns:
+
+    * If _list is not None: max(_list)
+    * None otherwise
+    '''
+    return None if _list is None else max(_list)
 
 def build_causal_mask(q_max_seq_len: int, kv_max_seq_len: int) \
                                                 -> torch.Tensor:
@@ -396,15 +437,13 @@ def make_metadata_tensors(seq_lens: List[int],
     * seq_start_loc: start idx of each sequence
     * query_start_loc: start idx of each query
     '''
-    seq_lens_tensor = None if seq_lens is None else \
-      torch.tensor(seq_lens, dtype=torch.int, device=device)  
-    context_lens_tensor = None if context_lens is None else torch.tensor(
-        context_lens, dtype=torch.int, device=device)
-    max_context_len = None if context_lens is None else max(context_lens)
-    max_seq_len = None if seq_lens is None else max(seq_lens)
+    seq_lens_tensor = maybe_list_to_int_tensor(seq_lens, device)
+    context_lens_tensor = maybe_list_to_int_tensor(context_lens, device)
+    max_context_len = maybe_max(context_lens)
+    max_seq_len = maybe_max(seq_lens)
 
-    encoder_seq_lens_tensor = None if encoder_seq_lens is None else \
-      torch.tensor(encoder_seq_lens, dtype=torch.int, device=device)
+    encoder_seq_lens_tensor = maybe_list_to_int_tensor(encoder_seq_lens,
+                                                       device)
     max_encoder_seq_len = None if encoder_seq_lens is None else \
                             max(encoder_seq_lens)
 
@@ -547,18 +586,12 @@ def make_block_tables_slot_mapping(block_size: int,
         dtype=torch.int,
         device=device,
     )
-    prefill_slot_mapping_tensor = torch.tensor(prefill_slot_mapping,
-                                               dtype=torch.long,
-                                               device=device)
-    decode_slot_mapping_tensor = torch.tensor(decode_slot_mapping,
-                                              dtype=torch.long,
-                                              device=device)
-    slot_mapping_tensor = torch.tensor(slot_mapping,
-                                       dtype=torch.long,
-                                       device=device)
-    empty_slot_mapping_tensor = torch.tensor([],
-                                             dtype=torch.long,
-                                             device=device)
+    prefill_slot_mapping_tensor = maybe_list_to_long_tensor(
+        prefill_slot_mapping, device)
+    decode_slot_mapping_tensor = maybe_list_to_long_tensor(
+        decode_slot_mapping, device)
+    slot_mapping_tensor = maybe_list_to_long_tensor(slot_mapping, device)
+    empty_slot_mapping_tensor = maybe_list_to_long_tensor([], device)
 
     return decode_block_tables_tensor, \
            decode_slot_mapping_tensor, \

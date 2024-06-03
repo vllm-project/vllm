@@ -328,7 +328,8 @@ def _set_attn_bias(attn_metadata: XFormersMetadata,
             f"Invalid attn_metadata.attention_type {str(attn_type)}")
 
 
-def _get_seq_len_block_table_args(attn_metadata: XFormersMetadata, is_prompt: bool) -> tuple:
+def _get_seq_len_block_table_args(attn_metadata: XFormersMetadata,
+                                  is_prompt: bool) -> tuple:
     '''
     The particular choice of sequence-length- and block-table-related
     attributes which should be extracted from attn_metadata is dependent
