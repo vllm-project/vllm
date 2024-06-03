@@ -107,8 +107,8 @@ class OpenAIServingChat(OpenAIServing):
             elif part_type == "image_url":
                 config = getattr(self.engine.engine, "vision_language_config", None)
                 if not isinstance(config, VisionLanguageConfig):
-                    logger.warning("Ignoring image_url input as the loaded model is not multimodal.")
-                    continue
+                    raise ValueError("'image_url' input is not supported as the loaded model is not multimodal.")
+
                 elif image_count == 0:
                     assert self.tokenizer is not None
                     image_future = async_get_and_parse_image(part["image_url"])
@@ -119,8 +119,7 @@ class OpenAIServingChat(OpenAIServing):
                     texts.insert(0, text)
                     image_count += 1
                 else:
-                    logger.warning("Ignoring additional image_url input as the loaded model only supports one image.")
-                    continue
+                    raise NotImplementedError("Multiple 'image_url' input is currently not supported.")
 
             else:
                 raise NotImplementedError(f"Unknown part type: {part_type}")
