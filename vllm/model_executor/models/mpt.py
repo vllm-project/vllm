@@ -138,7 +138,12 @@ class MPTAttention(nn.Module):
         if self.qk_ln:
             q = self.q_ln(q)
             k = self.k_ln(k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        
+        if self.use_attention_sinks:
+            attn_output = self.attention_sink(q, k, v, None, kv_cache, attn_metadata)
+        else:
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        
         output, _ = self.out_proj(attn_output)
         return output
 
