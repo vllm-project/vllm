@@ -41,8 +41,9 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.quantization.fp8 import (
-    Fp8Config, per_tensor_dequantize, per_tensor_quantize)
+from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
+                                                         per_tensor_dequantize,
+                                                         per_tensor_quantize)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -186,8 +187,8 @@ class MixtralMoE(nn.Module):
                                               loaded_weight).abs() > 1e-5:
                 raise ValueError(
                     "act_scales of w1 and w3 of a layer "
-                    f"must be equal. But got {param_data[expert_id]} vs. {loaded_weight}"
-                )
+                    f"must be equal. But got {param_data[expert_id]} "
+                    f"vs. {loaded_weight}")
             param_data[expert_id] = loaded_weight
         elif "weight_scale" in weight_name:
             # We have to keep the weight scales of w1 and w3 because
@@ -230,8 +231,9 @@ class MixtralMoE(nn.Module):
                 if (not all_close_1d(self.a13_scale)
                         or not all_close_1d(self.a2_scale)):
                     print_warning_once(
-                        "Found act_scales that are not equal for fp8 MoE layer. "
-                        "Using the maximum across experts for each layer. ")
+                        "Found act_scales that are not equal for "
+                        "fp8 MoE layer. Using the maximum across experts "
+                        "for each layer. ")
 
                 self.a13_scale = nn.Parameter(self.a13_scale.max(),
                                               requires_grad=False)
