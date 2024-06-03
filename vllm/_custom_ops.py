@@ -19,8 +19,6 @@ if not current_platform.is_tpu():
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
 
-from vllm.lowering_utils import vllm_lib, register_vllm_lowering
-
 
 def hint_on_error(fn):
 

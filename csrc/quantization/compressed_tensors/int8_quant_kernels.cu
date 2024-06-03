@@ -91,7 +91,6 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
                                          out.data_ptr<int8_t>(),
                                          scale.data_ptr<float>(), hidden_size);
       });
-  //return out;
 }
 
 void dynamic_scaled_int8_quant(

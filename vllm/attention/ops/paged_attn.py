@@ -9,8 +9,6 @@ from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
-from vllm.lowering_utils import vllm_lib, register_vllm_lowering
-
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
 
@@ -253,25 +251,3 @@ class PagedAttention:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
-
-# needed for compile
-vllm_lib.define(
-    "reshape_and_cache(Tensor key, Tensor value, Tensor key_cache, Tensor value_cache, Tensor slot_mapping, str dtype) -> (Tensor, Tensor)"
-)
-
-
-@torch.library.impl(vllm_lib, "reshape_and_cache", "Meta")
-def _reshape_and_cache_meta(key, value, key_cache, value_cache, slot_mapping,
-                            dtype):
-    return key_cache, value_cache
-
-
-@torch.library.impl(vllm_lib, "reshape_and_cache", "CUDA")
-def _reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
-                       dtype):
-    cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                slot_mapping, dtype)
-    return key_cache, value_cache
-
-
-register_vllm_lowering(torch.ops.vllm.reshape_and_cache, [2, 3])

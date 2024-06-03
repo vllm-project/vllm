@@ -85,7 +85,7 @@ class LlamaMLP(nn.Module):
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
-    #@torch.compile(backend=make_backend(backend=None))
+    @torch.compile(backend=make_backend(backend=None))
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)

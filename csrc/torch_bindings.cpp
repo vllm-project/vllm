@@ -16,11 +16,6 @@
 // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
-  ops.def("float_scalar", &float_scalar);
-  ops.impl("float_scalar", torch::kCUDA, &float_scalar);
-  ops.impl("float_scalar", torch::kCPU, &float_scalar);
-  ops.impl("float_scalar", torch::kMeta, &float_scalar_meta);
-
   // vLLM custom ops
 
   // Attention ops
@@ -360,6 +355,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.impl("register_graph_buffers", torch::kCPU,
                  &register_graph_buffers);
 }
-  #endif
+#endif
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

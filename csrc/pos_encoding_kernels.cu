@@ -174,8 +174,8 @@ void batched_rotary_embedding(
     torch::Tensor& cos_sin_cache_offsets  // [num_tokens]
 ) {
   int64_t num_tokens = cos_sin_cache_offsets.size(0);
-  int64_t num_heads = query.size(-1) / head_size;
-  int64_t num_kv_heads = key.size(-1) / head_size;
+  int num_heads = query.size(-1) / head_size;
+  int num_kv_heads = key.size(-1) / head_size;
   int64_t query_stride = query.stride(-2);
   int64_t key_stride = key.stride(-2);
 
