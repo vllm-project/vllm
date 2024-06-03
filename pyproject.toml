@@ -59,7 +59,7 @@ exclude = [
 ]
 
 [tool.codespell]
-ignore-words-list = "dout, te, indicies"
+ignore-words-list = "dout, te, indicies, subtile"
 skip = "./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
 
 [tool.isort]
