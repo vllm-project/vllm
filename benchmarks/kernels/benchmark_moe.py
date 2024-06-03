@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Tuple
 
 import ray
 import torch
+import triton
 from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe.fused_moe import *
