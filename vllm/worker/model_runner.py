@@ -11,13 +11,17 @@ import torch.nn as nn
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         VisionLanguageConfig, PromptAdapterConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import graph_capture
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+from vllm.prompt_adapter.layers import PromptAdapterMapping
+from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.prompt_adapter.worker_manager import (
+    LRUCacheWorkerPromptAdapterManager)
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -53,6 +57,8 @@ class ModelInput(NamedTuple):
     num_prefill_tokens: int
     num_decode_tokens: int
     num_prefills: int
+    prompt_adapter_mapping: Optional[PromptAdapterMapping]
+    prompt_adapter_requests: Set[PromptAdapterRequest]
 
     @classmethod
     def empty(cls, device):
@@ -69,6 +75,8 @@ class ModelInput(NamedTuple):
             num_prefill_tokens=0,
             num_decode_tokens=0,
             num_prefills=0,
+            prompt_adapter_mapping=None,
+            prompt_adapter_requests=set(),
         )
 
 
@@ -86,6 +94,7 @@ class ModelRunner:
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -96,7 +105,7 @@ class ModelRunner:
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.vision_language_config = vision_language_config
-
+        self.prompt_adapter_config = prompt_adapter_config
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
 
@@ -142,6 +151,7 @@ class ModelRunner:
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+        self.prompt_adapter_manager: LRUCacheWorkerPromptAdapterManager = None
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -153,7 +163,7 @@ class ModelRunner:
                 vision_language_config=self.vision_language_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
-                cache_config=self.cache_config,
+                cache_config=self.cache_config
             )
 
         self.model_memory_usage = m.consumed_memory
@@ -181,7 +191,15 @@ class ModelRunner:
                 max_position_embeddings,
             )
             self.model = self.lora_manager.create_lora_manager(self.model)
-
+            
+        if self.prompt_adapter_config:
+            self.prompt_adapter_manager = LRUCacheWorkerPromptAdapterManager(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens,
+                self.device, self.prompt_adapter_config)
+            self.model = self.prompt_adapter_manager\
+                                .create_prompt_adapter_manager(self.model)
+            
         if self.kv_cache_dtype == "fp8" and is_hip():
             # Currently only ROCm accepts kv-cache scaling factors
             # via quantization_param_path and this will be deprecated
@@ -259,6 +277,9 @@ class ModelRunner:
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
+        prompt_adapter_index_mapping: List[int] = []
+        prompt_adapter_prompt_mapping: List[int] = []
+        prompt_adapter_requests: Set[PromptAdapterRequest] = set()
 
         seq_lens: List[int] = []
         prefill_seq_lens: List[int] = []
@@ -418,7 +439,8 @@ class ModelRunner:
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
                 lora_id = seq_group_metadata.lora_int_id
-
+                prompt_adapter_id = seq_group_metadata.prompt_adapter_id
+                
                 if is_prompt:
                     assert len(seq_ids) == 1
                     num_prefills += 1
@@ -434,7 +456,7 @@ class ModelRunner:
 
                 if lora_id > 0:
                     lora_requests.add(seq_group_metadata.lora_request)
-
+                
                 lora_index_mapping += [lora_id] * query_len
                 lora_prompt_mapping.extend(
                     [lora_id] *
@@ -442,17 +464,20 @@ class ModelRunner:
                      and seq_group_metadata.sampling_params.prompt_logprobs
                      is not None else 1))
 
-                mm_data = seq_group_metadata.multi_modal_data
-                if mm_data is not None:
-                    # Process multi-modal data
-                    if self.multi_modal_input_processor is None:
-                        raise ValueError(
-                            "Multi-modal inputs are only supported by "
-                            "vision language models.")
-
-                    mm_kwargs = self.multi_modal_input_processor(mm_data)
-                    for k, v in mm_kwargs.items():
-                        multi_modal_kwargs_list[k].append(v)
+                if prompt_adapter_id > 0:
+                    prompt_adapter_requests.add(
+                        seq_group_metadata.prompt_adapter_request)
+                    
+                prompt_adapter_index_mapping += [prompt_adapter_id] * query_len
+                prompt_adapter_prompt_mapping.extend(
+                    [prompt_adapter_id] *
+                    (query_len if seq_group_metadata.sampling_params
+                     and seq_group_metadata.sampling_params.prompt_logprobs
+                     else 1))
+                    
+                if seq_group_metadata.multi_modal_data:
+                    multi_modal_input_list.append(
+                        seq_group_metadata.multi_modal_data.data)
 
                 if _is_block_tables_empty(seq_group_metadata.block_tables):
                     # During memory profiling, the block tables are not
@@ -515,6 +540,8 @@ class ModelRunner:
                 seq_lens.append(1)
                 block_tables.append([])
                 lora_index_mapping.append(0)
+                prompt_adapter_index_mapping.append(0)
+                
             batch_size = graph_batch_size
             num_decode_tokens = batch_size
 
@@ -637,6 +664,14 @@ class ModelRunner:
         else:
             lora_mapping = None
 
+        if self.prompt_adapter_config:
+            prompt_adapter_mapping = PromptAdapterMapping(
+                prompt_adapter_index_mapping,
+                prompt_adapter_prompt_mapping,
+            )
+        else:
+            prompt_adapter_mapping = None
+
         multi_modal_kwargs = {
             k: torch.cat(v, dim=0).to(self.device)
             for k, v in multi_modal_kwargs_list.items()
@@ -655,13 +690,15 @@ class ModelRunner:
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
+            prompt_adapter_mapping=prompt_adapter_mapping,
+            prompt_adapter_requests=prompt_adapter_requests,
         )
 
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
+               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor], Set[PromptAdapterRequest], PromptAdapterMapping]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
@@ -678,7 +715,10 @@ class ModelRunner:
                 num_prefill_tokens,
                 num_decode_tokens,
                 num_prefills,
+                prompt_adapter_mapping,
+                prompt_adapter_requests
             ) = self._prepare_model_input(seq_group_metadata_list)
+                
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
@@ -695,6 +735,8 @@ class ModelRunner:
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
+                "prompt_adapter_requests": prompt_adapter_requests,
+                "prompt_adapter_mapping": prompt_adapter_mapping,
             }
             if attn_metadata:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
@@ -708,6 +750,9 @@ class ModelRunner:
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
             multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
+            prompt_adapter_mapping = metadata_dict.pop("prompt_adapter_mapping")
+            prompt_adapter_requests = metadata_dict.pop("prompt_adapter_requests")
+            
             if metadata_dict:
                 attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
@@ -722,7 +767,7 @@ class ModelRunner:
 
         return (input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_kwargs)
+                multi_modal_kwargs, prompt_adapter_requests, prompt_adapter_mapping)
 
     @torch.inference_mode()
     def execute_model(
@@ -731,11 +776,15 @@ class ModelRunner:
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_kwargs
+         lora_requests, lora_mapping, multi_modal_kwargs,
+         prompt_adapter_requests, prompt_adapter_mapping
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
+
+        if self.prompt_adapter_config:
+            self.set_active_prompt_adapters(prompt_adapter_requests, prompt_adapter_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
         prefill_meta = attn_metadata.prefill_metadata
@@ -870,6 +919,37 @@ class ModelRunner:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
+
+    def remove_all_prompt_adapters(self):
+        if not self.prompt_adapter_manager:
+            raise RuntimeError("PromptAdapter is not enabled.")
+        self.prompt_adapter_manager.remove_all_prompt_adapters()
+        
+    def set_active_prompt_adapters(
+            self, prompt_adapter_requests: Set[PromptAdapterRequest],
+        prompt_adapter_mapping: PromptAdapterMapping
+    ) -> None:
+        if not self.prompt_adapter_manager:
+            raise RuntimeError("PromptAdapter is not enabled.")
+        self.prompt_adapter_manager.set_active_prompt_adapters(
+            prompt_adapter_requests, prompt_adapter_mapping)
+
+    def add_prompt_adapter(
+            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        if not self.prompt_adapter_manager:
+            raise RuntimeError("PromptAdapter is not enabled.")
+        return self.prompt_adapter_manager.add_prompt_adapter(
+            prompt_adapter_request)
+        
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        if not self.prompt_adapter_manager:
+            raise RuntimeError("PromptAdapter is not enabled.")
+        return self.prompt_adapter_manager.remove_lora(prompt_adapter_id)
+
+    def list_prompt_adapters(self) -> Set[int]:
+        if not self.prompt_adapter_manager:
+            raise RuntimeError("PromptAdapter is not enabled.")
+        return self.prompt_adapter_manager.list_prompt_adapters()
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[torch.Tensor]) -> None:

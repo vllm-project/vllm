@@ -1095,6 +1095,18 @@ class LoRAConfig:
 
 
 @dataclass
+class PromptAdapterConfig:
+    max_prompt_adapters: int
+    max_cpu_prompt_adapters: Optional[int] = None
+
+    def __post_init__(self):
+        if self.max_prompt_adapters < 1:
+            raise ValueError(f"max_prompt_adapters "
+                             f"({self.max_prompt_adapters}) must be >= 1.")
+        if self.max_cpu_prompt_adapters is None:
+            self.max_cpu_prompt_adapters = self.max_prompt_adapters
+
+@dataclass
 class VisionLanguageConfig:
     """Configs the input data format and how models should run for
     vision language models."""
@@ -1371,6 +1383,7 @@ class EngineConfig:
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
+    prompt_adapter_config: Optional[PromptAdapterConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.

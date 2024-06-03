@@ -19,6 +19,7 @@ from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.utils import LRUCache, is_pin_memory_available
+from vllm.adapter_commons.models import AdapterModel, AdapterLRUCache, AdapterModelManager
 
 logger = init_logger(__name__)
 
@@ -152,7 +153,7 @@ def get_lora_id():
     return _GLOBAL_LORA_ID
 
 
-class LoRAModel:
+class LoRAModel(AdapterModel):
     """A LoRA fine-tuned model."""
 
     def __init__(
@@ -358,7 +359,7 @@ class LoRAModel:
         )
 
 
-class LoRAModelManager:
+class LoRAModelManager(AdapterModelManager):
     """A manager that manages multiple LoRA-fine-tuned models."""
 
     def __init__(
@@ -410,8 +411,7 @@ class LoRAModelManager:
         # base_indices, sampler_indices, sampler_indices_padded,
         # embeddings_indices
         self.indices_len: List[Optional[int]] = [None] * 4
-
-        self.model: nn.Module = model
+        super().__init__(model)
         if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
                 self.model.supported_lora_modules)
@@ -423,12 +423,13 @@ class LoRAModelManager:
                 self.model.packed_modules_mapping)
         self.packed_modules: Dict[str, List[str]] = {}
         self.modules: Dict[str, "BaseLayerWithLoRA"] = {}
-        self._registered_loras: Dict[int, LoRAModel] = {}
+        # self._registered_loras: Dict[int, LoRAModel] = {}
         # Dict instead of a Set for compatibility with LRUCache.
-        self._active_loras: Dict[int, None] = {}
+        # self._active_loras: Dict[int, None] = {}
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
         self.model.lora_manager = self
+        self.adapter_type = 'LoRa'
 
     @property
     def capacity(self) -> int:
@@ -438,15 +439,16 @@ class LoRAModelManager:
     def lora_slots(self) -> int:
         return self.lora_config.max_loras
 
-    def __len__(self) -> int:
-        return len(self._registered_loras)
+    @property
+    def adapter_slots(self) -> int:
+        return self.lora_slots
 
     def activate_lora(
         self,
         lora_id: int,
     ) -> bool:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
-        if lora_id in self._active_loras:
+        if lora_id in self._active_adapters:
             return False
         first_free_slot = next(
             ((i, lora_id) for i, lora_id in enumerate(self.lora_index_to_id)
@@ -454,8 +456,8 @@ class LoRAModelManager:
         if first_free_slot is None:
             raise ValueError("No free lora slots")
         index, _ = first_free_slot
-        self._active_loras[lora_id] = None
-        lora_model = self._registered_loras[lora_id]
+        self._active_adapters[lora_id] = None
+        lora_model = self._registered_adapters[lora_id]
         logger.debug("Activating LoRA. int id: %d, slot index: %d",
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
@@ -469,6 +471,10 @@ class LoRAModelManager:
                 module.reset_lora(index)
         return True
 
+    @property
+    def activate_adapter(self):
+        return self.activate_lora
+
     def _deactivate_lora(self, lora_id: int):
         try:
             index = self.lora_index_to_id.index(lora_id)
@@ -476,14 +482,14 @@ class LoRAModelManager:
         except ValueError:
             pass
 
-    def deactivate_lora(self, lora_id: int) -> bool:
-        """Remove a LoRA from a GPU buffer."""
-        if lora_id in self._active_loras:
-            self._deactivate_lora(lora_id)
-            self._active_loras.pop(lora_id)
-            return True
-        return False
+    @property
+    def _deactivate_adapter(self):
+        return self._deactivate_lora
 
+    @property
+    def deactivate_lora(self):
+        return self.deactivate_adapter
+        
     def _set_long_lora_context(self, lora: LoRAModel):
         if self.long_lora_context is None:
             return
@@ -501,29 +507,23 @@ class LoRAModelManager:
 
     def _add_lora(self, lora: LoRAModel):
         self._create_merged_loras_inplace(lora)
-        self._registered_loras[lora.id] = lora
+        self._registered_adapters[lora.id] = lora
         self._set_long_lora_context(lora)
 
-    def add_lora(self, lora: LoRAModel) -> bool:
-        """Add a LoRAModel to the manager CPU cache."""
+    @property
+    def _add_adapter(self):
+        return self._add_lora
+
+    def add_lora(self, lora: LoRAModel):
         logger.debug(
             "Adding lora. Model id: %d, "
             "int id: %d, "
             "scaling factor: %s", lora.id, lora.id, lora.scaling_factor)
-        if lora.id not in self._registered_loras:
-            if len(self._registered_loras) >= self.capacity:
-                raise RuntimeError("No free LoRA slots.")
-            self._add_lora(lora)
-            return True
-        return False
+        return self.add_adapter(lora)
 
-    def remove_lora(self, lora_id: int) -> bool:
-        """Remove a LoRAModel from the manager CPU cache."""
-        # TODO: should we check active lora?
-        self.deactivate_lora(lora_id)
-        if self.long_lora_context:
-            self.long_lora_context.offsets_by_lora_id.pop(lora_id, None)
-        return bool(self._registered_loras.pop(lora_id, None))
+    @property
+    def remove_lora(self):
+        return self.remove_adapter
 
     # TODO see if this can be vectorized
     def _set_lora_mapping(self, mapping: LoRAMapping) -> None:
@@ -548,23 +548,31 @@ class LoRAModelManager:
         # Maintain the reference
         self.indices_len[:] = indices_len
 
-    def set_lora_mapping(self, lora_mapping: LoRAMapping) -> None:
-        if self._last_mapping != lora_mapping:
-            self._set_lora_mapping(lora_mapping)
-        self._last_mapping = lora_mapping
+    @property
+    def set_lora_mapping(self):
+        return self.set_adapter_mapping
 
-    def list_loras(self) -> Dict[int, LoRAModel]:
-        """List all registered LoRAModels."""
-        return dict(self._registered_loras)
+    @property
+    def _set_adapter_mapping(self):
+        return self._set_lora_mapping
 
-    def get_lora(self, lora_id: int) -> Optional[LoRAModel]:
-        return self._registered_loras.get(lora_id, None)
+    @property
+    def list_loras(self):
+        return self.list_adapters
 
+    @property
+    def get_lora(self):
+        return self.get_adapter
+        
     def remove_all_loras(self):
         """Remove all LoRAModels from the manager."""
-        self._registered_loras.clear()
+        self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
-        self._active_loras.clear()
+        self._active_adapters.clear()
+
+    @property
+    def remove_all_adapters(self):
+        return self.remove_all_loras
 
     def _create_lora_modules(self):
         for module_name, module in self.model.named_modules(
@@ -709,17 +717,10 @@ class LoRAModelManager:
                 replacement_loras)
 
 
-class LoRALRUCache(LRUCache[LoRAModel]):
+class LoRALRUCache(AdapterLRUCache[LoRAModel]):
 
-    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int],
-                                                                   bool]):
-        super().__init__(capacity)
-        self.deactivate_lora_fn = deactivate_lora_fn
-
-    def _on_remove(self, key: int, value: LoRAModel):
-        logger.debug("Removing LoRA. int id: %d", key)
-        self.deactivate_lora_fn(key)
-        return super()._on_remove(key, value)
+    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], None]):
+        super().__init__(capacity, deactivate_lora_fn)
 
 
 class LRUCacheLoRAModelManager(LoRAModelManager):
@@ -735,45 +736,45 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
     ):
         super().__init__(model, max_num_seqs, max_num_batched_tokens,
                          vocab_size, lora_config)
-        self._registered_loras: LoRALRUCache = LoRALRUCache(
+        self._registered_adapters: LoRALRUCache = LoRALRUCache(
             self.capacity, self.deactivate_lora)
-        self._active_loras: LoRALRUCache = LoRALRUCache(
+        self._active_adapters: LoRALRUCache = LoRALRUCache(
             self.lora_slots, self._deactivate_lora)
 
-    def list_loras(self) -> Dict[int, LoRAModel]:
+    def list_adapters(self) -> Dict[int, LoRAModel]:
         """List all registered LoRAModels."""
-        return dict(self._registered_loras.cache)
+        return dict(self._registered_adapters.cache)
 
-    def add_lora(self, lora: LoRAModel) -> bool:
+    def add_adapter(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
         logger.debug(
             "Adding lora. Model id: %d, "
             "int id: %d, "
             "scaling factor: %s", lora.id, lora.id, lora.scaling_factor)
-        if lora.id not in self._registered_loras:
+        if lora.id not in self._registered_adapters:
             self._add_lora(lora)
             was_added = True
         else:
             # We always touch to update the LRU cache order
-            self._registered_loras.touch(lora.id)
+            self._registered_adapters.touch(lora.id)
             was_added = False
         return was_added
 
-    def activate_lora(
+    def activate_adapter(
         self,
         lora_id: int,
     ) -> bool:
-        if lora_id not in self._active_loras and len(
-                self._active_loras) >= self.lora_slots:
-            self._active_loras.remove_oldest()
+        if lora_id not in self._active_adapters and len(
+                self._active_adapters) >= self.lora_slots:
+            self._active_adapters.remove_oldest()
         result = super().activate_lora(lora_id)
         # We always touch to update the LRU cache order
-        self._active_loras.touch(lora_id)
+        self._active_adapters.touch(lora_id)
         return result
 
     def remove_oldest_lora(self) -> bool:
-        if len(self._registered_loras) > 0:
-            self._registered_loras.remove_oldest()
+        if len(self._registered_adapters) > 0:
+            self._registered_adapters.remove_oldest()
             return True
         return False
 

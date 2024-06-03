@@ -44,6 +44,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+from vllm.prompt_adapter.layers import apply_prompt_adapter
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -278,6 +279,7 @@ class BaiChuanModel(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
+        hidden_states = apply_prompt_adapter(self, hidden_states, positions)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]

@@ -40,6 +40,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+from vllm.prompt_adapter.layers import apply_prompt_adapter
 
 
 class GPTBigCodeAttention(nn.Module):
@@ -219,6 +220,7 @@ class GPTBigCodeModel(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         inputs_embeds = self.wte(input_ids)
+        inputs_embeds = apply_prompt_adapter(self, inputs_embeds, position_ids)
         position_embeds = self.wpe(position_ids)
         hidden_states = inputs_embeds + position_embeds
 

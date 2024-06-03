@@ -53,6 +53,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
+from vllm.prompt_adapter.layers import apply_prompt_adapter
 
 
 class MixtralMoE(nn.Module):
@@ -462,6 +463,7 @@ class MixtralModel(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
+        hidden_states = apply_prompt_adapter(self, hidden_states, positions)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]

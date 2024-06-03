@@ -21,6 +21,7 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
         cache_config=engine_config.cache_config,
         load_config=engine_config.load_config,
         lora_config=engine_config.lora_config,
+        prompt_adapter_config=engine_config.prompt_adapter_config,
         is_driver_worker=True,
     )
     return model_runner
@@ -353,7 +354,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
         decode_metadata_list.append(seq_group_metadata)
 
     (input_tokens, input_positions, attn_metadata, _, _, _,
-     _) = model_runner.prepare_input_tensors(seq_group_metadata_list)
+     _, _, _) = model_runner.prepare_input_tensors(seq_group_metadata_list)
 
     prefill_meta_actual = attn_metadata.prefill_metadata
     decode_meta_actual = attn_metadata.decode_metadata
