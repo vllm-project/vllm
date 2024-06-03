@@ -9,8 +9,6 @@ from typing import TypedDict, Union, cast, final
 from fastapi import Request
 from openai.types.chat import (ChatCompletionContentPartImageParam,
                                ChatCompletionContentPartTextParam)
-from opentelemetry.trace.propagation.tracecontext import (
-    TraceContextTextMapPropagator)
 
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -33,6 +31,7 @@ from vllm.multimodal.utils import (async_get_and_parse_image,
                                    get_full_image_text_prompt)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
+from vllm.tracing import extract_trace_context
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -269,7 +268,7 @@ class OpenAIServingChat(OpenAIServing):
         if image_data is not None:
             inputs["multi_modal_data"] = image_data
 
-        trace_context = TraceContextTextMapPropagator().extract(
+        trace_context = extract_trace_context(
             raw_request.headers if raw_request else {})
         result_generator = self.engine.generate(
             inputs,

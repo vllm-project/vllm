@@ -4,8 +4,6 @@ from typing import TYPE_CHECKING, ClassVar, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Type, TypeVar, Union
 
-from opentelemetry.context.context import Context
-from opentelemetry.trace import SpanKind
 from transformers import GenerationConfig, PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
@@ -33,7 +31,7 @@ from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
-from vllm.tracing import SpanAttributes, init_tracer
+from vllm.tracing import Context, SpanAttributes, SpanKind, init_tracer
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -996,6 +994,8 @@ class LLMEngine:
         self.model_executor.check_health()
 
     def create_trace_span(self, seq_group: SequenceGroup, now: float) -> None:
+        if tracer is None:
+            return
         if seq_group.trace_context is None:
             return
         arrival_time_nano_seconds = int(seq_group.metrics.arrival_time * 1e9)

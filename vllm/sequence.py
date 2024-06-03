@@ -6,13 +6,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
-from opentelemetry.context.context import Context
 
 from vllm.block import LogicalTokenBlock
 from vllm.inputs import LLMInputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.tracing import Context
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalData

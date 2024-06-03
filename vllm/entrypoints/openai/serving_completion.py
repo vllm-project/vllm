@@ -5,8 +5,6 @@ from typing import Sequence as GenericSequence
 from typing import Tuple
 
 from fastapi import Request
-from opentelemetry.trace.propagation.tracecontext import (
-    TraceContextTextMapPropagator)
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -26,6 +24,7 @@ from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
+from vllm.tracing import extract_trace_context
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -127,8 +126,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         truncate_prompt_tokens)
                 prompt_ids, prompt_text = prompt_formats
 
-                trace_context = TraceContextTextMapPropagator().extract(
-                    raw_request.headers)
+                trace_context = extract_trace_context(raw_request.headers)
                 generator = self.engine.generate(
                     {
                         "prompt": prompt_text,

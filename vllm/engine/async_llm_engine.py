@@ -4,7 +4,6 @@ from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
                     Set, Tuple, Type, Union)
 
-from opentelemetry.context.context import Context
 from transformers import PreTrainedTokenizer
 
 import vllm.envs as envs
@@ -20,6 +19,7 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.tracing import Context
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
