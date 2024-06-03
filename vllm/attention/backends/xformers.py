@@ -341,6 +341,20 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
 def _get_attn_bias(attn_metadata: XFormersMetadata) -> \
     Optional[List[Optional[AttentionBias]]]:
+    '''
+    Extract appropriate attention bias from attention metadata
+    according to attention type.
+
+    Depends on attn_metadata having a valid attention_type.
+
+    Arguments:
+
+    * attn_metadata: Attention metadata structure associated with attention
+
+    Returns:
+    * Appropriate attention bias value
+    '''
+
     attn_type = attn_metadata.attention_type
     if attn_type == AttentionType.DECODER:
         return attn_metadata.attn_bias
@@ -353,6 +367,18 @@ def _get_attn_bias(attn_metadata: XFormersMetadata) -> \
 
 def _set_attn_bias(attn_metadata: XFormersMetadata, 
                    attn_bias: List[Optional[AttentionBias]]) -> None:
+    '''
+    Update appropriate attention bias field of attention metadata,
+    according to attention type.
+
+    Depends on attn_metadata having a valid attention_type.
+
+    Arguments:
+
+    * attn_metadata: Attention metadata structure associated with attention
+    * attn_bias: The desired attention bias value
+    '''
+
     attn_type = attn_metadata.attention_type
     if attn_type == AttentionType.DECODER:
         attn_metadata.attn_bias = attn_bias
