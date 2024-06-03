@@ -7,9 +7,10 @@ STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 
-def override_backend(mpatch: pytest.MonkeyPatch, backend_name: str) -> None:
+def override_backend_env_variable(mpatch: pytest.MonkeyPatch,
+                                  backend_name: str) -> None:
     '''
-    Override vLLM attention backend temporarily,
+    Override the environment variable indicating the vLLM backend temporarily,
     using pytest monkeypatch to ensure that the env vars get
     reset once the test context exits.
 
