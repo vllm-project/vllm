@@ -194,8 +194,7 @@ class PromptAdapterModelManager(AdapterModelManager):
             self.prompt_adapter_index_to_id[index] = None
             for module_name, module in self.model.named_modules():
                 if 'Model' in (module.__class__.__name__):
-                    module.prefix_encoder = None
-                    break
+                    del module.prefix_encoder
         except ValueError:
             pass
 
