@@ -75,6 +75,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
+    preemption_mode: Optional[str] = None
 
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
@@ -564,6 +565,13 @@ class EngineArgs:
                             'corresponding to the chosen load_format. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
+        parser.add_argument(
+            '--preemption_mode',
+            type=str,
+            default=None,
+            help='If \'recompute\', the engine performs preemption by block '
+            'swapping; If \'swap\', the engine performs preemption by block '
+            'swapping.')
 
         parser.add_argument(
             "--served-model-name",
@@ -667,6 +675,7 @@ class EngineArgs:
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
+            preemption_mode=self.preemption_mode,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

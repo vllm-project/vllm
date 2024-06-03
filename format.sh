@@ -118,7 +118,7 @@ mypy vllm/model_executor --config-file pyproject.toml
 # https://github.com/codespell-project/codespell/issues/1915
 # Avoiding the "./" prefix and using "/**" globs for directories appears to solve the problem
 CODESPELL_EXCLUDES=(
-    '--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,tests/lora/data/**,build/**'
+    '--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**'
 )
 
 # check spelling of specified files
