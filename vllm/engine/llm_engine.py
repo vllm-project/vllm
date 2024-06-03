@@ -582,18 +582,6 @@ class LLMEngine:
         sampling_params.update_from_generation_config(
             self.generation_config_fields)
 
-        # Process multi-modal data
-        if multi_modal_data is None:
-            mm_kwargs = {}
-        else:
-            vlm_config = self.vision_language_config
-            assert vlm_config is not None, (
-                "Multi-modal inputs are only supported by "
-                "vision language models.")
-
-            mm_kwargs = multi_modal_data.get_input_kwargs(
-                self.model_config, vlm_config)
-
         # Create the sequence group.
         seq_group = SequenceGroup(request_id=request_id,
                                   seqs=[seq],

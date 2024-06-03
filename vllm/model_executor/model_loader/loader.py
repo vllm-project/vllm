@@ -20,6 +20,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          SchedulerConfig, VisionLanguageConfig)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import set_weight_attrs
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
@@ -33,9 +34,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.linear import LinearMethodBase
 
 _VISION_MODEL_CLASSES = [
     LlavaForConditionalGeneration,

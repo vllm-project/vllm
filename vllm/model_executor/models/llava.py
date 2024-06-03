@@ -82,33 +82,11 @@ class LlavaImageFeatureInputs(TypedDict):
 
 LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
 
-    return inputs_embeds
-
-
-class LlavaImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, num_channels, height, width)"""
-
-
-class LlavaImageFeatureInputs(TypedDict):
-    type: Literal["image_features"]
-    data: torch.Tensor
-    """Shape: (batch_size, image_feature_size, hidden_size)"""
-
-
-LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
-
 
 @MULTIMODAL_REGISTRY.register_image_feature_input()
 @MULTIMODAL_REGISTRY.register_image_pixel_input()
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class LlavaForConditionalGeneration(VisionLanguageModelBase):
-
-    is_vlm: ClassVar[bool] = True
-    """Indicates that the model is a vision-language model and thus accepts
-    the `vision_language_config` parameter.
-    """
 
     def __init__(self,
                  config: LlavaConfig,

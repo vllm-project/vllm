@@ -6,7 +6,6 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
