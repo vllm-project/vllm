@@ -124,37 +124,11 @@ torch::Tensor fp8_gemm(
   int algo_idx
 );
 
-torch::Tensor bf8_gemm(
-  torch::Tensor& a,
-  torch::Tensor& b,
-  torch::Tensor& scaleA,
-  torch::Tensor& scaleB,
-  torch::Tensor& scaleD,
-  int algo_idx
-);
-
 torch::Tensor fp8_gemm_16(
   torch::Tensor& a,
   torch::Tensor& b,
   torch::Tensor& scaleA,
   torch::Tensor& scaleB,
-  int algo_idx
-);
-
-torch::Tensor fp8_gemm_16_new(
-  torch::Tensor& a,
-  torch::Tensor& b,
-  torch::Tensor& scaleA,
-  torch::Tensor& scaleB,
-  int algo_idx
-);
-
-torch::Tensor fp8_gemm_new(
-  torch::Tensor& a,
-  torch::Tensor& b,
-  torch::Tensor& scaleA,
-  torch::Tensor& scaleB,
-  torch::Tensor& scaleC,
   int algo_idx
 );
 
