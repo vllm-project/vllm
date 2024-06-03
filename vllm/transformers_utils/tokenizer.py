@@ -29,7 +29,7 @@ def get_cached_tokenizer(
     tokenizer_all_special_tokens_extended = (
         tokenizer.all_special_tokens_extended)
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
-    tokenizer_len = len(tokenizer)
+    tokenizer_len = tokenizer.vocab_size
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
