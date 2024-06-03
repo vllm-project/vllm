@@ -65,7 +65,6 @@ class EngineArgs:
     tokenizer_pool_type: str = "ray"
     tokenizer_pool_extra_config: Optional[dict] = None
     enable_lora: bool = False
-    enable_prompt_adapter: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
     max_prompt_adapters: int = 1
