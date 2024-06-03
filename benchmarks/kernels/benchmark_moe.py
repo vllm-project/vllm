@@ -107,20 +107,20 @@ def get_configs_compute_bound() -> List[Dict[str, int]]:
     # TODO(woosuk): Increase the search space and use a performance model to
     # prune the search space.
     configs = []
-    for num_stages in [4]:
-        for block_m in [64]:
-            for block_k in [32]:
-                for block_n in [32]:
-                    num_warps = 2 if block_n <= 64 else 4
-                    for group_size in [1]:
-                        configs.append({
-                            "BLOCK_SIZE_M": block_m,
-                            "BLOCK_SIZE_N": block_n,
-                            "BLOCK_SIZE_K": block_k,
-                            "GROUP_SIZE_M": group_size,
-                            "num_warps": num_warps,
-                            "num_stages": num_stages,
-                        })
+    for num_stages in [2, 3, 4, 5]:
+        for block_m in [16, 32, 64, 128, 256]:
+            for block_k in [64, 128, 256]:
+                for block_n in [32, 64, 128, 256]:
+                    for num_warps in [4, 8]:
+                        for group_size in [1, 16, 32, 64]:
+                            configs.append({
+                                "BLOCK_SIZE_M": block_m,
+                                "BLOCK_SIZE_N": block_n,
+                                "BLOCK_SIZE_K": block_k,
+                                "GROUP_SIZE_M": group_size,
+                                "num_warps": num_warps,
+                                "num_stages": num_stages,
+                            })
     return configs
 
 
