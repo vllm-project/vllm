@@ -363,8 +363,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
         f"Unrecognized backend_name {backend_name} for unit test")
 
 
-def make_metadata_tensors(is_prompt: bool,
-                          seq_lens: List[int],
+def make_metadata_tensors(seq_lens: List[int],
                           context_lens: List[int],
                           device: Union[torch.device, str] = \
                             CUDA_DEVICE) -> tuple:
@@ -393,27 +392,17 @@ def make_metadata_tensors(is_prompt: bool,
         context_lens, dtype=torch.int, device=device)
     max_context_len = None if context_lens is None else max(context_lens)
     max_seq_len = None if seq_lens is None else max(seq_lens)
-    
-    seq_start_loc = torch.cat([torch.tensor([0], dtype=torch.int32, device=device), torch.cumsum(seq_lens_tensor, dim=0, dtype=torch.int32)])
 
-
-    if is_prompt:
-        # Prefill: query_start_loc matches seq_start_loc
-        query_start_loc = copy.deepcopy(seq_start_loc)
-        max_query_len = max_seq_len
-    else:
-        # Decode: one new query input token per batch element, thus
-        # query_start_loc is the cumsum of [1,1,1,...]
-        query_start_loc = list(range(len(seq_start_loc)))
-        max_query_len = 1
+    seq_start_loc = torch.cat([
+        torch.tensor([0], dtype=torch.int32, device=device),
+        torch.cumsum(seq_lens_tensor, dim=0, dtype=torch.int32)
+    ])
 
     return seq_lens_tensor, \
            context_lens_tensor, \
-           max_query_len, \
            max_context_len, \
            max_seq_len, \
-           seq_start_loc, \
-           query_start_loc
+           seq_start_loc
 
 
 def make_kv_cache(num_blocks: int,
@@ -625,14 +614,11 @@ def make_test_metadata(
 
         seq_lens_tensor, \
         context_lens_tensor, \
-        max_query_len, \
         _, \
         _, \
-        seq_start_loc, \
-        query_start_loc = make_metadata_tensors(is_prompt,
-                                                seq_lens,
-                                                context_lens,
-                                                device=device)
+        seq_start_loc = make_metadata_tensors(seq_lens,
+                                              context_lens,
+                                              device=device)
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
@@ -641,10 +627,8 @@ def make_test_metadata(
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
-            max_query_len=max_query_len,
             max_prefill_seq_len=max(seq_lens),
             max_decode_seq_len=0,
-            query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
@@ -662,14 +646,11 @@ def make_test_metadata(
 
         seq_lens_tensor, \
         context_lens_tensor, \
-        max_query_len, \
         _, \
         _, \
-        seq_start_loc, \
-        query_start_loc = make_metadata_tensors(is_prompt,
-                                                seq_lens,
-                                                context_lens,
-                                                device=device)
+        seq_start_loc = make_metadata_tensors(seq_lens,
+                                              context_lens,
+                                              device=device)
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
@@ -678,10 +659,8 @@ def make_test_metadata(
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
-            max_query_len=max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=max(seq_lens),
-            query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,

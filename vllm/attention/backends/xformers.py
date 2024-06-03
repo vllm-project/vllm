@@ -80,8 +80,6 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # |-------------------- seq_len ----------------------|
     #                                   |-- query_len ---|
 
-    # Maximum query length in the batch. None for decoding.
-    max_query_len: Optional[int]
     # FIXME: It is for flash attn.
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
@@ -89,23 +87,29 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Maximum sequence length among decode batch. 0 if there are prefill
     # requests only.
     max_decode_seq_len: int
-    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
-    # the batch, used to index into subquery. E.g., if the subquery length
-    # is [4, 6], it is [0, 4, 10].
-    query_start_loc: Optional[torch.Tensor]
-    # FIXME: It is for flash attn.
-    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
-    # the batch, used to index into sequence. E.g., if the sequence length is
-    # [4, 6], it is [0, 4, 10].
-    seq_start_loc: Optional[torch.Tensor]
-    # (batch_size,) A tensor of context lengths (tokens that are computed
-    # so far).
-    context_lens_tensor: Optional[torch.Tensor]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
+
+    # FIXME: It is for flash attn.
+    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
+    # the batch, used to index into sequence. E.g., if the sequence length is
+    # [4, 6], it is [0, 4, 10].
+    seq_start_loc: Optional[torch.Tensor] = None
+
+    # (batch_size,) A tensor of context lengths (tokens that are computed
+    # so far).
+    context_lens_tensor: Optional[torch.Tensor] = None
+
+    # Maximum query length in the batch. None for decoding.
+    max_query_len: Optional[int] = None
+
+    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
+    # the batch, used to index into subquery. E.g., if the subquery length
+    # is [4, 6], it is [0, 4, 10].
+    query_start_loc: Optional[torch.Tensor] = None
 
     # Self-attention prefill/decode metadata cache
     _self_cached_prefill_metadata: Optional["XFormersMetadata"] = None
@@ -194,9 +198,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
             assert self.seq_lens is not None
             assert self.seq_lens_tensor is not None
-            assert self.query_start_loc is not None
             assert self.context_lens_tensor is not None
             assert self.block_tables is not None
+
+            query_start_loc = None if self.query_start_loc is None \
+                else self.query_start_loc[:self.num_prefills + 1]
 
             self._self_cached_prefill_metadata = XFormersMetadata(
                 num_prefills=self.num_prefills,
@@ -208,7 +214,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 max_query_len=self.max_query_len,
                 max_prefill_seq_len=self.max_prefill_seq_len,
                 max_decode_seq_len=0,
-                query_start_loc=self.query_start_loc[:self.num_prefills + 1],
+                query_start_loc=query_start_loc,
                 seq_start_loc=None,
                 context_lens_tensor=self.context_lens_tensor[:self.
                                                              num_prefills],
@@ -231,9 +237,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
             assert self.seq_lens is not None
             assert self.seq_lens_tensor is not None
-            assert self.query_start_loc is not None
             assert self.context_lens_tensor is not None
             assert self.block_tables is not None
+
+            query_start_loc = None if self.query_start_loc is None \
+                else self.query_start_loc[:self.num_prefills + 1]
 
             self._cross_cached_prefill_metadata = XFormersMetadata(
                 num_prefills=self.num_prefills,
@@ -245,7 +253,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 max_query_len=self.max_query_len,
                 max_prefill_seq_len=self.max_prefill_seq_len,
                 max_decode_seq_len=0,
-                query_start_loc=self.query_start_loc[:self.num_prefills + 1],
+                query_start_loc=query_start_loc,
                 seq_start_loc=None,
                 context_lens_tensor=self.context_lens_tensor[:self.
                                                              num_prefills],
@@ -503,6 +511,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
             else:
+                assert prefill_meta.query_start_loc is not None
+                assert prefill_meta.max_query_len is not None
+
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to
                 # deal with different data types between KV and FP8 KV cache,
