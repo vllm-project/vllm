@@ -216,7 +216,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             return None
 
         if self._self_cached_prefill_metadata is not None:
-            self._self_cached_prefill_metadata.attention_type = self.attention_type
+            self._self_cached_prefill_metadata.attention_type = \
+                self.attention_type
             return self._self_cached_prefill_metadata
 
         assert (self.seq_lens is not None) or \
@@ -234,8 +235,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
-            seq_lens=None if self.seq_lens is None else
-            self.seq_lens[:self.num_prefills],
+            seq_lens=None
+            if self.seq_lens is None else self.seq_lens[:self.num_prefills],
             seq_lens_tensor=None if self.seq_lens_tensor is None else
             self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -243,8 +244,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             max_decode_seq_len=0,
             query_start_loc=query_start_loc,
             seq_start_loc=None,
-            context_lens_tensor=self.context_lens_tensor[:self.
-                                                            num_prefills],
+            context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
             _attn_type=self.attention_type,
