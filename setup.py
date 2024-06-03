@@ -187,19 +187,22 @@ class cmake_build_ext(build_ext):
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
 
+        targets = []
         # Build all the extensions
         for ext in self.extensions:
             self.configure(ext)
+            targets.append(remove_prefix(ext.name, "vllm."))
 
-            ext_target_name = remove_prefix(ext.name, "vllm.")
-            num_jobs, _ = self.compute_num_jobs()
+        num_jobs, _ = self.compute_num_jobs()
 
-            build_args = [
-                '--build', '.', '--target', ext_target_name, '-j',
-                str(num_jobs)
-            ]
+        build_args = [
+            "--build",
+            ".",
+            f"-j={num_jobs}",
+            *[f"--target={name}" for name in targets],
+        ]
 
-            subprocess.check_call(['cmake', *build_args], cwd=self.build_temp)
+        subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
 
 
 def _is_cuda() -> bool:
@@ -379,7 +382,7 @@ def get_requirements() -> List[str]:
 
 ext_modules = []
 
-if _is_cuda():
+if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
 if not _is_neuron():

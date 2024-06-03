@@ -1,3 +1,11 @@
+"""
+Test
+
+* Encoder attention
+* Decoder self-attention
+* Encoder/decoder cross-attention
+"""
+
 import copy
 import itertools
 import random
@@ -6,6 +14,7 @@ from typing import List, Optional, Union
 import pytest
 import torch
 
+from tests.kernels.utils import override_backend_env_variable
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.utils import (
@@ -13,18 +22,13 @@ from vllm.attention.backends.utils import (
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import is_hip, make_tensor_with_pad
 
-# If not is_hip(): supported head sizes are [64, 80, 96, 112, 128, 256]
-#
-# TODO: FlashAttention forward only supports head dimension at most 128
-# https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d0
-# 37782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
 HEAD_SIZES = [64, 256]
 
 NUM_HEADS = [1, 16]
 
 BATCH_SIZES = [1, 16]
 BLOCK_SIZES = [16]
-BACKEND_NAMES = ["xformers"]
+BACKEND_NAMES = ["XFORMERS"]
 CUDA_DEVICE = "cuda:0"
 
 MAX_Q_SEQ_LENS = [128]
@@ -199,66 +203,51 @@ def make_qkv(batch_size: int,
     actual_max_kv_seq_len = max(kv_seq_lens)
 
     query = torch.rand(
-        (batch_size, max_q_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_q_seq_len, num_heads, head_size)).to(device)
     key = torch.rand(
-        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads, head_size)).to(device)
     value = torch.rand(
-        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads, head_size)).to(device)
 
     prefill_query = torch.zeros(
-        (batch_size, max_q_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_q_seq_len, num_heads, head_size)).to(device)
     prefill_key = torch.zeros(
-        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads, head_size)).to(device)
     prefill_value = torch.zeros(
-        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads, head_size)).to(device)
 
     decode_query = torch.zeros(
-        (batch_size, 1, num_heads * head_size)).to(device)
-    decode_key = torch.zeros((batch_size, 1, num_heads * head_size)).to(device)
+        (batch_size, 1, num_heads, head_size)).to(device)
+    decode_key = torch.zeros((batch_size, 1, num_heads, head_size)).to(device)
     decode_value = torch.zeros(
-        (batch_size, 1, num_heads * head_size)).to(device)
+        (batch_size, 1, num_heads, head_size)).to(device)
 
     for bdx, (q_seq_len, kv_seq_len) in enumerate(zip(q_seq_lens,
                                                       kv_seq_lens)):
-        query[bdx, q_seq_len:, :] = 0
-        key[bdx, kv_seq_len:, :] = 0
-        value[bdx, kv_seq_len:, :] = 0
+        query[bdx, q_seq_len:, :, :] = 0
+        key[bdx, kv_seq_len:, :, :] = 0
+        value[bdx, kv_seq_len:, :, :] = 0
 
-        prefill_query[bdx, 0:(q_seq_len - 1), :] = query[bdx,
-                                                         0:(q_seq_len - 1), :]
-        prefill_key[bdx, 0:(kv_seq_len - 1), :] = key[bdx,
-                                                      0:(kv_seq_len - 1), :]
-        prefill_value[bdx,
-                      0:(kv_seq_len - 1), :] = value[bdx,
-                                                     0:(kv_seq_len - 1), :]
+        prefill_query[bdx,
+                      0:(q_seq_len - 1), :, :] = query[bdx,
+                                                       0:(q_seq_len - 1), :, :]
+        prefill_key[bdx,
+                    0:(kv_seq_len - 1), :, :] = key[bdx,
+                                                    0:(kv_seq_len - 1), :, :]
+        prefill_value[bdx, 0:(kv_seq_len -
+                              1), :, :] = value[bdx, 0:(kv_seq_len - 1), :, :]
 
-        decode_query[bdx, :, :] = query[bdx, (q_seq_len - 1):q_seq_len, :]
-        decode_key[bdx, :, :] = key[bdx, (kv_seq_len - 1):kv_seq_len, :]
-        decode_value[bdx, :, :] = value[bdx, (kv_seq_len - 1):kv_seq_len, :]
+        decode_query[bdx, :, :, :] = query[bdx,
+                                           (q_seq_len - 1):q_seq_len, :, :]
+        decode_key[bdx, :, :, :] = key[bdx, (kv_seq_len - 1):kv_seq_len, :, :]
+        decode_value[bdx, :, :, :] = value[bdx,
+                                           (kv_seq_len - 1):kv_seq_len, :, :]
 
     prefill_q_seq_lens = [plen - 1 for plen in q_seq_lens]
     prefill_kv_seq_lens = [plen - 1 for plen in kv_seq_lens]
 
     decode_q_seq_lens = [1 for _ in q_seq_lens]
     decode_kv_seq_lens = [1 for _ in kv_seq_lens]
-
-    query = query.view(batch_size, query.shape[1], num_heads, head_size)
-    key = key.view(batch_size, key.shape[1], num_heads, head_size)
-    value = value.view(batch_size, value.shape[1], num_heads, head_size)
-
-    prefill_query = prefill_query.view(batch_size, prefill_query.shape[1],
-                                       num_heads, head_size)
-    prefill_key = prefill_key.view(batch_size, prefill_key.shape[1], num_heads,
-                                   head_size)
-    prefill_value = prefill_value.view(batch_size, prefill_value.shape[1],
-                                       num_heads, head_size)
-
-    decode_query = decode_query.view(batch_size, decode_query.shape[1],
-                                     num_heads, head_size)
-    decode_key = decode_key.view(batch_size, decode_key.shape[1], num_heads,
-                                 head_size)
-    decode_value = decode_value.view(batch_size, decode_value.shape[1],
-                                     num_heads, head_size)
 
     return query, \
            key, \
@@ -349,13 +338,6 @@ def pack_qkv(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
         packed_query, q_start_loc_list = pack_tensor(query, q_seq_lens)
     packed_key, kv_start_loc_list = pack_tensor(key, kv_seq_lens)
     packed_value, _ = pack_tensor(value, kv_seq_lens)
-    if packed_query is not None:
-        packed_query = packed_query.view(
-            -1, packed_query.shape[-1] * packed_query.shape[-2])
-    packed_key = packed_key.view(-1,
-                                 packed_key.shape[-1] * packed_key.shape[-2])
-    packed_value = packed_value.view(
-        -1, packed_value.shape[-1] * packed_value.shape[-2])
     return packed_query, \
            packed_key, \
            packed_value, \
@@ -368,22 +350,28 @@ def make_backend(backend_name: str) -> AttentionBackend:
     Construct the backend instance determined by the backend_name string
     argument.
 
-    "xformers" -> construct xformers backend
+    "XFORMERS" -> construct xformers backend
 
-    TODO: flash attention backend
+    TODO: other backends
+
+    Note: at time of writing the Attention wrapper automatically selects
+    its own backend for Attention.forward(); so the backend instance which
+    you generate with this function is not meant to be used for *running*
+    inference, but rather for generating compatible metadata structures
+    using backend.make_metadata()
+
 
     Returns:
 
     * Backend instance
     '''
-    if backend_name == "xformers":
+    if backend_name == "XFORMERS":
         return XFormersBackend()
     raise AssertionError(
         f"Unrecognized backend_name {backend_name} for unit test")
 
 
-def make_metadata_tensors(is_prompt: bool,
-                          seq_lens: List[int],
+def make_metadata_tensors(seq_lens: List[int],
                           context_lens: List[int],
                           device: Union[torch.device, str] = \
                             CUDA_DEVICE) -> tuple:
@@ -407,38 +395,20 @@ def make_metadata_tensors(is_prompt: bool,
     * seq_start_loc: start idx of each sequence
     * query_start_loc: start idx of each query
     '''
-    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
+    seq_lens_tensor = None if seq_lens is None else \
+      torch.tensor(seq_lens, dtype=torch.int, device=device)
     context_lens_tensor = None if context_lens is None else torch.tensor(
         context_lens, dtype=torch.int, device=device)
     max_context_len = None if context_lens is None else max(context_lens)
     max_seq_len = None if seq_lens is None else max(seq_lens)
 
-    seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
-                                dtype=torch.int32,
-                                device=device)
-
-    torch.cumsum(seq_lens_tensor,
-                 dim=0,
-                 dtype=seq_start_loc.dtype,
-                 out=seq_start_loc[1:])
-
-    if is_prompt:
-        # Prefill: query_start_loc matches seq_start_loc
-        query_start_loc = copy.deepcopy(seq_start_loc)
-        max_query_len = max_seq_len
-    else:
-        # Decode: one new query input token per batch element, thus
-        # query_start_loc is the cumsum of [1,1,1,...]
-        query_start_loc = list(range(len(seq_start_loc)))
-        max_query_len = 1
+    seq_start_loc = None
 
     return seq_lens_tensor, \
            context_lens_tensor, \
-           max_query_len, \
            max_context_len, \
            max_seq_len, \
-           seq_start_loc, \
-           query_start_loc
+           seq_start_loc
 
 
 def make_kv_cache(num_blocks: int,
@@ -549,17 +519,14 @@ def make_block_tables_slot_mapping(block_size: int,
         num_blocks = num_blocks_list[sdx]
         block_table = list(
             range(block_base_idx, block_base_idx - num_blocks, -1))
-        for idx in range(num_tokens - 1):
-            prefill_slot_mapping.append((idx % block_size) +
-                                        block_table[idx // block_size] *
-                                        block_size)
-            slot_mapping.append((idx % block_size) +
-                                block_table[idx // block_size] * block_size)
-        idx = num_tokens - 1
-        decode_slot_mapping.append((idx % block_size) +
-                                   block_table[idx // block_size] * block_size)
-        slot_mapping.append((idx % block_size) +
-                            block_table[idx // block_size] * block_size)
+        for idx in range(num_tokens):
+            mapping_value = (
+                idx % block_size) + block_table[idx // block_size] * block_size
+            slot_mapping.append(mapping_value)
+            if idx < num_tokens - 1:
+                prefill_slot_mapping.append(mapping_value)
+            elif idx == num_tokens - 1:
+                decode_slot_mapping.append(mapping_value)
 
         block_base_idx -= num_blocks
         block_tables.append(block_table)
@@ -602,8 +569,10 @@ def make_test_metadata(
     block_tables: torch.Tensor,
     slot_mapping: torch.Tensor,
     is_encoder_only_test: bool,
+    num_prefills_or_decodes: int,
+    num_prefill_or_decode_tokens: int,
     device: Union[torch.device, str] = CUDA_DEVICE,
-    cross_seq_lens: Optional[List[int]] = None,
+    encoder_seq_lens: Optional[List[int]] = None,
     cross_block_tables: Optional[torch.Tensor] = None,
     cross_slot_mapping: Optional[List[int]] = None,
 ) -> AttentionMetadata:
@@ -630,7 +599,7 @@ def make_test_metadata(
     * is_encoder_only_test: True if testing encoder; False if testing
       decoder self-attention or encoder/decoder cross-attention.
     * device: CPU or CUDA device
-    * cross_seq_lens: list of token counts for each encoder sequence, if any
+    * encoder_seq_lens: list of token counts for each encoder sequence, if any
       exist
     * cross_block_tables: cross-attention block tables, if required
     * cross_slot_mapping: cross-attention slot mapping, if required
@@ -644,20 +613,17 @@ def make_test_metadata(
                           else AttentionType.DECODER
 
     if is_prompt:
-        num_prefills = len(seq_lens)
-        num_prefill_tokens = sum(seq_lens)
+        num_prefills = num_prefills_or_decodes
+        num_prefill_tokens = num_prefill_or_decode_tokens
         num_decode_tokens = 0
 
         seq_lens_tensor, \
         context_lens_tensor, \
-        max_query_len, \
         _, \
         _, \
-        seq_start_loc, \
-        query_start_loc = make_metadata_tensors(is_prompt,
-                                                seq_lens,
-                                                context_lens,
-                                                device=device)
+        seq_start_loc = make_metadata_tensors(seq_lens,
+                                              context_lens,
+                                              device=device)
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
@@ -666,16 +632,13 @@ def make_test_metadata(
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
-            max_query_len=max_query_len,
-            max_prefill_seq_len=max(seq_lens),
+            max_prefill_seq_len=None if seq_lens is None else max(seq_lens),
             max_decode_seq_len=0,
-            query_start_loc=query_start_loc,
-            seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
             _attn_type=default_attn_type,
-            cross_seq_lens=cross_seq_lens,
+            encoder_seq_lens=encoder_seq_lens,
             cross_slot_mapping=cross_slot_mapping,
             cross_block_tables=cross_block_tables)
 
@@ -683,18 +646,15 @@ def make_test_metadata(
 
         num_prefills = 0
         num_prefill_tokens = 0
-        num_decode_tokens = len(seq_lens)
+        num_decode_tokens = num_prefill_or_decode_tokens
 
         seq_lens_tensor, \
         context_lens_tensor, \
-        max_query_len, \
         _, \
         _, \
-        seq_start_loc, \
-        query_start_loc = make_metadata_tensors(is_prompt,
-                                                seq_lens,
-                                                context_lens,
-                                                device=device)
+        seq_start_loc = make_metadata_tensors(seq_lens,
+                                              context_lens,
+                                              device=device)
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
@@ -703,16 +663,13 @@ def make_test_metadata(
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
-            max_query_len=max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=max(seq_lens),
-            query_start_loc=query_start_loc,
-            seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
             _attn_type=default_attn_type,
-            cross_seq_lens=cross_seq_lens,
+            encoder_seq_lens=encoder_seq_lens,
             cross_slot_mapping=cross_slot_mapping,
             cross_block_tables=cross_block_tables)
 
@@ -1250,8 +1207,8 @@ def run_encoder_decoder_cross_attention_test(
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("max_seq_len", MAX_Q_SEQ_LENS)
 def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
-                           batch_size: int, block_size: int,
-                           max_seq_len: int) -> None:
+                           batch_size: int, block_size: int, max_seq_len: int,
+                           monkeypatch) -> None:
     '''
     Encoder-only attention test:
 
@@ -1278,6 +1235,9 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     layer output.)
     '''
 
+    # Force Attention wrapper backend
+    override_backend_env_variable(monkeypatch, backend_name)
+
     # Attention scale factor, attention backend instance, attention wrapper
     # instance. Encoder attention does not require KV cache.
     scale, \
@@ -1302,11 +1262,11 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     block_tables, \
     slot_mapping, \
     q_seq_lens = encoder_attn_setup(batch_size,
-                                     num_heads,
-                                     head_size,
-                                     block_size,
-                                     scale,
-                                     max_seq_len)
+                                    num_heads,
+                                    head_size,
+                                    block_size,
+                                    scale,
+                                    max_seq_len)
 
     context_lens = [0 for _ in range(batch_size)]
 
@@ -1319,12 +1279,14 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
         True,
-        q_seq_lens,
+        None,
         context_lens,
         block_tables,
         slot_mapping,
         is_encoder_only_test=True,
-    )
+        num_prefills_or_decodes=len(q_seq_lens),
+        num_prefill_or_decode_tokens=sum(q_seq_lens),
+        encoder_seq_lens=q_seq_lens)
 
     packed_actual_output: torch.Tensor = \
       run_encoder_or_decoder_self_attention_test(
@@ -1351,7 +1313,8 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
 @pytest.mark.parametrize("max_kv_seq_len", MAX_K_SEQ_LENS)
 def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         num_heads: int, head_size: int, backend_name: str, batch_size: int,
-        block_size: int, max_q_seq_len: int, max_kv_seq_len: int) -> None:
+        block_size: int, max_q_seq_len: int, max_kv_seq_len: int,
+        monkeypatch) -> None:
     '''
     Encoder/decoder attention test:
 
@@ -1378,6 +1341,9 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     for cross-attention.
     '''
 
+    # Force Attention wrapper backend
+    override_backend_env_variable(monkeypatch, backend_name)
+
     # Num KV cache blocks
     num_blocks = 4096
 
@@ -1387,10 +1353,10 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     attn_backend, \
     attn, \
     kv_cache = basic_setup(num_heads,
-                           head_size,
-                           num_blocks,
-                           block_size,
-                           backend_name)
+                          head_size,
+                          num_blocks,
+                          block_size,
+                          backend_name)
 
     # Self-attention setup
 
@@ -1429,7 +1395,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     cross_prefill_packed_value, \
     cross_prefill_packed_ideal_output, \
     cross_decode_packed_ideal_output, \
-    cross_kv_seq_lens, \
+    encoder_kv_seq_lens, \
     cross_decode_block_tables, \
     cross_decode_slot_mapping, \
     cross_prefill_slot_mapping, \
@@ -1458,7 +1424,9 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         self_prefill_block_tables,
         self_prefill_slot_mapping,
         is_encoder_only_test=False,
-        cross_seq_lens=cross_kv_seq_lens,
+        num_prefills_or_decodes=len(prefill_q_seq_lens),
+        num_prefill_or_decode_tokens=sum(prefill_q_seq_lens),
+        encoder_seq_lens=encoder_kv_seq_lens,
         cross_block_tables=cross_prefill_block_tables,
         cross_slot_mapping=cross_prefill_slot_mapping,
     )
@@ -1502,7 +1470,9 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         self_decode_block_tables,
         self_decode_slot_mapping,
         is_encoder_only_test=False,
-        cross_seq_lens=cross_kv_seq_lens,
+        num_prefills_or_decodes=len(q_seq_lens),
+        num_prefill_or_decode_tokens=len(q_seq_lens),
+        encoder_seq_lens=encoder_kv_seq_lens,
         cross_block_tables=cross_decode_block_tables,
         cross_slot_mapping=cross_decode_slot_mapping,
     )
@@ -1525,7 +1495,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 
     cross_decode_packed_actual_output: torch.Tensor = \
       run_encoder_decoder_cross_attention_test(
-        attn, decode_packed_query, None, None, kv_cache, decode_attn_metadata)
+        attn, decode_packed_query, None,
+        None, kv_cache, decode_attn_metadata)
 
     # - Decode cross-attention correct?
     assert torch.allclose(
@@ -1534,7 +1505,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
             cross_decode_packed_ideal_output))
 
     # The following test conditions could in principle be a
-    # standalone test, however the test setup is so involved that it is easier
+    # standalone test, however the test setup is
+    # so involved that it is easier
     # to piggyback off of the test vectors & other data structures
     # created for testing decode-phase encoder/decoder cross-
     # attention above.
@@ -1568,7 +1540,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
                                      backend_name: str, batch_size: int,
                                      block_size: int, max_q_seq_len: int,
-                                     max_kv_seq_len: int) -> None:
+                                     max_kv_seq_len: int, monkeypatch) -> None:
     '''
     Encoder/decoder not-implemented-for-ROCm-HIP test:
 
@@ -1595,6 +1567,9 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
     for cross-attention.
     '''
 
+    # Force Attention wrapper backend
+    override_backend_env_variable(monkeypatch, backend_name)
+
     # Num KV cache blocks
     num_blocks = 4096
 
@@ -1604,10 +1579,10 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
     attn_backend, \
     attn, \
     kv_cache = basic_setup(num_heads,
-                           head_size,
-                           num_blocks,
-                           block_size,
-                           backend_name)
+                          head_size,
+                          num_blocks,
+                          block_size,
+                          backend_name)
 
     # Self-attention setup
 
@@ -1646,7 +1621,7 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
     cross_prefill_packed_value, \
     cross_prefill_packed_ideal_output, \
     cross_decode_packed_ideal_output, \
-    cross_kv_seq_lens, \
+    encoder_kv_seq_lens, \
     cross_decode_block_tables, \
     cross_decode_slot_mapping, \
     cross_prefill_slot_mapping, \
@@ -1675,7 +1650,9 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
         self_prefill_block_tables,
         self_prefill_slot_mapping,
         is_encoder_only_test=False,
-        cross_seq_lens=cross_kv_seq_lens,
+        num_prefills_or_decodes=len(prefill_q_seq_lens),
+        num_prefill_or_decode_tokens=sum(prefill_q_seq_lens),
+        encoder_seq_lens=encoder_kv_seq_lens,
         cross_block_tables=cross_prefill_block_tables,
         cross_slot_mapping=cross_prefill_slot_mapping,
     )
