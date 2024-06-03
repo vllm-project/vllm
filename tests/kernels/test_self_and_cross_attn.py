@@ -393,15 +393,9 @@ def make_metadata_tensors(is_prompt: bool,
         context_lens, dtype=torch.int, device=device)
     max_context_len = None if context_lens is None else max(context_lens)
     max_seq_len = None if seq_lens is None else max(seq_lens)
+    
+    seq_start_loc = torch.cat([torch.tensor([0], dtype=torch.int32, device=device), torch.cumsum(seq_lens_tensor, dim=0, dtype=torch.int32)])
 
-    seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
-                                dtype=torch.int32,
-                                device=device)
-
-    torch.cumsum(seq_lens_tensor,
-                 dim=0,
-                 dtype=seq_start_loc.dtype,
-                 out=seq_start_loc[1:])
 
     if is_prompt:
         # Prefill: query_start_loc matches seq_start_loc
