@@ -5,63 +5,67 @@ from typing import Any, Dict, List, Tuple
 
 import ray
 import torch
-import torch.nn.functional as F
-import triton.language as tl
 from transformers import AutoConfig
 
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.fused_moe import *
-
-logger = init_logger(__name__)
 
 
 def benchmark_config(
     config: Dict[str, int],
-    M: int,
-    E: int,
-    N: int,
-    K: int,
+    num_tokens: int,
+    num_experts: int,
+    fused_intermediate_size: int,
+    hidden_size: int,
     topk: int,
     dtype: torch.dtype,
+    use_fp8: bool,
     num_iters: int = 100,
 ) -> float:
-    x = torch.randn(M, K, dtype=dtype)
-    w = torch.randn(E, N, K, dtype=dtype)
-    o = torch.empty(M, topk, N, dtype=dtype)
-    gating = torch.randn(num_iters, M, E, dtype=dtype)
+    init_dtype = torch.float16 if use_fp8 else dtype
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    w1 = torch.randn(num_experts,
+                     fused_intermediate_size,
+                     hidden_size,
+                     dtype=init_dtype).to(dtype)
+    w2 = torch.randn(num_experts,
+                     hidden_size,
+                     fused_intermediate_size,
+                     dtype=init_dtype).to(dtype)
+    gating_output = torch.randn(num_iters,
+                                num_tokens,
+                                num_experts,
+                                dtype=torch.float32)
 
-    compute_type = tl.bfloat16 if x.dtype == torch.bfloat16 else tl.float16
-    routing_weights = F.softmax(gating, dim=-1, dtype=torch.float32)
-    topk_weights, input_topk_ids = torch.topk(routing_weights, topk, dim=-1)
-    topk_ids = input_topk_ids[0]
+    w1_scale = None
+    w2_scale = None
+    a1_scale = None
+    a2_scale = None
+    if use_fp8:
+        w1_scale = torch.ones(num_experts, dtype=torch.float32)
+        w2_scale = torch.ones(num_experts, dtype=torch.float32)
+        a1_scale = torch.ones(1, dtype=torch.float32)
+        a2_scale = torch.ones(1, dtype=torch.float32)
 
-    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, config["BLOCK_SIZE_M"], E)
+    input_gating = torch.empty(num_tokens, num_experts, dtype=torch.float32)
 
     def prepare(i: int):
-        topk_ids.copy_(input_topk_ids[i])
-        outputs = moe_align_block_size(topk_ids, config["BLOCK_SIZE_M"], E)
-        sorted_token_ids.copy_(outputs[0])
-        expert_ids.copy_(outputs[1])
-        num_tokens_post_padded.copy_(outputs[2])
+        input_gating.copy_(gating_output[i])
 
     def run():
-        invoke_fused_moe_kernel(
+        fused_moe(
             x,
-            w,
-            o,
-            None,
-            None,
-            topk_weights[0],
-            topk_ids,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            False,
+            w1,
+            w2,
+            input_gating,
             topk,
-            config,
-            compute_type=compute_type,
-            use_fp8=False,  # TODO(woosuk): Support FP8.
+            renormalize=True,
+            inplace=True,
+            override_config=config,
+            use_fp8=use_fp8,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
         )
 
     # JIT compilation & warmup
@@ -104,32 +108,11 @@ def get_configs_compute_bound() -> List[Dict[str, int]]:
     # prune the search space.
     configs = []
     for num_stages in [4]:
-        for block_m in [64, 128, 256]:
-            for block_k in [32, 64]:
-                for block_n in [32, 64, 128, 256]:
+        for block_m in [64]:
+            for block_k in [32]:
+                for block_n in [32]:
                     num_warps = 2 if block_n <= 64 else 4
-                    for group_size in [1, 8, 64]:
-                        configs.append({
-                            "BLOCK_SIZE_M": block_m,
-                            "BLOCK_SIZE_N": block_n,
-                            "BLOCK_SIZE_K": block_k,
-                            "GROUP_SIZE_M": group_size,
-                            "num_warps": num_warps,
-                            "num_stages": num_stages,
-                        })
-    return configs
-
-
-def get_configs_io_bound() -> List[Dict[str, int]]:
-    # Adapted from https://github.com/openai/triton/blob/22af8d80458ee4e6269779dae0a3c34b755aade2/python/triton/ops/matmul.py#L36
-    # TODO(woosuk): Implement a performance model to prune the search space.
-    configs = []
-    for num_stages in [2, 3, 4, 5, 6]:
-        for block_m in [16, 32]:
-            for block_k in [32, 64]:
-                for block_n in [32, 64, 128, 256]:
-                    num_warps = 2 if block_n <= 64 else 4
-                    for group_size in [1, 8]:
+                    for group_size in [1]:
                         configs.append({
                             "BLOCK_SIZE_M": block_m,
                             "BLOCK_SIZE_N": block_n,
@@ -152,44 +135,55 @@ class BenchmarkWorker:
 
     def benchmark(
         self,
-        M: int,
-        E: int,
-        N: int,
-        K: int,
+        num_tokens: int,
+        num_experts: int,
+        shard_intermediate_size: int,
+        hidden_size: int,
         topk: int,
         dtype: torch.dtype,
+        use_fp8: bool,
     ) -> Tuple[Dict[str, int], float]:
         torch.cuda.manual_seed_all(self.seed)
 
-        op_config = get_op_config(E, N, K, topk, str(dtype))
+        dtype_str = "float8" if use_fp8 else str(dtype)
+        op_config = get_moe_configs(num_experts, shard_intermediate_size,
+                                    dtype_str)
         if op_config is None:
-            config = get_default_config(M, E, N, K, topk, str(dtype))
+            config = get_default_config(num_tokens, num_experts,
+                                        shard_intermediate_size, hidden_size,
+                                        topk, dtype_str)
         else:
-            config = op_config[min(op_config.keys(), key=lambda x: abs(x - M))]
-        kernel_time = benchmark_config(config, M, E, N, K, topk, dtype)
+            config = op_config[min(op_config.keys(),
+                                   key=lambda x: abs(x - num_tokens))]
+        kernel_time = benchmark_config(config, num_tokens, num_experts,
+                                       shard_intermediate_size, hidden_size,
+                                       topk, dtype, use_fp8)
         return config, kernel_time
 
     def tune(
         self,
-        M: int,
-        E: int,
-        N: int,
-        K: int,
+        num_tokens: int,
+        num_experts: int,
+        shard_intermediate_size: int,
+        hidden_size: int,
         topk: int,
         dtype: torch.dtype,
+        use_fp8: bool,
         search_space: List[Dict[str, int]],
     ) -> Dict[str, int]:
         best_config = None
         best_time = float("inf")
         for config in search_space:
+            print(config)
             try:
                 kernel_time = benchmark_config(config,
-                                               M,
-                                               E,
-                                               N,
-                                               K,
+                                               num_tokens,
+                                               num_experts,
+                                               shard_intermediate_size,
+                                               hidden_size,
                                                topk,
                                                dtype,
+                                               use_fp8,
                                                num_iters=10)
             except triton.runtime.autotuner.OutOfResources:
                 # Some configurations may be invalid and fail to compile.
@@ -199,7 +193,7 @@ class BenchmarkWorker:
                 best_time = kernel_time
                 best_config = config
         now = datetime.now()
-        print(f"{now.ctime()}] Completed tuning for M={M}")
+        print(f"{now.ctime()}] Completed tuning for batch_size={num_tokens}")
         return best_config
 
 
@@ -223,35 +217,31 @@ def save_configs(
     dtype: str,
 ) -> None:
     filename = get_config_file_name(E, N, K, topk, dtype)
-    logger.info("writing config to file %s", filename)
+    print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
         json.dump(configs, f, indent=4)
         f.write("\n")
 
 
 def main(args: argparse.Namespace):
-    logger.info(args)
+    print(args)
 
     config = AutoConfig.from_pretrained(args.model)
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
         intermediate_size = config.ffn_config.ffn_hidden_size
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
         # Default: Mixtral.
         E = config.num_local_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
 
     hidden_size = config.hidden_size
-    shard_intermediate_size = intermediate_size // args.tp_size
     dtype = config.torch_dtype
-    if args.dtype == "auto":
-        w_dtype = dtype
-    elif args.dtype == "fp8":
-        w_dtype = torch.float16
-    else:
-        raise ValueError(f"Invalid dtype: {args.dtype}")
+    use_fp8 = args.dtype == "fp8"
 
     if args.batch_size is None:
         batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
@@ -274,36 +264,31 @@ def main(args: argparse.Namespace):
         return ray.get(outputs)
 
     if args.tune:
-        search_space = get_configs_compute_bound() + get_configs_io_bound()
-
-        def _tune(Ms: List[int], N: int, K: int, topk_experts: int):
-            configs = _distribute(
-                "tune",
-                [(M, E, N, K, topk_experts, dtype, search_space) for M in Ms])
-            best_configs = {
-                M: sort_config(config)
-                for M, config in zip(Ms, configs)
-            }
-            save_configs(best_configs, E, N, K, topk_experts, str(dtype))
-
-        logger.info("Start tuning over %d configurations...",
-                    len(search_space))
+        search_space = get_configs_compute_bound()
+        print(f"Start tuning over {len(search_space)} configurations...")
 
         start = time.time()
-        _tune(batch_sizes, 2 * shard_intermediate_size, hidden_size, topk)
+        configs = _distribute(
+            "tune", [(batch_size, E, shard_intermediate_size, hidden_size,
+                      topk, dtype, use_fp8, search_space)
+                     for batch_size in batch_sizes])
+        best_configs = {
+            M: sort_config(config)
+            for M, config in zip(batch_sizes, configs)
+        }
+        save_configs(best_configs, E, shard_intermediate_size, hidden_size,
+                     topk, str(dtype))
         end = time.time()
-        logger.info("Tuning took %.2f seconds", end - start)
+        print(f"Tuning took {end - start:.2f} seconds")
     else:
+        outputs = _distribute("benchmark",
+                              [(batch_size, E, shard_intermediate_size,
+                                hidden_size, topk, dtype, use_fp8)
+                               for batch_size in batch_sizes])
 
-        def _benchmark(Ms: List[int], N: int, K: int, topk_experts: int):
-            return _distribute("benchmark",
-                               [(M, E, N, K, topk_experts, dtype) for M in Ms])
-
-        outputs = _benchmark(batch_sizes, 2 * shard_intermediate_size,
-                             hidden_size, topk)
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
-            logger.info("Batch size: %d, config: %s", batch_size, config)
-            logger.info("Kernel time: %.2f us", kernel_time)
+            print(f"Batch size: {batch_size}, config: {config}")
+            print(f"Kernel time: {kernel_time:.2f} us")
 
 
 if __name__ == "__main__":
