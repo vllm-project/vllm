@@ -38,7 +38,7 @@ def test_clip_image_processor(hf_images, dtype):
             image,
             return_tensors="np",
         )
-        vllm_result = MULTIMODAL_REGISTRY.process_input(
+        vllm_result = MULTIMODAL_REGISTRY.map_input(
             ImagePixelData(image),
             model_config=model_config,
             vlm_config=vlm_config,
@@ -76,12 +76,12 @@ def test_image_pixel_types(hf_images, vllm_image_tensors, dtype):
     )
 
     for image, tensor in zip(hf_images, vllm_image_tensors):
-        image_result = MULTIMODAL_REGISTRY.process_input(
+        image_result = MULTIMODAL_REGISTRY.map_input(
             ImagePixelData(image),
             model_config=model_config,
             vlm_config=vlm_config,
         )
-        tensor_result = MULTIMODAL_REGISTRY.process_input(
+        tensor_result = MULTIMODAL_REGISTRY.map_input(
             ImagePixelData(tensor),
             model_config=model_config,
             vlm_config=vlm_config,

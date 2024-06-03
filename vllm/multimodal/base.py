@@ -32,8 +32,8 @@ class MultiModalData:
 D = TypeVar("D", bound=MultiModalData)
 N = TypeVar("N", bound=Type["nn.Module"])
 
-MultiModalInputProcessor = Callable[[D, ModelConfig, VisionLanguageConfig],
-                                    Dict[str, "torch.Tensor"]]
+MultiModalInputMapper = Callable[[D, ModelConfig, VisionLanguageConfig],
+                                 Dict[str, "torch.Tensor"]]
 """Return a dictionary to be passed as keyword arguments to
 :meth:`torch.nn.Module.forward`. This is similar in concept to tokenizers
 and processors in HuggingFace Transformers."""
@@ -51,8 +51,8 @@ class MultiModalPlugin(ABC, Generic[D]):
     """
 
     def __init__(self) -> None:
-        self._input_processors: Dict[Type["nn.Module"],
-                                     MultiModalInputProcessor[D]] = {}
+        self._input_mappers: Dict[Type["nn.Module"],
+                                  MultiModalInputMapper[D]] = {}
 
     @abstractmethod
     def get_data_type(self) -> Type[D]:
@@ -63,7 +63,7 @@ class MultiModalPlugin(ABC, Generic[D]):
         raise NotImplementedError
 
     @abstractmethod
-    def _default_input_processor(
+    def _default_input_mapper(
             self, data: D, model_config: ModelConfig,
             vlm_config: VisionLanguageConfig) -> Dict[str, "torch.Tensor"]:
         """Return a dictionary to be passed as keyword arguments to
@@ -72,39 +72,40 @@ class MultiModalPlugin(ABC, Generic[D]):
         """
         raise NotImplementedError
 
-    def register_input_processor(self,
-                                 processor: Optional[
-                                     MultiModalInputProcessor[D]] = None):
+    def register_input_mapper(
+        self,
+        mapper: Optional[MultiModalInputMapper[D]] = None,
+    ):
         """
-        Register an input processor to a model class.
+        Register an input mapper to a model class.
         
         When the model receives input data that matches the modality served by
-        this plugin (see :meth:`get_data_type`), the provided input processor is
-        applied to preprocess the data. If `None` is provided, then the default
-        input processor is applied instead.
+        this plugin (see :meth:`get_data_type`), the provided function is
+        invoked to transform the data into a dictionary of model inputs.
+        If `None` is provided, then the default input mapper is used instead.
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._input_processors:
+            if model_cls in self._input_mappers:
                 logger.warning(
-                    "Model class %s already has an input processor "
+                    "Model class %s already has an input mapper "
                     "registered to %s. It is overwritten by the new one.",
                     model_cls, self)
 
-            self._input_processors[model_cls] = processor \
-                or self._default_input_processor
+            self._input_mappers[model_cls] = mapper \
+                or self._default_input_mapper
 
             return model_cls
 
         return wrapper
 
-    def process_input(
+    def map_input(
             self, data: D, model_config: ModelConfig,
             vlm_config: VisionLanguageConfig) -> Dict[str, "torch.Tensor"]:
         """
-        Apply an input processor to a :class:`~MultiModalData` instance passed
-        to the model.
-        
+        Apply an input mapper to a :class:`~MultiModalData` instance passed
+        to the model, transforming the data into a dictionary of model inputs.
+
         The model is identified by ``model_config``. ``vlm_config`` is
         for compatibility purposes and may be merged into ``model_config``
         in the near future.
@@ -114,9 +115,9 @@ class MultiModalPlugin(ABC, Generic[D]):
 
         model_cls, _ = get_model_architecture(model_config)
 
-        processor = self._input_processors.get(model_cls)
-        if processor is None:
-            raise KeyError(f"No input processor in {self} is registered for "
+        mapper = self._input_mappers.get(model_cls)
+        if mapper is None:
+            raise KeyError(f"No input mapper in {self} is registered for "
                            f"model class {model_cls.__name__}.")
 
-        return processor(data, model_config, vlm_config)
+        return mapper(data, model_config, vlm_config)

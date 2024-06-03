@@ -6,6 +6,8 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 
+from .data import LLMInputs
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VisionLanguageConfig
     from vllm.multimodal import MultiModalData, MultiModalRegistry
@@ -19,6 +21,9 @@ N = TypeVar("N", bound=Type[nn.Module])
 DummyDataFactory = Callable[[int, "ModelConfig"],
                             Tuple["SequenceData", Optional["MultiModalData"]]]
 """Create dummy data to be inputted into the model."""
+
+InputProcessor = Callable[[LLMInputs], LLMInputs]
+"""Processes the inputs to the model."""
 
 C = TypeVar("C", bound=PretrainedConfig)
 

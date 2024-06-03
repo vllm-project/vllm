@@ -67,13 +67,13 @@ class CPUModelRunner:
 
         # Create processor for multi-modal data
         if self.vision_language_config is not None:
-            self.multi_modal_input_processor = INPUT_REGISTRY.MULTIMODAL \
-                .create_input_processor(
+            self.multi_modal_input_mapper = INPUT_REGISTRY.MULTIMODAL \
+                .create_input_mapper(
                     self.model_config,
                     self.vision_language_config,
                 )
         else:
-            self.multi_modal_input_processor = None
+            self.multi_modal_input_mapper = None
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
@@ -124,12 +124,12 @@ class CPUModelRunner:
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data is not None:
                 # Process multi-modal data
-                if self.multi_modal_input_processor is None:
+                if self.multi_modal_input_mapper is None:
                     raise ValueError(
                         "Multi-modal inputs are only supported by "
                         "vision language models.")
 
-                mm_kwargs = self.multi_modal_input_processor(mm_data)
+                mm_kwargs = self.multi_modal_input_mapper(mm_data)
                 for k, v in mm_kwargs.items():
                     multi_modal_kwargs_list[k].append(v)
 

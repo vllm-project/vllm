@@ -84,8 +84,8 @@ class LlavaImageFeatureInputs(TypedDict):
 LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
 
 
-@INPUT_REGISTRY.MULTIMODAL.register_image_feature_input()
-@INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input()
+@INPUT_REGISTRY.MULTIMODAL.register_image_feature_input_mapper()
+@INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(
     DummyImageDataFactories.for_model(LlavaConfig))
 class LlavaForConditionalGeneration(VisionLanguageModelBase):
