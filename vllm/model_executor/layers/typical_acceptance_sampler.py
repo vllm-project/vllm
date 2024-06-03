@@ -12,7 +12,6 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         Multiple Decoding Heads"
         https://arxiv.org/pdf/2401.10774
     """
-
     def __init__(
         self,
         disable_bonus_tokens: bool = False,
