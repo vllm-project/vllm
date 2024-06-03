@@ -6,7 +6,6 @@
 # Then, copy-paste this file into the docker and execute it using bash.
 
 set -xe
-export HF_TOKEN=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
 TRT_LLM_VERSION=r24.04
 model_path=meta-llama/llama-2-7b-chat-hf
 model_name=llama-2-7b-chat-hf
