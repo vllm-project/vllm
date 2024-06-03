@@ -148,8 +148,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         self.encoder_attn_bias: Optional[List[AttentionBias]] = None
         self.cross_attn_bias: Optional[List[AttentionBias]] = None
 
-        if self.is_all_encoder_attn_metadata_set:
-            self._maybe_compute_implicit_encoder_attrs()
+        # if self.is_all_encoder_attn_metadata_set:
+        #     self._maybe_compute_implicit_encoder_attrs()
 
     @property
     def is_all_encoder_attn_metadata_set(self):
@@ -194,14 +194,14 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             "Must set self.encoder_seq_lens, self.cross_slot_mapping, " + \
             "self.cross_block_tables in order to perform cross-attention"
 
-            self._maybe_compute_implicit_encoder_attrs()
+            # self._maybe_compute_implicit_encoder_attrs()
 
             self._attn_type = AttentionType.ENCODER_DECODER
         elif atype == AttentionType.ENCODER:
             assert self.is_all_encoder_attn_metadata_set, \
             "Must set self.encoder_seq_lens in order to perform cross-attention"
 
-            self._maybe_compute_implicit_encoder_attrs()
+            # self._maybe_compute_implicit_encoder_attrs()
 
             self._attn_type = AttentionType.ENCODER
         else:
@@ -346,26 +346,38 @@ def _set_attn_bias(attn_metadata: XFormersMetadata,
             f"Invalid attn_metadata.attention_type {str(attn_type)}")
 
 
-def _get_seq_len_block_table_args(attn_metadata: XFormersMetadata) -> tuple:
+def _get_seq_len_block_table_args(attn_metadata: XFormersMetadata, is_prompt: bool) -> tuple:
     '''
-    Extract appropriate attention bias from attention metadata
-    according to attention type.
+    The particular choice of sequence-length- and block-table-related
+    attributes which should be extracted from attn_metadata is dependent
+    on the type of attention operation.
 
-    Depends on attn_metadata having a valid attention_type.
-
+    Decoder attn -> select entirely decoder self-attention-related fields
+    Encoder/decoder cross-attn -> select encoder sequence lengths & 
+                                  cross-attn block-tables fields
+    Encoder attn -> select encoder sequence lengths fields & no block tables
+    
     Arguments:
 
-    * attn_metadata: Attention metadata structure associated with attention
+    * attn_metadata: Attention metadata structure associated with attention op
 
     Returns:
-    * Appropriate attention bias value
+
+    * Appropriate sequence-lengths tensor
+    * Appropriate max sequence-length scalar
+    * Appropriate block tables (or None)
     '''
 
     attn_type = attn_metadata.attention_type
     if attn_type == AttentionType.DECODER:
         # Decoder self-attention
+        # Choose max_seq_len based on whether we are in prompt_run
+        if is_prompt:
+            max_seq_len = attn_metadata.max_prefill_seq_len
+        else:
+            max_seq_len = attn_metadata.max_decode_seq_len
         return attn_metadata.seq_lens_tensor, \
-               attn_metadata.max_decode_seq_len, \
+               max_seq_len, \
                attn_metadata.block_tables
     elif attn_type == AttentionType.ENCODER_DECODER:
         # Enc/dec cross-attention KVs match encoder sequence length;
@@ -586,7 +598,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
             seq_lens_arg, \
             max_seq_len_arg,\
-            block_tables_arg = _get_seq_len_block_table_args(decode_meta)
+            block_tables_arg = _get_seq_len_block_table_args(decode_meta, False)
 
             output[num_prefill_tokens:] = PagedAttention.forward_decode(
                 decode_query,
@@ -630,7 +642,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # (seq_lens or encoder_seq_lens) is set.
         seq_lens, \
         _,\
-        _ = _get_seq_len_block_table_args(attn_metadata)
+        _ = _get_seq_len_block_table_args(attn_metadata, True)
         assert seq_lens is not None
 
         original_query = query

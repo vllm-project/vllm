@@ -373,6 +373,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
 def make_metadata_tensors(seq_lens: List[int],
                           context_lens: List[int],
+                          encoder_seq_lens: List[int],
                           device: Union[torch.device, str] = \
                             CUDA_DEVICE) -> tuple:
     '''
@@ -621,7 +622,7 @@ def make_test_metadata(
         context_lens_tensor, \
         _, \
         _, \
-        seq_start_loc = make_metadata_tensors(seq_lens,
+        _ = make_metadata_tensors(seq_lens,
                                               context_lens,
                                               device=device)
 
@@ -652,7 +653,7 @@ def make_test_metadata(
         context_lens_tensor, \
         _, \
         _, \
-        seq_start_loc = make_metadata_tensors(seq_lens,
+        _ = make_metadata_tensors(seq_lens,
                                               context_lens,
                                               device=device)
 
