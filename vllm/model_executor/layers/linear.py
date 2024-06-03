@@ -436,6 +436,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size = loaded_weight.shape[output_dim]
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
+            
+            # is_ggml_scales = getattr(param, "ggml_scales", False)
+            # if is_ggml_scales:
+            #     shard_size = loaded_weight.shape[output_dim]
+            #     shard_offset = loaded_weight.shape[output_dim] * \
+            #         loaded_shard_id
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)

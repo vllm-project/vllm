@@ -25,7 +25,10 @@ class GGMLConfig(QuantizationConfig):
         return "ggml"
 
     def get_supported_act_dtypes(self) -> List[torch.dtype]:
-        return [torch.half]
+        return [torch.half, torch.bfloat16]
+    
+    def get_min_capability(self) -> int:
+        return 70
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -46,14 +49,15 @@ class GGMLConfig(QuantizationConfig):
 
 
 class GGMLLinearMethod(LinearMethodBase):
-    """Linear method for AWQ.
+    """Linear method for GGML.
 
     Args:
-        quant_config: The AWQ quantization config.
+        quant_config: The GGML quantization config.
     """
 
     def __init__(self, quant_config: GGMLConfig):
         self.quant_config = quant_config
+        self.block_size = 32
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
@@ -63,22 +67,22 @@ class GGMLLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         quants = Parameter(torch.empty(output_size_per_partition,
                                        input_size_per_partition,
-                                       dtype=torch.int16),
+                                       dtype=torch.int8),
                            requires_grad=False)
-        set_weight_attrs(quants, {"input_dim": 0, "output_dim": 1})
+        set_weight_attrs(quants, {"input_dim": 1, "output_dim": 0})
         set_weight_attrs(quants, extra_weight_attrs)
         layer.register_parameter("quants", quants)
 
         scales = Parameter(
             torch.empty(
-                input_size_per_partition,
                 output_size_per_partition,
-                dtype=torch.float32,
+                input_size_per_partition//self.block_size,
+                dtype=params_dtype,
             ),
             requires_grad=False,
         )
-
-        layer.register_parameter("quants", quants)
+        set_weight_attrs(scales, {"input_dim": 1, "output_dim": 0, "ggml_scales": True})
+        set_weight_attrs(scales, extra_weight_attrs)
         layer.register_parameter("scales", scales)
 
     def apply(self,
@@ -86,8 +90,9 @@ class GGMLLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         # dequantized for Q4_0 and Q8_0
-        out = layer.quants * layer.scales
-        out = torch.matmul(x, out)
+        shape = layer.quants.shape
+        out = layer.quants.reshape(-1, self.block_size) * layer.scales.reshape(-1, 1)
+        out = torch.matmul(x, out.reshape(shape).T)
         if bias is not None:
             out.add_(bias)
         return out

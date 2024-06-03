@@ -28,8 +28,8 @@ def convert_tensor_q4_0(data):
     # Use hstack
     quants = np.hstack([ql, qr])
 
-    scales = torch.from_numpy(scales)
-    quants = torch.from_numpy(quants)
+    # scales = torch.from_numpy(scales)
+    # quants = torch.from_numpy(quants)
     return scales, quants
 
 
@@ -46,27 +46,27 @@ def convert_tensor_q8_0(data):
     )
     quants = np.frombuffer(data, dtype=np.int8).reshape(num_blocks, 2 + 32)[:, 2:]
 
-    scales = torch.from_numpy(scales)
-    quants = torch.from_numpy(quants)
+    # scales = torch.from_numpy(scales)
+    # quants = torch.from_numpy(quants)
     return scales, quants
 
 
-def load_gguf_tensor(shape, ggml_type, data):
+def load_gguf_tensor(tensor):
+    shape, ggml_type, data = tensor.shape, tensor.tensor_type, tensor.data
+
     scales = None
-    quants = load_dequant_gguf_tensor(shape, ggml_type, data)
+    if ggml_type == GGML_TYPES["Q8_0"] and "blk" in tensor.name:
+        scales, quants = convert_tensor_q8_0(data)
+    elif ggml_type == GGML_TYPES["Q4_0"] and "blk" in tensor.name:
+        scales, quants = convert_tensor_q4_0(data)
+    else:
+        quants = load_dequant_gguf_tensor(shape, ggml_type, data)
+        quants = torch.from_numpy(quants.copy())
+        return scales, quants
+    
+    scales_shape = (int(shape[0]//32), shape[1])
+    scales = scales.reshape(scales_shape[::-1])
+    quants = quants.reshape(shape[::-1])
+    scales = torch.from_numpy(scales.copy())
     quants = torch.from_numpy(quants.copy())
     return scales, quants
-    # FIXME (Isotr0py): This remained for ggml runtime dequantization
-    # if ggml_type == GGML_TYPES["Q8_0"]:
-    #     scales, quants = convert_tensor_q8_0(data)
-    # elif ggml_type == GGML_TYPES["Q4_0"]:
-    #     scales, quants = convert_tensor_q4_0(data)
-    # else:
-    #     quants = load_dequant_gguf_tensor(shape, ggml_type, data)
-    #     quants = torch.from_numpy(quants)
-    #     return scales, quants
-
-    # if scales is not None:
-    #     scales = scales.reshape(shape[::-1])
-    # quants = quants.reshape(shape[::-1])
-    # return scales, quants

@@ -16,6 +16,7 @@ from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
+from transformers.integrations.ggml import load_dequant_gguf_tensor
 
 from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
@@ -119,6 +120,9 @@ def convert_bin_to_safetensor_file(
 def get_quant_config(model_config: ModelConfig,
                      load_config: LoadConfig) -> QuantizationConfig:
     quant_cls = get_quantization_config(model_config.quantization)
+    # GGUF doesn't have config file
+    if model_config.quantization == "ggml":
+        return quant_cls()
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)
@@ -377,23 +381,32 @@ def pt_weights_iterator(
         torch.cuda.empty_cache()
 
 
-def gguf_weights_iterator(gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model gguf files."""
+def gguf_dequant_weights_iterator(gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """Iterate over the dequant weights in the model gguf files."""
     from gguf import GGUFReader
 
     reader = GGUFReader(gguf_file)
     for tensor in reader.tensors:
-        shape = tensor.shape
         name = tensor.name
-        scales, quants = load_gguf_tensor(
-            shape=shape, ggml_type=tensor.tensor_type, data=tensor.data
-        )
+        weights = load_dequant_gguf_tensor(tensor.shape, tensor.tensor_type, tensor.data)
+        weights = torch.from_numpy(weights.copy())
+        yield name, weights
+
+
+def gguf_quant_weights_iterator(gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """Iterate over the quant weights in the model gguf files."""
+    from gguf import GGUFReader
+
+    reader = GGUFReader(gguf_file)
+    for tensor in reader.tensors:
+        name = tensor.name
+        scales, quants = load_gguf_tensor(tensor)
         # for F32, scales is None
         if scales is not None and "weight" in name:
             scales_name = name.replace("weight", "scales")
             quants_name = name.replace("weight", "quants")
-            for param in zip([scales_name, quants_name], [scales, quants]):
-                yield name, param
+            for new_name, param in zip([scales_name, quants_name], [scales, quants]):
+                yield new_name, param
         else:
             yield name, quants
 

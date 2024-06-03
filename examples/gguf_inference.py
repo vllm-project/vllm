@@ -14,7 +14,8 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 llm = LLM(
     model="/data/LLM-model/TinyLlama-1.1B-Chat-v1.0-GGUF/tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
     tokenizer="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    load_format="gguf"
+    load_format="gguf",
+    quantization="ggml"
 )
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
