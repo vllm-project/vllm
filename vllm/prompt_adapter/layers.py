@@ -18,7 +18,7 @@ class PromptAdapterMapping:
 
 def apply_prompt_adapter(instance, hidden_states: torch.Tensor,
                          positions: torch.Tensor) -> torch.Tensor:
-    if hasattr(instance, 'prefix_encoder'):
+    if instance.prefix_encoder != None:
         soft_prompt = instance.prefix_encoder.prompt_embedding
         indices = (positions < soft_prompt.shape[0])
         hidden_states[indices] = soft_prompt[positions[indices]]
