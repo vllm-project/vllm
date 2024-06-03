@@ -1,9 +1,10 @@
+import functools
 from typing import (TYPE_CHECKING, Callable, Dict, Optional, Tuple, Type,
                     TypeVar)
-from typing_extensions import Concatenate, ParamSpec
 
 from torch import nn
 from transformers import PretrainedConfig
+from typing_extensions import Concatenate, ParamSpec
 
 from vllm.logger import init_logger
 
@@ -31,6 +32,7 @@ C = TypeVar("C", bound=PretrainedConfig)
 
 
 def _for_hf(hf_config_type: Type[C]):
+
     def wrapper(
         fn: Callable[Concatenate[C, P], R],
     ) -> Callable[Concatenate["ModelConfig", P], R]:
@@ -54,6 +56,7 @@ def _for_hf(hf_config_type: Type[C]):
 
 
 def _for_multimodal_hf(hf_config_type: Type[C]):
+
     def wrapper(
         factory: Callable[Concatenate["VisionLanguageConfig", C, P], R],
     ) -> Callable[Concatenate["ModelConfig", P], R]:
@@ -138,8 +141,8 @@ class InputProcessors:
         """
 
         def wrapper(
-            processor: Callable[[C, LLMInputs], LLMInputs],
-        ) -> InputProcessor:
+            processor: Callable[[C, LLMInputs],
+                                LLMInputs], ) -> InputProcessor:
             return _for_hf(hf_config_type)(processor)
 
         return wrapper
@@ -219,11 +222,8 @@ class InputRegistry:
 
         return wrapper
 
-    def dummy_data_for_profiling(
-        self,
-        model_config: "ModelConfig",
-        seq_len: int,
-    ):
+    def dummy_data_for_profiling(self, model_config: "ModelConfig",
+                                 seq_len: int):
         """Create dummy data for memory profiling."""
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
@@ -279,3 +279,10 @@ class InputRegistry:
                            f"model class {model_cls.__name__}.")
 
         return processor(model_config, inputs)
+
+    def create_input_processor(self, model_config: ModelConfig):
+        """
+        Create an input processor (see :meth:`process_input`) for a
+        specific model.
+        """
+        return functools.partial(self.process_input, model_config=model_config)
