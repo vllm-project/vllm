@@ -92,7 +92,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = layer.weight
-        if is_hip() and x.view(-1, x.size(-1)).shape[0] == 1:
+        if is_hip() and x.dtype == torch.float16 and x.view(-1, x.size(-1)).shape[0] == 1:
             batched = False
             if x.dim() == 3:
                 inp = x.view(-1, x.size(-1))
@@ -120,6 +120,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
             if bias is not None:
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
+        elif bias is not None:
+            return F.linear(x, weight, bias)
         return tgemm.mm(x, weight)
 
 
