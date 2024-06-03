@@ -195,66 +195,51 @@ def make_qkv(batch_size: int,
     actual_max_kv_seq_len = max(kv_seq_lens)
 
     query = torch.rand(
-        (batch_size, max_q_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_q_seq_len, num_heads, head_size)).to(device)
     key = torch.rand(
-        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads, head_size)).to(device)
     value = torch.rand(
-        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads, head_size)).to(device)
 
     prefill_query = torch.zeros(
-        (batch_size, max_q_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_q_seq_len, num_heads, head_size)).to(device)
     prefill_key = torch.zeros(
-        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads, head_size)).to(device)
     prefill_value = torch.zeros(
-        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads, head_size)).to(device)
 
     decode_query = torch.zeros(
-        (batch_size, 1, num_heads * head_size)).to(device)
-    decode_key = torch.zeros((batch_size, 1, num_heads * head_size)).to(device)
+        (batch_size, 1, num_heads, head_size)).to(device)
+    decode_key = torch.zeros((batch_size, 1, num_heads, head_size)).to(device)
     decode_value = torch.zeros(
-        (batch_size, 1, num_heads * head_size)).to(device)
+        (batch_size, 1, num_heads, head_size)).to(device)
 
     for bdx, (q_seq_len, kv_seq_len) in enumerate(zip(q_seq_lens,
                                                       kv_seq_lens)):
-        query[bdx, q_seq_len:, :] = 0
-        key[bdx, kv_seq_len:, :] = 0
-        value[bdx, kv_seq_len:, :] = 0
+        query[bdx, q_seq_len:, :, :] = 0
+        key[bdx, kv_seq_len:, :, :] = 0
+        value[bdx, kv_seq_len:, :, :] = 0
 
-        prefill_query[bdx, 0:(q_seq_len - 1), :] = query[bdx,
-                                                         0:(q_seq_len - 1), :]
-        prefill_key[bdx, 0:(kv_seq_len - 1), :] = key[bdx,
-                                                      0:(kv_seq_len - 1), :]
-        prefill_value[bdx,
-                      0:(kv_seq_len - 1), :] = value[bdx,
-                                                     0:(kv_seq_len - 1), :]
+        prefill_query[bdx,
+                      0:(q_seq_len - 1), :, :] = query[bdx,
+                                                       0:(q_seq_len - 1), :, :]
+        prefill_key[bdx,
+                    0:(kv_seq_len - 1), :, :] = key[bdx,
+                                                    0:(kv_seq_len - 1), :, :]
+        prefill_value[bdx, 0:(kv_seq_len -
+                              1), :, :] = value[bdx, 0:(kv_seq_len - 1), :, :]
 
-        decode_query[bdx, :, :] = query[bdx, (q_seq_len - 1):q_seq_len, :]
-        decode_key[bdx, :, :] = key[bdx, (kv_seq_len - 1):kv_seq_len, :]
-        decode_value[bdx, :, :] = value[bdx, (kv_seq_len - 1):kv_seq_len, :]
+        decode_query[bdx, :, :, :] = query[bdx,
+                                           (q_seq_len - 1):q_seq_len, :, :]
+        decode_key[bdx, :, :, :] = key[bdx, (kv_seq_len - 1):kv_seq_len, :, :]
+        decode_value[bdx, :, :, :] = value[bdx,
+                                           (kv_seq_len - 1):kv_seq_len, :, :]
 
     prefill_q_seq_lens = [plen - 1 for plen in q_seq_lens]
     prefill_kv_seq_lens = [plen - 1 for plen in kv_seq_lens]
 
     decode_q_seq_lens = [1 for _ in q_seq_lens]
     decode_kv_seq_lens = [1 for _ in kv_seq_lens]
-
-    query = query.view(batch_size, query.shape[1], num_heads, head_size)
-    key = key.view(batch_size, key.shape[1], num_heads, head_size)
-    value = value.view(batch_size, value.shape[1], num_heads, head_size)
-
-    prefill_query = prefill_query.view(batch_size, prefill_query.shape[1],
-                                       num_heads, head_size)
-    prefill_key = prefill_key.view(batch_size, prefill_key.shape[1], num_heads,
-                                   head_size)
-    prefill_value = prefill_value.view(batch_size, prefill_value.shape[1],
-                                       num_heads, head_size)
-
-    decode_query = decode_query.view(batch_size, decode_query.shape[1],
-                                     num_heads, head_size)
-    decode_key = decode_key.view(batch_size, decode_key.shape[1], num_heads,
-                                 head_size)
-    decode_value = decode_value.view(batch_size, decode_value.shape[1],
-                                     num_heads, head_size)
 
     return query, \
            key, \
