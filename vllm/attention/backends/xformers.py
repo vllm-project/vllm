@@ -112,10 +112,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     query_start_loc: Optional[torch.Tensor] = None
 
     # Self-attention prefill/decode metadata cache
-    _self_cached_prefill_metadata: Optional["XFormersMetadata"] = None
-    _self_cached_decode_metadata: Optional["XFormersMetadata"] = None
-    # Cross-attention prefill/decode metadata cache
-    _cross_cached_decode_metadata: Optional["XFormersMetadata"] = None
+    _cached_prefill_metadata: Optional["XFormersMetadata"] = None
+    _cached_decode_metadata: Optional["XFormersMetadata"] = None
 
     # Begin encoder attn & enc/dec cross-attn fields...
 
@@ -215,10 +213,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         if self.num_prefills == 0:
             return None
 
-        if self._self_cached_prefill_metadata is not None:
-            self._self_cached_prefill_metadata.attention_type = \
+        if self._cached_prefill_metadata is not None:
+            self._cached_prefill_metadata.attention_type = \
                 self.attention_type
-            return self._self_cached_prefill_metadata
+            return self._cached_prefill_metadata
 
         assert (self.seq_lens is not None) or \
             (self.encoder_seq_lens is not None)
@@ -230,7 +228,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         query_start_loc = None if self.query_start_loc is None \
             else self.query_start_loc[:self.num_prefills + 1]
 
-        self._self_cached_prefill_metadata = XFormersMetadata(
+        self._cached_prefill_metadata = XFormersMetadata(
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
@@ -254,22 +252,22 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
             cross_block_tables=self.cross_block_tables)
-        return self._self_cached_prefill_metadata
+        return self._cached_prefill_metadata
 
     @property
     def decode_metadata(self) -> Optional["XFormersMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
-        if self._self_cached_decode_metadata is not None:
-            self._self_cached_decode_metadata.attention_type = \
+        if self._cached_decode_metadata is not None:
+            self._cached_decode_metadata.attention_type = \
                 self.attention_type
-            return self._self_cached_decode_metadata
+            return self._cached_decode_metadata
         assert self.block_tables is not None
         assert (self.seq_lens_tensor is not None) or \
             (self.encoder_seq_lens_tensor is not None)
 
-        self._self_cached_decode_metadata = XFormersMetadata(
+        self._cached_decode_metadata = XFormersMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
@@ -292,7 +290,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
             cross_block_tables=self.cross_block_tables)
-        return self._self_cached_decode_metadata
+        return self._cached_decode_metadata
 
 def _get_attn_bias(attn_metadata: XFormersMetadata) -> \
     Optional[List[Optional[AttentionBias]]]:
