@@ -150,11 +150,25 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         self.attn_bias: Optional[List[AttentionBias]] = None
         self.encoder_attn_bias: Optional[List[AttentionBias]] = None
         self.cross_attn_bias: Optional[List[AttentionBias]] = None
+        
+        if self.is_all_encoder_attn_metadata_set:
+            self._maybe_compute_implicit_encoder_attrs()
+
+    @property
+    def is_all_encoder_attn_metadata_set(self):
+        '''
+        All attention metadata required for encoder attention is set.
+        '''
+        return self.encoder_seq_lens is not None
 
     @property
     def is_all_cross_attn_metadata_set(self):
-        # No cross-attention metadata is present whatsoever
-        return (self.encoder_seq_lens is not None) and \
+        '''
+        All attention metadata required for enc/dec cross-attention is set.
+
+        Superset of encoder attention required metadata.
+        '''
+        return self.is_all_encoder_attn_metadata_set and \
                (self.cross_slot_mapping is not None) and \
                (self.cross_block_tables is not None)
 
@@ -162,27 +176,40 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     def attention_type(self) -> AttentionType:
         return self._attn_type
 
+    def _maybe_compute_implicit_encoder_attrs(self):
+        '''
+        Encoder attention and cross-attention require some encoder-related
+        metadata attributes which may or may not be been provided by the user.
+        This method infers the implicit attributes from provided attributes
+        '''
+        if self.encoder_seq_lens_tensor is None:
+            assert self.seq_lens_tensor is not None
+            self.encoder_seq_lens_tensor = torch.tensor(
+                self.encoder_seq_lens,
+                dtype=self.seq_lens_tensor.dtype,
+                device=self.seq_lens_tensor.device)
+        if self.max_encoder_seq_len is None:
+            assert self.encoder_seq_lens is not None
+            self.max_encoder_seq_len = max(self.encoder_seq_lens)
+
     @attention_type.setter
     def attention_type(self, atype: AttentionType) -> None:
 
         if atype == AttentionType.ENCODER_DECODER:
             assert self.is_all_cross_attn_metadata_set, \
-            "Must enable self.cross_seq_lens, self.cross_slot_mapping, " + \
+            "Must set self.encoder_seq_lens, self.cross_slot_mapping, " + \
             "self.cross_block_tables in order to perform cross-attention"
 
-            # Infer implicit cross-attention fields
-            # from user-provided fields, if needed
-            if self.encoder_seq_lens_tensor is None:
-                assert self.seq_lens_tensor is not None
-                self.encoder_seq_lens_tensor = torch.tensor(
-                    self.encoder_seq_lens,
-                    dtype=self.seq_lens_tensor.dtype,
-                    device=self.seq_lens_tensor.device)
-            if self.max_encoder_seq_len is None:
-                assert self.encoder_seq_lens is not None
-                self.max_encoder_seq_len = max(self.encoder_seq_lens)
+            self._maybe_compute_implicit_encoder_attrs()
 
             self._attn_type = AttentionType.ENCODER_DECODER
+        elif atype == AttentionType.ENCODER:
+            assert self.is_all_encoder_attn_metadata_set, \
+            "Must set self.encoder_seq_lens in order to perform cross-attention"
+
+            self._maybe_compute_implicit_encoder_attrs()
+
+            self._attn_type = AttentionType.ENCODER
         else:
             # AttentionType.{ENCODER,DECODER}
             self._attn_type = atype
@@ -224,9 +251,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 use_cuda_graph=False,
                 _attn_type=self.
                 _attn_type,  # Begin cross-attention fields below...
-                encoder_seq_lens=None,
-                encoder_seq_lens_tensor=None,
-                max_encoder_seq_len=None,
+                encoder_seq_lens=self.encoder_seq_lens,
+                encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
+                max_encoder_seq_len=self.max_encoder_seq_len,
                 cross_block_tables=None,
                 cross_slot_mapping=None)
             return self._self_cached_prefill_metadata
@@ -300,9 +327,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 use_cuda_graph=self.use_cuda_graph,
                 _attn_type=self.
                 _attn_type,  # Begin cross-attention fields below...
-                encoder_seq_lens=None,
-                encoder_seq_lens_tensor=None,
-                max_encoder_seq_len=None,
+                encoder_seq_lens=self.encoder_seq_lens,
+                encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
+                max_encoder_seq_len=self.max_encoder_seq_len,
                 cross_block_tables=None,
                 cross_slot_mapping=None)
             return self._self_cached_decode_metadata
@@ -393,7 +420,7 @@ def _set_attn_bias(attn_metadata: XFormersMetadata,
             f"Invalid attn_metadata.attention_type {str(attn_type)}")
 
 
-def _get_paged_attention_args(attn_metadata: XFormersMetadata) -> tuple:
+def _get_seq_len_block_table_args(attn_metadata: XFormersMetadata) -> tuple:
     '''
     Extract appropriate attention bias from attention metadata
     according to attention type.
@@ -633,7 +660,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
             seq_lens_arg, \
             max_seq_len_arg,\
-            block_tables_arg = _get_paged_attention_args(decode_meta)
+            block_tables_arg = _get_seq_len_block_table_args(decode_meta)
 
             output[num_prefill_tokens:] = PagedAttention.forward_decode(
                 decode_query,
@@ -672,7 +699,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             value: shape = [num_prefill_tokens, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         """
-        assert attn_metadata.seq_lens is not None
+
+        # Enforce that the appropriate *_seq_lens attribute of attn_metadata
+        # (seq_lens or encoder_seq_lens) is set.
+        seq_lens, \
+        _,\
+        _ = _get_seq_len_block_table_args(attn_metadata)
+        assert seq_lens is not None
+
         original_query = query
         if self.num_kv_heads != self.num_heads:
             # GQA/MQA requires the shape [B, M, G, H, K].

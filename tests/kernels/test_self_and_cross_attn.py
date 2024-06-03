@@ -1278,6 +1278,7 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
             block_tables,
             slot_mapping,
             is_encoder_only_test=True,
+            encoder_seq_lens=q_seq_lens
         )
 
         packed_actual_output: torch.Tensor = \
