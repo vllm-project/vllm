@@ -1,10 +1,10 @@
 """Kernel test utils"""
 
-from tests.utils import env_var_fixture
 from contextlib import contextmanager
 from typing import Iterator
 
-# Configure 
+from tests.utils import env_var_fixture
+
 
 @contextmanager
 def backend_override_fixture(backend_name: str) -> Iterator[None]:
@@ -22,4 +22,4 @@ def backend_override_fixture(backend_name: str) -> Iterator[None]:
         # or unset
     '''
     with env_var_fixture('VLLM_ATTENTION_BACKEND', backend_name):
-        yield  # Control is yielded to the enclosed block, environment variable is set
+        yield

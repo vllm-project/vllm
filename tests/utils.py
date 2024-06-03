@@ -4,7 +4,6 @@ import sys
 import time
 import warnings
 from contextlib import contextmanager
-
 from typing import Iterator
 
 import ray
@@ -103,6 +102,7 @@ def error_on_warning():
         warnings.simplefilter("error")
 
         yield
+
 
 @contextmanager
 def env_var_fixture(var_name: str, value: str) -> Iterator[None]:

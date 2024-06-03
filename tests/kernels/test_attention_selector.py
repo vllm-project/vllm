@@ -3,8 +3,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.attention.selector import which_attn_to_use
 from tests.kernels.utils import backend_override_fixture
+from vllm.attention.selector import which_attn_to_use
 
 
 @pytest.mark.parametrize(
@@ -40,11 +40,13 @@ def test_flash_attn():
 
         # Unsupported CUDA arch
         with patch("torch.cuda.get_device_capability", return_value=[7, 5]):
-            backend = which_attn_to_use(8, 16, 8, None, torch.float16, None, 16)
+            backend = which_attn_to_use(8, 16, 8, None, torch.float16, None,
+                                        16)
             assert backend.name != "FLASH_ATTN"
 
         # Unsupported data type
-        backend = which_attn_to_use(8, 16, 8, None, torch.float8_e4m3fn, None, 16)
+        backend = which_attn_to_use(8, 16, 8, None, torch.float8_e4m3fn, None,
+                                    16)
         assert backend.name != "FLASH_ATTN"
 
         # Unsupported kv cache data type
@@ -61,7 +63,8 @@ def test_flash_attn():
 
         # flash-attn is not installed
         with patch.dict('sys.modules', {'vllm_flash_attn': None}):
-            backend = which_attn_to_use(8, 16, 8, None, torch.float16, None, 16)
+            backend = which_attn_to_use(8, 16, 8, None, torch.float16, None,
+                                        16)
             assert backend.name != "FLASH_ATTN"
 
         # Unsupported head size
@@ -73,4 +76,4 @@ def test_invalid_env():
     """Throw an exception if the backend name is invalid."""
 
     with backend_override_fixture("INVALID"), pytest.raises(ValueError):
-            which_attn_to_use(8, 16, 8, None, torch.float16, None, 16)
+        which_attn_to_use(8, 16, 8, None, torch.float16, None, 16)
