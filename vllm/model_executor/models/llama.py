@@ -438,7 +438,7 @@ class LlamaForCausalLM(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
                 
-    def load_ammo_quantized_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_quantized_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
         #with open("/projects/a.txt", "r") as f:
         #    j = json.load(f)
