@@ -50,13 +50,6 @@ class MultiModalPlugin(ABC, Generic[D]):
     (i.e., the modality of the data).
     """
 
-    @classmethod
-    def get_model_cls(cls, model_config: ModelConfig) -> Type["nn.Module"]:
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_architecture
-
-        return get_model_architecture(model_config)[0]
-
     def __init__(self) -> None:
         self._input_processors: Dict[Type["nn.Module"],
                                      MultiModalInputProcessor[D]] = {}
@@ -116,7 +109,10 @@ class MultiModalPlugin(ABC, Generic[D]):
         for compatibility purposes and may be merged into ``model_config``
         in the near future.
         """
-        model_cls = self.get_model_cls(model_config)
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_architecture
+
+        model_cls, _ = get_model_architecture(model_config)
 
         processor = self._input_processors.get(model_cls)
         if processor is None:

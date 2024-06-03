@@ -1,9 +1,14 @@
-from typing import Dict, Tuple, Type, Union
+from typing import Dict, Optional, Tuple, Type, Union
 
 import torch
 from PIL import Image
+from transformers import (CLIPVisionConfig, LlavaConfig, LlavaNextConfig,
+                          PretrainedConfig)
+from transformers.models.llava_next.modeling_llava_next import (
+    get_anyres_image_grid_shape)
 
 from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.inputs.registry import DummyDataFactories, DummyDataFactory
 from vllm.logger import init_logger
 from vllm.sequence import SequenceData
 from vllm.transformers_utils.image_processor import cached_get_image_processor
@@ -13,49 +18,185 @@ from .base import MultiModalData, MultiModalPlugin
 logger = init_logger(__name__)
 
 
-def _get_dummy_seq_data(seq_len: int,
-                        vlm_config: VisionLanguageConfig) -> SequenceData:
+def _get_dummy_seq_data(
+    *,
+    seq_len: int,
+    image_token_id: int,
+    image_feature_size: int,
+) -> SequenceData:
     # NOTE: We assume that <image> token is repeated `image_feature_size` times
     # and then concatenated with the text prompt
     # TODO: Enable other ways of inserting the image into the prompt
 
-    token_ids = [vlm_config.image_token_id] * vlm_config.image_feature_size
-    token_ids += [0] * (seq_len - vlm_config.image_feature_size)
+    token_ids = [image_token_id] * image_feature_size
+    token_ids += [0] * (seq_len - image_feature_size)
 
     return SequenceData(token_ids)
 
 
-def _get_dummy_values(vlm_config: VisionLanguageConfig) -> torch.Tensor:
-    if vlm_config.image_processor is None:
-        values_dtype = torch.float16
-    else:
-        values_dtype = torch.uint8
+class DummyImageDataFactories:
 
-    return torch.zeros(vlm_config.image_input_shape, dtype=values_dtype)
+    @classmethod
+    def _get_clip_num_patches(
+        cls,
+        hf_config: CLIPVisionConfig,
+    ) -> int:
+        image_size = hf_config.image_size
+        patch_size = hf_config.patch_size
 
+        assert image_size % patch_size == 0
+        return image_size // patch_size
 
-def get_dummy_image_data(
-    seq_len: int,
-    model_config: ModelConfig,
-    vlm_config: VisionLanguageConfig,
-) -> Tuple[SequenceData, MultiModalData]:
-    """Standard dummy data factory for image data (to be used in
-    :meth:`vlm.multimodal.MultiModalRegistry.register_dummy_data`)."""
-    seq_data = _get_dummy_seq_data(seq_len, vlm_config)
-    values = _get_dummy_values(vlm_config)
+    @classmethod
+    def _dummy_data_for_clip(
+        cls,
+        seq_len: int,
+        multimodal_config: VisionLanguageConfig,
+        hf_config: CLIPVisionConfig,
+        *,
+        image_token_id: int,
+        image_feature_size_override: Optional[int] = None,
+    ):
+        if image_feature_size_override is None:
+            num_patches = cls._get_clip_num_patches(hf_config)
+            image_feature_size = num_patches * num_patches
+        else:
+            image_feature_size = image_feature_size_override
 
-    config_input_type = vlm_config.image_input_type
-    ImageInputType = VisionLanguageConfig.ImageInputType
+        seq_data = _get_dummy_seq_data(
+            seq_len=seq_len,
+            image_token_id=image_token_id,
+            image_feature_size=image_feature_size,
+        )
 
-    fake_mm_data: MultiModalData
-    if config_input_type == ImageInputType.PIXEL_VALUES:
-        fake_mm_data = ImagePixelData(values)
-    elif config_input_type == ImageInputType.IMAGE_FEATURES:
-        fake_mm_data = ImageFeatureData(values)
-    else:
-        raise NotImplementedError
+        image_input_type = multimodal_config.image_input_type
+        ImageInputType = VisionLanguageConfig.ImageInputType
+        multi_modal_data: MultiModalData
+        if image_input_type == ImageInputType.PIXEL_VALUES:
+            width = height = hf_config.image_size
+            if multimodal_config.image_processor is None:
+                values_dtype = torch.float16
+            else:
+                values_dtype = torch.uint8
 
-    return seq_data, fake_mm_data
+            values = torch.zeros((1, 3, width, height), dtype=values_dtype)
+            multi_modal_data = ImagePixelData(values)
+        elif image_input_type == ImageInputType.IMAGE_FEATURES:
+            depth = hf_config.hidden_size
+            values_dtype = torch.float16
+
+            values = torch.zeros((1, image_feature_size, depth),
+                                 dtype=values_dtype)
+            multi_modal_data = ImageFeatureData(values)
+
+        return seq_data, multi_modal_data
+
+    @classmethod
+    def _dummy_data_for_llava(
+        cls,
+        seq_len: int,
+        multimodal_config: VisionLanguageConfig,
+        hf_config: LlavaConfig,
+    ):
+        vision_config = hf_config.vision_config
+
+        if isinstance(vision_config, CLIPVisionConfig):
+            return cls._dummy_data_for_clip(
+                seq_len=seq_len,
+                multimodal_config=multimodal_config,
+                hf_config=vision_config,
+                image_token_id=hf_config.image_token_index,
+            )
+
+        msg = f"Unsupported vision config: {type(vision_config)}"
+        raise NotImplementedError(msg)
+
+    @classmethod
+    def _get_llava_next_num_unpadded_features(
+        cls,
+        height: int,
+        width: int,
+        npatches: int,
+        num_patch_height: int,
+        num_patch_width: int,
+    ) -> Tuple[int, int]:
+        # Taken from: https://github.com/huggingface/text-generation-inference/blob/799a193b109662743bed1b18a09af1fdcd508c8b/server/text_generation_server/models/vlm_causal_lm.py#L111
+        current_height = npatches * num_patch_height
+        current_width = npatches * num_patch_width
+
+        aspect_ratio: float = width / height
+        current_aspect_ratio: float = current_width / current_height
+        if aspect_ratio > current_aspect_ratio:
+            new_height = (height * current_width) // width
+            current_height = new_height
+        else:
+            new_width = (width * current_height) // height
+            current_width = new_width
+
+        unpadded_features = current_height * current_width
+        newline_features = current_height
+        return (unpadded_features, newline_features)
+
+    @classmethod
+    def _dummy_data_for_llava_next(
+        cls,
+        seq_len: int,
+        multimodal_config: VisionLanguageConfig,
+        hf_config: LlavaNextConfig,
+    ):
+        vision_config = hf_config.vision_config
+
+        if isinstance(vision_config, CLIPVisionConfig):
+            num_patches = cls._get_clip_num_patches(vision_config)
+            base_feature_size = num_patches * num_patches
+
+            # Results in the max possible feature size
+            dummy_height, dummy_width = 448, 448
+            num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+                image_size=(dummy_height, dummy_width),
+                grid_pinpoints=hf_config.image_grid_pinpoints,
+                patch_size=vision_config.image_size,
+            )
+
+            (
+                unpadded_feature_size,
+                newline_feature_size,
+            ) = cls._get_llava_next_num_unpadded_features(
+                dummy_height,
+                dummy_width,
+                num_patches,
+                num_patch_height,
+                num_patch_width,
+            )
+
+            image_feature_size = unpadded_feature_size + newline_feature_size \
+                + base_feature_size
+
+            return cls._dummy_data_for_clip(
+                seq_len=seq_len,
+                multimodal_config=multimodal_config,
+                hf_config=vision_config,
+                image_token_id=hf_config.image_token_index,
+                image_feature_size_override=image_feature_size,
+            )
+
+        msg = f"Unsupported vision config: {type(vision_config)}"
+        raise NotImplementedError(msg)
+
+    @classmethod
+    def for_model(
+        cls,
+        hf_config_type: Type[PretrainedConfig],
+    ) -> DummyDataFactory:
+        if hf_config_type == LlavaConfig:
+            return DummyDataFactories.for_multimodal_hf(LlavaConfig) \
+                (cls._dummy_data_for_llava)
+        if hf_config_type == LlavaNextConfig:
+            return DummyDataFactories.for_multimodal_hf(LlavaNextConfig) \
+                (cls._dummy_data_for_llava_next)
+
+        msg = f"Unsupported model config: {type(hf_config_type)}"
+        raise NotImplementedError(msg)
 
 
 class ImagePixelData(MultiModalData):

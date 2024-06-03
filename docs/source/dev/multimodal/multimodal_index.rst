@@ -24,9 +24,7 @@ Module Contents
 Registry
 --------
 
-.. data:: vllm.multimodal.MULTIMODAL_REGISTRY
-
-    The global :class:`MultiModalRegistry` which is used by model runners.
+.. autodata:: vllm.multimodal.MULTIMODAL_REGISTRY
 
 .. autoclass:: vllm.multimodal.MultiModalRegistry
     :members:
