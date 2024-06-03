@@ -5,12 +5,11 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence,
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.logger import init_logger
 
-from .base import MultiModalData, MultiModalPlugin
+from .base import MultiModalData, MultiModalInputProcessor, MultiModalPlugin
 from .image import (ImageFeatureData, ImageFeaturePlugin, ImagePixelData,
                     ImagePixelPlugin)
 
 if TYPE_CHECKING:
-    import torch
     from torch import nn
 
     from vllm.sequence import SequenceData
@@ -20,8 +19,6 @@ logger = init_logger(__name__)
 D = TypeVar("D", bound=MultiModalData)
 N = TypeVar("N", bound=Type["nn.Module"])
 
-MultiModalInputProcessor = Callable[[D, ModelConfig, VisionLanguageConfig],
-                                    Dict[str, "torch.Tensor"]]
 MultiModalDummyFactory = Callable[[int, ModelConfig, VisionLanguageConfig],
                                   Tuple["SequenceData", MultiModalData]]
 
