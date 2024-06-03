@@ -1,7 +1,8 @@
 from typing import Dict, Optional
 
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
+from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MPTConfig, RWConfig)
@@ -24,11 +25,20 @@ def get_config(model: str,
                code_revision: Optional[str] = None,
                rope_scaling: Optional[dict] = None) -> PretrainedConfig:
     try:
-        config = AutoConfig.from_pretrained(
-            model,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            code_revision=code_revision)
+        if VLLM_USE_MODELSCOPE:
+            from modelscope import AutoConfig
+            config = AutoConfig.from_pretrained(
+                model,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+                code_revision=code_revision)
+        else:
+            from transformers import AutoConfig
+            config = AutoConfig.from_pretrained(
+                model,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+                code_revision=code_revision)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
