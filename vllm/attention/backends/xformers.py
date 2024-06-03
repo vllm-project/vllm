@@ -363,9 +363,11 @@ def _get_attn_bias(attn_metadata: XFormersMetadata) -> \
     elif attn_type == AttentionType.ENCODER_DECODER:
         return attn_metadata.cross_attn_bias
     else:
-        raise AttributeError(f"Invalid attn_metadata.attention_type {attn_type}")
+        raise AttributeError(
+            f"Invalid attn_metadata.attention_type {attn_type}")
 
-def _set_attn_bias(attn_metadata: XFormersMetadata, 
+
+def _set_attn_bias(attn_metadata: XFormersMetadata,
                    attn_bias: List[Optional[AttentionBias]]) -> None:
     '''
     Update appropriate attention bias field of attention metadata,
@@ -387,7 +389,9 @@ def _set_attn_bias(attn_metadata: XFormersMetadata,
     elif attn_type == AttentionType.ENCODER_DECODER:
         attn_metadata.cross_attn_bias = attn_bias
     else:
-        raise AttributeError(f"Invalid attn_metadata.attention_type {attn_type}")
+        raise AttributeError(
+            f"Invalid attn_metadata.attention_type {attn_type}")
+
 
 class XFormersImpl(AttentionImpl[XFormersMetadata]):
     """
@@ -677,11 +681,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                         self.sliding_window)
                 attn_bias = [attn_bias]
             else:
-                attn_bias = _make_alibi_bias(
-                    self.alibi_slopes, self.num_kv_heads, query.dtype,
-                    attn_metadata.seq_lens)
+                attn_bias = _make_alibi_bias(self.alibi_slopes,
+                                             self.num_kv_heads, query.dtype,
+                                             attn_metadata.seq_lens)
 
-            _set_attn_bias(attn_metadata,attn_bias)
+            _set_attn_bias(attn_metadata, attn_bias)
 
         # No alibi slopes.
         # TODO(woosuk): Too many view operations. Let's try to reduce
@@ -712,7 +716,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 query[None, start:end],
                 key[None, start:end],
                 value[None, start:end],
-                attn_bias=attn_metadata.attn_bias[i],
+                attn_bias=attn_bias[i],
                 p=0.0,
                 scale=self.scale)
             # TODO(woosuk): Unnecessary copy. Optimize.
