@@ -11,9 +11,9 @@ from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.utils import (
     STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL, STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 from vllm.attention.backends.xformers import XFormersBackend
+from vllm.logger import init_logger
 from vllm.utils import is_hip, make_tensor_with_pad
 
-from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 # If not is_hip(): supported head sizes are [64, 80, 96, 112, 128, 256]
@@ -1282,8 +1282,9 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     '''
 
     import vllm.envs as envs
-    print("envs.VLLM_ATTENTION_BACKEND: "+str(envs.VLLM_ATTENTION_BACKEND))
-    logger.info("envs.VLLM_ATTENTION_BACKEND: "+str(envs.VLLM_ATTENTION_BACKEND))
+    print("envs.VLLM_ATTENTION_BACKEND: " + str(envs.VLLM_ATTENTION_BACKEND))
+    logger.info("envs.VLLM_ATTENTION_BACKEND: ",
+                str(envs.VLLM_ATTENTION_BACKEND))
 
     # Attention scale factor, attention backend instance, attention wrapper
     # instance. Encoder attention does not require KV cache.
