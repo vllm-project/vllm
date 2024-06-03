@@ -103,5 +103,5 @@ The inputs to the LLM, which can take one of the following forms:
 
 class LLMInputs(TypedDict):
     prompt_token_ids: List[int]
-    prompt: Optional[str]
-    multi_modal_data: Optional["MultiModalData"]
+    prompt: NotRequired[Optional[str]]
+    multi_modal_data: NotRequired[Optional["MultiModalData"]]

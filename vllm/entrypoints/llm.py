@@ -13,7 +13,6 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
@@ -28,12 +27,6 @@ class LLM:
     states (aka KV cache). Given a batch of prompts and sampling parameters,
     this class generates texts from the model, using an intelligent batching
     mechanism and efficient memory management.
-
-    NOTE: This class is intended to be used for offline inference. For online
-    serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
-
-    NOTE: For the comprehensive list of arguments, see
-    :class:`~vllm.EngineArgs`.
 
     Args:
         model: The name or path of a HuggingFace Transformers model.
@@ -83,6 +76,12 @@ class LLM:
             When a sequence has context length larger than this, we fall back
             to eager mode.
         disable_custom_all_reduce: See ParallelConfig
+        **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
+            :ref:`engine_args`)
+    
+    Note:
+        This class is intended to be used for offline inference. For online
+        serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
     """
 
     DEPRECATE_LEGACY: ClassVar[bool] = False
@@ -163,7 +162,6 @@ class LLM:
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -176,7 +174,6 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -190,7 +187,6 @@ class LLM:
         prompt_token_ids: List[int],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -204,7 +200,6 @@ class LLM:
         prompt_token_ids: List[List[int]],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -216,7 +211,6 @@ class LLM:
         prompt_token_ids: Union[List[int], List[List[int]]],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -235,7 +229,6 @@ class LLM:
 
     @deprecate_kwargs("prompts",
                       "prompt_token_ids",
-                      "multi_modal_data",
                       is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
                       additional_message="Please use the 'inputs' parameter "
                       "instead.")
@@ -248,11 +241,10 @@ class LLM:
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
-        NOTE: This class automatically batches the given prompts, considering
+        This class automatically batches the given prompts, considering
         the memory constraint. For the best performance, put all of your prompts
         into a single list and pass it to this method.
 
@@ -269,12 +261,21 @@ class LLM:
         Returns:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
+
+        Note:
+            Using ``prompts`` and ``prompt_token_ids`` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the ``inputs`` parameter.
         """
-        if prompt_token_ids is not None or multi_modal_data is not None:
+        if self.llm_engine.model_config.embedding_mode:
+            raise ValueError(
+                "LLM.generate() is only supported for generation models "
+                "(XForCausalLM).")
+
+        if prompt_token_ids is not None:
             inputs = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
             )
         else:
             inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], prompts)
@@ -301,7 +302,6 @@ class LLM:
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -314,7 +314,6 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -328,7 +327,6 @@ class LLM:
         prompt_token_ids: List[int],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -342,7 +340,6 @@ class LLM:
         prompt_token_ids: List[List[int]],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -354,7 +351,6 @@ class LLM:
         prompt_token_ids: Union[List[int], List[List[int]]],
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -373,7 +369,6 @@ class LLM:
 
     @deprecate_kwargs("prompts",
                       "prompt_token_ids",
-                      "multi_modal_data",
                       is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
                       additional_message="Please use the 'inputs' parameter "
                       "instead.")
@@ -386,11 +381,10 @@ class LLM:
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         """Generates the completions for the input prompts.
 
-        NOTE: This class automatically batches the given prompts, considering
+        This class automatically batches the given prompts, considering
         the memory constraint. For the best performance, put all of your prompts
         into a single list and pass it to this method.
 
@@ -406,12 +400,21 @@ class LLM:
         Returns:
             A list of `EmbeddingRequestOutput` objects containing the
             generated embeddings in the same order as the input prompts.
+
+        Note:
+            Using ``prompts`` and ``prompt_token_ids`` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the ``inputs`` parameter.
         """
-        if prompt_token_ids is not None or multi_modal_data is not None:
+        if not self.llm_engine.model_config.embedding_mode:
+            raise ValueError(
+                "LLM.encode() is only supported for embedding models (XModel)."
+            )
+
+        if prompt_token_ids is not None:
             inputs = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
             )
         else:
             inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], prompts)
@@ -434,7 +437,6 @@ class LLM:
         self,
         prompts: Optional[Union[str, List[str]]],
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]],
-        multi_modal_data: Optional[MultiModalData],
     ):
         # skip_tokenizer_init is now checked in engine
 
@@ -467,9 +469,6 @@ class LLM:
                 item = TokensPrompt(prompt_token_ids=prompt_token_ids[i])
             else:
                 raise AssertionError
-
-            if multi_modal_data is not None:
-                item["multi_modal_data"] = multi_modal_data
 
             inputs.append(item)
 
