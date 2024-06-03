@@ -993,11 +993,11 @@ class Scheduler:
                 lora_request=seq_group.lora_request,
                 computed_block_nums=common_computed_block_nums,
                 state=seq_group.state,
-                # `multi_modal_kwargs` will only be present for the 1st comm
+                # `multi_modal_data` will only be present for the 1st comm
                 # between engine and worker.
                 # the subsequent comms can still use delta, but
-                # `multi_modal_kwargs` will be None.
-                multi_modal_kwargs=seq_group.multi_modal_kwargs
+                # `multi_modal_data` will be None.
+                multi_modal_data=seq_group.multi_modal_data
                 if scheduler_outputs.num_prefill_groups > 0 else None,
             )
             seq_group_metadata_list.append(seq_group_metadata)

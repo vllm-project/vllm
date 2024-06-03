@@ -43,7 +43,8 @@ _IMAGE_PROMPTS = [
     "<image>\nUSER: What's the content of the image?\nASSISTANT:",
     "<image>\nUSER: What is the season?\nASSISTANT:"
 ]
-assert len(_IMAGE_FEATURES_FILES) == len(_IMAGE_FILES) == len(_IMAGE_PROMPTS)
+assert len(_PIXEL_VALUES_FILES) == len(_IMAGE_FEATURES_FILES) == len(
+    _IMAGE_FILES) == len(_IMAGE_PROMPTS)
 
 
 def _read_prompts(filename: str) -> List[str]:
