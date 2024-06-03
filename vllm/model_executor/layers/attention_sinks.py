@@ -225,7 +225,7 @@ class StreamingAttentionSink(nn.Module):
                     block_tables.append(capped_block_table)
 
                     # cap number of tokens to consider with model context len
-                    attn_metadata.seq_lens_tensor[i] = model_context_len
+                    attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
                     positions[i] = model_context_len - 1
                 else:
                     block_tables.append(block_table.tolist())

@@ -93,9 +93,6 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
-        if self.use_attention_sinks and self.speculative_model:
-            raise NotImplementedError('Attention sinks are not supported '
-                                      'with speculative decoding currently.')
 
     @staticmethod
     def add_cli_args(

@@ -34,7 +34,8 @@ ATTENTION_SINKS_MODELS = {
     "LlamaForCausalLM",
     "MixtralForCausalLM",
     "FalconForCausalLM",
-    "BloomForCausalLM"
+    "BloomForCausalLM",
+    "MPTForCausalLM"
 }
 
 
@@ -352,7 +353,8 @@ class TensorizerLoader(BaseModelLoader):
                 quant_config = _get_quantization_config(
                     model_config, self.load_config)
                 extra_kwargs = _get_model_initialization_kwargs(
-                    model_class, lora_config, vision_language_config)
+                    model_class, lora_config, vision_language_config,
+                    model_config.use_attention_sinks)
                 extra_kwargs["quant_config"] = quant_config
                 extra_kwargs["cache_config"] = cache_config
 

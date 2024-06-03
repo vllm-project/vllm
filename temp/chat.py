@@ -1,11 +1,12 @@
 import json
 from typing import List, Tuple
-from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
+import os
 from transformers import AutoTokenizer
 from huggingface_hub import login
+from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 
 
-login(token='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')
+login(token=os.environ.get("HF_TOKEN"))
 MAX_GEN_TOKENS = 1000
 
 
@@ -57,11 +58,13 @@ def process_requests(engine: LLMEngine,
 
 def main():
     model = "meta-llama/Llama-2-13b-chat-hf"
-    model = "lmsys/vicuna-7b-v1.5"
     model = "mistralai/Mixtral-8x7B-Instruct-v0.1" # TODO
     model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
-    model = "tiiuae/falcon-7b-instruct" # alibi is garbage
-    model = "bigscience/bloom-7b1"
+    model = "bigscience/bloom-7b1"  # sinks < no sinks
+    model = "tiiuae/falcon-7b-instruct" # alibi is garbage; sinks == no sinks
+    model = "mosaicml/mpt-7b-chat"  # alibi is alright; sinks == no sinks
+    model = "mosaicml/mpt-7b-storywriter"  # TODO: 65k too large for gpu cache
+    model = "lmsys/vicuna-7b-v1.5"
     args = EngineArgs(
         model=model,
         enforce_eager=True,
@@ -72,8 +75,8 @@ def main():
     engine = LLMEngine.from_engine_args(args)
     print("max model len", engine.model_config.max_model_len)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    prompts = get_prompt(model)
-    # prompts = get_long_prompt()
+    # prompts = get_prompt(model)
+    prompts = get_long_prompt()
     process_requests(engine, prompts, tokenizer)
 
 
