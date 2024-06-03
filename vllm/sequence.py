@@ -254,7 +254,6 @@ class Sequence:
     @property
     def prompt(self) -> Optional[str]:
         return self.inputs.get("prompt")
-        return self.inputs.get("prompt")
 
     @property
     def prompt_token_ids(self) -> List[int]:
@@ -658,7 +657,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
+        multi_modal_data: Optional["MultiModalData"] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
