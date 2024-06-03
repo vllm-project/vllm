@@ -1,0 +1,33 @@
+name: Build docker image
+description: 'build docker image for nm-vllm'
+inputs:
+  docker_tag:
+    description: "tag to be used for the docker image"
+    type: string
+    required: true
+  build_type:
+    description: "type of nm-vllm to install for the docker image: nightly (default) or release"
+    type: string
+    default: 'nightly'
+  build_version:
+    description: "version of nm-vllm to install for the docker image: latest (default) or specific version e.g. 0.4.0, 0.4.0.20240531"
+    type: string
+    default: 'latest'
+runs:
+  using: composite
+  steps:
+  - run: |
+      # clean up
+      docker stop $(docker ps -a -q) || echo 'no container to stop'
+      docker rm $(docker ps -a -q) || echo 'no container to remove'
+      docker rmi -f $(docker images -aq) || echo 'no image to remove'
+      docker system prune --all --force
+      # build
+      docker build --tag ghcr.io/neuralmagic/nm-vllm-openai:${{ inputs.docker_tag }} \
+             --build-arg build_type=${{ inputs.build_type }} \
+             --build-arg build_version=${{ inputs.build_version }} \
+             --target vllm-openai . || status=$?
+      echo "status=${status}" >> $GITHUB_OUTPUT
+      echo "status=${status}"
+      exit ${status}
+    shell: bash

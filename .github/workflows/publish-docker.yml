@@ -1,26 +1,36 @@
 name: Docker Build + Publish
 
 on:
-  # For now, just manually trigger
-  # push:
-  #   branches:
-  #     - main
-  # pull_request:
-  #   branches:
-  #     - main
   workflow_dispatch:
+    inputs:
+      docker_tag:
+        description: "tag to be used for the docker image"
+        type: string
+        required: true
+      push_to_repository:
+        description: "whether to push out the docker image: no (default) or yes"
+        type: string
+        default: 'no'
+      gitref:
+        description: "git commit hash or branch name"
+        type: string
+        default: 'main'
+      build_type:
+        description: "type of nm-vllm to install for the docker image: nightly (default) or release"
+        type: string
+        default: 'nightly'
+      build_version:
+        description: "version of nm-vllm to install for the docker image: latest (default) or specific version e.g. 0.4.0, 0.4.0.20240531"
+        type: string
+        default: 'latest'
 
 jobs:
     build-docker-image:
 
-        runs-on: aws-avx2-192G-4-a10g-96G
-        timeout-minutes: 240
+        runs-on: aws-avx2-32G-a10g-24G
+        timeout-minutes: 60
 
         steps:
-          
-          - name: Set up Docker Buildx
-            id: buildx
-            uses: docker/setup-buildx-action@v3
 
           - name: Login to Github Packages
             uses: docker/login-action@v3
@@ -35,17 +45,23 @@ jobs:
               fetch-depth: 1
               submodules: recursive
 
-          - name: Get version tag
-            id: extract_tag
-            run: echo "tag=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+          - name: Set up nvidia-container-toolkit
+            id: setup
+            uses: ./.github/actions/nm-setup-nvidia-container-toolkit/
 
-          - name: Current Version Name
-            run: echo ${{ steps.extract_tag.outputs.tag }}
+          - name: Build image
+            id: build
+            uses: ./.github/actions/nm-build-docker/
+            with:
+              docker_tag: ${{ inputs.docker_tag }}
+              build_type: ${{ inputs.build_type }}
+              build_version: ${{ inputs.build_version }}
 
-          - name: nm-vllm latest
+          - name: Push image
             uses: docker/build-push-action@v5
+            if: ${{ inputs.push_to_repository == 'yes' && steps.build.outputs.status == 0 }}
             with:
               context: .
               target: vllm-openai
               push: true
-              tags: ghcr.io/neuralmagic/nm-vllm-openai:${{ steps.extract_tag.outputs.tag }}
+              tags: ghcr.io/neuralmagic/nm-vllm-openai:${{ inputs.docker_tag }}
