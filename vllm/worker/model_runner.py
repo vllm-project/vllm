@@ -426,7 +426,7 @@ class ModelRunner:
                 lora_prompt_mapping.extend(
                     [lora_id] *
                     (query_len if seq_group_metadata.sampling_params
-                     and seq_group_metadata.sampling_params.prompt_logprobs
+                     and seq_group_metadata.sampling_params.prompt_logprobs is not None
                      else 1))
 
                 mm_data = seq_group_metadata.multi_modal_data
