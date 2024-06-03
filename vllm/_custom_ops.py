@@ -1,6 +1,6 @@
+import contextlib
 from typing import List, Optional, Tuple, Type
 
-import contextlib
 import torch
 
 try:

@@ -14,15 +14,9 @@
 
 // REGISTER_EXTENSION allows the shared library to be loaded and initialized
 // via python's import statement.
-#define REGISTER_EXTENSION(NAME)                \
-PyMODINIT_FUNC CONCAT(PyInit_,NAME)()           \
-{                                               \
-    static struct PyModuleDef module = {        \
-        PyModuleDef_HEAD_INIT,                  \
-        STRINGIFY(NAME),                        \
-        nullptr,                                \
-        0,                                      \
-        nullptr                                 \
-    };                                          \
-    return PyModule_Create(&module);            \
-}
+#define REGISTER_EXTENSION(NAME)                                               \
+  PyMODINIT_FUNC CONCAT(PyInit_, NAME)() {                                     \
+    static struct PyModuleDef module = {PyModuleDef_HEAD_INIT,                 \
+                                        STRINGIFY(NAME), nullptr, 0, nullptr}; \
+    return PyModule_Create(&module);                                           \
+  }

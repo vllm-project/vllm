@@ -56,7 +56,8 @@ torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebook_partition_sizes,
                         const std::optional<torch::Tensor>& bias);
 
-torch::Tensor aqlm_gemm_meta(const torch::Tensor& input, const torch::Tensor& codes,
+torch::Tensor aqlm_gemm_meta(const torch::Tensor& input,
+                             const torch::Tensor& codes,
                              const torch::Tensor& codebooks,
                              const torch::Tensor& scales,
                              const torch::Tensor& codebook_partition_sizes,
@@ -75,8 +76,8 @@ torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        int64_t split_k_iters);
 
 torch::Tensor awq_gemm_meta(torch::Tensor _in_feats, torch::Tensor _kernel,
-                            torch::Tensor _scaling_factors, torch::Tensor _zeros,
-                            int64_t split_k_iters);
+                            torch::Tensor _scaling_factors,
+                            torch::Tensor _zeros, int64_t split_k_iters);
 
 torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _scaling_factors,
@@ -93,8 +94,9 @@ torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                           int64_t size_m, int64_t size_n, int64_t size_k);
 
 torch::Tensor marlin_gemm_meta(torch::Tensor& a, torch::Tensor& b_q_weight,
-                               torch::Tensor& b_scales, torch::Tensor& workspace,
-                               int64_t size_m, int64_t size_n, int64_t size_k);
+                               torch::Tensor& b_scales,
+                               torch::Tensor& workspace, int64_t size_m,
+                               int64_t size_n, int64_t size_k);
 
 torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   torch::Tensor& b_meta,
@@ -103,12 +105,10 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   int64_t size_m, int64_t size_n,
                                   int64_t size_k);
 
-torch::Tensor gptq_marlin_24_gemm_meta(torch::Tensor& a, torch::Tensor& b_q_weight,
-                                       torch::Tensor& b_meta,
-                                       torch::Tensor& b_scales,
-                                       torch::Tensor& workspace, int64_t num_bits,
-                                       int64_t size_m, int64_t size_n,
-                                       int64_t size_k);
+torch::Tensor gptq_marlin_24_gemm_meta(
+    torch::Tensor& a, torch::Tensor& b_q_weight, torch::Tensor& b_meta,
+    torch::Tensor& b_scales, torch::Tensor& workspace, int64_t num_bits,
+    int64_t size_m, int64_t size_n, int64_t size_k);
 
 torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                torch::Tensor& b_scales, torch::Tensor& g_idx,
@@ -117,9 +117,10 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                int64_t size_k, bool is_k_full);
 
 torch::Tensor gptq_marlin_gemm_meta(torch::Tensor& a, torch::Tensor& b_q_weight,
-                                    torch::Tensor& b_scales, torch::Tensor& g_idx,
-                                    torch::Tensor& perm, torch::Tensor& workspace,
-                                    int64_t num_bits, int64_t size_m, int64_t size_n,
+                                    torch::Tensor& b_scales,
+                                    torch::Tensor& g_idx, torch::Tensor& perm,
+                                    torch::Tensor& workspace, int64_t num_bits,
+                                    int64_t size_m, int64_t size_n,
                                     int64_t size_k, bool is_k_full);
 
 torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
@@ -184,8 +185,8 @@ int64_t meta_size();
 void register_buffer(fptr_t _fa, torch::Tensor& t,
                      const std::vector<std::string>& handles,
                      const std::vector<int64_t>& offsets);
-std::tuple<torch::Tensor, std::vector<int64_t>>
-get_graph_buffer_ipc_meta(fptr_t _fa);
+std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
+    fptr_t _fa);
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
 #endif

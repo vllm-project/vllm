@@ -138,8 +138,10 @@ std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
     fptr_t _fa) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
   auto [handle_bytes, offsets] = fa->get_graph_buffer_ipc_meta();
-  auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-  auto handles = torch::empty({static_cast<int64_t>(handle_bytes.size())}, options);
+  auto options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+  auto handles =
+      torch::empty({static_cast<int64_t>(handle_bytes.size())}, options);
   std::memcpy(handles.data_ptr(), handle_bytes.data(), handle_bytes.size());
   return {handles, std::move(offsets)};
 }

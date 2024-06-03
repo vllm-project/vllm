@@ -6,12 +6,12 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
 from vllm.distributed.parallel_state import (
     get_local_rank, get_tensor_model_parallel_cpu_group)
 from vllm.logger import init_logger
-from vllm import _custom_ops as ops
 
 try:
     import pynvml

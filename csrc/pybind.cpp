@@ -187,7 +187,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
-      "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale) -> ()");
+      "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale) -> "
+      "()");
   ops.impl("static_scaled_int8_quant", torch::kCUDA, &static_scaled_int8_quant);
 
   // Compute int8 quantized tensor and scaling factor
