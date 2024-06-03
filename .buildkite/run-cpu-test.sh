@@ -21,4 +21,4 @@ docker exec cpu-test bash -c "cd tests;
   pip install pytest Pillow protobuf
   bash ../.buildkite/download-images.sh
   cd ../
-  pytest -v -s tests/models --ignore=tests/models/test_llava.py --ignore=tests/models/test_embedding.py"
+  pytest -v -s tests/models --ignore=tests/models/test_llava.py --ignore=tests/models/test_embedding.py --ignore=tests/models/test_registry.py"

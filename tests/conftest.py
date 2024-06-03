@@ -155,9 +155,9 @@ class HfRunner:
 
     def wrap_device(self, input: any):
         if not is_cpu():
-            return input.cuda()
+            return input.to("cuda")
         else:
-            return input.cpu()
+            return input.to("cpu")
 
     def __init__(
         self,
