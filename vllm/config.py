@@ -241,6 +241,12 @@ class ModelConfig:
                 "must be divisible by pipeline parallel size "
                 f"({pipeline_parallel_size}).")
 
+        if self.quantization == "bitsandbytes" and (
+                parallel_config.tensor_parallel_size > 1
+                or parallel_config.pipeline_parallel_size > 1):
+            raise ValueError(
+                "BitAndBytes quantization with TP or PP is not supported yet.")
+
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled.
         """
@@ -327,7 +333,7 @@ class ModelConfig:
     def get_num_attention_heads(self,
                                 parallel_config: "ParallelConfig") -> int:
         return self.hf_text_config.num_attention_heads // \
-                    parallel_config.tensor_parallel_size
+            parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
@@ -487,6 +493,7 @@ class LoadFormat(str, enum.Enum):
     DUMMY = "dummy"
     TENSORIZER = "tensorizer"
     SHARDED_STATE = "sharded_state"
+    BITSANDBYTES = "bitsandbytes"
 
 
 @dataclass
@@ -1087,10 +1094,12 @@ class VisionLanguageConfig:
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
+    # The image processor to load from HuggingFace
+    image_processor: Optional[str]
+    image_processor_revision: Optional[str]
 
     @classmethod
-    def get_image_input_enum_type(
-            cls, value: str) -> "VisionLanguageConfig.ImageInputType":
+    def get_image_input_enum_type(cls, value: str) -> ImageInputType:
         """Get the image input type from a string."""
         try:
             return cls.ImageInputType[value.upper()]
