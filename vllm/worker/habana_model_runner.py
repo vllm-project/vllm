@@ -812,6 +812,9 @@ class HabanaModelRunner:
 
     @torch.inference_mode()
     def warmup_model(self, kv_caches: List[torch.Tensor]) -> None:
+        if os.environ.get('VLLM_SKIP_WARMUP', 'false').lower() == 'true':
+            logger.info("Skipping warmup...")
+            return
         self.profiler.start('internal', 'warmup')
         times = 1  # TODO: this is will be updated once HPU graphs are reintroduced
         scenarios = []
