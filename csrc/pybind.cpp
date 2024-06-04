@@ -87,6 +87,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 "Reshape the key and value tensors and cache them");
   cache_ops.def("reshape_and_cache_flash", &reshape_and_cache_flash,
                 "Reshape the key and value tensors and cache them");
+#ifndef USE_ROCM
+   cache_ops.def("convert_fp8", &convert_fp8,
+                "Convert the key and value cache to fp8 data type");
+#endif
 
   // Cuda utils
   pybind11::module cuda_utils =
