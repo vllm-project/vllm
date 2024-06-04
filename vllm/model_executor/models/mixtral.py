@@ -128,12 +128,12 @@ class MixtralMoE(nn.Module):
             # WEIGHT_SCALE (for fp8)
             # Allocate 2 scales for w1 and w3 respectively.
             # They will be combined to a single scale after weight loading.
-            self.w13_scale = nn.Parameter(torch.zeros(self.num_total_experts,
-                                                      2,
-                                                      dtype=torch.float32),
-                                          requires_grad=False)
-            self.w2_scale = nn.Parameter(torch.zeros(self.num_total_experts,
+            self.w13_scale = nn.Parameter(torch.ones(self.num_total_experts,
+                                                     2,
                                                      dtype=torch.float32),
+                                          requires_grad=False)
+            self.w2_scale = nn.Parameter(torch.ones(self.num_total_experts,
+                                                    dtype=torch.float32),
                                          requires_grad=False)
 
             # If loading fp8 checkpoint, pass the weight loaders.
@@ -209,8 +209,10 @@ class MixtralMoE(nn.Module):
             w2_weight = torch.empty_like(self.w2_weight.data,
                                          dtype=torch.float8_e4m3fn)
 
-            self.w13_scale = nn.Parameter(torch.zeros(self.num_total_experts,
-                                                      dtype=torch.float32),
+            # Re-initialize w13_scale because we directly quantize
+            # merged w13 weights and generate a single scaling factor.
+            self.w13_scale = nn.Parameter(torch.ones(self.num_total_experts,
+                                                     dtype=torch.float32),
                                           requires_grad=False)
             for expert in range(self.num_total_experts):
                 w13_weight[expert, :, :], self.w13_scale[
