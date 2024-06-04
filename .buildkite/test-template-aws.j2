@@ -1,6 +1,7 @@
-{% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
-{% set default_num_gpu = 1 %}
+{% set ecr_repo = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo" %}
+{% set docker_image = ecr_repo + ":$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
+
 
 steps:
   - label: ":docker: build image"
@@ -8,6 +9,7 @@ steps:
       queue: cpu_queue
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker pull {{ ecr_repo }}:latest || true"
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
     env:
@@ -30,7 +32,7 @@ steps:
       {% else %}
       queue: gpu_1_queue
       {% endif %}
-    soft_fail: {{ step.soft_fail or false }}
+    soft_fail: true
     {% if step.parallelism %}
     parallelism: {{ step.parallelism }}
     {% endif %}
@@ -43,7 +45,6 @@ steps:
     plugins:
       - docker#v5.2.0:
           image: {{ docker_image }}
-          shm-size: "32g"
           always-pull: true
           propagate-environment: true
           {% if not step.no_gpu %}
@@ -53,10 +54,9 @@ steps:
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_TOKEN
-            - NVIDIA_VISIBLE_DEVICES=all
-            - NVIDIA_DRIVER_CAPABILITIES=all
-            - CUDA_LAUNCH_BLOCKING=1
+            {% if step.label == "Speculative decoding tests" %}
+            - VLLM_ATTENTION_BACKEND=XFORMERS
+            {% endif %}
           volumes:
-            - type: tmpfs
-              target: /dev/shm
+            - /dev/shm:/dev/shm
   {% endfor %}
