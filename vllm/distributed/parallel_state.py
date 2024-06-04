@@ -376,3 +376,9 @@ def destroy_model_parallel():
     _PP_DEVICE_GROUP = None
     global _PP_GLOBAL_RANKS
     _PP_GLOBAL_RANKS = None
+    global _PP_CPU_GROUP
+    if _PP_CPU_GROUP:
+        torch.distributed.destroy_process_group(_PP_CPU_GROUP)
+    _PP_CPU_GROUP = None
+    global _PP_PYNCCL_COMMUNICATOR
+    _PP_PYNCCL_COMMUNICATOR = None
