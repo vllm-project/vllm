@@ -1,4 +1,3 @@
-import gc
 from typing import List, Tuple
 
 import pytest
@@ -120,9 +119,6 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
                                               max_tokens,
                                               images=vllm_images)
     del vllm_model
-
-    gc.collect()
-    torch.cuda.empty_cache()
 
     for i in range(len(HF_IMAGE_PROMPTS)):
         hf_output_ids, hf_output_str = hf_outputs[i]
