@@ -6,14 +6,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm import _custom_ops as ops
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
+from vllm.model_executor.ops.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
 
-class SiluAndMul(nn.Module):
+class SiluAndMul(CustomOp):
     """An activation function for SwiGLU.
 
     The function computes x -> silu(x[:d]) * x[d:] where d = x.shape[-1] // 2.
@@ -28,7 +28,9 @@ class SiluAndMul(nn.Module):
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm._C import ops
+
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
@@ -36,7 +38,7 @@ class SiluAndMul(nn.Module):
         return out
 
 
-class GeluAndMul(nn.Module):
+class GeluAndMul(CustomOp):
     """An activation function for GeGLU.
 
     The function computes x -> GELU(x[:d]) * x[d:] where d = x.shape[-1] // 2.
@@ -57,7 +59,9 @@ class GeluAndMul(nn.Module):
         d = x.shape[-1] // 2
         return F.gelu(x[..., :d], approximate=self.approximate) * x[..., d:]
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm._C import ops
+
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
@@ -71,7 +75,7 @@ class GeluAndMul(nn.Module):
         return f'approximate={repr(self.approximate)}'
 
 
-class NewGELU(nn.Module):
+class NewGELU(CustomOp):
 
     def _forward(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -79,20 +83,24 @@ class NewGELU(nn.Module):
         return 0.5 * x * (1.0 + torch.tanh(c *
                                            (x + 0.044715 * torch.pow(x, 3.0))))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm._C import ops
+
         out = torch.empty_like(x)
         ops.gelu_new(out, x)
         return out
 
 
-class FastGELU(nn.Module):
+class FastGELU(CustomOp):
 
     def _forward(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 *
                                            (1.0 + 0.044715 * x * x)))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm._C import ops
+
         out = torch.empty_like(x)
         ops.gelu_fast(out, x)
         return out
