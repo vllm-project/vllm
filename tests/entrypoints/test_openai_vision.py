@@ -18,7 +18,7 @@ TEST_IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
-pytestmark = pytest.mark.asyncio
+pytestmark = pytest.mark.openai
 
 
 @pytest.fixture(scope="module")
