@@ -1,5 +1,10 @@
 from typing import Mapping, Optional
 
+from vllm.logger import init_logger
+from vllm.utils import run_once
+
+logger = init_logger(__name__)
+
 _is_otel_installed = False
 try:
     from opentelemetry.context.context import Context
@@ -63,3 +68,13 @@ class SpanAttributes(BaseSpanAttributes):
     LLM_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
     LLM_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
     LLM_LATENCY_E2E = "gen_ai.latency.e2e"
+
+
+def contains_trace_context(headers: Mapping[str, str]) -> bool:
+    return "traceparent" in headers or "tracestate" in headers
+
+
+@run_once
+def log_tracing_disabled_warning() -> None:
+    logger.warning(
+        "Received a request with trace context but tracing is disabled")

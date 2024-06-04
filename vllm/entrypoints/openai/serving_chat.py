@@ -31,7 +31,8 @@ from vllm.multimodal.utils import (async_get_and_parse_image,
                                    get_full_image_text_prompt)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
-from vllm.tracing import extract_trace_context
+from vllm.tracing import (contains_trace_context, extract_trace_context,
+                          log_tracing_disabled_warning)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -270,6 +271,9 @@ class OpenAIServingChat(OpenAIServing):
 
         trace_context = extract_trace_context(
             raw_request.headers if raw_request else {})
+        if self.engine.engine.tracer is None and contains_trace_context(
+                raw_request.headers if raw_request else {}):
+            log_tracing_disabled_warning()
         result_generator = self.engine.generate(
             inputs,
             sampling_params,
