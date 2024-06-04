@@ -1,7 +1,8 @@
-from typing import Dict, Optional, TypedDict, Union
+from typing import Dict, Optional, Tuple, TypedDict, Union
 
 import torch
-from torch import nn
+import torch.nn as nn
+from PIL import Image
 from transformers import LlavaNextConfig
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
@@ -9,8 +10,9 @@ from transformers.models.llava_next.modeling_llava_next import (
 from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
 from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
+from vllm.sequence import SequenceData
 
 from .llava import (LlavaForConditionalGeneration, LlavaImageFeatureInputs,
                     LlavaImagePixelInputs)
@@ -35,6 +37,25 @@ LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
                              LlavaNextImageFeatureInputs]
 
 
+def _get_dummy_image_data(
+    seq_len: int,
+    model_config: ModelConfig,
+    vlm_config: VisionLanguageConfig,
+) -> Tuple[SequenceData, MultiModalData]:
+    seq_data, fake_mm_data = get_dummy_image_data(seq_len, model_config,
+                                                  vlm_config)
+
+    config_input_type = vlm_config.image_input_type
+    ImageInputType = VisionLanguageConfig.ImageInputType
+
+    if config_input_type == ImageInputType.PIXEL_VALUES:
+        _, c, h, w = vlm_config.image_input_shape
+        mode = {1: "L", 3: "RGB"}[c]
+        fake_mm_data = ImagePixelData(Image.new(mode, (w, h), color=0))
+
+    return seq_data, fake_mm_data
+
+
 def _image_pixel_processor(
     data: ImagePixelData,
     model_config: ModelConfig,
@@ -55,7 +76,7 @@ def _image_pixel_processor(
 
 @MULTIMODAL_REGISTRY.register_image_feature_input()
 @MULTIMODAL_REGISTRY.register_image_pixel_input(_image_pixel_processor)
-@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
+@MULTIMODAL_REGISTRY.register_dummy_data(_get_dummy_image_data)
 class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
     """
     Args to `forward()`:

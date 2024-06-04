@@ -1,7 +1,7 @@
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
-from torch import nn
+import torch.nn as nn
 # TODO(xwjiang): We should port CLIPVisionModel's code over to not depend on
 # transformers' impl.
 from transformers import CLIPVisionModel, LlavaConfig
