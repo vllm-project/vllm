@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
+from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -101,6 +102,9 @@ class OpenAIServingChat(OpenAIServing):
     ) -> ChatMessageParseResult:
         tokenizer = self.tokenizer
 
+        vlm_config = getattr(self.engine.engine, "vision_language_config",
+                             None)
+
         texts: List[str] = []
         image_futures: List[Awaitable[ImagePixelData]] = []
 
@@ -111,9 +115,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 texts.append(text)
             elif part_type == "image_url":
-                config = getattr(self.engine.engine, "vision_language_config",
-                                 None)
-                if not isinstance(config, VisionLanguageConfig):
+                if not isinstance(vlm_config, VisionLanguageConfig):
                     raise ValueError("GPT-4 with Vision API is only supported "
                                      "for vision language models.")
 
@@ -122,8 +124,8 @@ class OpenAIServingChat(OpenAIServing):
                 if image_url.get("detail", "auto") != "auto":
                     logger.info("content[%s].image_url.detail is ignored", i)
 
-                text = config.get_image_token_text(
-                    config, tokenizer, image_idx=len(image_futures))
+                text = vlm_config.get_image_token_text(
+                    tokenizer, image_idx=len(image_futures))
                 image_future = self._get_and_parse_image(image_url["url"])
 
                 texts.append(text)
@@ -221,12 +223,15 @@ class OpenAIServingChat(OpenAIServing):
                 sampling_params.logits_processors.append(
                     guided_decode_logits_processor)
 
+            inputs: PromptInputs = {
+                "prompt": prompt_text,
+                "prompt_token_ids": prompt_ids,
+            }
+            if multi_modal_data is not None:
+                inputs["multi_modal_data"] = multi_modal_data
+
             result_generator = self.engine.generate(
-                {
-                    "prompt": prompt_text,
-                    "prompt_token_ids": prompt_ids,
-                    "multi_modal_data": multi_modal_data,
-                },
+                inputs,
                 sampling_params,
                 request_id,
                 lora_request,

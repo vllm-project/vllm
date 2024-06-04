@@ -1173,11 +1173,10 @@ class VisionLanguageConfig:
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageOpenAI]}.") from e
 
-    def get_image_token_text(self, config: "VisionLanguageConfig",
-                             tokenizer: PreTrainedTokenizerBase,
+    def get_image_token_text(self, tokenizer: PreTrainedTokenizerBase,
                              image_idx: int) -> str:
         return self._image_openai_processors[self.image_openai] \
-            .get_image_token_text(config, tokenizer, image_idx)
+            .get_image_token_text(self, tokenizer, image_idx)
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
