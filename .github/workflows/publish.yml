@@ -4,9 +4,9 @@
 name: Create Release
 
 on:
-  push:
-    tags:
-      - v*
+  # push:
+  #   tags:
+  #     - v*
 
 # Needed to create release and upload assets
 permissions:
