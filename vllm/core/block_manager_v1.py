@@ -541,11 +541,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         return new_block_table
 
-    def swap_in(self,
-                seq_group: SequenceGroup,
-                num_lookahead_slots: int = 0) -> List[Tuple[int, int]]:
-        assert (num_lookahead_slots == 0
-                ), "BlockSpaceManagerV1 does not support lookahead allocation"
+    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
 
         request_id = seq_group.request_id
 
