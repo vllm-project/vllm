@@ -13,9 +13,13 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm._C import ops
 import pandas as pd
 import os
+
+try:
+    from vllm._C import ops as vllm_ops
+except ImportError:
+    pass
 
 logger = init_logger(__name__)
 
@@ -210,7 +214,7 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         osf: torch.Tensor,
     ) -> torch.Tensor:
         x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        ops.convert_fp8(x, x8, asf)
+        vllm_ops.convert_fp8(x, x8, asf)
         m = weight.shape[0]
         n = x.shape[0]
         k = x.shape[1]
@@ -229,7 +233,7 @@ class Fp8RocmLinearMethod(LinearMethodBase):
                 ).drop_duplicates()
                 df.to_csv("/projects/fp8_shapes.csv", index=False)
             algo = 0
-        res = ops.fp8_gemm_16(x8, weight.t(), asf, wsf, int(algo))
+        res = vllm_ops.fp8_gemm_16(x8, weight.t(), asf, wsf, int(algo))
         return res
 
     def apply_fp8_8(
@@ -243,7 +247,7 @@ class Fp8RocmLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         assert not bias
         x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        ops.convert_fp8(x, x8, asf)
+        vllm_ops.convert_fp8(x, x8, asf)
         m = weight.shape[0]
         n = x.shape[0]
         k = x.shape[1]
@@ -263,9 +267,9 @@ class Fp8RocmLinearMethod(LinearMethodBase):
                 df.to_csv("/projects/fp8_shapese.csv", index=False)
             algo = 0
 
-        res = ops.fp8_gemm(x8, weight.t(), asf, wsf, osf, int(algo))
+        res = vllm_ops.fp8_gemm(x8, weight.t(), asf, wsf, osf, int(algo))
         res16 = torch.empty_like(res, dtype=torch.float16)
-        ops.convert_fp8(res, res16, 1/osf)
+        vllm_ops.convert_fp8(res, res16, 1/osf)
         return res16
 
     def apply(

@@ -48,7 +48,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
-from vllm._C import ops
 
 
 class LlamaMLP(nn.Module):
