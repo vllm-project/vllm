@@ -64,6 +64,7 @@ DEFAULT_CONDA_PATTERNS = {
     "triton",
     "optree",
     "nccl",
+    "transformers",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -75,6 +76,7 @@ DEFAULT_PIP_PATTERNS = {
     "optree",
     "onnx",
     "nccl",
+    "transformers",
 }
 
 
