@@ -603,6 +603,11 @@ Versions of relevant libraries:
 {conda_packages}
 """.strip()
 
+# both the above code and the following code use `strip()` to
+# remove leading/trailing whitespaces, so we need to add a newline
+# in between to separate the two sections
+env_info_fmt += "\n"
+
 env_info_fmt += """
 ROCM Version: {rocm_version}
 Neuron SDK Version: {neuron_sdk_version}
