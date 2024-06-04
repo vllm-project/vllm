@@ -285,7 +285,8 @@ def get_ip() -> str:
 
 
 def get_image(url: str) -> Image.Image:
-    """Retrieves an image from a data URL or an online resource.
+    """
+    Retrieve an image from a data URL or an online resource.
 
     The returned image should be used like a context manager to ensure
     proper disposal of the underlying buffer.
