@@ -230,10 +230,11 @@ class OpenAIServingChat(OpenAIServing):
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
 
+        # Fetch image data
         image_data = None
         try:
             if len(image_futures):
-                # Since we support single image currently
+                # since we support only single image currently
                 assert len(image_futures) == 1
                 image_data = await image_futures[0]
         except Exception as e:
