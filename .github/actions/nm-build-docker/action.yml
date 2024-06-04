@@ -23,6 +23,7 @@ runs:
       docker rmi -f $(docker images -aq) || echo 'no image to remove'
       docker system prune --all --force
       # build
+      status=0
       docker build --tag ghcr.io/neuralmagic/nm-vllm-openai:${{ inputs.docker_tag }} \
              --build-arg build_type=${{ inputs.build_type }} \
              --build-arg build_version=${{ inputs.build_version }} \
