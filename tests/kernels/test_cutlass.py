@@ -47,7 +47,7 @@ def cutlass_fp8_gemm_helper(m: int,
     scale_b = (torch.randn(
         (1, n_b_scales), device=device, dtype=torch.float32) / 10)
 
-    out = ops.cutlass_scaled_mm_dq(a, b, scale_a, scale_b, out_dtype)
+    out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b * b.to(dtype=torch.float32)).to(out_dtype)
 
@@ -74,7 +74,7 @@ def cutlass_int8_gemm_helper(m: int,
     scale_b = (torch.randn(
         (1, n_b_scales), device=device, dtype=torch.float32) / 10)
 
-    out = ops.cutlass_scaled_mm_dq(a, b, scale_a, scale_b, out_dtype)
+    out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b *
                         b.to(dtype=torch.float32)).to(dtype=out_dtype)
@@ -106,7 +106,7 @@ def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16, torch.int8])
 def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                         out_dtype: Type[torch.dtype]):
     cutlass_int8_gemm_helper(512, 512, 512, per_act_token, per_out_ch,
@@ -115,7 +115,7 @@ def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
@@ -180,7 +180,7 @@ def test_cutlass_subset():
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
 
-    out = ops.cutlass_scaled_mm_dq(a,
+    out = ops.cutlass_scaled_mm(a,
                                    b,
                                    scale_a,
                                    scale_b,
@@ -203,7 +203,7 @@ class CutlassLayer(torch.nn.Module):
         self.out_dtype = out_dtype
 
     def forward(self, a):
-        return ops.cutlass_scaled_mm_dq(a, self.b, self.scale_a, self.scale_b,
+        return ops.cutlass_scaled_mm(a, self.b, self.scale_a, self.scale_b,
                                         self.out_dtype)
 
 
