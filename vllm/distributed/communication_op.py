@@ -12,6 +12,7 @@ from .parallel_state import (get_cpu_world_group, get_pp_pynccl_communicator,
                              get_tensor_model_parallel_world_size,
                              get_tp_ca_communicator,
                              get_tp_pynccl_communicator)
+from vllm.utils import is_hip
 
 
 @dataclass
@@ -251,7 +252,10 @@ def broadcast_tensor_dict(
         return tensor_dict
 
     group = group or torch.distributed.group.WORLD
-    metadata_group = metadata_group or get_cpu_world_group()
+    if is_hip():
+        metadata_group = metadata_group or torch.distributed.group.WORLD
+    else:
+        metadata_group = metadata_group or get_cpu_world_group()
     ranks = torch.distributed.get_process_group_ranks(group)
     assert src in ranks, f"Invalid src rank ({src})"
 
