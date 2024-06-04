@@ -153,7 +153,14 @@ class LLM:
         self,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     ) -> None:
-        self.llm_engine.tokenizer.tokenizer = get_cached_tokenizer(tokenizer)
+        # While CachedTokenizer is dynamic, have no choice but
+        # compare class name. Misjudgment will arise from
+        # user-defined tokenizer started with 'Cached'
+        if tokenizer.__class__.__name__.startswith("Cached"):
+            self.llm_engine.tokenizer.tokenizer = tokenizer
+        else:
+            self.llm_engine.tokenizer.tokenizer = get_cached_tokenizer(
+                tokenizer)
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def generate(
