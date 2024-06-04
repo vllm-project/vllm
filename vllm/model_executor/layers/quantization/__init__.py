@@ -24,7 +24,13 @@ from vllm.utils import is_hip
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,
     "awq": AWQConfig,
+    "deepspeedfp": DeepSpeedFPConfig,
     "fp8": Fp8Config if not is_hip() else Fp8RocmConfig,
+    # The order of gptq methods is important for config.py iteration over
+    # override_quantization_method(..)
+    "marlin": MarlinConfig,
+    "gptq_marlin_24": GPTQMarlin24Config,
+    "gptq_marlin": GPTQMarlinConfig,
     "gptq": GPTQConfig,
     "squeezellm": SqueezeLLMConfig,
     "sparseml": CompressedTensorsConfig,
