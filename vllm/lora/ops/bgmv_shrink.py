@@ -28,24 +28,26 @@ def _bgmv_shrink_kernel(
     cn_stride,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    SPLIT_K: tl.constexpr,
 ):
-    cur_batch = tl.program_id(axis=0)
+    pid_sk = tl.program_id(axis=0)
+    cur_batch = tl.program_id(axis=1)
     lora_index = tl.load(lora_indices + cur_batch)
     if lora_index == -1:
         return
 
     offset_n = tl.arange(0, BLOCK_N)
-    offset_k = tl.arange(0, BLOCK_K)
+    offset_k = tl.arange(0, BLOCK_K) + pid_sk * BLOCK_K
     a_ptr = input_ptr + cur_batch * xm_stride
     b_ptr = lora_ptr + l0_stride * lora_index
     rank_mask = offset_n[:, None] < N
     accumulator = tl.zeros((BLOCK_N,), dtype=tl.float32)
-    for k in range(0, K, BLOCK_K):
+    for k in range(0, K, BLOCK_K * SPLIT_K):
         current_k = k + offset_k
         # vector load
         current_k_c = tl.max_contiguous(current_k, BLOCK_K)
         tiled_a = tl.load(
-            a_ptr + current_k_c * xk_stride,
+            a_ptr + current_k_c,
             mask=current_k < K,
             other=0.0,
         )  # [BLOCK_K]
@@ -64,8 +66,10 @@ def _bgmv_shrink_kernel(
     offset_cn = tl.arange(0, BLOCK_N)
     c_ptr = out_ptr + cur_batch * cm_stride + offset_cn * cn_stride
     c_mask = offset_cn < N
-
-    tl.store(c_ptr, accumulator, mask=c_mask)
+    if SPLIT_K == 1:
+        tl.store(c_ptr, accumulator, mask=c_mask)
+    else:
+        tl.atomic_add(c_ptr, accumulator, mask=c_mask)
 
 
 @torch.inference_mode()
@@ -105,7 +109,9 @@ def bgmv_shrink(
     N, K = lora_a_weights.shape[-2:]  # K=hidden_size,N=rank
     BLOCK_K = 512
     BLOCK_N = triton.next_power_of_2(output_tensor.size(1))
+    SPLIT_K = 16
     grid = [
+        SPLIT_K,
         batchs,
     ]
     config = {"num_stages": 4, "num_warps": 8}
@@ -126,6 +132,7 @@ def bgmv_shrink(
         output_tensor.stride(1),
         BLOCK_N,
         BLOCK_K,
+        SPLIT_K,
         **config,
     )
     return

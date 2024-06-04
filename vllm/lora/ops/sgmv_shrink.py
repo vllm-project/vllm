@@ -120,7 +120,6 @@ def sgmv_shrink(
     batchs: int,
     max_seq_length: int,
     scaling: float,
-    config: dict,
 ):
     """
 
@@ -163,20 +162,20 @@ def sgmv_shrink(
     # SPLIT_K = config.get("SPLIT_K", 16)
     # num_warps = config.get("num_warps", 4)
     # num_stages = config.get("num_stages", 3)
-    # BLOCK_M = 32
-    # BLOCK_N = 16
-    # BLOCK_K = 32
-    # SPLIT_K = 16
-    EVEN_K = K %  config.get("BLOCK_K", 32) == 0
-    # grid = [
-    #     triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
-    #     SPLIT_K,
-    #     batchs,
-    # ]
+    BLOCK_M = 32
+    BLOCK_N = 16
+    BLOCK_K = 32
+    SPLIT_K = 8
+    EVEN_K = K % BLOCK_K == 0
+    grid = [
+        triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
+        SPLIT_K,
+        batchs,
+    ]
     
-    grid = lambda META: (triton.cdiv(max_seq_length, META[
-        'BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),META[
-        'SPLIT_K'],batchs)
+    # grid = lambda META: (triton.cdiv(max_seq_length, META[
+    #     'BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),META[
+    #     'SPLIT_K'],batchs)
     _sgmv_shrink_kernel[grid](
         inputs,
         lora_a_weights,
@@ -194,12 +193,10 @@ def sgmv_shrink(
         lora_a_weights.stride(2),
         output_tensor.stride(0),
         output_tensor.stride(1),
-        EVEN_K=EVEN_K,
-        **config
-        # BLOCK_M,
-        # BLOCK_N,
-        # BLOCK_K,
-        # EVEN_K,
-        # SPLIT_K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        EVEN_K,
+        SPLIT_K,
     )
     return
