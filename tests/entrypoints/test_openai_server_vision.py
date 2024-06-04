@@ -97,7 +97,7 @@ async def test_single_chat_session_image(server, client: openai.AsyncOpenAI,
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=13, total_tokens=23)
+        completion_tokens=10, prompt_tokens=594, total_tokens=604)
 
     message = choice.message
     assert message.content is not None and len(message.content) >= 10
