@@ -7,19 +7,21 @@
 # Benchmarking results will be inside /vllm-workspace/vllm/benchmarks/*.txt
 
 set -xe
+set -o pipefail
 
-# Get the number of GPUs
+# get the number of GPUs
 gpu_count=$(nvidia-smi --list-gpus | wc -l)
+export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
 if [[ $gpu_count -gt 0 ]]; then
-  echo "GPU found. Continue"
+  echo "GPU found."
 else
   echo "Need at least 1 GPU to run benchmarking."
   exit 1
 fi
 
 
-# Check if HF_TOKEN exists and starts with "hf_"
+# check if HF_TOKEN exists and starts with "hf_"
 if [[ -z "$HF_TOKEN" ]]; then
   echo "Error: HF_TOKEN is not set."
   exit 1
@@ -32,37 +34,78 @@ fi
 
 # install wget and curl
 (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
-
-# clone vllm repo for benchmarking
-git clone https://github.com/vllm-project/vllm.git
+cd /
+# git clone https://github.com/vllm-project/vllm.git
+git clone https://github.com/KuntaiDu/vllm.git
+git checkout kuntai_benchmark
 cd vllm/benchmarks/
-export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
+mkdir results
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-
-echo "Run Llama 7B benchmarking."
-# offline -- 1GPU, Llama 7B
-CUDA_VISIBLE_DEVICES=0 python3 benchmark_throughput.py --dataset ./ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 1000 --model meta-llama/Llama-2-7b-hf 2>&1 | tee offline_7B.txt
-# online -- 1 GPU, Llama 7B
-CUDA_VISIBLE_DEVICES=0 python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-chat-hf --swap-space 16 --disable-log-requests &
-server_pid=$!
-timeout 200 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
-python3 benchmark_serving.py --backend vllm --model meta-llama/Llama-2-7b-chat-hf --dataset-name sharegpt --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 1000 2>&1 | tee online_7B.txt
-kill $server_pid
+PARAMS_FILE=/vllm/.buildkite/benchmark-parameters.json
+RESULTS_FOLDER=/vllm/benchmarks/results/
 
 
+# iterate over the test cases
+jq -c '.[]' $PARAMS_FILE | while read -r params; do
+    # extract keys
+    keys=$(echo $params | jq -r 'keys_unsorted[]')
 
-if [[ $gpu_count -gt 3 ]]; then
-  echo "Run Llama 70B benchmarking."
-  # offline -- 4GPU, Llama 70B
-	CUDA_VISIBLE_DEVICES=0,1,2,3 python3 benchmark_throughput.py --dataset ./ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 1000 --model meta-llama/Llama-2-70b-hf -tp 4  2>&1 | tee offline_70B.txt
-	# online -- 4 GPU, Llama 70B
-	CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-70b-chat-hf --swap-space 16 --disable-log-requests -tp 4 &
-	server_pid=$!
-	# Use a small timeout, as the model is already cached during offline benchmarking.
-	timeout 300 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
-	python3 benchmark_serving.py --backend vllm --model meta-llama/Llama-2-70b-chat-hf --dataset-name sharegpt --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 1000 2>&1 | tee online_70B.txt
-	kill $server_pid
-else
-  echo "Skip Llama 70B benchmarking as there are less than 4 GPUs."
-  exit 1
-fi
+    # extract some parameters
+    testname=$(echo $params | jq -r '.testname')
+    model=$(echo $params | jq -r '.model')
+    tp=$(echo $params | jq -r '.tensor-parallel-size')
+
+    if [[ $gpu_count -lt $tp ]]; then
+      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
+      continue
+    fi
+
+    # initialize the command with the script name
+    offline_command="python3 benchmark_throughput.py --output-json $RESULTS_FOLDER/offline_$testname.json "
+    online_command="python3 benchmark_serving.py --backend vllm --save-result --result-dir $RESULTS_FOLDER "
+    
+    # iteratre over each key to dynamically create variables and build the command
+    for key in $keys; do
+        value=$(echo $params | jq -r --arg key "$key" '.[$key]')
+        if [[ key -eq "testname" ]]; then
+          continue
+        fi
+        offline_command="$offline_command --$key $value"
+        online_command="$online_command --$key $value"
+    done
+    
+    # offline inference
+    echo "Testing offline inference throughput ($testname)"
+    sleep 5
+    eval $offline_command 2>&1 | tee $RESULTS_FOLDER/offline_$testname.txt
+
+    echo "### Offline inference throughput ($testname)" >> benchmark_results.md
+    sed -n '1p' RESULTS_FOLDER/offline_$testname.txt >> benchmark_results.md # first line
+    echo "" >> benchmark_results.md
+    sed -n '$p' RESULTS_FOLDER/offline_$testname.txt >> benchmark_results.md # last line
+
+    # online serving
+    echo "Testing online serving throughput ($testname)"
+    python3 -m vllm.entrypoints.openai.api_server --model $model --swap-space 16 --disable-log-requests -tp $tp &
+    server_pid=$!
+    # wait until server finishes initialization
+    timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
+    eval "$online_command" 2>&1 | tee $RESULTS_FOLDER/online_$testname.txt
+    kill $server_pid
+    # get the output json file and rename it
+    serving_json_output=$(find "$RESULTS_FOLDER" -type f -name "vllm*")
+    mv "$serving_json_output" $RESULTS_FOLDER/online_$testname.json
+
+    echo "### Online serving throughput ($testname)" >> benchmark_results.md
+    sed -n '1p' benchmark_serving.txt >> benchmark_results.md # first line
+    echo "" >> benchmark_results.md
+    echo '```' >> benchmark_results.md
+    tail -n 17 benchmark_serving.txt >> benchmark_results.md # last 20 lines
+    echo '```' >> benchmark_results.md
+
+
+
+
+done
+
+
