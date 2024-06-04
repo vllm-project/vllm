@@ -15,7 +15,7 @@ def get_prompt(model, file_path="./prompts.json") -> List[Tuple[str, SamplingPar
         prompts = json.load(f)
     
     prompt = prompts[model]
-    return [(prompt, SamplingParams(max_tokens=MAX_GEN_TOKENS))]
+    return [(prompt, SamplingParams(min_tokens=200, max_tokens=MAX_GEN_TOKENS))]
 
 
 def get_long_prompt(file_path="./paxos_paper.txt", count=1) -> Tuple[str, SamplingParams]:
@@ -58,18 +58,17 @@ def process_requests(engine: LLMEngine,
 
 def main():
     model = "meta-llama/Llama-2-13b-chat-hf"
-    model = "lmsys/vicuna-7b-v1.5"
     model = "mistralai/Mixtral-8x7B-Instruct-v0.1" # TODO
     model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
-    model = "tiiuae/falcon-7b-instruct" # alibi is garbage; sinks == no sinks
-    model = "mosaicml/mpt-7b-storywriter"  # TODO: 65k too large for gpu cache
-    model = "mosaicml/mpt-7b-chat"  # alibi is alright; sinks (garbage past 2048) < no sinks
-    model = "bigscience/bloom-7b1"  # sinks < no sinks
+    model = "mosaicml/mpt-7b-chat"
+    model = "bigscience/bloom-7b1"
+    model = "tiiuae/falcon-7b-instruct"
+    model = "lmsys/vicuna-7b-v1.5"
     args = EngineArgs(
         model=model,
         enforce_eager=True,
         block_size=16,
-        use_attention_sinks=True
+        use_attention_sinks=False
     )
 
     engine = LLMEngine.from_engine_args(args)

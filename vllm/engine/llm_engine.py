@@ -111,10 +111,10 @@ class LLMEngine:
             "model=%r, speculative_config=%r, tokenizer=%r, "
             "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
             "tokenizer_revision=%s, trust_remote_code=%s, dtype=%s, "
-            "max_seq_len=%d, download_dir=%r, load_format=%s, "
-            "tensor_parallel_size=%d, disable_custom_all_reduce=%s, "
-            "quantization=%s, enforce_eager=%s, kv_cache_dtype=%s, "
-            "quantization_param_path=%s, device_config=%s, "
+            "max_seq_len=%d, use_attention_sinks=%s download_dir=%r, "
+            "load_format=%s, tensor_parallel_size=%d, "
+            "disable_custom_all_reduce=%s, quantization=%s, enforce_eager=%s, "
+            "kv_cache_dtype=%s, quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, seed=%d, served_model_name=%s)",
             vllm.__version__,
             model_config.model,
@@ -127,6 +127,7 @@ class LLMEngine:
             model_config.trust_remote_code,
             model_config.dtype,
             model_config.max_model_len,
+            model_config.use_attention_sinks,
             load_config.download_dir,
             load_config.load_format,
             parallel_config.tensor_parallel_size,

@@ -142,8 +142,6 @@ class FalconAttention(nn.Module):
         assert not (self.use_rotary and self.use_alibi), (
             "Rotary and alibi are mutually exclusive.")
 
-        # self.use_alibi = True
-        # self.use_rotary = False
         self.use_attention_sinks = use_attention_sinks
         if self.use_rotary:
             rope_theta = getattr(config, "rope_theta", 10000)

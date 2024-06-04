@@ -31,7 +31,6 @@ class StreamingAttentionSink(nn.Module):
         attn_layer,
     ) -> None:
         super().__init__()
-        print("INIT Attention Sinks: context length", model_context_len, ", use rope?", rotary_emb_layer is not None)
         self.model_context_len = model_context_len
         self.block_size = block_size
         self.kv_cache_dtype = kv_cache_dtype
@@ -340,7 +339,8 @@ class StreamingAttentionSink(nn.Module):
                 block_tables.append(capped_block_table)
 
                 # cap number of tokens to consider with model context len
-                attn_metadata.seq_lens_tensor[i] = model_context_len
+                rem = num_past_tokens % block_size
+                attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
 
             attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(
                 block_tables,
