@@ -9,7 +9,7 @@ RUN apt-get update  -y \
 RUN echo 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD' >> ~/.bashrc
 
 # TODO: Remove it after the 2.3.1 official release
-RUN pip install https://intel-extension-for-pytorch.s3.amazonaws.com/ipex_dev/cpu/intel_extension_for_pytorch-2.3.0%2Bgit1e79114-cp310-cp310-linux_x86_64.whl
+RUN unset http_proxy && pip install http://mlpc.intel.com/downloads/cpu/ipex-2.3.100/rc0_vllm_0528/intel_extension_for_pytorch-2.3.0+gitac44227-cp310-cp310-linux_x86_64.whl
 
 RUN pip install --upgrade pip \
     && pip install wheel packaging ninja setuptools>=49.4.0 numpy
