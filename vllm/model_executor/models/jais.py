@@ -26,13 +26,15 @@ import torch
 from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -68,7 +70,8 @@ class JAISAttention(nn.Module):
     def __init__(
         self,
         config: JAISConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -88,13 +91,13 @@ class JAISAttention(nn.Module):
             self.head_dim,
             total_num_heads,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.c_proj = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         tp_rank = get_tensor_model_parallel_rank()
@@ -102,12 +105,12 @@ class JAISAttention(nn.Module):
         head_end = (tp_rank + 1) * self.num_heads
         alibi_slopes = _get_alibi_slopes(total_num_heads)
         alibi_slopes = alibi_slopes[head_start:head_end]
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            scale=self.scale,
-            alibi_slopes=alibi_slopes,
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              scale=self.scale,
+                              alibi_slopes=alibi_slopes,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -128,7 +131,7 @@ class JAISMLP(nn.Module):
         self,
         intermediate_size: int,
         config: JAISConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -137,19 +140,19 @@ class JAISMLP(nn.Module):
             hidden_size,
             intermediate_size,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.c_fc2 = (ColumnParallelLinear(
             hidden_size,
             intermediate_size,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         ) if self.swiglu else None)
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         self.act = SwiGLUActivation()
@@ -169,7 +172,8 @@ class JAISBlock(nn.Module):
     def __init__(
         self,
         config: JAISConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -177,9 +181,9 @@ class JAISBlock(nn.Module):
                      hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.attn = JAISAttention(config, linear_method)
+        self.attn = JAISAttention(config, cache_config, quant_config)
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.mlp = JAISMLP(inner_dim, config, linear_method)
+        self.mlp = JAISMLP(inner_dim, config, quant_config)
 
     def forward(
         self,
@@ -210,7 +214,8 @@ class JAISModel(nn.Module):
     def __init__(
         self,
         config: JAISConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
@@ -227,7 +232,7 @@ class JAISModel(nn.Module):
         else:
             self.embeddings_scale = config.mup_embeddings_scale
         self.h = nn.ModuleList([
-            JAISBlock(config, linear_method)
+            JAISBlock(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
@@ -261,12 +266,13 @@ class JAISLMHeadModel(nn.Module):
     def __init__(
         self,
         config: JAISConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
-        self.transformer = JAISModel(config, linear_method)
+        self.quant_config = quant_config
+        self.transformer = JAISModel(config, cache_config, quant_config)
         self.lm_head_weight = self.transformer.wte.weight
         if hasattr(config, "width_scale"):
             self.output_logits_scale = config.width_scale

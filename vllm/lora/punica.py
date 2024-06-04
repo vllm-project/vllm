@@ -49,6 +49,49 @@ def bgmv(
     punica_kernels.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
 
 
+def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
+                            w_t_all: torch.Tensor, indicies: torch.LongTensor,
+                            layer_idx: int, scale: float, y_offset: int,
+                            y_slice_size: int):
+    """
+    Same as `bgmv` but you can operate on slices of y.
+    Pass whole y, define y_offset and y_slice_size.
+
+    Semantics:
+      y[i] += (
+          x[i].unsqueeze(0)
+          @ w_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
+          * scale
+        ).squeeze(0)
+
+    Args:
+      y: Shape: `[B, H2]`. Output vectors. Will be changed in-place.
+      x: Shape: `[B, H1]`. Input vectors.
+      w_t_all: Shape: `[None, L, y_slice_size, H1]`. Column partition of
+        all of the transposed LoRA matrices.
+      indicies: Shape: `[B]`. Indices of the LoRA weights.
+      layer_idx: Layer index of LoRA weights.
+      scale: Scaling factor.
+      y_offset: Offset to apply to the starting column of y.
+      y_slice_size: Size of the y column slice.
+    """
+    try:
+        import vllm._punica_C as punica_kernels
+    except ImportError as e:
+        _raise_import_error(e)
+    punica_kernels.dispatch_bgmv_low_level(
+        y,
+        x,
+        w_t_all,
+        indicies,
+        layer_idx,
+        scale,
+        x.size(1),
+        y_slice_size,
+        y_offset,
+    )
+
+
 def add_lora(y: torch.Tensor,
              x: torch.Tensor,
              wa_t_all: torch.Tensor,

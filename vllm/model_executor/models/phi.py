@@ -42,13 +42,15 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -62,7 +64,8 @@ class PhiAttention(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
@@ -80,12 +83,12 @@ class PhiAttention(nn.Module):
             self.head_size,
             self.total_num_heads,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.dense = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         scaling = self.head_size**-0.5
@@ -104,7 +107,11 @@ class PhiAttention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
         )
-        self.attn = Attention(self.num_heads, self.head_size, scaling)
+        self.attn = Attention(self.num_heads,
+                              self.head_size,
+                              scaling,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -125,7 +132,7 @@ class PhiMLP(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
         n_inner = getattr(config, "n_inner", None)
@@ -134,14 +141,13 @@ class PhiMLP(nn.Module):
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             n_inner,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.fc2 = RowParallelLinear(
             n_inner,
             config.hidden_size,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
-        quant_config = getattr(linear_method, "quant_config", None)
         self.act = get_act_fn(config.hidden_act, quant_config, n_inner)
 
     def forward(self, hidden_states):
@@ -155,12 +161,13 @@ class PhiLayer(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
-        self.self_attn = PhiAttention(config, linear_method)
-        self.mlp = PhiMLP(config, linear_method)
+        self.self_attn = PhiAttention(config, cache_config, quant_config)
+        self.mlp = PhiMLP(config, quant_config)
 
     def forward(
         self,
@@ -186,14 +193,15 @@ class PhiModel(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
+        self.quant_config = quant_config
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.layers = nn.ModuleList([
-            PhiLayer(config, linear_method)
+            PhiLayer(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
@@ -222,15 +230,37 @@ class PhiModel(nn.Module):
 
 
 class PhiForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ]
+    }
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "dense",
+        "fc1",
+        "fc2",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
+    ):
+        del lora_config  # Unused.
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
+        self.quant_config = quant_config
 
-        self.model = PhiModel(config, linear_method)
+        self.model = PhiModel(config, cache_config, quant_config)
 
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,

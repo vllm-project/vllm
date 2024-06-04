@@ -6,7 +6,7 @@ import pytest
 # and debugging.
 import ray
 
-from vllm.entrypoints.openai.test_utils import ServerRunner
+from ..utils import ServerRunner
 
 MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
 CHAT_TEMPLATE = (Path(__file__).parent.parent.parent /
@@ -21,7 +21,7 @@ TEST_IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
-pytestmark = pytest.mark.asyncio
+pytestmark = pytest.mark.openai
 
 
 @pytest.fixture(scope="module")
@@ -63,6 +63,7 @@ def client():
     yield client
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image(server, client: openai.AsyncOpenAI,
@@ -113,6 +114,7 @@ async def test_single_chat_session_image(server, client: openai.AsyncOpenAI,
     assert message.content is not None and len(message.content) >= 0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_chat_streaming_image(server, client: openai.AsyncOpenAI,

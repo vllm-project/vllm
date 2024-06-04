@@ -6,13 +6,14 @@ import torch.distributed
 
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig)
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.cpu_model_runner import CPUModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
@@ -52,7 +53,15 @@ class CPUCacheEngine:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # Get attention backend.
-        self.attn_backend = get_attn_backend(model_config.dtype)
+        self.attn_backend = get_attn_backend(
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            cache_config.cache_dtype,
+            self.block_size,
+        )
 
         # Initialize the cache.
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks)
@@ -122,6 +131,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
+        vision_language_config: Optional[VisionLanguageConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ) -> None:
@@ -135,21 +145,26 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
+        self.vision_language_config = vision_language_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
+
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self.model_runner = CPUModelRunner(model_config,
-                                           parallel_config,
-                                           scheduler_config,
-                                           device_config,
-                                           load_config=self.load_config,
-                                           lora_config=self.lora_config,
-                                           kv_cache_dtype=kv_cache_dtype,
-                                           is_driver_worker=is_driver_worker)
+        self.model_runner = CPUModelRunner(
+            model_config,
+            parallel_config,
+            scheduler_config,
+            device_config,
+            cache_config,
+            load_config=self.load_config,
+            lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
+            kv_cache_dtype=kv_cache_dtype,
+            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: CPUCacheEngine
@@ -242,30 +257,35 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
     def cache_copy(
         self,
-        blocks_to_copy: Dict[int, List[int]],
+        blocks_to_copy: torch.Tensor,
     ) -> None:
-        if blocks_to_copy:
+        if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
 
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
-        blocks_to_swap_in: Optional[Dict[int, int]] = None,
-        blocks_to_swap_out: Optional[Dict[int, int]] = None,
-        blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+        execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> List[SamplerOutput]:
+
+        if execute_model_req is None:
+            seq_group_metadata_list = None
+        else:
+            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             num_seq_groups: int = len(seq_group_metadata_list)
-            assert blocks_to_swap_in is not None
-            assert blocks_to_swap_out is not None
-            assert blocks_to_copy is not None
-            assert len(blocks_to_swap_in) == 0
-            assert len(blocks_to_swap_out) == 0
+            assert execute_model_req is not None
+            blocks_to_copy = execute_model_req.blocks_to_copy
+            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                          device="cpu",
+                                          dtype=torch.int64).view(-1, 2)
+            assert len(execute_model_req.blocks_to_swap_in) == 0
+            assert len(execute_model_req.blocks_to_swap_out) == 0
             data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
-                "blocks_to_copy": blocks_to_copy,
+                "blocks_to_copy": execute_model_req.blocks_to_copy,
             }
             broadcast_tensor_dict(data, src=0)
         else:
@@ -273,7 +293,6 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             num_seq_groups = data["num_seq_groups"]
             blocks_to_copy = data["blocks_to_copy"]
 
-        assert blocks_to_copy is not None
         self.cache_copy(blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.

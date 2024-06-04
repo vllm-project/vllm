@@ -52,12 +52,16 @@ TEST_SCHEMA = {
 TEST_REGEX = (r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
               r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
 
+pytestmark = pytest.mark.openai
+
 
 def test_guided_logits_processors():
     """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""
     tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
     regex_LP = RegexLogitsProcessor(TEST_REGEX, tokenizer)
-    json_LP = JSONLogitsProcessor(TEST_SCHEMA, tokenizer)
+    json_LP = JSONLogitsProcessor(TEST_SCHEMA,
+                                  tokenizer,
+                                  whitespace_pattern=None)
 
     regex_LP.init_state()
     token_ids = tokenizer.encode(

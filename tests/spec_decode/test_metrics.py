@@ -119,7 +119,7 @@ def test_initial_metrics_has_correct_values(has_data: bool):
         num_draft_tokens = 0
     k = 5
 
-    num_possible_tokens = AsyncMetricsCollector.get_max_num_accepted_tokens(
+    max_num_emitted_tokens = AsyncMetricsCollector.get_max_num_emitted_tokens(
         num_draft_tokens, k)
 
     rej_sampler = MagicMock()
@@ -153,7 +153,7 @@ def test_initial_metrics_has_correct_values(has_data: bool):
         assert (metrics.draft_acceptance_rate == num_accepted_tokens /
                 num_draft_tokens)
         assert (metrics.system_efficiency == num_emitted_tokens /
-                num_possible_tokens)
+                max_num_emitted_tokens)
     else:
         assert math.isnan(metrics.draft_acceptance_rate)
         assert math.isnan(metrics.system_efficiency)
