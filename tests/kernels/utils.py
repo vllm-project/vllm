@@ -432,14 +432,16 @@ def _num_tokens_to_min_blocks(num_tokens: int, block_size: int) -> int:
     '''
     return (num_tokens + block_size) // block_size
 
+
 def make_empty_slot_mapping_tensor(device: Union[torch.device, str]):
     return maybe_make_long_tensor([], device)
+
 
 def make_empty_block_tables_tensor(device: Union[torch.device, str]):
     return torch.tensor([], device=device)
 
-def split_slot_mapping(slot_mapping_list: torch.Tensor,
-                       seq_lens: List[int],
+
+def split_slot_mapping(slot_mapping_list: torch.Tensor, seq_lens: List[int],
                        device: Union[torch.device, str]):
     '''
     Split a slot mapping into valid prefill- and decode-phase slot mappings.
@@ -484,15 +486,16 @@ def split_slot_mapping(slot_mapping_list: torch.Tensor,
     prefill_slot_mapping = []
     decode_slot_mapping = []
 
-    base_idx=0
+    base_idx = 0
     for seq_len in seq_lens:
-        prefill_slot_mapping.extend(
-            slot_mapping_list[range(base_idx,base_idx+seq_len-1)])
-        decode_slot_mapping.append(slot_mapping_list[base_idx+seq_len-1])
+        prefill_slot_mapping.extend(slot_mapping_list[base_idx:(base_idx +
+                                                                seq_len - 1)])
+        decode_slot_mapping.append(slot_mapping_list[base_idx + seq_len - 1])
         base_idx += seq_len
 
     return maybe_make_long_tensor(prefill_slot_mapping, device), \
            maybe_make_long_tensor(decode_slot_mapping, device)
+
 
 def make_block_tables_slot_mapping(block_size: int,
                                    seq_lens: List[int],

@@ -13,17 +13,17 @@ import pytest
 import torch
 
 from tests.kernels.utils import (make_backend, make_block_tables_slot_mapping,
-                                 make_kv_cache, make_qkv, make_test_metadata,
+                                 make_empty_block_tables_tensor,
+                                 make_empty_slot_mapping_tensor, make_kv_cache,
+                                 make_qkv, make_test_metadata,
                                  override_backend_env_variable, pack_qkv,
                                  pack_tensor, ref_masked_attention,
-                                 make_empty_slot_mapping_tensor,
-                                 make_empty_block_tables_tensor,
                                  split_slot_mapping)
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.utils import (
     STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL, STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
-from vllm.utils import is_hip, make_causal_mask
+from vllm.utils import is_hip, make_causal_mask, maybe_make_long_tensor
 
 HEAD_SIZES = [64, 256]
 
@@ -163,11 +163,7 @@ def _encoder_attn_setup(batch_size: int,
                                          device=CUDA_DEVICE)
 
     block_tables, \
-    _, \
-    _, \
-    _, \
     slot_mapping, \
-    _, \
     _ = make_block_tables_slot_mapping(
         block_size,
         q_seq_lens,
@@ -331,12 +327,12 @@ def _decoder_attn_setup(batch_size: int,
     # slot mapping must be in a format compatible
     # with KV caching & attention kernels
     #
-    # Prefill:
-    # 
+    # Prefill-phase:
+    #
     # * Empty block-tables tensor
     # * Slot-mapping with entries for prompt tokens
     #
-    # Decode:
+    # Decode-phase:
     # * Block-tables tensor with minimum number of blocks
     #   required by total num. tokens in the entirety of all sequences
     #   (including both prefill & decode)
@@ -353,8 +349,8 @@ def _decoder_attn_setup(batch_size: int,
                             block_base_addr = block_base_addr)
 
     prefill_slot_mapping, \
-    decode_slot_mapping = split_slot_mapping(slot_mapping_list, 
-                                             q_seq_lens, 
+    decode_slot_mapping = split_slot_mapping(slot_mapping_list,
+                                             q_seq_lens,
                                              device=CUDA_DEVICE)
 
     prefill_packed_query, \
@@ -514,20 +510,44 @@ def _enc_dec_cross_attn_setup_reuses_query(query: torch.Tensor,
                                                 [1 for _ in range(batch_size)],
                                                 device=CUDA_DEVICE)
 
-    # Unlike self-attention:
-    # - Prefill slot-mapping includes all key slots
-    # - Decode slot-mapping is empty
+    # Build prefill- & decode-phase data structures
+    # for encoder/decoder cross-attention. Block tables and
+    # slot mapping must be in a format compatible
+    # with KV caching & attention kernels
+    #
+    # Whereas decoder self-attention extracts relationships between
+    # equal-length Q/K/V sequences, which mutually grow in length
+    # with each decoded token, cross-attention relates the Q sequence
+    # - which grows with each new decoded token - to fixed-length
+    # K and V sequences derived from the encoder hidden states.
+    #
+    # Prefill-phase:
+    #
+    # * Empty block-tables tensor
+    # * Slot-mapping with as many entries as there are tokens in the encoder
+    #   prompt.
+    #
+    # Decode-phase:
+    # * Block-tables tensor with minimum number of blocks to
+    #   accommodate K & V tensors which are equal in lnegth
+    #   to the encoder prompt length
+    # * Empty slot-mapping tensor (since K & V are fixed in size,
+    #   new decoded tokens are not KV-cached and require no slot-
+    #   mapping)
+
+    prefill_block_tables = make_empty_block_tables_tensor(device=CUDA_DEVICE)
+    decode_slot_mapping = make_empty_slot_mapping_tensor(device=CUDA_DEVICE)
+
     decode_block_tables, \
-    _, \
-    _, \
-    prefill_block_tables, \
-    prefill_slot_mapping, \
-    decode_slot_mapping, \
+    prefill_slot_mapping_list, \
     max_block_idx = make_block_tables_slot_mapping(
         block_size,
         kv_seq_lens,
         block_base_addr=block_base_addr,
         device=CUDA_DEVICE)
+
+    prefill_slot_mapping = maybe_make_long_tensor(prefill_slot_mapping_list,
+                                                  device=CUDA_DEVICE)
 
     # Packed key/value (query is already provided)
     _, packed_key, packed_value, _, _ = pack_qkv(None,
