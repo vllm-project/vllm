@@ -164,12 +164,12 @@ class HfRunner:
             else:
                 auto_cls = AutoModelForCausalLM
 
-            self.model = auto_cls.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-                device_map="auto",
-            )
+            self.model = self.wrap_device(
+                auto_cls.from_pretrained(
+                    model_name,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=True,
+                ))
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
