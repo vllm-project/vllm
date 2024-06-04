@@ -1,4 +1,5 @@
 """Token blocks."""
+
 from itertools import takewhile
 from os.path import commonprefix
 from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
@@ -8,6 +9,7 @@ from vllm.core.block.common import (CopyOnWriteTracker,
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
+from vllm.utils import cdiv
 
 PrefixHash = int
 
@@ -294,9 +296,28 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def get_num_total_blocks(self) -> int:
         return self._hashless_allocator.get_num_total_blocks()
 
+    def get_physical_block_id(self, absolute_id: int) -> int:
+        """Returns the zero-offset block id on certain block allocator
+        given the absolute block id.
+
+        Args:
+            absolute_id (int): The absolute block id for the block 
+                in whole allocator.
+
+        Returns:
+            int: The rzero-offset block id on certain device.
+        """
+        return sorted(self.all_block_ids).index(absolute_id)
+
     @property
     def all_block_ids(self) -> FrozenSet[int]:
         return self._hashless_allocator.all_block_ids
+
+    def is_block_cached(self, block: Block) -> bool:
+        assert block.content_hash is not None
+        if block.content_hash in self._cached_blocks:
+            return True
+        return False
 
     def promote_to_immutable_block(self, block: Block) -> BlockId:
         """Once a mutable block is full, it can be promoted to an immutable
@@ -410,6 +431,63 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             ids for ids in ids_list  # type: ignore
             if ids != []
         ])
+
+    def get_num_blocks_touched(self,
+                               blocks: List[Block],
+                               num_lookahead_slots: int = 0) -> int:
+        """Determine the number of blocks that will be touched by
+        swapping in/out the given blocks from certain sequence
+        group with the provided num_lookahead_slots.
+
+        Args:
+            blocks (List[Block]): The potential blocks to swap.
+            num_lookahead_slots (int): number of lookahead slots (0 for 
+                swap out).
+        
+        Returns:
+            int: the number of blocks that will be touched by
+                swapping in/out the given blocks and num_lookahead_slots.
+        """
+        num_touched_blocks = 0
+        for block in blocks:
+            if not block.is_full:
+                if block.num_empty_slots >= num_lookahead_slots:
+                    num_touched_blocks += 1
+                else:
+                    num_touched_blocks += cdiv(
+                        num_lookahead_slots - block.num_empty_slots,
+                        self._block_size)
+            else:
+                if not self.is_block_cached(block):
+                    num_touched_blocks += 1
+        return num_touched_blocks
+
+    def swap_out(self, blocks: List[Block]) -> None:
+        """Execute the swap out actions. Basically just free the 
+        given blocks.
+
+        Args:
+            blocks: List of blocks to be swapped out.
+        """
+        for block in blocks:
+            self.free(block)
+
+    def swap_in(self, blocks: List[Block]) -> None:
+        """Execute the swap int actions. Change the block id from 
+        old allocator to current allocator for each block to finish 
+        the block table update. 
+
+        Args:
+            blocks: List of blocks to be swapped in.
+        """
+        for block in blocks:
+            if block.is_full:
+                alloc = self.allocate_immutable(block.prev_block,
+                                                block.token_ids)
+            else:
+                alloc = self.allocate_mutable(block.prev_block)
+                alloc.append_token_ids(block.token_ids)
+            block.block_id = alloc.block_id
 
 
 class PrefixCachingBlock(Block):

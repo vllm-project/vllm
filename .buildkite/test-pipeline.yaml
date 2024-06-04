@@ -62,7 +62,6 @@ steps:
   mirror_hardwares: [amd]
 
   commands:
-  - pytest -v -s test_inputs.py
   - pytest -v -s entrypoints -m llm
   - pytest -v -s entrypoints -m openai
 
@@ -78,6 +77,13 @@ steps:
     - python3 llm_engine_example.py
     - python3 llava_example.py
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+
+- label: Inputs Test
+  #mirror_hardwares: [amd]
+  commands:
+    - bash ../.buildkite/download-images.sh
+    - pytest -v -s test_inputs.py
+    - pytest -v -s multimodal
 
 - label: Kernels Test %N
   #mirror_hardwares: [amd]

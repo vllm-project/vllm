@@ -140,7 +140,6 @@ class CopyOnWriteTracker:
         assert refcount != 0
         if refcount > 1:
             src_block_id = block_id
-
             # Decrement refcount of the old block.
             self._allocator.free(block)
 

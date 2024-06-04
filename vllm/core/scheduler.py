@@ -297,6 +297,8 @@ class Scheduler:
         self.prev_prompt = False
         # Latency of the last prompt step
         self.last_prompt_latency = 0.0
+        # preemption mode, RECOMPUTE or SWAP
+        self.user_specified_preemption_mode = scheduler_config.preemption_mode
 
         # The following field is test-only. It is used to inject artificial
         # preemption.
@@ -522,7 +524,9 @@ class Scheduler:
             seq_group = swapped_queue[0]
 
             # If the sequence group cannot be swapped in, stop.
-            alloc_status = self.block_manager.can_swap_in(seq_group)
+            is_prefill = seq_group.is_prefill()
+            alloc_status = self.block_manager.can_swap_in(
+                seq_group, self._get_num_lookahead_slots(is_prefill))
             if alloc_status == AllocStatus.LATER:
                 break
             elif alloc_status == AllocStatus.NEVER:
@@ -1067,11 +1071,16 @@ class Scheduler:
         # over sequence groups with a single sequence.
         # TODO(woosuk): Support recomputation for sequence groups with multiple
         # sequences. This may require a more sophisticated CUDA kernel.
-        if preemption_mode is None:
+        if self.user_specified_preemption_mode is None:
             if seq_group.get_max_num_running_seqs() == 1:
                 preemption_mode = PreemptionMode.RECOMPUTE
             else:
                 preemption_mode = PreemptionMode.SWAP
+
+        elif self.user_specified_preemption_mode == "swap":
+            preemption_mode = PreemptionMode.SWAP
+        else:
+            preemption_mode = PreemptionMode.RECOMPUTE
 
         if self.num_cumulative_preemption % 50 == 0:
             logger.warning(
