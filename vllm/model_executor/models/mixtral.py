@@ -153,11 +153,11 @@ class MixtralMoE(nn.Module):
                     raise ValueError(
                         "Found static activation scheme for checkpoint that "
                         "was not serialized fp8.")
-                self.a13_scale = nn.Parameter(torch.zeros(
+                self.a13_scale = nn.Parameter(torch.ones(
                     self.num_total_experts, dtype=torch.float32),
                                               requires_grad=False)
-                self.a2_scale = nn.Parameter(torch.zeros(
-                    self.num_total_experts, dtype=torch.float32),
+                self.a2_scale = nn.Parameter(torch.ones(self.num_total_experts,
+                                                        dtype=torch.float32),
                                              requires_grad=False)
 
                 set_weight_attrs(self.a13_scale, {
@@ -183,8 +183,8 @@ class MixtralMoE(nn.Module):
 
         # Loading scales
         if "act_scale" in weight_name or "w2.weight_scale" in weight_name:
-            if param_data[expert_id] > 0 and (param_data[expert_id] -
-                                              loaded_weight).abs() > 1e-5:
+            if param_data[expert_id] != 1 and (param_data[expert_id] -
+                                               loaded_weight).abs() > 1e-5:
                 raise ValueError(
                     "act_scales of w1 and w3 of a layer "
                     f"must be equal. But got {param_data[expert_id]} "
