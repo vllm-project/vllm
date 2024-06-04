@@ -85,8 +85,11 @@ def _prune_hidden_states(
     hidden_states: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    return hidden_states.index_select(0,
-                                      sampling_metadata.selected_token_indices)
+    if sampling_metadata.selected_token_indices is not None:
+        return hidden_states.index_select(0,
+                                          sampling_metadata.selected_token_indices)
+    else:
+        return hidden_states
 
 
 def _apply_logits_processors(

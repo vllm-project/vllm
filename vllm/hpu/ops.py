@@ -36,7 +36,7 @@ def fetch_from_cache(cache, blocks):
 
 
 @hpu_utils.with_mark_steps
-def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block_tables, context_lens, block_size, max_context_len, alibi_slopes, kv_cache_dtype=None)  -> None:
+def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block_tables, context_lens, block_size, alibi_slopes, kv_cache_dtype=None) -> None:
     seq_len = block_tables.size(1)
     batch_size, query_heads, _ = query.shape
     _, kv_heads, _, _ = key_cache.shape

@@ -90,7 +90,6 @@ class HabanaWorker(WorkerBase):
         if self.device_config.device.type == "hpu":
             self.device = torch.device("hpu")
             torch.hpu.set_device(self.device)
-            self.init_hpu_memory = torch.hpu.mem_get_info()[0]
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -123,22 +122,15 @@ class HabanaWorker(WorkerBase):
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
-
-        # Calculate the number of blocks that can be allocated with the
-        # profiled peak memory.
         torch.hpu.synchronize()
-        free_hpu_memory, total_hpu_memory = torch.hpu.mem_get_info()
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # HPU did not change their memory usage during the profiling.
-        peak_memory = self.init_hpu_memory - free_hpu_memory
-        assert peak_memory > 0, (
-            "Error in memory profiling. This happens when the HPU memory was "
-            "not properly cleaned up before initializing the vLLM instance.")
+
+        # At this point we should've allocated the maximum workspace for all recipes
+        # we will use the extra memory for graphs/blocks
+        free_hpu_memory = torch.hpu.mem_get_info()[0]
 
         cache_block_size = self.get_cache_block_size_bytes()
-        num_hpu_blocks = int(
-            (total_hpu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
+        graph_headroom = 1 - (float(os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.4')) if not self.model_config.enforce_eager else 0)
+        num_hpu_blocks = int(free_hpu_memory * graph_headroom * self.cache_config.gpu_memory_utilization // cache_block_size)
         num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                              cache_block_size)
         num_hpu_blocks = max(num_hpu_blocks, 0)
@@ -298,7 +290,8 @@ def init_worker_distributed_environment(
     assert dummy_tensor_hpu.item() == parallel_config.world_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
-    
+
+
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
                                 max_model_len) -> None:
     if num_gpu_blocks <= 0:
