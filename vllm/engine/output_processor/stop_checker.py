@@ -57,16 +57,16 @@ class StopChecker:
             return
 
         # Check if a stop token was encountered.
-        # This assumes a single token produced per step.
-        last_token_id = seq.get_last_token_id()
-        if last_token_id in sampling_params.stop_token_ids:
-            if new_char_count and (
-                    not sampling_params.include_stop_str_in_output):
-                # Remove last token
-                seq.output_text = seq.output_text[:-new_char_count]
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            seq.stop_reason = last_token_id
-            return
+        last_token_ids = seq.get_last_few_token_ids(new_char_count)
+        for last_token_id in last_token_ids:
+            if last_token_id in sampling_params.stop_token_ids:
+                if new_char_count and (
+                        not sampling_params.include_stop_str_in_output):
+                    # Remove last token
+                    seq.output_text = seq.output_text[:-new_char_count]
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                seq.stop_reason = last_token_id
+                return
 
         # Check if any stop strings are matched.
         stop_str = self._check_stop_strings(seq, new_char_count,
