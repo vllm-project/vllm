@@ -4,9 +4,9 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 import ray
-from ray.experimental.tqdm_ray import tqdm
 import torch
 import triton
+from ray.experimental.tqdm_ray import tqdm
 from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe.fused_moe import *
