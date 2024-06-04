@@ -4,7 +4,7 @@ from typing import List, Optional
 import pytest
 import torch
 
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.ops.rotary_embedding import get_rope
 
 from .allclose_default import get_default_atol, get_default_rtol
 

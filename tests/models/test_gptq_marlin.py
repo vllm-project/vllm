@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+from vllm.model_executor.ops.rotary_embedding import _ROPE_DICT
 
 from .utils import check_logprobs_close
 

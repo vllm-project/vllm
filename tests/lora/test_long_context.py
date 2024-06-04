@@ -8,7 +8,7 @@ import vllm
 from vllm import SamplingParams
 from vllm.lora.layers import LinearScalingRotaryEmbeddingWithLora
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.rotary_embedding import (
+from vllm.model_executor.ops.rotary_embedding import (
     LinearScalingRotaryEmbedding)
 
 from .data.long_context_test_data import prompts_and_responses
