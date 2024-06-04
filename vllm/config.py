@@ -614,7 +614,7 @@ class ParallelConfig:
                 backend = "ray"
             elif ray_found:
                 from ray.util import get_current_placement_group
-                if get_current_placement_group() is not None:
+                if self.placement_group or get_current_placement_group():
                     backend = "ray"
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
