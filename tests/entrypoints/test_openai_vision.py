@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import openai
 import pytest
 import ray
@@ -5,7 +7,9 @@ import ray
 from ..utils import ServerRunner
 
 MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
-
+VICUNA_CHAT_TEMPLATE = (Path(__file__).parent.parent.parent /
+                        "examples/template_vicuna.jinja")
+assert VICUNA_CHAT_TEMPLATE.exists()
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
@@ -36,6 +40,8 @@ def server():
         "1,3,336,336",
         "--image-feature-size",
         "576",
+        "--chat-template",
+        str(VICUNA_CHAT_TEMPLATE),
     ])
     ray.get(server_runner.ready.remote())
     yield server_runner

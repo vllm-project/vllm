@@ -88,15 +88,6 @@ class OpenAIServingChat(OpenAIServing):
         elif tokenizer.chat_template is not None:
             logger.info("Using default chat template:\n%s",
                         tokenizer.chat_template)
-
-        # NOTE: This is a temporary hack for vision language models that do
-        # not have a chat template.
-        elif self.engine.engine.vision_language_config is not None:
-
-            # Vicuna chat template
-            if self.engine.engine.model_config.hf_config.model_type == "llava":
-                tokenizer.chat_template = "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = 'A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user\\'s questions.' %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 %}{{ system_message }}{% endif %}{% if message['role'] == 'user' %}{{ ' USER: ' + message['content'].strip() }}{% elif message['role'] == 'assistant' %}{{ ' ASSISTANT: ' + message['content'].strip() + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ ' ASSISTANT:' }}{% endif %}"  # noqa
-
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")
