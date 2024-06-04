@@ -108,8 +108,8 @@ class FlashInferMetadata(AttentionMetadata):
     data_type: torch.dtype = None
     device: torch.device = torch.device("cuda")
     num_gpu_blocks: Optional[int] = None
-    max_num_seqs: Optional[int] = None
-    use_captured_graph: Optional[bool] = None
+    max_num_seqs: int = 256
+    use_captured_graph: bool = True
 
     def __post_init__(self):
         # Refer to
@@ -132,6 +132,9 @@ class FlashInferMetadata(AttentionMetadata):
                 BatchPrefillWithPagedKVCacheWrapper(
                 self.prefill_workspace_buffer, "NHD")
             assert self.prefill_workspace_buffer is not None
+            assert self.paged_kv_indices is not None
+            assert self.paged_kv_indptr is not None
+            assert self.paged_kv_last_page_len is not None
             self.paged_kv_indices = self.paged_kv_indices.to(self.device)
             self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
             self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
@@ -161,12 +164,16 @@ class FlashInferMetadata(AttentionMetadata):
                                                             device=self.device)
 
             if self.use_captured_graph:
-                self.decode_wrapper = CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
+                self.decode_wrapper = \
+                    CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
                     self.decode_workspace_buffer, self.indptr_buffer,
                     self.indices_buffer, self.last_page_len_buffer, "NHD")
             else:
                 self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                     self.decode_workspace_buffer, "NHD")
+                assert self.paged_kv_indices is not None
+                assert self.paged_kv_indptr is not None
+                assert self.paged_kv_last_page_len is not None
                 self.paged_kv_indices = self.paged_kv_indices.to(self.device)
                 self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
                 self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
