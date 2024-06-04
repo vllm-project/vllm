@@ -7,9 +7,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,
-                          LlavaConfig, LlavaForConditionalGeneration,
-                          LlavaNextConfig, LlavaNextForConditionalGeneration)
+from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
+                          AutoProcessor, AutoTokenizer)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
@@ -126,10 +125,6 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "float": torch.float,
 }
 
-AutoModelForCausalLM.register(LlavaConfig, LlavaForConditionalGeneration)
-AutoModelForCausalLM.register(LlavaNextConfig,
-                              LlavaNextForConditionalGeneration)
-
 _EMBEDDING_MODELS = [
     "intfloat/e5-mistral-7b-instruct",
 ]
@@ -147,6 +142,8 @@ class HfRunner:
         self,
         model_name: str,
         dtype: str = "half",
+        *,
+        is_vision_model: bool = False,
     ) -> None:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
@@ -162,7 +159,12 @@ class HfRunner:
                     device="cpu",
                 ).to(dtype=torch_dtype))
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(
+            if is_vision_model:
+                auto_cls = AutoModelForVision2Seq
+            else:
+                auto_cls = AutoModelForCausalLM
+
+            self.model = auto_cls.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
                 trust_remote_code=True,
