@@ -1027,8 +1027,6 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
 
     # PREFILL: self- and cross-attention tests
 
-    context_lens = [0 for _ in range(batch_size)]
-
     prefill_attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
         True,

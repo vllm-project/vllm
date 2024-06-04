@@ -258,7 +258,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             seq_lens_tensor=None if self.seq_lens_tensor is None else
-                self.seq_lens_tensor[self.num_prefills:],
+            self.seq_lens_tensor[self.num_prefills:],
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
             block_tables=self.block_tables[self.num_prefills:],
