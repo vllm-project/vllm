@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 try:
     import flashinfer
     from flash_attn import flash_attn_varlen_func
+    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
 except ImportError:
@@ -71,6 +72,8 @@ class FlashInferMetadata(AttentionMetadata):
     use_cuda_graph: bool = False
 
     prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
+    decode_cudagraph_wrapper: Optional[
+        CUDAGraphBatchDecodeWithPagedKVCacheWrapper] = None
     decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
 
     # Metadata for the prefill stage
@@ -78,10 +81,6 @@ class FlashInferMetadata(AttentionMetadata):
     query_start_loc: Optional[torch.Tensor] = None
     block_tables: Optional[torch.Tensor] = None
 
-    # Metadata for the decode stage
-    # Workspace buffer required by the kernel, the buffer should not
-    # be allocated/deacollated by the FalshInfermetadata object.
-    workspace_buffer: Optional[torch.Tensor] = None
     # An example for paged_kv_indices, paged_kv_indptr:
     # request 1, page indices [0, 5, 8]
     # request 2, page indices [1, 6, 7]
@@ -107,6 +106,10 @@ class FlashInferMetadata(AttentionMetadata):
     page_size: Optional[int] = None
     # The data type of the paged kv cache
     data_type: torch.dtype = None
+    device: torch.device = torch.device("cuda")
+    num_gpu_blocks: Optional[int] = None
+    max_num_seqs: Optional[int] = None
+    use_captured_graph: Optional[bool] = None
 
     def __post_init__(self):
         # Refer to
@@ -119,16 +122,56 @@ class FlashInferMetadata(AttentionMetadata):
                 f"received {self.head_dim}.")
 
         if self.num_prefill_tokens > 0:
+            if not hasattr(self, "prefill_workspace_buffer"):
+                # Allocate 16MB workspace buffer
+                # Follow the example of flashinfer: https://docs.flashinfer.ai/api/python/decode.html
+                self.prefill_workspace_buffer = torch.empty(16 * 1024 * 1024,
+                                                            dtype=torch.uint8,
+                                                            device=self.device)
             self.prefill_wrapper = \
-                flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-                self.workspace_buffer, "NHD")
+                BatchPrefillWithPagedKVCacheWrapper(
+                self.prefill_workspace_buffer, "NHD")
+            assert self.prefill_workspace_buffer is not None
+            self.paged_kv_indices = self.paged_kv_indices.to(self.device)
+            self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
+            self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
+                self.device)
             self.prefill_wrapper.begin_forward(
                 self.query_start_loc, self.paged_kv_indptr,
                 self.paged_kv_indices, self.paged_kv_last_page_len,
-                self.num_qo_heads, self.num_kv_heads, self.head_dim)
+                self.num_qo_heads, self.num_kv_heads, self.head_dim,
+                self.page_size)
         else:
-            self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                self.workspace_buffer, "NHD")
+            if not hasattr(self, "decode_workspace_buffer"):
+                # Allocate 16MB workspace buffer
+                # Follow the example of flashinfer: https://docs.flashinfer.ai/api/python/decode.html
+                self.decode_workspace_buffer = torch.empty(16 * 1024 * 1024,
+                                                           dtype=torch.uint8,
+                                                           device=self.device)
+
+                if self.use_captured_graph:
+                    self.indptr_buffer = torch.empty(self.max_num_seqs + 1,
+                                                     dtype=torch.int32,
+                                                     device=self.device)
+                    self.indices_buffer = torch.empty(self.num_gpu_blocks,
+                                                      dtype=torch.int32,
+                                                      device=self.device)
+                    self.last_page_len_buffer = torch.empty(self.max_num_seqs,
+                                                            dtype=torch.int32,
+                                                            device=self.device)
+
+            if self.use_captured_graph:
+                self.decode_wrapper = CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
+                    self.decode_workspace_buffer, self.indptr_buffer,
+                    self.indices_buffer, self.last_page_len_buffer, "NHD")
+            else:
+                self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                    self.decode_workspace_buffer, "NHD")
+                self.paged_kv_indices = self.paged_kv_indices.to(self.device)
+                self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
+                self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
+                    self.device)
+
             self.decode_wrapper.begin_forward(
                 self.paged_kv_indptr,
                 self.paged_kv_indices,
