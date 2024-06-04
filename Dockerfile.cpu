@@ -7,7 +7,7 @@ RUN apt-get update  -y \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
 RUN pip install --upgrade pip \
-    && pip install wheel packaging ninja setuptools>=49.4.0 numpy
+    && pip install wheel packaging ninja "setuptools>=49.4.0" numpy
 
 FROM cpu-test-1 AS build
 
