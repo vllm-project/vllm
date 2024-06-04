@@ -93,7 +93,7 @@ if __name__ == '__main__':
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--head-size",
                         type=int,
-                        choices=[64, 80, 96, 112, 128, 256],
+                        choices=[64, 80, 96, 112, 128, 192, 256],
                         default=128)
     parser.add_argument("--rotary-dim", type=int, choices=[16, 32], default=32)
     parser.add_argument("--dtype",

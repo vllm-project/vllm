@@ -200,7 +200,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # The CUTLASS kernels for Hopper require sm90a to be enabled.
   # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
   # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 11)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
     set_source_files_properties(
           "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu"
           PROPERTIES
@@ -311,6 +311,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
 
+  message(STATUS "Enabling moe extension.")
+  add_dependencies(default _moe_C)
+
   # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=ON or
   # VLLM_INSTALL_PUNICA_KERNELS is set in the environment and
   # there are supported target arches.
@@ -319,9 +322,4 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Enabling punica extension.")
     add_dependencies(default _punica_C)
   endif()
-endif()
-
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  message(STATUS "Enabling moe extension.")
-  add_dependencies(default _moe_C)
 endif()
