@@ -181,13 +181,12 @@ class HfRunner:
                     device="cpu",
                 ).to(dtype=torch_dtype))
         else:
-            self.model = self.wrap_device(
-                AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    torch_dtype=torch_dtype,
-                    trust_remote_code=True,
-                    device_map="auto",
-                ))
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+                device_map="auto",
+            )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
