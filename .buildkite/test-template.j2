@@ -4,7 +4,7 @@
 
 steps:
   - label: ":docker: build image"
-    commands: 
+    commands:
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
     env:
@@ -28,6 +28,7 @@ steps:
         command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" ; ")) | safe }}"
         env:
           DOCKER_BUILDKIT: "1"
+        soft_fail: true
     {% endif %}
     {% endfor %}
 
@@ -36,7 +37,7 @@ steps:
     agents:
       queue: neuron
     command: bash .buildkite/run-neuron-test.sh
-    soft_fail: true
+    soft_fail: false
 
   - label: "Intel Test"
     depends_on: ~

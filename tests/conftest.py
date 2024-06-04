@@ -1,14 +1,15 @@
 import contextlib
 import gc
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TypeVar
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoProcessor, AutoTokenizer)
+                          AutoProcessor, AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
@@ -125,14 +126,12 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "float": torch.float,
 }
 
-_EMBEDDING_MODELS = [
-    "intfloat/e5-mistral-7b-instruct",
-]
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
 
 
 class HfRunner:
 
-    def wrap_device(self, input: any):
+    def wrap_device(self, input: _T) -> _T:
         if not is_cpu():
             return input.to("cuda")
         else:
@@ -143,6 +142,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "half",
         *,
+        is_embedding_model: bool = False,
         is_vision_model: bool = False,
     ) -> None:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
@@ -150,7 +150,7 @@ class HfRunner:
 
         self.model_name = model_name
 
-        if model_name in _EMBEDDING_MODELS:
+        if is_embedding_model:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
             self.model = self.wrap_device(
