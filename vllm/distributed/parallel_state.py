@@ -357,6 +357,17 @@ def get_pipeline_model_parallel_prev_rank():
     return _PP_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
 
 
+def is_pipeline_model_parallel_first_rank() -> bool:
+    """Return True if the caller is the first rank in the pipeline"""
+    return get_pipeline_model_parallel_rank() == 0
+
+
+def is_pipeline_model_parallel_last_rank() -> bool:
+    """Return True if the caller is the last rank in the pipeline"""
+    return get_pipeline_model_parallel_rank(
+    ) == get_pipeline_model_parallel_world_size() - 1
+
+
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP_DEVICE_GROUP
@@ -376,3 +387,9 @@ def destroy_model_parallel():
     _PP_DEVICE_GROUP = None
     global _PP_GLOBAL_RANKS
     _PP_GLOBAL_RANKS = None
+    global _PP_CPU_GROUP
+    if _PP_CPU_GROUP:
+        torch.distributed.destroy_process_group(_PP_CPU_GROUP)
+    _PP_CPU_GROUP = None
+    global _PP_PYNCCL_COMMUNICATOR
+    _PP_PYNCCL_COMMUNICATOR = None

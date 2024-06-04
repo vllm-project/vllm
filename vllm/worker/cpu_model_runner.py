@@ -7,7 +7,8 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
+from vllm.distributed import (broadcast_tensor_dict,
+                              get_tensor_model_parallel_src_rank_and_group)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
@@ -259,6 +260,8 @@ class CPUModelRunner:
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Optional[torch.Tensor]]:
         multi_modal_input = None
+        src_rank, tp_group, cpu_tp_group = (
+            get_tensor_model_parallel_src_rank_and_group())
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
@@ -289,9 +292,14 @@ class CPUModelRunner:
                 sampling_metadata.selected_token_indices,
             }
             metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
+            broadcast_tensor_dict(metadata_dict,
+                                  src=src_rank,
+                                  group=tp_group,
+                                  metadata_group=cpu_tp_group)
         else:
-            metadata_dict = broadcast_tensor_dict(src=0)
+            metadata_dict = broadcast_tensor_dict(src=src_rank,
+                                                  group=tp_group,
+                                                  metadata_group=cpu_tp_group)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
             selected_token_indices = metadata_dict.pop(

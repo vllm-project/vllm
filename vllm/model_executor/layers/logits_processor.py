@@ -4,7 +4,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from vllm.distributed import tensor_model_parallel_gather
+from vllm.distributed import (get_tensor_model_parallel_src_rank,
+                              tensor_model_parallel_gather)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 
@@ -64,7 +65,8 @@ class LogitsProcessor(nn.Module):
         logits = torch.matmul(hidden_states, embedding.t())
         if embedding_bias is not None:
             logits += embedding_bias
-        logits = tensor_model_parallel_gather(logits)
+        logits = tensor_model_parallel_gather(
+            logits, dst=get_tensor_model_parallel_src_rank())
         # Remove paddings in vocab (if any).
         if logits is not None:
             logits = logits[:, :self.org_vocab_size]

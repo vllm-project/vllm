@@ -10,6 +10,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
+                              get_tensor_model_parallel_src_rank_and_group,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
@@ -273,6 +274,8 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         else:
             seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
+        src_rank, tp_group, cpu_tp_group = (
+            get_tensor_model_parallel_src_rank_and_group())
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             num_seq_groups: int = len(seq_group_metadata_list)
@@ -287,9 +290,14 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_copy": execute_model_req.blocks_to_copy,
             }
-            broadcast_tensor_dict(data, src=0)
+            broadcast_tensor_dict(data,
+                                  src=src_rank,
+                                  group=tp_group,
+                                  metadata_group=cpu_tp_group)
         else:
-            data = broadcast_tensor_dict(src=0)
+            data = broadcast_tensor_dict(src=src_rank,
+                                         group=tp_group,
+                                         metadata_group=cpu_tp_group)
             num_seq_groups = data["num_seq_groups"]
             blocks_to_copy = data["blocks_to_copy"]
 
