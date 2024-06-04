@@ -15,7 +15,10 @@ from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
-from vllm.sequence import MultiModalData, SampleLogprobs
+from vllm.multimodal import MultiModalData
+from vllm.multimodal.image import ImageFeatureData, ImagePixelData
+from vllm.sequence import SampleLogprobs
+from vllm.utils import is_cpu
 
 logger = init_logger(__name__)
 
@@ -24,6 +27,7 @@ _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 # Multi modal related
+# You can use `.buildkite/download-images.sh` to download the assets
 _PIXEL_VALUES_FILES = [
     os.path.join(_TEST_DIR, "images", filename) for filename in
     ["stop_sign_pixel_values.pt", "cherry_blossom_pixel_values.pt"]
@@ -55,7 +59,8 @@ def cleanup():
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
-    torch.cuda.empty_cache()
+    if not is_cpu():
+        torch.cuda.empty_cache()
 
 
 @pytest.fixture()
@@ -89,17 +94,23 @@ def hf_images() -> List[Image.Image]:
 
 
 @pytest.fixture()
-def vllm_images(request) -> "torch.Tensor":
+def vllm_images(request) -> List[MultiModalData]:
     vision_language_config = request.getfixturevalue("model_and_config")[1]
-    all_images = []
     if vision_language_config.image_input_type == (
             VisionLanguageConfig.ImageInputType.IMAGE_FEATURES):
-        filenames = _IMAGE_FEATURES_FILES
+        return [
+            ImageFeatureData(torch.load(filename))
+            for filename in _IMAGE_FEATURES_FILES
+        ]
     else:
-        filenames = _PIXEL_VALUES_FILES
-    for filename in filenames:
-        all_images.append(torch.load(filename))
-    return torch.concat(all_images, dim=0)
+        return [
+            ImagePixelData(Image.open(filename)) for filename in _IMAGE_FILES
+        ]
+
+
+@pytest.fixture()
+def vllm_image_tensors(request) -> List[torch.Tensor]:
+    return [torch.load(filename) for filename in _PIXEL_VALUES_FILES]
 
 
 @pytest.fixture()
@@ -142,6 +153,12 @@ _EMBEDDING_MODELS = [
 
 class HfRunner:
 
+    def wrap_device(self, input: any):
+        if not is_cpu():
+            return input.to("cuda")
+        else:
+            return input.to("cpu")
+
     def __init__(
         self,
         model_name: str,
@@ -155,16 +172,18 @@ class HfRunner:
         if model_name in _EMBEDDING_MODELS:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(
-                model_name,
-                device="cpu",
-            ).to(dtype=torch_dtype).cuda()
+            self.model = self.wrap_device(
+                SentenceTransformer(
+                    model_name,
+                    device="cpu",
+                ).to(dtype=torch_dtype))
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            ).cuda()
+            self.model = self.wrap_device(
+                AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=True,
+                ))
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
@@ -205,7 +224,7 @@ class HfRunner:
             inputs = self.processor(**processor_kwargs)
 
             output_ids = self.model.generate(
-                **inputs.to("cuda"),
+                **self.wrap_device(inputs),
                 use_cache=True,
                 **kwargs,
             )
@@ -262,7 +281,7 @@ class HfRunner:
         for prompt in prompts:
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
             output = self.model.generate(
-                input_ids.cuda(),
+                self.wrap_device(input_ids),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
@@ -297,7 +316,7 @@ class HfRunner:
         for prompt in prompts:
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
             output = self.model.generate(
-                input_ids.cuda(),
+                self.wrap_device(input_ids),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
@@ -392,23 +411,17 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[torch.Tensor] = None,
+        images: Optional[List[MultiModalData]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
 
-        prompt_inputs: List[TextPrompt] = []
-        for i, prompt in enumerate(prompts):
-            prompt = TextPrompt(prompt=prompt)
-            if images is not None:
-                prompt["multi_modal_data"] = MultiModalData(
-                    type=MultiModalData.Type.IMAGE,
-                    data=images[i:i + 1],
-                )
+        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
+        if images is not None:
+            for i, image in enumerate(images):
+                inputs[i]["multi_modal_data"] = image
 
-            prompt_inputs.append(prompt)
-
-        req_outputs = self.model.generate(prompt_inputs,
+        req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
 
         outputs: List[Tuple[List[List[int]], List[str]]] = []
@@ -447,7 +460,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[torch.Tensor] = None,
+        images: Optional[List[MultiModalData]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)
