@@ -907,6 +907,191 @@ async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_named_tool_use(server, client: openai.AsyncOpenAI,
+                              guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        f"Give an example JSON for an employee profile that "
+        f"fits this schema: {TEST_SCHEMA}"
+    }]
+
+    # non-streaming
+
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=1000,
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name",
+                "description": "This is a dummy function",
+                "parameters": TEST_SCHEMA
+            }
+        }],
+        tool_choice={
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name"
+            }
+        })
+    message = chat_completion.choices[0].message
+    assert len(message.content) == 0
+    json_string = message.tool_calls[0].function.arguments
+    json1 = json.loads(json_string)
+    jsonschema.validate(instance=json1, schema=TEST_SCHEMA)
+
+    messages.append({"role": "assistant", "content": json_string})
+    messages.append({
+        "role":
+        "user",
+        "content":
+        "Give me another one with a different name and age"
+    })
+
+    # streaming
+
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=1000,
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name",
+                "description": "This is a dummy function",
+                "parameters": TEST_SCHEMA
+            }
+        }],
+        tool_choice={
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name"
+            }
+        },
+        stream=True)
+
+    output = []
+    finish_reason_count = 0
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.role:
+            assert delta.role == "assistant"
+        assert delta.content is None or len(delta.content) == 0
+        if delta.tool_calls:
+            output.append(delta.tool_calls[0].function.arguments)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
+    json2 = json.loads("".join(output))
+    jsonschema.validate(instance=json2, schema=TEST_SCHEMA)
+    assert json1["name"] != json2["name"]
+    assert json1["age"] != json2["age"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guided_decoding_backend", ["outlines"])
+async def test_required_tool_use_not_yet_supported(
+        server, client: openai.AsyncOpenAI, guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        f"Give an example JSON for an employee profile that "
+        f"fits this schema: {TEST_SCHEMA}"
+    }]
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=1000,
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "dummy_function_name",
+                    "description": "This is a dummy function",
+                    "parameters": TEST_SCHEMA
+                }
+            }],
+            tool_choice="required")
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=1000,
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "dummy_function_name",
+                    "description": "This is a dummy function",
+                    "parameters": TEST_SCHEMA
+                }
+            }],
+            tool_choice="auto")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guided_decoding_backend", ["outlines"])
+async def test_inconsistent_tool_choice_and_tools(
+        server, client: openai.AsyncOpenAI, guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        f"Give an example JSON for an employee profile that "
+        f"fits this schema: {TEST_SCHEMA}"
+    }]
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(model=MODEL_NAME,
+                                             messages=messages,
+                                             max_tokens=1000,
+                                             tool_choice={
+                                                 "type": "function",
+                                                 "function": {
+                                                     "name":
+                                                     "dummy_function_name"
+                                                 }
+                                             })
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=1000,
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "dummy_function_name",
+                    "description": "This is a dummy function",
+                    "parameters": TEST_SCHEMA
+                }
+            }],
+            tool_choice={
+                "type": "function",
+                "function": {
+                    "name": "nondefined_function_name"
+                }
+            })
+
+
+@pytest.mark.asyncio
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     for _ in range(2):
         resp = await client.chat.completions.create(
