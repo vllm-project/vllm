@@ -50,6 +50,8 @@ class CustomOp(nn.Module):
         return self.forward_native(*args, **kwargs)
 
     def dispatch_forward(self):
+        # NOTE(woosuk): Here we assume that vLLM was built for only one
+        # specific backend. Currently, we do not support dynamic dispatching.
         if is_hip():
             return self.forward_hip
         elif is_cpu():
