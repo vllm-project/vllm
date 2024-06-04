@@ -8,7 +8,7 @@ apt install -y curl jq
 
 # Install minijinja for templating
 curl -sSfL https://github.com/mitsuhiko/minijinja/releases/latest/download/minijinja-cli-installer.sh | sh
-source /var/lib/buildkite-agent/.cargo/env
+source $HOME/.cargo/env
 
 # If BUILDKITE_PULL_REQUEST != "false", then we check the PR labels using curl and jq
 if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
