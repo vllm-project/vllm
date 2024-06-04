@@ -60,12 +60,10 @@ def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("worker_use_ray", [False])
 @pytest.mark.parametrize("tensor_parallel_size", [2])
 def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                 vllm_image_prompts, vllm_images, model_and_config, dtype: str,
-                max_tokens: int, worker_use_ray: bool,
-                tensor_parallel_size: int) -> None:
+                max_tokens: int, tensor_parallel_size: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -88,7 +86,6 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
 
     vllm_model = vllm_runner(model_id,
                              dtype=dtype,
-                             worker_use_ray=worker_use_ray,
                              tensor_parallel_size=tensor_parallel_size,
                              enforce_eager=True,
                              **vision_language_config.as_cli_args_dict())
