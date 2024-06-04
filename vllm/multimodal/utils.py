@@ -1,4 +1,3 @@
-# Copyright (c) OpenMMLab. All rights reserved.
 import base64
 from io import BytesIO
 from typing import Union
@@ -10,13 +9,6 @@ from vllm.config import ModelConfig
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.image import ImagePixelData
 from vllm.utils import make_async
-
-
-def encode_image_base64(image: Image.Image) -> str:
-    """encode image to base64 format."""
-    buffered = BytesIO()
-    image.save(buffered, format='JPEG')
-    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 
 def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
