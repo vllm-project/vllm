@@ -9,6 +9,8 @@ from transformers.models.llava_next.modeling_llava_next import (
 from vllm.config import CacheConfig, VisionLanguageConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import get_dummy_image_data
 
 from .llava import (LlavaForConditionalGeneration, LlavaImageFeatureInputs,
                     LlavaImagePixelInputs)
@@ -33,6 +35,9 @@ LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
                              LlavaNextImageFeatureInputs]
 
 
+@MULTIMODAL_REGISTRY.register_image_feature_input()
+@MULTIMODAL_REGISTRY.register_image_pixel_input()
+@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
     """
     Args to `forward()`:
