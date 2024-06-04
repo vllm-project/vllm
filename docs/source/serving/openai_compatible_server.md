@@ -110,3 +110,14 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 :func: make_arg_parser
 :prog: -m vllm.entrypoints.openai.api_server
 ```
+
+## Tool calling in the chat completion API
+vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
+
+To use a named function you need to define the function in the `tools` parameter and call it in the `tool_choice` parameter. 
+
+It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt. **This may change in the future.**
+
+vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
+
+Please refer to the OpenAI API reference documentation for more information.

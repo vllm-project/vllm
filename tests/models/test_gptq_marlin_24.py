@@ -14,10 +14,13 @@ import torch
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
-marlin_not_supported = (capability <
-                        QUANTIZATION_METHODS["marlin"].get_min_capability())
+marlin_not_supported = True
+
+if torch.cuda.is_available():
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    marlin_not_supported = (
+        capability < QUANTIZATION_METHODS["marlin"].get_min_capability())
 
 
 @dataclass
