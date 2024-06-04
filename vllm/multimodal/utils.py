@@ -12,12 +12,12 @@ from vllm.utils import make_async
 
 
 def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
-    """load image from base64 format."""
+    """Load image from base64 format"""
     return Image.open(BytesIO(base64.b64decode(image)))
 
 
 def fetch_image(image_url: str) -> Image.Image:
-    """load image from url, local path or openai GPT4V."""
+    """Load image from a url or base64 encoded openai GPT4V format"""
 
     # Avoid circular import
     from vllm import __version__ as VLLM_VERSION
