@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
-from vllm.model_executor.ops.custom_op import CustomOp
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -23,7 +23,7 @@ class SiluAndMul(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
@@ -54,7 +54,7 @@ class GeluAndMul(CustomOp):
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.gelu(x[..., :d], approximate=self.approximate) * x[..., d:]
@@ -77,7 +77,7 @@ class GeluAndMul(CustomOp):
 
 class NewGELU(CustomOp):
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         c = math.sqrt(2.0 / math.pi)
         return 0.5 * x * (1.0 + torch.tanh(c *
@@ -93,7 +93,7 @@ class NewGELU(CustomOp):
 
 class FastGELU(CustomOp):
 
-    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 *
                                            (1.0 + 0.044715 * x * x)))

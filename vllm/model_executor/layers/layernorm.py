@@ -4,7 +4,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.ops.custom_op import CustomOp
+from vllm.model_executor.custom_op import CustomOp
 
 
 class RMSNorm(CustomOp):
@@ -23,7 +23,7 @@ class RMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
-    def _forward(
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,

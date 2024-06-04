@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.ops.custom_op import CustomOp
+from vllm.model_executor.custom_op import CustomOp
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -93,7 +93,7 @@ class RotaryEmbedding(CustomOp):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
-    def _forward(
+    def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
