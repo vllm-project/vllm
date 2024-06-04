@@ -1,4 +1,4 @@
-from typing import Optional, TypedDict, Union
+from typing import Dict, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -6,11 +6,11 @@ from transformers import LlavaNextConfig
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 
-from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import get_dummy_image_data
+from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
 
 from .llava import (LlavaForConditionalGeneration, LlavaImageFeatureInputs,
                     LlavaImagePixelInputs)
@@ -35,8 +35,26 @@ LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
                              LlavaNextImageFeatureInputs]
 
 
+def _image_pixel_processor(
+    data: ImagePixelData,
+    model_config: ModelConfig,
+    vlm_config: VisionLanguageConfig,
+) -> Dict[str, torch.Tensor]:
+    image = data.image
+
+    if isinstance(image, torch.Tensor):
+        pixel_values = image.to(model_config.dtype)
+        batch_size, _, h, w = pixel_values.shape
+        image_sizes = torch.tensor([(w, h) for _ in range(batch_size)])
+
+        return {"pixel_values": pixel_values, "image_sizes": image_sizes}
+
+    return MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
+        ._default_input_processor(data, model_config, vlm_config)
+
+
 @MULTIMODAL_REGISTRY.register_image_feature_input()
-@MULTIMODAL_REGISTRY.register_image_pixel_input()
+@MULTIMODAL_REGISTRY.register_image_pixel_input(_image_pixel_processor)
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
     """

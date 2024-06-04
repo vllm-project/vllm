@@ -96,10 +96,10 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
             self, data: ImagePixelData, model_config: ModelConfig,
             vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
         image = data.image
-        image_processor = self._get_hf_image_processor(model_config,
-                                                       vlm_config)
 
         if isinstance(image, Image.Image):
+            image_processor = self._get_hf_image_processor(
+                model_config, vlm_config)
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available"
                                    "to process the image object")
