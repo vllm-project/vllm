@@ -793,7 +793,6 @@ class ModelRunner:
             "kv_caches": kv_caches,
             "attn_metadata": attn_metadata,
         }
-        execute_model_kwargs.update(multi_modal_kwargs)
         execute_model_kwargs.update(extra_inputs.asdict())
 
         execute_model_kwargs = {
@@ -801,6 +800,11 @@ class ModelRunner:
             for k, v in execute_model_kwargs.items() if k in self.model_inputs
         }
 
+        # Currently or multi-modal inputs, kwargs is being used in forward-
+        # pass, so we add those inputs after removing the other unexpected
+        # ones. Would it be better to change multi-modal models to use
+        # normal keyword arguments?
+        execute_model_kwargs.update(multi_modal_kwargs)
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
