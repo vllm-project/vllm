@@ -70,6 +70,10 @@ def _image_pixel_processor(
 
         return {"pixel_values": pixel_values, "image_sizes": image_sizes}
 
+    # Temporary patch before dynamic number of image tokens is supported
+    _, _, h, w = vlm_config.image_input_shape
+    data.image = image.resize((w, h))
+
     return MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
         ._default_input_processor(data, model_config, vlm_config)
 
