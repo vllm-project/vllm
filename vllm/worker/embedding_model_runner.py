@@ -99,7 +99,7 @@ class EmbeddingModelRunner(ModelRunner):
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
-               Set[LoRARequest], LoRAMapping, torch.Tensor,
+               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor],
                Set[PromptAdapterRequest], PromptAdapterMapping]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
