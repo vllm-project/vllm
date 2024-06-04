@@ -5,8 +5,8 @@ Run `pytest tests/quantization/test_bitsandbytes.py`.
 import pytest
 import torch
 
-from vllm import SamplingParams
 from tests.utils import is_quant_method_supported
+from vllm import SamplingParams
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),

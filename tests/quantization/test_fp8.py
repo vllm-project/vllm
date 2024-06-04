@@ -5,8 +5,8 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from tests.utils import is_quant_method_supported
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
