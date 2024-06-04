@@ -24,7 +24,7 @@ from vllm.utils import LRUCache, is_pin_memory_available
 # _BATCH_SIZES_TO_CAPTURE.It needs to be updated if _BATCH_SIZES_TO_CAPTURE
 # is changed.
 
-_MAX_BATCHS = 256+16 #max(_BATCH_SIZES_TO_CAPTURE)+16
+_MAX_BATCHS = 256 + 16  #max(_BATCH_SIZES_TO_CAPTURE)+16
 
 logger = init_logger(__name__)
 
@@ -448,10 +448,10 @@ class LoRAModelManager:
                                               dtype=torch.long,
                                               device="cuda")
 
-        # element contains batch_size, max_length, 0 or 1. Use 1 for the 
-        # prefilling stage and 0 for the decoding stage.The reason for 
-        # distinguishing between the prefilling and decoding stage is that 
-        # if we have implemented bgmv, it can be utilized during the decoding 
+        # element contains batch_size, max_length, 0 or 1. Use 1 for the
+        # prefilling stage and 0 for the decoding stage.The reason for
+        # distinguishing between the prefilling and decoding stage is that
+        # if we have implemented bgmv, it can be utilized during the decoding
         # stage.
         self.batch_mlen_stage_lst = [-1] * 3
         self._create_lora_modules()
@@ -582,12 +582,12 @@ class LoRAModelManager:
                                              dtype=torch.long,
                                              device="cuda")
             self.seq_length_tensor[:batchs].copy_(seq_length_tensor)
-            temp_tensor=torch.cumsum(
-                seq_length_tensor,
-                dim=0,
-                dtype=seq_length_tensor.dtype)
-            self.b_seq_start_tensor[1:temp_tensor.size(0)+1].copy_(temp_tensor)
-            
+            temp_tensor = torch.cumsum(seq_length_tensor,
+                                       dim=0,
+                                       dtype=seq_length_tensor.dtype)
+            self.b_seq_start_tensor[1:temp_tensor.size(0) +
+                                    1].copy_(temp_tensor)
+
             self.batch_mlen_stage_lst[:] = [
                 batchs,
                 max(mapping.seq_lens), 1 if mapping.is_prefilling else 0

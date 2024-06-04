@@ -41,7 +41,7 @@ def _bgmv_shrink_kernel(
     a_ptr = input_ptr + cur_batch * xm_stride
     b_ptr = lora_ptr + l0_stride * lora_index
     rank_mask = offset_n[:, None] < N
-    accumulator = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    accumulator = tl.zeros((BLOCK_N, ), dtype=tl.float32)
     for k in range(0, K, BLOCK_K * SPLIT_K):
         current_k = k + offset_k
         # vector load
@@ -54,9 +54,8 @@ def _bgmv_shrink_kernel(
         b_ptr_mask = (rank_mask < N) & (current_k[None, :] < K)
 
         tiled_b = tl.load(
-            b_ptr
-            + offset_n[:, None] * lora_k_stride
-            + current_k[None, :] * lora_n_stride,
+            b_ptr + offset_n[:, None] * lora_k_stride +
+            current_k[None, :] * lora_n_stride,
             mask=b_ptr_mask,
             other=0.0,
         )  # [BLOCK_N,BLOCK_K]

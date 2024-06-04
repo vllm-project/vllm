@@ -126,10 +126,11 @@ def _apply_lora_triton(
 
     batch_size = batch_mlen_stage_lst[0]
     max_length = batch_mlen_stage_lst[1]
+    is_prefilling = bool(batch_mlen_stage_lst[2])
 
     add_lora_triton(output, x, lora_a_stacked, lora_b_stacked,
                     b_seq_start_tensor, seq_length_tensor, lora_index_tensor,
-                    batch_size, max_length, 0, 1.0)
+                    batch_size, max_length, 0, 1.0, is_prefilling)
     return output.view_as(org_output)
 
 
@@ -206,7 +207,7 @@ def _apply_lora_triton_nslice(
 
     batch_size = batch_mlen_stage_lst[0]
     max_length = batch_mlen_stage_lst[1]
-
+    is_prefilling = bool(batch_mlen_stage_lst[2])
     offset_left = 0
     #TODO fuse these kernel
     for slice_idx in range(len(output_slices)):
@@ -214,7 +215,7 @@ def _apply_lora_triton_nslice(
                               lora_b_stacked[slice_idx], b_seq_start_tensor,
                               seq_length_tensor, lora_index_tensor, batch_size,
                               max_length, 0, 1.0, offset_left,
-                              output_slices[slice_idx])
+                              output_slices[slice_idx], is_prefilling)
         offset_left += output_slices[slice_idx]
 
     return output.view_as(org_output)
@@ -558,8 +559,8 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         _apply_lora_triton(x, self.lora_a_stacked, self.lora_b_stacked,
                            self.b_seq_start_tensor[:batch_size],
                            self.seq_length_tensor[:batch_size],
-                           self.indices[:batch_size], self.batch_mlen_stage_lst,
-                           output)
+                           self.indices[:batch_size],
+                           self.batch_mlen_stage_lst, output)
         return output
 
     def forward(self, input_):
@@ -1125,8 +1126,8 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         _apply_lora_triton(x, self.lora_a_stacked, self.lora_b_stacked,
                            self.b_seq_start_tensor[:batch_size],
                            self.seq_length_tensor[:batch_size],
-                           self.indices[:batch_size], self.batch_mlen_stage_lst,
-                           output)
+                           self.indices[:batch_size],
+                           self.batch_mlen_stage_lst, output)
         return output
 
     # def apply(self, x: torch.Tensor) -> torch.Tensor:

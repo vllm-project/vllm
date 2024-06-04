@@ -62,7 +62,7 @@ HIDDEN_SIZES = [
     128000,
     128256,
 ]
-BATCHS = [i for i in range(0, 64, 8)]
+BATCHS = [i for i in range(0, 128, 8)]
 NUM_LORA = [1, 4, 8, 16, 32, 64, 128, 256]
 DTYPES = [torch.half, torch.bfloat16, torch.float32]
 MAX_RANKS = [1, 4, 8, 16, 32, 64, 128]
@@ -101,7 +101,7 @@ def _torch_groupgemm(
     out_list = []
     current_offset = 0
     for lora_index, b_length in zip(range(batchs), seq_len_tensor):
-        input_weight = inputs[current_offset : b_length + current_offset, :]
+        input_weight = inputs[current_offset:b_length + current_offset, :]
         current_offset += b_length
         lora_weight = lora_weights[lora_indices_tensor[lora_index]]
         result = torch.nn.functional.linear(input_weight, lora_weight)
@@ -115,29 +115,27 @@ def _torch_groupgemm(
     return
 
 
-def _generate_data(
-    batchs, hidden_size, lora_nums, max_rank, max_length, dtype, op_type, device
-):
+def _generate_data(batchs, hidden_size, lora_nums, max_rank, max_length, dtype,
+                   op_type, device):
     if max_length == 1:
         max_length += 1
-    seq_len_tensor = torch.randint(1, max_length, (batchs,)).to(device)
+    seq_len_tensor = torch.randint(1, max_length, (batchs, )).to(device)
     b_seq_start_loc = torch.cumsum(
         torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
         dim=0,
     ).to(device)
     total_tokens = seq_len_tensor.sum()
     if op_type == "shrink":
-        inputs_tensor = torch.rand((total_tokens, hidden_size), dtype=dtype).to(
-            device
-        )
+        inputs_tensor = torch.rand((total_tokens, hidden_size),
+                                   dtype=dtype).to(device)
         lora_weights = torch.rand(
             (lora_nums, max_rank, hidden_size),  # col-major
             dtype=dtype,
         ).to(device)
         # shrink op need atomic_add, so output is initinized by 0
-        ref_out_tensor = torch.zeros(
-            (total_tokens, max_rank), dtype=dtype, device=inputs_tensor.device
-        )
+        ref_out_tensor = torch.zeros((total_tokens, max_rank),
+                                     dtype=dtype,
+                                     device=inputs_tensor.device)
         # NOTE  shrink kernel using torch.float32 as output type
         our_out_tensor = torch.zeros(
             (total_tokens, max_rank),
@@ -163,16 +161,15 @@ def _generate_data(
         # Ensure the same input.
         our_out_tensor = ref_out_tensor.clone()
 
-    lora_indices_tensor = torch.randint(
-        0, lora_nums - 1 if lora_nums > 1 else 1, (batchs,)
-    ).to(device)
+    lora_indices_tensor = torch.randint(0,
+                                        lora_nums - 1 if lora_nums > 1 else 1,
+                                        (batchs, )).to(device)
     indices = torch.zeros((total_tokens), dtype=torch.long).to(device)
     current_offset = 0
     for b_id in range(batchs):
         lora_index = lora_indices_tensor[b_id]
-        indices[
-            current_offset : current_offset + seq_len_tensor[b_id]
-        ] = lora_index.item()
+        indices[current_offset:current_offset +
+                seq_len_tensor[b_id]] = lora_index.item()
         current_offset += seq_len_tensor[b_id].item()
     return (
         inputs_tensor,
@@ -186,7 +183,7 @@ def _generate_data(
     )
 
 
-@pytest.mark.skip("work in progress")
+# @pytest.mark.skip("work in progress")
 @pytest.mark.parametrize("batchs", BATCHS)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
 @pytest.mark.parametrize("rank", MAX_RANKS)
@@ -222,8 +219,8 @@ def test_sgmv_torch(
         seq_len_tensor,
         indices,
     ) = _generate_data(
-        batchs, hidden_size, num_loras, rank, 1024, dtype, op_type, device
-    )  # The sequence length is restricted to the range [1, 1024].
+        batchs, hidden_size, num_loras, rank, 1024, dtype, op_type,
+        device)  # The sequence length is restricted to the range [1, 1024].
     max_seq_length = seq_len_tensor.max()
     if isinstance(max_seq_length, tuple):
         max_seq_length = max_seq_length[0].item()
@@ -268,7 +265,7 @@ def test_sgmv_torch(
     assert_close(our_out_tensor, ref_out_tensor)
 
 
-@pytest.mark.skip("work in progress")
+# @pytest.mark.skip("work in progress")
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("scaling", SCALES)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -300,9 +297,8 @@ def test_triton_sgmv_punica_bgmv(
         lora_indices_tensor,
         seq_len_tensor,
         indices,
-    ) = _generate_data(
-        batchs, hidden_size, num_loras, rank, seq_len, dtype, op_type, device
-    )
+    ) = _generate_data(batchs, hidden_size, num_loras, rank, seq_len, dtype,
+                       op_type, device)
 
     max_seq_length = seq_len_tensor.max()
     if isinstance(max_seq_length, tuple):
@@ -380,9 +376,8 @@ def test_triton_bgmv_punica_bgmv(
         lora_indices_tensor,
         seq_len_tensor,
         indices,
-    ) = _generate_data(
-        batchs, hidden_size, num_loras, rank, seq_len, dtype, op_type, device
-    )
+    ) = _generate_data(batchs, hidden_size, num_loras, rank, seq_len, dtype,
+                       op_type, device)
 
     if op_type == "shrink":
         bgmv_shrink(
@@ -446,9 +441,8 @@ def test_sgmv_expand_nslice(
         lora_indices_tensor,
         seq_len_tensor,
         indices,
-    ) = _generate_data(
-        batchs, hidden_size, num_loras, rank, seq_len, dtype, op_type, device
-    )
+    ) = _generate_data(batchs, hidden_size, num_loras, rank, seq_len, dtype,
+                       op_type, device)
 
     max_seq_length = seq_len_tensor.max()
     if isinstance(max_seq_length, tuple):

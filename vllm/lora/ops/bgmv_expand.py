@@ -51,35 +51,26 @@ def _bgmv_expand_kernel(
     if CAST_TYPE:
         tiled_a = tiled_a.to(lora_ptr.dtype.element_ty)
     # sliding  to  next row-block
-    b_ptr = (
-        lora_ptr
-        + l0_stride * lora_index
-        + pid_sn * split_n_length * lora_k_stride
-    )
+    b_ptr = (lora_ptr + l0_stride * lora_index +
+             pid_sn * split_n_length * lora_k_stride)
     for n in range(0, split_n_length, BLOCK_N):
         current_n = n + offset_n
         # vector load
         current_n_c = tl.max_contiguous(current_n, BLOCK_N)
-        b_ptr_mask = (current_n[:, None] < split_n_length) & (
-            offset_k[None, :] < K
-        )
+        b_ptr_mask = (current_n[:, None] < split_n_length) & (offset_k[None, :]
+                                                              < K)
 
         tiled_b = tl.load(
-            b_ptr
-            + current_n_c[:, None] * lora_k_stride
-            + offset_k[None, :] * lora_n_stride,
+            b_ptr + current_n_c[:, None] * lora_k_stride +
+            offset_k[None, :] * lora_n_stride,
             mask=b_ptr_mask,
             other=0.0,
         )  # [BLOCK_N,BLOCK_K]
 
         accumulator = tl.sum(tiled_a * tiled_b, 1)
 
-        c_ptr = (
-            out_ptr
-            + cur_batch * cm_stride
-            + pid_sn * split_n_length
-            + current_n * cn_stride
-        )
+        c_ptr = (out_ptr + cur_batch * cm_stride + pid_sn * split_n_length +
+                 current_n * cn_stride)
         c_mask = current_n < split_n_length
         if ADD_INPUTS:
             tiled_out = tl.load(c_ptr, mask=c_mask)
@@ -137,8 +128,8 @@ def bgmv_expand(
     ADD_INPUTS = add_inputs
     CAST_TYPE = False
     if inputs.dtype == torch.float32 and lora_b_weights.dtype in [
-        torch.float16,
-        torch.bfloat16,
+            torch.float16,
+            torch.bfloat16,
     ]:
         CAST_TYPE = True
     grid = [

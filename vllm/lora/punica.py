@@ -6,7 +6,10 @@ import torch
 
 from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+from vllm.lora.ops.bgmv_expand import bgmv_expand
+from vllm.lora.ops.bgmv_shrink import bgmv_shrink
 from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
+from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
 
 
 def _raise_import_error(e):
@@ -164,6 +167,7 @@ def add_lora_triton(
     max_length: int,
     layer_idx: int,
     scale: float,
+    is_prefilling: bool,
     *,
     buffer: Optional[torch.Tensor] = None,
 ):
@@ -175,6 +179,49 @@ def add_lora_triton(
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
+    if is_prefilling:
+        _lora_sgmv(
+            y,
+            x,
+            wa_t_all,
+            wb_t_all,
+            b_seq_start_tensor,
+            seq_length_tensor,
+            lora_indices_tensor,
+            batch_size,
+            max_length,
+            layer_idx,
+            scale,
+            buffer=buffer,
+        )
+    else:
+        _lora_bgmv(
+            y,
+            x,
+            wa_t_all,
+            wb_t_all,
+            lora_indices_tensor,
+            batch_size,
+            layer_idx,
+            scale,
+            buffer=buffer,
+        )
+
+
+def _lora_sgmv(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
+    b_seq_start_tensor: torch.Tensor,
+    seq_length_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batch_size: int,
+    max_length: int,
+    layer_idx: int,
+    scale: float,
+    buffer: torch.Tensor,
+):
     sgmv_shrink(
         x,
         wa_t_all,
@@ -197,6 +244,26 @@ def add_lora_triton(
         max_length,
         add_inputs=True,
     )
+
+
+def _lora_bgmv(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batch_size: int,
+    layer_idx: int,
+    scale: float,
+    buffer: torch.Tensor,
+):
+    bgmv_shrink(x, wa_t_all, buffer, lora_indices_tensor, batch_size, scale)
+    bgmv_expand(buffer,
+                wb_t_all,
+                y,
+                lora_indices_tensor,
+                batch_size,
+                add_inputs=True)
 
 
 def add_lora_slice(
@@ -288,6 +355,7 @@ def add_lora_triton_slice(
     scale: float,
     y_offset: int,
     y_slice_size: int,
+    is_prefilling: bool,
     *,
     buffer: Optional[torch.Tensor] = None,
 ):
@@ -315,7 +383,7 @@ def add_lora_triton_slice(
       scale: Scaling factor.
       y_offset: Offset to apply to the starting column of y.
       y_slice_size: Size of the y column slice.
-    # """
+    #"""
     # try:
     #     import vllm._punica_C as punica_kernels
     # except ImportError as e:
@@ -329,6 +397,23 @@ def add_lora_triton_slice(
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
+    if is_prefilling:
+        _lora_sgmv_nslice(y, x, wa_t_all, wb_t_all, b_seq_start_tensor,
+                          seq_length_tensor, lora_indices_tensor, batch_size,
+                          max_length, layer_idx, scale, y_offset, y_slice_size,
+                          buffer)
+    else:
+        _lora_bgmv_nslice(y, x, wa_t_all, wb_t_all, lora_indices_tensor,
+                          batch_size, layer_idx, scale, y_offset, y_slice_size,
+                          buffer)
+
+
+def _lora_sgmv_nslice(y: torch.Tensor, x: torch.Tensor, wa_t_all: torch.Tensor,
+                      wb_t_all: torch.Tensor, b_seq_start_tensor: torch.Tensor,
+                      seq_length_tensor: torch.Tensor,
+                      lora_indices_tensor: torch.Tensor, batch_size: int,
+                      max_length: int, layer_idx: int, scale: float,
+                      y_offset: int, y_slice_size: int, buffer):
     sgmv_shrink(
         x,
         wa_t_all,
@@ -353,3 +438,19 @@ def add_lora_triton_slice(
         y_slice_size,
         add_inputs=True,
     )
+
+
+def _lora_bgmv_nslice(y: torch.Tensor, x: torch.Tensor, wa_t_all: torch.Tensor,
+                      wb_t_all: torch.Tensor,
+                      lora_indices_tensor: torch.Tensor, batch_size: int,
+                      layer_idx: int, scale: float, y_offset: int,
+                      y_slice_size: int, buffer):
+    bgmv_shrink(x, wa_t_all, buffer, lora_indices_tensor, batch_size, scale)
+    bgmv_expand_slice(buffer,
+                      wb_t_all,
+                      y,
+                      lora_indices_tensor,
+                      y_offset,
+                      y_slice_size,
+                      batch_size,
+                      add_inputs=True)

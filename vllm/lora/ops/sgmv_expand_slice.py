@@ -60,7 +60,7 @@ def _sgmv_expand_slice_kernel(
     offset_k = tl.arange(0, BLOCK_K)
     ram = tl.max_contiguous(tl.multiple_of(offset_m % M, BLOCK_M), BLOCK_M)
     rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
-    
+
     a_ptr = (input_ptr + cur_seq_start * xm_stride + ram[:, None] * xm_stride +
              offset_k[None, :] * xk_stride, )
     b_ptr = (lora_ptr + l0_stride * lora_index +
