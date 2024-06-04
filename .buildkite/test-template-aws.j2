@@ -1,4 +1,5 @@
-{% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
+{% set ecr_repo = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo" %}
+{% set docker_image = ecr_repo + ":$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
@@ -7,6 +8,7 @@ steps:
       queue: cpu_queue
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker pull {{ ecr_repo }}:latest || true"
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
     env:
