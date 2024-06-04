@@ -15,7 +15,10 @@ import torch
 from tests.kernels.utils import (make_backend, make_block_tables_slot_mapping,
                                  make_kv_cache, make_qkv, make_test_metadata,
                                  override_backend_env_variable, pack_qkv,
-                                 pack_tensor, ref_masked_attention)
+                                 pack_tensor, ref_masked_attention,
+                                 make_empty_slot_mapping_tensor,
+                                 make_empty_block_tables_tensor,
+                                 split_slot_mapping)
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.utils import (
@@ -323,17 +326,36 @@ def _decoder_attn_setup(batch_size: int,
                                                 [1 for _ in range(batch_size)],
                                                 device=CUDA_DEVICE)
 
+    # Build prefill- & decode-phase data structures
+    # for decoder self-attention. Block tables and
+    # slot mapping must be in a format compatible
+    # with KV caching & attention kernels
+    #
+    # Prefill:
+    # 
+    # * Empty block-tables tensor
+    # * Slot-mapping with entries for prompt tokens
+    #
+    # Decode:
+    # * Block-tables tensor with minimum number of blocks
+    #   required by total num. tokens in the entirety of all sequences
+    #   (including both prefill & decode)
+    # * Slot-mapping with entries for tokens that will be decoded in the
+    #   current decode iteration
+
+    prefill_block_tables = make_empty_block_tables_tensor(device=CUDA_DEVICE)
+
     decode_block_tables, \
-    decode_slot_mapping, \
+    slot_mapping_list, \
+    max_block_idx = make_block_tables_slot_mapping(block_size,
+                            q_seq_lens,
+                            device=CUDA_DEVICE,
+                            block_base_addr = block_base_addr)
+
     prefill_slot_mapping, \
-    prefill_block_tables, \
-    _, \
-    _, \
-    max_block_idx = make_block_tables_slot_mapping(
-        block_size,
-        q_seq_lens,
-        block_base_addr=block_base_addr,
-        device=CUDA_DEVICE)
+    decode_slot_mapping = split_slot_mapping(slot_mapping_list, 
+                                             q_seq_lens, 
+                                             device=CUDA_DEVICE)
 
     prefill_packed_query, \
     prefill_packed_key, \

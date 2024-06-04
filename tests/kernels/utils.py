@@ -432,9 +432,70 @@ def _num_tokens_to_min_blocks(num_tokens: int, block_size: int) -> int:
     '''
     return (num_tokens + block_size) // block_size
 
+def make_empty_slot_mapping_tensor(device: Union[torch.device, str]):
+    return maybe_make_long_tensor([], device)
+
+def make_empty_block_tables_tensor(device: Union[torch.device, str]):
+    return torch.tensor([], device=device)
+
+def split_slot_mapping(slot_mapping_list: torch.Tensor,
+                       seq_lens: List[int],
+                       device: Union[torch.device, str]):
+    '''
+    Split a slot mapping into valid prefill- and decode-phase slot mappings.
+
+    Context:
+    * Your goal is to test (1) prefill of N prompts, with prompt-lengths
+      {K_i \forall i \in [0,N)}, followed by (2) decoding of a single token
+      for all N prompts (N tokens total); the resultant sequence lengths 
+      after decode would be {K_i + 1 for i \in [0,N)}
+    * The test you want to do requires (1) having the prefill slot mapping 
+      for all tokens present during prefill, the number of which is 
+      M = \sum_i{K_i}, and (2) having the decode slot mapping for all N 
+      decoded tokens
+    
+    This function consumes a single 1D slot mapping, which is the 
+    concatenation of N slot mappings each of length K_i + 1 (corresponding
+    to the  sequence lengths after decode), with a total length of
+    P = \sum_i{K_i + 1} = M + N
+
+    The prefill-phase slot mapping results from excising the (K_i + 1)-th entry
+    from each of the N subsequences in the slot mapping (i.e. omitting the 
+    decoded token's mapping.)
+
+    The N excised entries are appended to obtain the decode-phase slot mapping
+
+    Arguments:
+
+    * slot_mapping_list: Length-P 1D slot mapping (as List) reflecting all N
+      post-decode sequences
+    * seq_lens: List of N post-decode sequence lengths (K_i + 1 in the 
+      description above)
+    * device: cuda, cpu, etc.
+
+    Returns:
+
+    * prefill_slot_mapping: Length-M 1D slot mapping (as Tensor) 
+      reflecting all N prefill prompts
+    * decode_slot_mapping: Length-N 1D slot mapping (as Tensor) reflecting 
+      all N decoded tokens
+    '''
+
+    prefill_slot_mapping = []
+    decode_slot_mapping = []
+
+    base_idx=0
+    for seq_len in seq_lens:
+        prefill_slot_mapping.extend(
+            slot_mapping_list[range(base_idx,base_idx+seq_len-1)])
+        decode_slot_mapping.append(slot_mapping_list[base_idx+seq_len-1])
+        base_idx += seq_len
+
+    return maybe_make_long_tensor(prefill_slot_mapping, device), \
+           maybe_make_long_tensor(decode_slot_mapping, device)
 
 def make_block_tables_slot_mapping(block_size: int,
-                                   seq_lens: List,
+                                   seq_lens: List[int],
                                    device: Union[torch.device, str],
                                    block_base_addr: int = 0) -> tuple:
     '''
@@ -467,17 +528,8 @@ def make_block_tables_slot_mapping(block_size: int,
 
     Return:
 
-    * decode_block_tables_tensor: fake the state of the block tables during
-      decode
-    * decode_slot_mapping_tensor: fake the state of the slot mapping during
-      decode
-    * prefill_slot_mapping_tensor: fake the state of the slot mapping during
-      prefill
-    * prefill_block_tables_tensor: fake the state of the block tables during
-      prefill
-    * slot_mapping_tensor: union of prefill and decode slot mappings
-    * empty_slot_mapping_tensor: empty slot mapping (useful for decode phase
-      cross attention)
+    * block_tables_tensor: block table for sequence   
+    * slot_mapping_list: slot mapping for sequence
     * max_block_idx: the highest block address within this block table
     '''
 
@@ -490,9 +542,7 @@ def make_block_tables_slot_mapping(block_size: int,
     block_table_pad_tokens = 10
 
     block_tables = []
-    prefill_slot_mapping = []
-    decode_slot_mapping = []
-    slot_mapping = []
+    slot_mapping_list = []
     # Compute uppermost address of block table
     total_cache_blocks = sum(num_blocks_list)
     block_base_idx = block_base_addr + total_cache_blocks
@@ -504,36 +554,21 @@ def make_block_tables_slot_mapping(block_size: int,
         for idx in range(num_tokens):
             mapping_value = (
                 idx % block_size) + block_table[idx // block_size] * block_size
-            slot_mapping.append(mapping_value)
-            if idx < num_tokens - 1:
-                prefill_slot_mapping.append(mapping_value)
-            elif idx == num_tokens - 1:
-                decode_slot_mapping.append(mapping_value)
+            slot_mapping_list.append(mapping_value)
 
         block_base_idx -= num_blocks
         block_tables.append(block_table)
 
-    prefill_block_tables_tensor = torch.tensor([], device=device)
-    decode_block_tables_tensor = make_tensor_with_pad(
+    block_tables_tensor = make_tensor_with_pad(
         block_tables,
         max_len=max_block_table_len + block_table_pad_tokens,
         pad=0,
         dtype=torch.int,
         device=device,
     )
-    prefill_slot_mapping_tensor = maybe_make_long_tensor(
-        prefill_slot_mapping, device)
-    decode_slot_mapping_tensor = maybe_make_long_tensor(
-        decode_slot_mapping, device)
-    slot_mapping_tensor = maybe_make_long_tensor(slot_mapping, device)
-    empty_slot_mapping_tensor = maybe_make_long_tensor([], device)
 
-    return decode_block_tables_tensor, \
-           decode_slot_mapping_tensor, \
-           prefill_slot_mapping_tensor, \
-           prefill_block_tables_tensor, \
-           slot_mapping_tensor, \
-           empty_slot_mapping_tensor, \
+    return block_tables_tensor, \
+           slot_mapping_list, \
            max_block_idx
 
 
