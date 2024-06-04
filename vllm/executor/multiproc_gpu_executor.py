@@ -34,6 +34,9 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
         os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()
 
+        # Disable torch async compiling which won't work with daemonic processes
+        os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+
         from torch.cuda import device_count
         assert world_size <= device_count(), (
             "please set tensor_parallel_size to less than max local gpu count")
