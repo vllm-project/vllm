@@ -200,16 +200,14 @@ def calculate_metrics(
     actual_output_lens = []
     total_input = 0
     completed = 0
-    tpots = []
+    itls = []
     ttfts = []
     for i in range(len(outputs)):
         if outputs[i].success:
-            output_len = len(tokenizer(outputs[i].generated_text).input_ids)
-            actual_output_lens.append(output_len)
+            actual_output_lens.append(len(outputs[i].itl))
             total_input += input_requests[i][1]
-            if output_len > 1:
-                tpots.append(
-                    (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
+
+            itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             completed += 1
         else:
@@ -220,6 +218,7 @@ def calculate_metrics(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
             stacklevel=2)
+    print(itls)
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
@@ -231,9 +230,9 @@ def calculate_metrics(
         1000,  # ttfts is empty if streaming is not supported by backend
         median_ttft_ms=np.median(ttfts or 0) * 1000,
         p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
-        mean_tpot_ms=np.mean(tpots or 0) * 1000,
-        median_tpot_ms=np.median(tpots or 0) * 1000,
-        p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
+        mean_tpot_ms=np.mean(itls or 0) * 1000,
+        median_tpot_ms=np.median(itls or 0) * 1000,
+        p99_tpot_ms=np.percentile(itls or 0, 99) * 1000,
     )
 
     return metrics, actual_output_lens
