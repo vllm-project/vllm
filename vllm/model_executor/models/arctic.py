@@ -10,7 +10,9 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
@@ -20,13 +22,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.deepspeedfp import (
     DeepSpeedFPConfig, DeepSpeedFPParameter)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.ops.activation import SiluAndMul
-from vllm.model_executor.ops.layernorm import RMSNorm
-from vllm.model_executor.ops.rotary_embedding import get_rope
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
