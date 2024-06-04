@@ -1,0 +1,58 @@
+import torch
+import hipbsolidxgemm
+import numpy as np
+import torch.nn.functional as F
+import sys
+import pandas as pd
+import timeit
+
+hipbsolidxgemm.hipb_create_extension()
+
+class TunedGemm:
+    def __init__(self,tuned_csv_file):
+        self.bestsols = pd.read_csv(tuned_csv_file,index_col=[0])
+        self.create_ds()
+    def create_ds(self):
+        df = self.bestsols
+        solds = {}
+        for i in range(len(df)):
+            ds = df.iloc[i]
+            key = (ds['M'],ds['N'],ds['K'])
+            solds[key] = (int(ds['solidx']))
+        #print(solds)
+        self.solids = solds
+    def query_sol(self,m,n,k):
+        return self.solids.get((m,n,k),(0,0))
+    def mm(self,inp,weights):
+        soltype,solidx = self.query_sol(m=weights.shape[0],n=inp.shape[0],k=inp.shape[1])
+        if soltype==1:
+            out = hipbsolidxgemm.hipb_mm(inp,weights.t(),solidx)
+        else:
+            out = F.linear(inp,weights)
+        return out
+    def run_all_tuned_sols(self):
+        for i in range(len(self.bestsols)):
+            ds = self.bestsols.iloc[i]
+            print('>>> Running tuned solution')
+            print(ds)
+            inp = torch.randn((ds['N'], ds['K']), dtype=get_dtype(ds['dtype']), device='cuda')
+            weights = torch.randn((ds['M'], ds['K']), dtype=get_dtype(ds['dtype']), device='cuda')
+            self.mm(inp,weights)
+
+def get_dtype(dtype_csv):
+    if dtype_csv=='torch.float16':
+        dtype = torch.float16
+    elif dtype_csv=='torch.bfloat16':
+        dtype = torch.bfloat16
+    elif dtype_csv=='torch.float32':
+        dtype = torch.float32
+    elif dtype_csv=='torch.float32':
+        dtype = torch.float32
+    return dtype
+
+if __name__ == '__main__':
+    tgemm = TunedGemm(sys.argv[1]) #csv file with tuned sols goes in argv[1]
+    print(tgemm.bestsols)
+    tgemm.run_all_tuned_sols()
+
+

@@ -77,6 +77,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
             if bias is not None:
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
+        elif bias is not None:
+            return F.linear(x, weight, bias)
         return tgemm.mm(x, weight)
 
 
@@ -260,11 +262,72 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
         super().__init__(input_size, sum(output_sizes), bias, gather_output,
                          skip_bias_add, params_dtype, linear_method)
+        self._wsfs = [0, 0]
+        self._asfs = [0, 0]
+        self._osfs = [0, 0]
+        for name, weight in self.linear_weights.items():
+            if isinstance(weight, torch.Tensor):
+                self.register_parameter(name, weight)
+                set_weight_attrs(
+                    weight, {
+                        "asf_loader": self.asf_loader,
+                        "wsf_loader": self.wsf_loader,
+                        "osf_loader": self.osf_loader,
+                        "rescale": self.rescale,
+                    })
+        
+    def rescale(self):
+        if self._wsfs[0] < self._wsfs[1]:
+            factor = self._wsfs[0] / self._wsfs[1]
+        else:
+            factor = self._wsfs[1] / self._wsfs[0]
+
+        weight_param = self.linear_weights["weight"]
+        param_data = weight_param.data
+        loaded_shard_id = 0 if self._wsfs[0] < self._wsfs[1] else 1
+        tp_size = get_tensor_model_parallel_world_size()
+        shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
+        shard_size = self.output_sizes[loaded_shard_id] // tp_size
+        output_dim = getattr(weight_param, "output_dim", None)
+        param_data = param_data.narrow(output_dim, shard_offset, shard_size)
+        param_data16 = torch.empty_like(param_data, dtype=torch.float16)
+        ops.convert_fp8(
+            param_data, param_data16,
+            torch.tensor(factor, dtype=torch.float32, device='cuda'))
+        ops.convert_fp8(param_data16, param_data,
+                        torch.tensor(1, dtype=torch.float32, device='cuda'))
+        #param_data *= factor[0]
+        pass
+
+    def wsf_loader(self, param: Parameter, sf: torch.Tensor,
+                   loaded_shard_id: int):
+        self._wsfs[loaded_shard_id] = sf
+        param.data.copy_(max(self._wsfs))
+
+    def asf_loader(self, param: Parameter, sf: torch.Tensor,
+                   loaded_shard_id: int):
+        self._asfs[loaded_shard_id] = sf
+        param.data.copy_(max(self._asfs))
+
+    def osf_loader(self, param: Parameter, sf: torch.Tensor,
+                   loaded_shard_id: int):
+        self._osfs[loaded_shard_id] = 1 / sf.item()
+        param.data.copy_(max(self._osfs))
 
     def weight_loader(self,
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
+        if (param.data.dtype == torch.float8_e4m3fnuz
+                and loaded_weight.dtype != torch.int8):
+            # Quantized weights for this layer have already been loaded
+            return
+        if (param.data.dtype != loaded_weight.dtype
+                and loaded_weight.dtype == torch.int8
+                and param.data.dtype != torch.float8_e4m3fnuz):
+            param.data = torch.empty_like(param.data,
+                                          dtype=torch.float8_e4m3fnuz)
+
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         if loaded_shard_id is None:
@@ -327,6 +390,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
         assert param_data.shape == loaded_weight.shape
+        if param_data.dtype == torch.float8_e4m3fnuz:
+            loaded_weight[loaded_weight == -128] = 0
+            assert param_data.is_contiguous() and loaded_weight.is_contiguous()
+            loaded_weight = loaded_weight.view(torch.float8_e4m3fnuz)
         param_data.copy_(loaded_weight)
 
 
@@ -391,8 +458,19 @@ class QKVParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[str] = None):
+        if param.data.dtype == torch.float8_e4m3fnuz and loaded_weight.dtype == torch.float16:
+            # Quantized weights for this layer have already been loaded
+            return
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
+
+        if param.data.dtype != loaded_weight.dtype and loaded_weight.dtype == torch.int8:
+            param.data = torch.empty_like(param.data,
+                                          dtype=torch.float8_e4m3fnuz)
+            loaded_weight[loaded_weight == -128] = 0
+            loaded_weight = loaded_weight.view(torch.float8_e4m3fnuz)
+            self.weight_loader(param, loaded_weight)
+            return
 
         if loaded_shard_id is None:
             # Loaded weight is already packed.

@@ -169,6 +169,10 @@ def prepare_hf_model_weights(
     elif load_format == "safetensors":
         use_safetensors = True
         allow_patterns = ["*.safetensors"]
+        if os.path.isfile(model_name_or_path):
+            return (os.path.dirname(model_name_or_path), 
+                    [model_name_or_path],
+                    True)
     elif load_format == "pt":
         allow_patterns = ["*.pt"]
     elif load_format == "npcache":

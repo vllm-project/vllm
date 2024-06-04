@@ -64,11 +64,36 @@ void MMCustomGPU(at::Tensor in_a, at::Tensor in_b, at::Tensor out_c) {
         at::cuda::getCurrentCUDAStream());
 }
 
+void paged_attention_custom(
+  torch::Tensor& out,
+  torch::Tensor& exp_sums,
+  torch::Tensor& max_logits,
+  torch::Tensor& tmp_out,
+  torch::Tensor& query,
+  torch::Tensor& key_cache,
+  torch::Tensor& value_cache,
+  int num_kv_heads,
+  float scale,
+  torch::Tensor& block_tables,
+  torch::Tensor& context_lens,
+  int block_size,
+  int max_context_len,
+#if 0
+  torch::Tensor& qk_out,
+  torch::Tensor& softmax_out,
+#endif
+  const c10::optional<torch::Tensor>& alibi_slopes,
+  const std::string& kv_cache_dtype);
+
 // declare the extension module with the AddGPU function:
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m){
       m.doc() = "pybind11 example plugin";
         m.def("LLMM1", &LLMM1);
         m.def("LLMM_Silu", &LLMM_Silu);
         m.def("LLZZ", &LLZZ);
+	m.def(
+          "paged_attention_custom",
+          &paged_attention_custom,
+          "PagedAttention LL4Mi Custom.");
 //m.def("MMCustomGPU", &MMCustomGPU);
 }
