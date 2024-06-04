@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 try:
     import flashinfer
     from flash_attn import flash_attn_varlen_func
-    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
 except ImportError:
     flashinfer = None
@@ -148,7 +148,7 @@ class FlashInferMetadata(AttentionMetadata):
             if not hasattr(self, "decode_workspace_buffer"):
                 # Allocate 16MB workspace buffer
                 # Follow the example of flashinfer: https://docs.flashinfer.ai/api/python/decode.html
-                self.decode_workspace_buffer = torch.empty(16 * 1024 * 1024,
+                self.decode_workspace_buffer = torch.empty(128 * 1024 * 1024,
                                                            dtype=torch.uint8,
                                                            device=self.device)
 
