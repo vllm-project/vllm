@@ -54,7 +54,7 @@ print("-" * 80)
 # Warmup so that the shared prompt's KV cache is computed.
 prefix_cached_llm.generate(generating_prompts[0], sampling_params)
 
-# Generate with prefix caching
+# Generate with prefix caching.
 start_time_cached = time()
 outputs = prefix_cached_llm.generate(generating_prompts, sampling_params)
 duration_cached = time() - start_time_cached
