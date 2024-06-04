@@ -32,13 +32,33 @@ void copy_blocks_cpu_impl(std::vector<torch::Tensor> const& key_caches,
   }
 }
 
-template <typename scalar_t>
-void reshape_and_cache_cpu_impl(
-    const scalar_t* __restrict__ key, const scalar_t* __restrict__ value,
-    scalar_t* __restrict__ key_cache, scalar_t* __restrict__ value_cache,
-    const int64_t* __restrict__ slot_mapping, const int num_tokens,
-    const int key_stride, const int value_stride, const int num_heads,
-    const int head_size, const int block_size, const int x) {
+template <typename scalar_t, typename cache_t = scalar_t>
+cache_t assign_cache_value(const scalar_t* src) {
+  return *src;
+}
+
+template <>
+uint8_t assign_cache_value<float, uint8_t>(const float* src) {
+  uint8_t res = cast_fp32x1_to_fp8x1(*src);
+  return res;
+}
+
+template <>
+uint8_t assign_cache_value<int16_t, uint8_t>(const int16_t* src) {
+  uint8_t res = cast_bf16x1_to_fp8x1(*src);
+  return res;
+}
+
+template <typename scalar_t, typename cache_t = scalar_t, bool use_fp8 = false>
+void reshape_and_cache_cpu_impl(const scalar_t* __restrict__ key,
+                                const scalar_t* __restrict__ value,
+                                cache_t* __restrict__ key_cache,
+                                cache_t* __restrict__ value_cache,
+                                const int64_t* __restrict__ slot_mapping,
+                                const int num_tokens, const int key_stride,
+                                const int value_stride, const int num_heads,
+                                const int head_size, const int block_size,
+                                const int kv_cache_stride, const int x) {
   const int block_elem_num = num_heads * head_size * block_size;
 
 #pragma omp parallel for collapse(2)
@@ -53,19 +73,20 @@ void reshape_and_cache_cpu_impl(
         const scalar_t* src_value_head_ptr = value + src_value_head_idx;
         const int64_t block_index = slot_idx / block_size;
         const int64_t block_offset = slot_idx % block_size;
-        scalar_t* target_key_head_ptr = key_cache +
-                                        block_elem_num * block_index +
-                                        head_idx * block_size * head_size;
-        scalar_t* target_value_head_ptr = value_cache +
-                                          block_elem_num * block_index +
-                                          head_idx * block_size * head_size;
+        cache_t* target_key_head_ptr = key_cache +
+                                       kv_cache_stride * block_index +
+                                       head_idx * block_size * head_size;
+        cache_t* target_value_head_ptr = value_cache +
+                                         kv_cache_stride * block_index +
+                                         head_idx * block_size * head_size;
 
         for (int src_key_idx = 0; src_key_idx < head_size; src_key_idx += x) {
           const int64_t target_offset =
               src_key_idx * block_size + block_offset * x;
           for (int i = 0; i < x; ++i) {
             target_key_head_ptr[target_offset + i] =
-                src_key_head_ptr[src_key_idx + i];
+                assign_cache_value<scalar_t, cache_t>(src_key_head_ptr +
+                                                      src_key_idx + i);
           }
         }
 
@@ -74,7 +95,8 @@ void reshape_and_cache_cpu_impl(
           const int64_t target_offset =
               src_value_idx * block_size + block_offset;
           target_value_head_ptr[target_offset] =
-              src_value_head_ptr[src_value_idx];
+              assign_cache_value<scalar_t, cache_t>(src_value_head_ptr +
+                                                    src_value_idx);
         }
       }
     }
@@ -104,6 +126,17 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
       });
 }
 
+#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, IS_FP8_KV_CACHE)                \
+  CPU_KERNEL_GUARD_IN(reshape_and_cache_cpu_impl)                             \
+  reshape_and_cache_cpu_impl<KV_T, CACHE_T, IS_FP8_KV_CACHE>(                 \
+      reinterpret_cast<KV_T*>(key.data_ptr()),                                \
+      reinterpret_cast<KV_T*>(value.data_ptr()),                              \
+      reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                       \
+      reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),                     \
+      slot_mapping.data_ptr<int64_t>(), num_tokens, key_stride, value_stride, \
+      num_heads, head_size, block_size, kv_cache_stride, x);                  \
+  CPU_KERNEL_GUARD_OUT(reshape_and_cache_cpu_impl)
+
 void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
                        torch::Tensor& key_cache, torch::Tensor& value_cache,
                        torch::Tensor& slot_mapping,
@@ -115,20 +148,30 @@ void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
   int head_size = key.size(2);
   int block_size = key_cache.size(3);
   int x = key_cache.size(4);
+  int kv_cache_stride = key_cache.stride(0);
 
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);
 
-  VLLM_DISPATCH_FLOATING_TYPES(
-      key.scalar_type(), "reshape_and_cache_cpu_impl", [&] {
-        CPU_KERNEL_GUARD_IN(reshape_and_cache_cpu_impl)
-        reshape_and_cache_cpu_impl<scalar_t>(
-            key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-            key_cache.data_ptr<scalar_t>(), value_cache.data_ptr<scalar_t>(),
-            slot_mapping.data_ptr<int64_t>(), num_tokens, key_stride,
-            value_stride, num_heads, head_size, block_size, x);
-        CPU_KERNEL_GUARD_OUT(reshape_and_cache_cpu_impl)
-      });
+  if (kv_cache_dtype == "auto") {
+    if (key.dtype() == at::ScalarType::Float) {
+      CALL_RESHAPE_AND_CACHE(float, float, false);
+    } else if (key.dtype() == at::ScalarType::Half) {
+      TORCH_CHECK(false, "Unsupported data type: Half");
+    } else if (key.dtype() == at::ScalarType::BFloat16) {
+      CALL_RESHAPE_AND_CACHE(int16_t, int16_t, false);
+    }
+  } else if (kv_cache_dtype == "fp8") {
+    if (key.dtype() == at::ScalarType::Float) {
+      CALL_RESHAPE_AND_CACHE(float, uint8_t, true);
+    } else if (key.dtype() == at::ScalarType::Half) {
+      TORCH_CHECK(false, "Unsupported data type: Half");
+    } else if (key.dtype() == at::ScalarType::BFloat16) {
+      CALL_RESHAPE_AND_CACHE(int16_t, uint8_t, true);
+    }
+  } else {
+    TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
+  }
 }
 
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,

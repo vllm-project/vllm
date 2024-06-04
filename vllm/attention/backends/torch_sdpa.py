@@ -132,10 +132,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {supported_head_sizes}.")
-        if kv_cache_dtype != "auto":
-            raise NotImplementedError(
-                "Torch SDPA backend does not support FP8 KV cache. "
-                "Please use xFormers backend instead.")
 
     def forward(
         self,
