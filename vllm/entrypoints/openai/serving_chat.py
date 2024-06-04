@@ -7,7 +7,8 @@ from typing import Sequence as GenericSequence
 from typing import TypedDict, Union, cast, final
 
 from fastapi import Request
-from openai.types.chat import ChatCompletionContentPartTextParam
+from openai.types.chat import (ChatCompletionContentPartImageParam,
+                               ChatCompletionContentPartTextParam)
 
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -23,11 +24,12 @@ from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
+from vllm.multimodal.image import ImagePixelData
+from vllm.multimodal.utils import (async_get_and_parse_image,
+                                   get_full_image_text_prompt)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
-from vllm.multimodal.utils import async_get_and_parse_image, get_full_image_text_prompt
-from vllm.multimodal.image import ImagePixelData
 
 logger = init_logger(__name__)
 
@@ -85,6 +87,15 @@ class OpenAIServingChat(OpenAIServing):
         elif tokenizer.chat_template is not None:
             logger.info("Using default chat template:\n%s",
                         tokenizer.chat_template)
+
+        # NOTE: This is a temporary hack for vision language models that do
+        # not have a chat template.
+        elif self.engine.engine.vision_language_config is not None:
+
+            # Vicuna chat template
+            if self.engine.engine.model_config.hf_config.model_type == "llava":
+                tokenizer.chat_template = "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = 'A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user\\'s questions.' %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 %}{{ system_message }}{% endif %}{% if message['role'] == 'user' %}{{ ' USER: ' + message['content'].strip() }}{% elif message['role'] == 'assistant' %}{{ ' ASSISTANT: ' + message['content'].strip() + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ ' ASSISTANT:' }}{% endif %}"  # noqa
+
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")
@@ -111,15 +122,21 @@ class OpenAIServingChat(OpenAIServing):
             elif part_type == "image_url":
                 if vlm_config is None:
                     raise ValueError(
-                        "'image_url' input is not supported as the loaded model is not multimodal."
-                    )
+                        "'image_url' input is not supported as the loaded "
+                        "model is not multimodal.")
 
                 elif image_count == 0:
                     assert self.tokenizer is not None
-                    image_future = async_get_and_parse_image(part["image_url"])
+                    image_url = cast(ChatCompletionContentPartImageParam,
+                                     part)["image_url"]
+
+                    if image_url.get("detail", "auto") != "auto":
+                        logger.warning(
+                            "'image_url.detail' is currently not supported and "
+                            "will be ignored.")
+
+                    image_future = async_get_and_parse_image(image_url["url"])
                     image_futures.append(image_future)
-                    image_text = vlm_config.get_image_token_text(
-                        self.tokenizer)
                     image_count += 1
 
                 else:
@@ -131,10 +148,30 @@ class OpenAIServingChat(OpenAIServing):
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 
         text_prompt = "\n".join(texts)
-        full_prompt = get_full_image_text_prompt(image_prompt=image_text,
-                                                 text_prompt=text_prompt,
-                                                 config=model_config)
-        messages = [ConversationMessage(role=role, content=full_prompt)]
+
+        if vlm_config is not None and image_count:
+
+            (image_token_prompt,
+             image_token_str) = vlm_config.get_image_token_text(self.tokenizer)
+
+            # NOTE: If image token string (e.g, <image>) is already present
+            # in the text prompt, we assume it follows the same format required
+            # by the engine.
+            if image_token_str in text_prompt:
+                messages = [
+                    ConversationMessage(role=role, content=text_prompt)
+                ]
+
+            else:
+                full_prompt = get_full_image_text_prompt(
+                    image_prompt=image_token_prompt,
+                    text_prompt=text_prompt,
+                    config=model_config)
+                messages = [
+                    ConversationMessage(role=role, content=full_prompt)
+                ]
+        else:
+            messages = [ConversationMessage(role=role, content=text_prompt)]
 
         return ChatMessageParseResult(messages=messages)
 

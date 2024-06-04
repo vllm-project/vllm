@@ -1109,10 +1109,13 @@ class VisionLanguageConfig:
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
 
-    def get_image_token_text(self, tokenizer: PreTrainedTokenizerBase) -> str:
-
+    def get_image_token_text(
+            self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
+        """Get the image token placeholder text to be inserted into the 
+        text prompt and the string representation of the image token id.
+        """
         image_token_str = tokenizer.decode(self.image_token_id)
-        return image_token_str * self.image_feature_size
+        return image_token_str * self.image_feature_size, image_token_str
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

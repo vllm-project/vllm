@@ -1,16 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import base64
-import os
 from io import BytesIO
 from typing import Union
 
 import requests
 from PIL import Image
 
-from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
-from vllm.utils import make_async
-from vllm.multimodal.image import ImagePixelData
 from vllm.config import ModelConfig
+from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
+from vllm.multimodal.image import ImagePixelData
+from vllm.utils import make_async
 
 
 def encode_image_base64(image: Image.Image) -> str:
@@ -43,9 +42,8 @@ def fetch_image(image_url: str) -> Image.Image:
     elif image_url.startswith('data:image'):
         img = load_image_from_base64(image_url.split(',')[1])
     else:
-        raise ValueError(
-            "Invalid image url: A valid image url must start with either 'data:image' or 'http'."
-        )
+        raise ValueError("Invalid image url: A valid image url must start "
+                         "with either 'data:image' or 'http'.")
 
     return img
 
@@ -58,7 +56,7 @@ async def async_get_and_parse_image(image_url: str) -> ImagePixelData:
         return ImagePixelData(image)
 
 
-def get_full_image_text_prompt(image_prompt, text_prompt,
+def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
                                config: ModelConfig) -> str:
     """Combine image and text prompts for vision language model depending on
     the  model architecture."""
