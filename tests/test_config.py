@@ -1,4 +1,28 @@
+import pytest
+
 from vllm.config import ModelConfig
+
+MODEL_IDS_EXPECTED = [
+    ("Qwen/Qwen1.5-7B", 32768),
+    ("mistralai/Mistral-7B-v0.1", 4096),
+    ("mistralai/Mistral-7B-Instruct-v0.2", 32768),
+]
+
+
+@pytest.mark.parametrize("model_id_expected", MODEL_IDS_EXPECTED)
+def test_disable_sliding_window(model_id_expected):
+    model_id, expected = model_id_expected
+    model_config = ModelConfig(
+        model_id,
+        model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        revision=None,
+        disable_sliding_window=True,
+    )
+    assert model_config.max_model_len == expected
 
 
 def test_get_sliding_window():
@@ -11,8 +35,6 @@ def test_get_sliding_window():
         "Qwen/Qwen1.5-7B",
         tokenizer_mode="auto",
         trust_remote_code=False,
-        download_dir=None,
-        load_format="dummy",
         seed=0,
         dtype="float16",
         revision=None,
@@ -30,8 +52,6 @@ def test_get_sliding_window():
         "mistralai/Mistral-7B-v0.1",
         tokenizer_mode="auto",
         trust_remote_code=False,
-        download_dir=None,
-        load_format="dummy",
         seed=0,
         dtype="float16",
         revision=None,
@@ -41,3 +61,57 @@ def test_get_sliding_window():
 
     mistral_model_config.hf_config.sliding_window = TEST_SLIDING_WINDOW
     assert mistral_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
+
+
+def test_rope_scaling():
+    TEST_ROPE_SCALING = {"type": "dynamic", "factor": 2.0}
+    LONGCHAT_ROPE_SCALING = {"type": "linear", "factor": 8.0}
+
+    llama_model_config = ModelConfig(
+        "meta-llama/Meta-Llama-3-8B-Instruct",
+        "meta-llama/Meta-Llama-3-8B-Instruct",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        dtype="float16",
+        seed=0,
+    )
+    assert getattr(llama_model_config.hf_config, "rope_scaling", None) is None
+    assert llama_model_config.max_model_len == 8192
+
+    llama_model_config = ModelConfig(
+        "meta-llama/Meta-Llama-3-8B-Instruct",
+        "meta-llama/Meta-Llama-3-8B-Instruct",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        dtype="float16",
+        seed=0,
+        rope_scaling=TEST_ROPE_SCALING,
+    )
+    assert getattr(llama_model_config.hf_config, "rope_scaling",
+                   None) == TEST_ROPE_SCALING
+    assert llama_model_config.max_model_len == 16384
+
+    longchat_model_config = ModelConfig(
+        "lmsys/longchat-13b-16k",
+        "lmsys/longchat-13b-16k",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        dtype="float16",
+        seed=0,
+    )
+    assert getattr(longchat_model_config.hf_config, "rope_scaling",
+                   None) == LONGCHAT_ROPE_SCALING
+    assert longchat_model_config.max_model_len == 16384
+
+    longchat_model_config = ModelConfig(
+        "lmsys/longchat-13b-16k",
+        "lmsys/longchat-13b-16k",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        dtype="float16",
+        seed=0,
+        rope_scaling=TEST_ROPE_SCALING,
+    )
+    assert getattr(longchat_model_config.hf_config, "rope_scaling",
+                   None) == TEST_ROPE_SCALING
+    assert longchat_model_config.max_model_len == 4096

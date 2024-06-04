@@ -3,8 +3,8 @@ import random
 import tempfile
 from unittest.mock import patch
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig)
 from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.worker.worker import Worker
@@ -18,11 +18,13 @@ def test_worker_apply_lora(sql_lora_files):
             "meta-llama/Llama-2-7b-hf",
             tokenizer_mode="auto",
             trust_remote_code=False,
-            download_dir=None,
-            load_format="dummy",
             seed=0,
             dtype="float16",
             revision=None,
+        ),
+        load_config=LoadConfig(
+            download_dir=None,
+            load_format="dummy",
         ),
         parallel_config=ParallelConfig(1, 1, False),
         scheduler_config=SchedulerConfig(32, 32, 32),

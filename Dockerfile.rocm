@@ -145,7 +145,6 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/gradlib/dist/*.whl /
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/rocm_patch /rocm_patch
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements*.txt /
-COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/patch_xformers.rocm.sh /
 
 # -----------------------
 # Final vLLM image
@@ -191,14 +190,13 @@ RUN --mount=type=bind,from=export_triton,src=/,target=/install \
     fi
 
 RUN python3 -m pip install --upgrade numba
-RUN python3 -m pip install xformers==0.0.23 --no-deps
 
 # Install vLLM (and gradlib)
+# Make sure punica kernels are built (for LoRA)
+ENV VLLM_INSTALL_PUNICA_KERNELS=1
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
     && pip install -U -r requirements-rocm.txt \
-    && if [ "$BUILD_FA" = "1" ]; then \
-            bash patch_xformers.rocm.sh; fi \
     && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
            *"rocm-6.0"*) \
                patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h rocm_patch/rocm_bf16.patch;; \
@@ -207,11 +205,9 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
            *) ;; esac \
     && pip install *.whl
 
-# Update Ray to latest version + set environment variable to ensure it works on TP > 1
-RUN python3 -m pip install --no-cache-dir 'ray[all]>=2.10.0'
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 
-# HIPgraph performance environment variable.
+# Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
 
 CMD ["/bin/bash"]

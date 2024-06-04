@@ -222,13 +222,15 @@ class JAISConfig(PretrainedConfig):
                              f"got {alibi_scaling_type}")
         if (alibi_scaling_factor is not None
                 and not isinstance(alibi_scaling_factor, float)
-                or alibi_scaling_factor <= 1.0):
+                or (alibi_scaling_factor is not None
+                    and alibi_scaling_factor <= 1.0)):
             raise ValueError(
                 f"`alibi_scaling`'s factor field must be a float > 1.0,"
                 f"got {alibi_scaling_factor}")
         if (alibi_dynamic_scaling is not None
                 and not isinstance(alibi_dynamic_scaling, int)
-                or alibi_dynamic_scaling <= 1):
+                or (alibi_dynamic_scaling is not None
+                    and alibi_dynamic_scaling <= 1)):
             raise ValueError(
                 f"`alibi_scaling`'s `train_seq_len` field must be an"
                 f"integer > 1, got {alibi_dynamic_scaling}")

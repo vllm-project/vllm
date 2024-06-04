@@ -7,7 +7,7 @@ import time
 from enum import Enum
 from pathlib import Path
 from threading import Thread
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 import cpuinfo
@@ -15,20 +15,22 @@ import psutil
 import requests
 import torch
 
-_config_home = os.getenv("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+import vllm.envs as envs
+
+_config_home = envs.VLLM_CONFIG_ROOT
 _USAGE_STATS_JSON_PATH = os.path.join(_config_home, "vllm/usage_stats.json")
 _USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home,
                                               "vllm/do_not_track")
 _USAGE_STATS_ENABLED = None
-_USAGE_STATS_SERVER = os.environ.get("VLLM_USAGE_STATS_SERVER",
-                                     "https://stats.vllm.ai")
+_USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
 
 
 def is_usage_stats_enabled():
     """Determine whether or not we can send usage stats to the server.
     The logic is as follows:
     - By default, it should be enabled.
-    - Two environment variables can disable it:
+    - Three environment variables can disable it:
+        - VLLM_DO_NOT_TRACK=1
         - DO_NOT_TRACK=1
         - VLLM_NO_USAGE_STATS=1
     - A file in the home directory can disable it if it exists:
@@ -36,8 +38,8 @@ def is_usage_stats_enabled():
     """
     global _USAGE_STATS_ENABLED
     if _USAGE_STATS_ENABLED is None:
-        do_not_track = os.environ.get("DO_NOT_TRACK", "0") == "1"
-        no_usage_stats = os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1"
+        do_not_track = envs.VLLM_DO_NOT_TRACK
+        no_usage_stats = envs.VLLM_NO_USAGE_STATS
         do_not_track_file = os.path.exists(_USAGE_STATS_DO_NOT_TRACK_PATH)
 
         _USAGE_STATS_ENABLED = not (do_not_track or no_usage_stats
@@ -88,6 +90,7 @@ class UsageContext(str, Enum):
     LLM_CLASS = "LLM_CLASS"
     API_SERVER = "API_SERVER"
     OPENAI_API_SERVER = "OPENAI_API_SERVER"
+    OPENAI_BATCH_RUNNER = "OPENAI_BATCH_RUNNER"
     ENGINE_CONTEXT = "ENGINE_CONTEXT"
 
 
@@ -124,7 +127,7 @@ class UsageMessage:
     def report_usage(self,
                      model_architecture: str,
                      usage_context: UsageContext,
-                     extra_kvs: Dict[str, any] = None) -> None:
+                     extra_kvs: Optional[Dict[str, Any]] = None) -> None:
         t = Thread(target=self._report_usage_worker,
                    args=(model_architecture, usage_context, extra_kvs or {}),
                    daemon=True)
@@ -132,13 +135,13 @@ class UsageMessage:
 
     def _report_usage_worker(self, model_architecture: str,
                              usage_context: UsageContext,
-                             extra_kvs: Dict[str, any]) -> None:
+                             extra_kvs: Dict[str, Any]) -> None:
         self._report_usage_once(model_architecture, usage_context, extra_kvs)
         self._report_continous_usage()
 
     def _report_usage_once(self, model_architecture: str,
                            usage_context: UsageContext,
-                           extra_kvs: Dict[str, any]) -> None:
+                           extra_kvs: Dict[str, Any]) -> None:
         # Platform information
         if torch.cuda.is_available():
             device_property = torch.cuda.get_device_properties(0)
@@ -167,7 +170,7 @@ class UsageMessage:
 
         # Metadata
         self.log_time = _get_current_timestamp_ns()
-        self.source = os.environ.get("VLLM_USAGE_SOURCE", "production")
+        self.source = envs.VLLM_USAGE_SOURCE
 
         data = vars(self)
         if extra_kvs:

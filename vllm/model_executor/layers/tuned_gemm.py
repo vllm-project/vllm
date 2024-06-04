@@ -51,7 +51,7 @@ class TunedGemm:
         return ds
 
     def create_ds(self):
-        df = self.bestsols
+        df: pd.DataFrame = self.bestsols
         solds = {}
         for i in range(len(df)):
             ds = self.apply_custom(df.iloc[i])

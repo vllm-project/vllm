@@ -1,37 +1,28 @@
-import os
-from typing import Dict, List, Optional
+from typing import List, Set, Tuple
 
 import torch
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
-from vllm.executor.executor_base import ExecutorBase
+import vllm.envs as envs
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
+from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+                        make_async)
 
 logger = init_logger(__name__)
 
 
 class CPUExecutor(ExecutorBase):
 
-    def __init__(self, model_config: ModelConfig, cache_config: CacheConfig,
-                 parallel_config: ParallelConfig,
-                 scheduler_config: SchedulerConfig,
-                 device_config: DeviceConfig,
-                 lora_config: Optional[LoRAConfig], *args, **kwargs) -> None:
-        assert device_config.device_type == "cpu"
-        assert lora_config is None, "cpu backend doesn't support LoRA"
-        model_config = _verify_and_get_model_config(model_config)
-        cache_config = _verify_and_get_cache_config(cache_config)
-
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
+    def _init_executor(self) -> None:
+        assert self.device_config.device_type == "cpu"
+        assert self.lora_config is None, "cpu backend doesn't support LoRA"
+        self.model_config = _verify_and_get_model_config(self.model_config)
+        self.cache_config = _verify_and_get_cache_config(self.cache_config)
+        self.scheduler_config = _verify_and_get_scheduler_config(
+            self.scheduler_config)
 
         # Instantiate the worker and load the model to CPU.
         self._init_worker()
@@ -50,17 +41,19 @@ class CPUExecutor(ExecutorBase):
             scheduler_config=self.scheduler_config,
             device_config=self.device_config,
             cache_config=self.cache_config,
+            load_config=self.load_config,
             local_rank=0,
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
@@ -73,20 +66,16 @@ class CPUExecutor(ExecutorBase):
         # NOTE: We log here to avoid multiple logs when number of workers is
         # greater than one. We could log in the engine, but not all executors
         # have GPUs.
-        logger.info(f"# CPU blocks: {num_cpu_blocks}")
+        # NOTE: `cpu block` for CPU backend is located on CPU memory but is
+        # referred as `gpu block`. Because we want to reuse the existing block
+        # management procedure.
+        logger.info("# CPU blocks: %d", num_gpu_blocks)
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
-    def execute_model(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
-                      blocks_to_swap_in: Dict[int, int],
-                      blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
-        output = self.driver_worker.execute_model(
-            seq_group_metadata_list=seq_group_metadata_list,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy,
-        )
+    def execute_model(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        output = self.driver_worker.execute_model(execute_model_req)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -95,10 +84,25 @@ class CPUExecutor(ExecutorBase):
     def remove_lora(self, lora_id: int) -> bool:
         return self.driver_worker.remove_lora(lora_id)
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
 
     def check_health(self) -> None:
+        # CPUExecutor will always be healthy as long as
+        # it's running.
+        return
+
+
+class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
+
+    async def execute_model_async(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        output = await make_async(self.driver_worker.execute_model
+                                  )(execute_model_req=execute_model_req, )
+        return output
+
+    async def check_health_async(self) -> None:
         # CPUExecutor will always be healthy as long as
         # it's running.
         return
@@ -116,14 +120,22 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
     return config
 
 
+def _verify_and_get_scheduler_config(
+        config: SchedulerConfig) -> SchedulerConfig:
+    if config.chunked_prefill_enabled:
+        logger.warning("Chunked prefill is not supported on CPU, disable it.")
+        config.chunked_prefill_enabled = False
+
+    return config
+
+
 def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
     _GB = 1 << 30
     if config.enable_prefix_caching:
         logger.warning("Prefix caching is not supported on CPU, disable it.")
         config.enable_prefix_caching = False
 
-    kv_cache_space_str = os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")
-    kv_cache_space = int(kv_cache_space_str)
+    kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
     if kv_cache_space >= 0:
         if kv_cache_space == 0:
