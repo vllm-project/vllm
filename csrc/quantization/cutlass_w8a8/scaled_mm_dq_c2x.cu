@@ -74,7 +74,7 @@ struct enable_sm80_to_sm89 : Kernel {
 };
 
 template <typename Kernel>
-struct enable_sm89 : Kernel {
+struct enable_sm89_to_sm90 : Kernel {
   template <typename... Args>
   CUTLASS_DEVICE static void invoke(Args&&... args) {
 #if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 890 && __CUDA_ARCH__ < 900
