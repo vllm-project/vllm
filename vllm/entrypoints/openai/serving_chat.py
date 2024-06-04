@@ -43,6 +43,7 @@ class ConversationMessage(TypedDict):
 @dataclass(frozen=True)
 class ChatMessageParseResult:
     messages: List[ConversationMessage]
+    image_futures: List[Awaitable[ImagePixelData]]
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -173,7 +174,8 @@ class OpenAIServingChat(OpenAIServing):
         else:
             messages = [ConversationMessage(role=role, content=text_prompt)]
 
-        return ChatMessageParseResult(messages=messages)
+        return ChatMessageParseResult(messages=messages,
+                                      image_futures=image_futures)
 
     def _parse_chat_message_content(
         self,
@@ -183,10 +185,10 @@ class OpenAIServingChat(OpenAIServing):
         content = message.get("content")
 
         if content is None:
-            return ChatMessageParseResult(messages=[])
+            return ChatMessageParseResult(messages=[], image_futures=[])
         if isinstance(content, str):
             messages = [ConversationMessage(role=role, content=content)]
-            return ChatMessageParseResult(messages=messages)
+            return ChatMessageParseResult(messages=messages, image_futures=[])
 
         return self._parse_chat_message_content_parts(role, content)
 
@@ -211,11 +213,13 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             conversation: List[ConversationMessage] = []
+            image_futures: List[Awaitable[ImagePixelData]] = []
 
             for msg in request.messages:
-                parsed_msg = self._parse_chat_message_content(msg)
+                chat_parsed_result = self._parse_chat_message_content(msg)
 
-                conversation.extend(parsed_msg.messages)
+                conversation.extend(chat_parsed_result.messages)
+                image_futures.extend(chat_parsed_result.image_futures)
 
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
@@ -224,6 +228,16 @@ class OpenAIServingChat(OpenAIServing):
             )
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
+            return self.create_error_response(str(e))
+
+        image_data = None
+        try:
+            if len(image_futures):
+                # Since we support single image currently
+                assert len(image_futures) == 1
+                image_data = await image_futures[0]
+        except Exception as e:
+            logger.error("Error in loading image data: %s", e)
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
@@ -248,15 +262,27 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        result_generator = self.engine.generate(
-            {
-                "prompt": prompt_text,
-                "prompt_token_ids": prompt_ids
-            },
-            sampling_params,
-            request_id,
-            lora_request,
-        )
+        if self.engine.engine.vision_language_config is None:
+            result_generator = self.engine.generate(
+                {
+                    "prompt": prompt_text,
+                    "prompt_token_ids": prompt_ids
+                },
+                sampling_params,
+                request_id,
+                lora_request,
+            )
+        else:
+            result_generator = self.engine.generate(
+                {
+                    "prompt": prompt_text,
+                    "prompt_token_ids": prompt_ids,
+                    "multi_modal_data": ImagePixelData(image_data=image_data)
+                },
+                sampling_params,
+                request_id,
+                lora_request,
+            )
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(

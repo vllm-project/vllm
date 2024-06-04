@@ -1086,7 +1086,6 @@ class VisionLanguageConfig:
         PIXEL_VALUES = enum.auto()
         IMAGE_FEATURES = enum.auto()
 
-
     image_input_type: ImageInputType
     # The input id corresponding to image token.
     image_token_id: int
