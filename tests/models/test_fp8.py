@@ -67,10 +67,13 @@ EXPECTED_STRS_MAP = {
     },
 }
 
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
-fp8_not_supported = (capability <
-                     QUANTIZATION_METHODS["fp8"].get_min_capability())
+fp8_not_supported = True
+
+if torch.cuda.is_available():
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    fp8_not_supported = (capability <
+                         QUANTIZATION_METHODS["fp8"].get_min_capability())
 
 
 @pytest.mark.skipif(fp8_not_supported,

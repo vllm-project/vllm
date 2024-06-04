@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import json
+import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -74,12 +75,17 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
+    preemption_mode: Optional[str] = None
 
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
+    image_processor: Optional[str] = None
+    image_processor_revision: Optional[str] = None
+    disable_image_processor: bool = False
+
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
@@ -99,6 +105,53 @@ class EngineArgs:
             self.tokenizer = self.model
 
     @staticmethod
+    def add_cli_args_for_vlm(
+            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        parser.add_argument('--image-input-type',
+                            type=nullable_str,
+                            default=None,
+                            choices=[
+                                t.name.lower()
+                                for t in VisionLanguageConfig.ImageInputType
+                            ],
+                            help=('The image input type passed into vLLM.'))
+        parser.add_argument('--image-token-id',
+                            type=int,
+                            default=None,
+                            help=('Input id for image token.'))
+        parser.add_argument(
+            '--image-input-shape',
+            type=nullable_str,
+            default=None,
+            help=('The biggest image input shape (worst for memory footprint) '
+                  'given an input type. Only used for vLLM\'s profile_run.'))
+        parser.add_argument(
+            '--image-feature-size',
+            type=int,
+            default=None,
+            help=('The image feature size along the context dimension.'))
+        parser.add_argument(
+            '--image-processor',
+            type=str,
+            default=EngineArgs.image_processor,
+            help='Name or path of the huggingface image processor to use. '
+            'If unspecified, model name or path will be used.')
+        parser.add_argument(
+            '--image-processor-revision',
+            type=str,
+            default=None,
+            help='Revision of the huggingface image processor version to use. '
+            'It can be a branch name, a tag name, or a commit id. '
+            'If unspecified, will use the default version.')
+        parser.add_argument(
+            '--disable-image-processor',
+            action='store_true',
+            help='Disables the use of image processor, even if one is defined '
+            'for the model on huggingface.')
+
+        return parser
+
+    @staticmethod
     def add_cli_args(
             parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """Shared CLI arguments for vLLM engine."""
@@ -113,7 +166,8 @@ class EngineArgs:
             '--tokenizer',
             type=nullable_str,
             default=EngineArgs.tokenizer,
-            help='Name or path of the huggingface tokenizer to use.')
+            help='Name or path of the huggingface tokenizer to use. '
+            'If unspecified, model name or path will be used.')
         parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
@@ -136,9 +190,9 @@ class EngineArgs:
             '--tokenizer-revision',
             type=nullable_str,
             default=None,
-            help='The specific tokenizer version to use. It can be a branch '
-            'name, a tag name, or a commit id. If unspecified, will use '
-            'the default version.')
+            help='Revision of the huggingface tokenizer to use. '
+            'It can be a branch name, a tag name, or a commit id. '
+            'If unspecified, will use the default version.')
         parser.add_argument(
             '--tokenizer-mode',
             type=str,
@@ -445,31 +499,10 @@ class EngineArgs:
                             default=EngineArgs.device,
                             choices=["auto", "cuda", "neuron", "cpu"],
                             help='Device type for vLLM execution.')
+
         # Related to Vision-language models such as llava
-        parser.add_argument(
-            '--image-input-type',
-            type=nullable_str,
-            default=None,
-            choices=[
-                t.name.lower() for t in VisionLanguageConfig.ImageInputType
-            ],
-            help=('The image input type passed into vLLM. '
-                  'Should be one of "pixel_values" or "image_features".'))
-        parser.add_argument('--image-token-id',
-                            type=int,
-                            default=None,
-                            help=('Input id for image token.'))
-        parser.add_argument(
-            '--image-input-shape',
-            type=nullable_str,
-            default=None,
-            help=('The biggest image input shape (worst for memory footprint) '
-                  'given an input type. Only used for vLLM\'s profile_run.'))
-        parser.add_argument(
-            '--image-feature-size',
-            type=int,
-            default=None,
-            help=('The image feature size along the context dimension.'))
+        parser = EngineArgs.add_cli_args_for_vlm(parser)
+
         parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
@@ -488,7 +521,6 @@ class EngineArgs:
             default=EngineArgs.speculative_model,
             help=
             'The name of the draft model to be used in speculative decoding.')
-
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,
@@ -533,6 +565,13 @@ class EngineArgs:
                             'corresponding to the chosen load_format. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
+        parser.add_argument(
+            '--preemption_mode',
+            type=str,
+            default=None,
+            help='If \'recompute\', the engine performs preemption by block '
+            'swapping; If \'swap\', the engine performs preemption by block '
+            'swapping.')
 
         parser.add_argument(
             "--served-model-name",
@@ -636,6 +675,7 @@ class EngineArgs:
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
+            preemption_mode=self.preemption_mode,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
@@ -666,12 +706,27 @@ class EngineArgs:
                 raise ValueError(
                     'Specify `image_token_id`, `image_input_shape` and '
                     '`image_feature_size` together with `image_input_type`.')
+
+            if self.image_processor is None:
+                self.image_processor = self.model
+            if self.disable_image_processor:
+                if self.image_processor != self.model:
+                    warnings.warn(
+                        "You've specified an image processor "
+                        f"({self.image_processor}) but also disabled "
+                        "it via `--disable-image-processor`.",
+                        stacklevel=2)
+
+                self.image_processor = None
+
             vision_language_config = VisionLanguageConfig(
                 image_input_type=VisionLanguageConfig.
                 get_image_input_enum_type(self.image_input_type),
                 image_token_id=self.image_token_id,
                 image_input_shape=str_to_int_tuple(self.image_input_shape),
                 image_feature_size=self.image_feature_size,
+                image_processor=self.image_processor,
+                image_processor_revision=self.image_processor_revision,
             )
         else:
             vision_language_config = None
@@ -734,3 +789,7 @@ def _engine_args_parser():
 def _async_engine_args_parser():
     return AsyncEngineArgs.add_cli_args(argparse.ArgumentParser(),
                                         async_args_only=True)
+
+
+def _vlm_engine_args_parser():
+    return EngineArgs.add_cli_args_for_vlm(argparse.ArgumentParser())
