@@ -51,7 +51,7 @@ for output in outputs:
 
 print("-" * 80)
 
-# Warmup
+# Warmup so that the shared prompt's KV cache is computed.
 prefix_cached_llm.generate(generating_prompts[0], sampling_params)
 
 # Generate with prefix caching
