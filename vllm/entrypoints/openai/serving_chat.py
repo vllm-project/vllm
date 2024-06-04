@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
+from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -104,8 +105,7 @@ class OpenAIServingChat(OpenAIServing):
             self.engine.engine, "vision_language_config", None)
         model_config = getattr(self.engine.engine, "model_config", None)
 
-        image_count = 0
-        for _, part in enumerate(parts):
+        for part in parts:
             part_type = part["type"]
             if part_type == "text":
                 text = cast(ChatCompletionContentPartTextParam, part)["text"]
@@ -117,7 +117,7 @@ class OpenAIServingChat(OpenAIServing):
                         "'image_url' input is not supported as the loaded "
                         "model is not multimodal.")
 
-                elif image_count == 0:
+                elif len(image_futures) == 0:
                     assert self.tokenizer is not None
                     image_url = cast(ChatCompletionContentPartImageParam,
                                      part)["image_url"]
@@ -129,7 +129,6 @@ class OpenAIServingChat(OpenAIServing):
 
                     image_future = async_get_and_parse_image(image_url["url"])
                     image_futures.append(image_future)
-                    image_count += 1
 
                 else:
                     raise NotImplementedError(
@@ -141,7 +140,7 @@ class OpenAIServingChat(OpenAIServing):
 
         text_prompt = "\n".join(texts)
 
-        if vlm_config is not None and image_count:
+        if vlm_config is not None and len(image_futures):
 
             (image_token_prompt,
              image_token_str) = vlm_config.get_image_token_text(self.tokenizer)
@@ -150,6 +149,9 @@ class OpenAIServingChat(OpenAIServing):
             # in the text prompt, we assume it follows the same format required
             # by the engine.
             if image_token_str in text_prompt:
+                logger.warning(
+                    "Detected image token string in the text prompt. "
+                    "Skipping prompt formatting.")
                 messages = [
                     ConversationMessage(role=role, content=text_prompt)
                 ]
@@ -254,27 +256,19 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        if self.engine.engine.vision_language_config is None:
-            result_generator = self.engine.generate(
-                {
-                    "prompt": prompt_text,
-                    "prompt_token_ids": prompt_ids
-                },
-                sampling_params,
-                request_id,
-                lora_request,
-            )
-        else:
-            result_generator = self.engine.generate(
-                {
-                    "prompt": prompt_text,
-                    "prompt_token_ids": prompt_ids,
-                    "multi_modal_data": ImagePixelData(image_data=image_data)
-                },
-                sampling_params,
-                request_id,
-                lora_request,
-            )
+        inputs: PromptInputs = {
+            "prompt": prompt_text,
+            "prompt_token_ids": prompt_ids,
+        }
+        if image_data is not None:
+            inputs["multi_modal_data"] = ImagePixelData(image_data=image_data)
+
+        result_generator = self.engine.generate(
+            inputs,
+            sampling_params,
+            request_id,
+            lora_request,
+        )
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(

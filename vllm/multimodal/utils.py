@@ -40,7 +40,7 @@ def fetch_image(image_url: str) -> Image.Image:
     return img
 
 
-async_fetch_image = make_async(fetch_image)  # type: ignore
+async_fetch_image = make_async(fetch_image)
 
 
 async def async_get_and_parse_image(image_url: str) -> ImagePixelData:
