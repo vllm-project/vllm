@@ -522,6 +522,10 @@ def make_block_tables_slot_mapping(block_size: int,
     block_base_addr
     
 
+    The constructed block-tables and slot-mapping are sized to the
+    lengths of the sequences in their entirety (as reflected by seq_lens),
+    i.e. the total of prefill prompt tokens + decoded tokens.
+
     Arguments:
 
     * block_size: number of offsets per block
