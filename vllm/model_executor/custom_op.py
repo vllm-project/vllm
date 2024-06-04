@@ -5,9 +5,11 @@ from vllm.utils import is_cpu, is_hip
 
 class CustomOp(nn.Module):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self._forward_method = self.dispatch_forward()
+
     def forward(self, *args, **kwargs):
-        if not hasattr(self, "_forward_method"):
-            self._forward_method = self.dispatch_forward()
         return self._forward_method(*args, **kwargs)
 
     def forward_native(self, *args, **kwargs):
