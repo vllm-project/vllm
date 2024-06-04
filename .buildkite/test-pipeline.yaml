@@ -88,13 +88,14 @@ steps:
   #mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models --ignore=models/test_llava.py
+    - pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_llava_next.py
 
 - label: Llava Test
   mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
     - pytest -v -s models/test_llava.py
+    - pytest -v -s models/test_llava_next.py
 
 - label: Prefix Caching Test
   mirror_hardwares: [amd]
