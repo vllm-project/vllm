@@ -11,7 +11,8 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict, get_tp_src_rank_and_group,
+from vllm.distributed import (broadcast_tensor_dict,
+                              get_tensor_model_parallel_src_rank_and_group,
                               is_pipeline_model_parallel_last_rank)
 from vllm.distributed.communication_op import graph_capture
 from vllm.logger import init_logger
@@ -618,7 +619,8 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, torch.Tensor]:
-        src_rank, tp_group, cpu_tp_group = get_tp_src_rank_and_group()
+        src_rank, tp_group, cpu_tp_group = (
+            get_tensor_model_parallel_src_rank_and_group())
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.

@@ -11,7 +11,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          SpeculativeConfig, VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
-                              get_tp_src_rank_and_group,
+                              get_tensor_model_parallel_src_rank_and_group,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
@@ -240,7 +240,8 @@ class Worker(WorkerBase):
             self._execute_model_non_driver()
             return []
 
-        src_rank, tp_group, cpu_tp_group = get_tp_src_rank_and_group()
+        src_rank, tp_group, cpu_tp_group = (
+            get_tensor_model_parallel_src_rank_and_group())
         if execute_model_req is None:
             # This signals that there's no more requests to process for now.
             # All workers are running infinite loop with broadcast_tensor_dict,
@@ -318,7 +319,8 @@ class Worker(WorkerBase):
         Returns True iff there are remaining sequences to process.
         """
         assert not self.is_driver_worker
-        src_rank, tp_group, cpu_tp_group = get_tp_src_rank_and_group()
+        src_rank, tp_group, cpu_tp_group = (
+            get_tensor_model_parallel_src_rank_and_group())
         data = broadcast_tensor_dict(src=src_rank,
                                      group=tp_group,
                                      metadata_group=cpu_tp_group)

@@ -368,19 +368,6 @@ def is_pipeline_model_parallel_last_rank() -> bool:
     ) == get_pipeline_model_parallel_world_size() - 1
 
 
-def get_tp_src_rank_and_group():
-    parallelism_initialized = model_parallel_is_initialized()
-    if parallelism_initialized:
-        src_rank = get_tensor_model_parallel_src_rank()
-        tp_group = get_tensor_model_parallel_group()
-        cpu_tp_group = get_tensor_model_parallel_cpu_group()
-    else:
-        src_rank = 0
-        tp_group = None
-        cpu_tp_group = None
-    return src_rank, tp_group, cpu_tp_group
-
-
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP_DEVICE_GROUP
@@ -400,3 +387,9 @@ def destroy_model_parallel():
     _PP_DEVICE_GROUP = None
     global _PP_GLOBAL_RANKS
     _PP_GLOBAL_RANKS = None
+    global _PP_CPU_GROUP
+    if _PP_CPU_GROUP:
+        torch.distributed.destroy_process_group(_PP_CPU_GROUP)
+    _PP_CPU_GROUP = None
+    global _PP_PYNCCL_COMMUNICATOR
+    _PP_PYNCCL_COMMUNICATOR = None

@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from vllm.distributed.communication_op import broadcast_tensor_dict
+from vllm.distributed.utils import get_tensor_model_parallel_src_rank_and_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
@@ -242,13 +243,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             self._run_non_driver_rank()
             return []
 
+        src_rank, tp_group, cpu_tp_group = (
+            get_tensor_model_parallel_src_rank_and_group())
         if execute_model_req is None:
             # This signals that there's no more requests to process for now.
             # All workers are running infinite loop with broadcast_tensor_dict,
             # and it stops the loop when the driver broadcasts an empty input.
             # Send an empty input to notify all other workers to stop their
             # execution loop.
-            broadcast_tensor_dict({}, src=0)
+            broadcast_tensor_dict({},
+                                  src=src_rank,
+                                  group=tp_group,
+                                  metadata_group=cpu_tp_group)
             return []
 
         disable_all_speculation = self._should_disable_all_speculation(
@@ -265,7 +271,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             num_lookahead_slots=num_lookahead_slots,
             disable_all_speculation=disable_all_speculation,
         )
-        broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
+        broadcast_tensor_dict(broadcast_dict,
+                              src=src_rank,
+                              group=tp_group,
+                              metadata_group=cpu_tp_group)
 
         assert execute_model_req.seq_group_metadata_list is not None, (
             "speculative decoding requires non-None seq_group_metadata_list")
@@ -351,8 +360,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         Returns True iff there are remaining sequences to process.
         """
         assert self.rank != self._driver_rank
+        src_rank, tp_group, cpu_tp_group = (
+            get_tensor_model_parallel_src_rank_and_group())
 
-        data = broadcast_tensor_dict(src=self._driver_rank)
+        data = broadcast_tensor_dict(src=src_rank,
+                                     group=tp_group,
+                                     metadata_group=cpu_tp_group)
         if not data:
             return False
         num_lookahead_slots = data["num_lookahead_slots"]

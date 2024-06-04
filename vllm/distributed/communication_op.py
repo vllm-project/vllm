@@ -326,29 +326,31 @@ def broadcast_tensor_dict(
 
 def send_next_rank(tensors: List[torch.Tensor]) -> None:
     """Send the tensors to the next pipeline model parallel rank."""
-    combined_tensor = torch.cat(tensors, dim=0)
-    torch.cat(tensors, dim=0)
     pynccl_comm = get_pp_pynccl_communicator()
     if (pynccl_comm is not None and not pynccl_comm.disabled):
-        pynccl_comm.send(combined_tensor)
+        for tensor in tensors:
+            pynccl_comm.send(tensor)
     else:
-        torch.distributed.send(combined_tensor,
-                               get_pipeline_model_parallel_next_rank(),
-                               get_pipeline_model_parallel_group())
+        for tensor in tensors:
+            torch.distributed.send(tensor,
+                                   get_pipeline_model_parallel_next_rank(),
+                                   get_pipeline_model_parallel_group())
 
 
-def recv_prev_rank(num_tensors: int, sizes: torch.Size, dtype: torch.dtype,
+def recv_prev_rank(num_tensors: int, size: torch.Size, dtype: torch.dtype,
                    device: torch.device) -> List[torch.Tensor]:
     """Receive tensors from the previous pipeline model parallel rank."""
-    sizes = list(sizes)
-    combined_tensor = torch.empty([sizes[0] * num_tensors] + sizes[1:],
-                                  dtype=dtype,
-                                  device=device)
+    tensors = [
+        torch.empty(size, dtype=dtype, device=device)
+        for _ in range(num_tensors)
+    ]
     pynccl_comm = get_pp_pynccl_communicator()
     if (pynccl_comm is not None and not pynccl_comm.disabled):
-        pynccl_comm.recv(combined_tensor)
+        for tensor in tensors:
+            pynccl_comm.recv(tensor)
     else:
-        torch.distributed.recv(combined_tensor,
-                               get_pipeline_model_parallel_prev_rank(),
-                               get_pipeline_model_parallel_group())
-    return torch.chunk(combined_tensor, num_tensors, dim=0)
+        for tensor in tensors:
+            torch.distributed.recv(tensor,
+                                   get_pipeline_model_parallel_prev_rank(),
+                                   get_pipeline_model_parallel_group())
+    return tensors

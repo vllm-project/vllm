@@ -12,7 +12,11 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import init_logger
 
-from .parallel_state import get_cpu_world_group, get_local_rank
+from .parallel_state import (get_cpu_world_group, get_local_rank,
+                             get_tensor_model_parallel_cpu_group,
+                             get_tensor_model_parallel_group,
+                             get_tensor_model_parallel_src_rank,
+                             model_parallel_is_initialized)
 
 logger = init_logger(__name__)
 
@@ -134,6 +138,23 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         cache = json.load(f)
     _gpu_p2p_access_cache = cache
     return _gpu_p2p_access_cache[f"{i}->{j}"]
+
+
+def get_tensor_model_parallel_src_rank_and_group():
+    """
+    Return the source rank and group for the tensor model parallel
+    broadcasts with default values if not initialized.
+    Broadcast ops in vLLM use world group as default which is not
+    appropriate for tensor model parallel broadcasts.
+    """
+    parallelism_initialized = model_parallel_is_initialized()
+    src_rank, tp_group, cpu_tp_group = 0, None, None
+    if parallelism_initialized:
+        src_rank = get_tensor_model_parallel_src_rank()
+        tp_group = get_tensor_model_parallel_group()
+        cpu_tp_group = get_tensor_model_parallel_cpu_group()
+
+    return src_rank, tp_group, cpu_tp_group
 
 
 def get_pp_indices(num_hidden_layers: int, pp_rank: int,
