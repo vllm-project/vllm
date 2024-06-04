@@ -7,9 +7,11 @@ from contextlib import contextmanager
 
 import ray
 import requests
+import torch
 
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import get_open_port
 
 # Path to root of repository so that utilities can be imported by ray workers
@@ -102,3 +104,14 @@ def error_on_warning():
         warnings.simplefilter("error")
 
         yield
+
+
+def is_quant_method_supported(quant_method: str) -> bool:
+    # Currently, all quantization methods require Nvidia or AMD GPUs
+    if not torch.cuda.is_available():
+        return False
+
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    return (capability <
+            QUANTIZATION_METHODS[quant_method].get_min_capability())
