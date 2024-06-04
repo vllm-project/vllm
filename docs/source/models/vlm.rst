@@ -54,3 +54,56 @@ For now, we only support a single image per text prompt. To pass an image to the
         print(generated_text)
 
 A code example can be found in `examples/llava_example.py <https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py>`_.
+
+Online OpenAI Vision API Compatible Inference
+----------------------------------------------
+
+You can serve vision language models with vLLM's HTTP server that is compatible with `OpenAI Vision API <https://platform.openai.com/docs/guides/vision>`_.
+
+.. note::
+    Currently, vLLM supports only **single ``image_url`` input** per ``messages``. Support for multi-image inputs will be
+    added in the future.
+
+Below is an example on how to launch the same `llava-hf/llava-1.5-7b-hf` with vLLM API server.
+
+.. important::
+    Since OpenAI Vision API is based on `Chat <https://platform.openai.com/docs/api-reference/chat>`_ API, a chat template 
+    is **required** to launch the API server. In this example, we use the Vicuna chat template that you can 
+    find `here in the example folder <https://github.com/vllm-project/vllm/blob/main/examples/template_vicuna.jinja>`_.
+
+.. code-block:: bash
+
+    python -m vllm.entrypoints.openai.api_server \
+        --model llava-hf/llava-1.5-7b-hf \
+        --image-input-type pixel_values \
+        --image-token-id 32000 \
+        --image-input-shape 1,3,336,336 \
+        --image-feature-size 576 \
+        --chat-template template_vicuna.jinja \
+
+To consume the server, you can use the OpenAI client
+
+.. code-block:: python
+    from openai import OpenAI
+    openai_api_key = "EMPTY"
+    openai_api_base = "http://localhost:8000/v1"
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
+    chat_response = client.chat.completions.create(
+        model="llava-hf/llava-1.5-7b-hf",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What's in this image?"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
+                    },
+                },
+            ],
+        }],
+    )
+    print("Chat response:", chat_response)
