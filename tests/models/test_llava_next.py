@@ -107,13 +107,15 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
         for p in HF_IMAGE_PROMPTS
     ]
 
-    vllm_model = vllm_runner(model_id,
-                             dtype=dtype,
-                             tensor_parallel_size=tensor_parallel_size,
-                             # should be greater than image_feature_size
-                             max_model_len=4096,
-                             enforce_eager=True,
-                             **vlm_config.as_cli_args_dict())
+    vllm_model = vllm_runner(
+        model_id,
+        dtype=dtype,
+        tensor_parallel_size=tensor_parallel_size,
+        # should be greater than image_feature_size
+        max_model_len=4096,
+        enforce_eager=True,
+        **vlm_config.as_cli_args_dict(),
+    )
     vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
                                               max_tokens,
                                               images=vllm_images)
