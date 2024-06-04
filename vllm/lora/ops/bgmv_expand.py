@@ -27,34 +27,42 @@ def _bgmv_expand_kernel(
     cn_stride,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    SPLIT_N: tl.constexpr,
     ADD_INPUTS: tl.constexpr,
     CAST_TYPE: tl.constexpr,
 ):
     """
     C=A@B, and B is col-major matrix
     """
-    cur_batch = tl.program_id(axis=0)
+    pid_sn = tl.program_id(axis=0)
+    cur_batch = tl.program_id(axis=1)
     lora_index = tl.load(lora_indices + cur_batch)
     if lora_index == -1:
         return
     offset_k = tl.arange(0, BLOCK_K)
     offset_n = tl.arange(0, BLOCK_N)
-    # tl.max_contiguous(offset_k, BLOCK_K)
     tiled_a = tl.load(
         input_ptr + cur_batch * xm_stride + offset_k * xk_stride,
         mask=offset_k < K,
         other=0,
     )  # [BLOCK_K]
-    b_ptr = lora_ptr + l0_stride * lora_index
+
+    split_n_length = tl.cdiv(N, SPLIT_N)
     if CAST_TYPE:
         tiled_a = tiled_a.to(lora_ptr.dtype.element_ty)
     # sliding  to  next row-block
-
-    for n in range(0, N, BLOCK_N):
+    b_ptr = (
+        lora_ptr
+        + l0_stride * lora_index
+        + pid_sn * split_n_length * lora_k_stride
+    )
+    for n in range(0, split_n_length, BLOCK_N):
         current_n = n + offset_n
         # vector load
         current_n_c = tl.max_contiguous(current_n, BLOCK_N)
-        b_ptr_mask = (current_n[:, None] < N) & (offset_k[None, :] < K)
+        b_ptr_mask = (current_n[:, None] < split_n_length) & (
+            offset_k[None, :] < K
+        )
 
         tiled_b = tl.load(
             b_ptr
@@ -66,8 +74,13 @@ def _bgmv_expand_kernel(
 
         accumulator = tl.sum(tiled_a * tiled_b, 1)
 
-        c_ptr = out_ptr + cur_batch * cm_stride + current_n * cn_stride
-        c_mask = current_n < N
+        c_ptr = (
+            out_ptr
+            + cur_batch * cm_stride
+            + pid_sn * split_n_length
+            + current_n * cn_stride
+        )
+        c_mask = current_n < split_n_length
         if ADD_INPUTS:
             tiled_out = tl.load(c_ptr, mask=c_mask)
             accumulator += tiled_out
@@ -118,8 +131,9 @@ def bgmv_expand(
     # TODO tuning this config
 
     N, K = lora_b_weights.shape[-2:]  # K= rank,N=hidden_size
-    BLOCK_N = 512 
+    BLOCK_N = 512
     BLOCK_K = triton.next_power_of_2(K)
+    SPLIT_N = 8
     ADD_INPUTS = add_inputs
     CAST_TYPE = False
     if inputs.dtype == torch.float32 and lora_b_weights.dtype in [
@@ -128,9 +142,9 @@ def bgmv_expand(
     ]:
         CAST_TYPE = True
     grid = [
+        SPLIT_N,
         batchs,
     ]
-    config = {"num_stages": 4, "num_warps": 8}
     _bgmv_expand_kernel[grid](
         inputs,
         lora_b_weights,
@@ -147,8 +161,8 @@ def bgmv_expand(
         output_tensor.stride(1),
         BLOCK_N,
         BLOCK_K,
+        SPLIT_N,
         ADD_INPUTS,
         CAST_TYPE,
-        **config,
     )
     return
