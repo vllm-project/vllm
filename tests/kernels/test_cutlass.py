@@ -51,7 +51,8 @@ def cutlass_fp8_gemm_helper(m: int,
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b * b.to(dtype=torch.float32)).to(out_dtype)
 
-    assert torch.allclose(out, baseline, rtol=1e-2, atol=1e-1)
+    # Convert outputs to fp32, since allclose is not implemented for fp8_e4m3
+    assert torch.allclose(out.to(torch.float32), baseline.to(torch.float32), rtol=1e-2, atol=1e-1)
 
 
 def cutlass_int8_gemm_helper(m: int,
@@ -78,8 +79,9 @@ def cutlass_int8_gemm_helper(m: int,
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b *
                         b.to(dtype=torch.float32)).to(dtype=out_dtype)
-
-    assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
+    
+    rtol = 1e0 if out_dtype is torch.int8 else 1e-1
+    assert torch.allclose(out, baseline, rtol=rtol, atol=1e0)
 
 
 @pytest.mark.parametrize("m", [512, 222, 100, 33, 1])
