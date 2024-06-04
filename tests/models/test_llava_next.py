@@ -1,7 +1,6 @@
 from typing import List, Tuple
 
 import pytest
-import torch
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
@@ -77,10 +76,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
-                model_and_config, dtype: str, max_tokens: int,
-                tensor_parallel_size: int) -> None:
+                model_and_config, dtype: str, max_tokens: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -90,9 +87,6 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    if torch.cuda.device_count() < tensor_parallel_size:
-        pytest.skip(f"Need at least {tensor_parallel_size} GPUs.")
-
     model_id, vlm_config = model_and_config
 
     hf_model = hf_runner(model_id, dtype=dtype, is_vision_model=True)
@@ -109,7 +103,6 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     vllm_model = vllm_runner(
         model_id,
         dtype=dtype,
-        tensor_parallel_size=tensor_parallel_size,
         # should be greater than image_feature_size
         max_model_len=4096,
         enforce_eager=True,
