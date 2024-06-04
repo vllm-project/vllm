@@ -27,11 +27,11 @@ def benchmark_config(
     w1 = torch.randn(num_experts,
                      shard_intermediate_size,
                      hidden_size,
-                     dtype=init_dtype).to(dtype)
+                     dtype=init_dtype)
     w2 = torch.randn(num_experts,
                      hidden_size,
                      shard_intermediate_size // 2,
-                     dtype=init_dtype).to(dtype)
+                     dtype=init_dtype)
     gating_output = torch.randn(num_iters,
                                 num_tokens,
                                 num_experts,
@@ -46,6 +46,9 @@ def benchmark_config(
         w2_scale = torch.randn(num_experts, dtype=torch.float32)
         a1_scale = torch.randn(1, dtype=torch.float32)
         a2_scale = torch.randn(1, dtype=torch.float32)
+
+        w1 = w1.to(torch.float8_e4m3fn)
+        w2 = w2.to(torch.float8_e4m3fn)
 
     input_gating = torch.empty(num_tokens, num_experts, dtype=torch.float32)
 
@@ -132,7 +135,6 @@ class BenchmarkWorker:
         torch.set_default_device("cuda")
         torch.cuda.manual_seed_all(seed)
         self.seed = seed
-        self.device_properties = torch.cuda.get_device_properties("cuda")
 
     def benchmark(
         self,
@@ -147,7 +149,9 @@ class BenchmarkWorker:
         torch.cuda.manual_seed_all(self.seed)
 
         dtype_str = "float8" if use_fp8 else None
-        op_config = get_moe_configs(num_experts, shard_intermediate_size,
+        # NOTE(woosuk): The current naming convention uses w2.shape[2], which
+        # is the intermediate size after silu_and_mul.
+        op_config = get_moe_configs(num_experts, shard_intermediate_size // 2,
                                     dtype_str)
         if op_config is None:
             config = get_default_config(num_tokens, num_experts,
@@ -218,7 +222,9 @@ def save_configs(
     use_fp8: bool,
 ) -> None:
     dtype_str = "float8" if use_fp8 else None
-    filename = get_config_file_name(num_experts, shard_intermediate_size,
+    # NOTE(woosuk): The current naming convention uses w2.shape[2], which
+    # is the intermediate size after silu_and_mul.
+    filename = get_config_file_name(num_experts, shard_intermediate_size // 2,
                                     dtype_str)
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
