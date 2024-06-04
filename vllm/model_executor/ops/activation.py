@@ -29,7 +29,7 @@ class SiluAndMul(CustomOp):
         return F.silu(x[..., :d]) * x[..., d:]
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        from vllm._custom_ops import ops
+        from vllm import _custom_ops as ops
 
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
@@ -60,7 +60,7 @@ class GeluAndMul(CustomOp):
         return F.gelu(x[..., :d], approximate=self.approximate) * x[..., d:]
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        from vllm._custom_ops import ops
+        from vllm import _custom_ops as ops
 
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
@@ -84,7 +84,7 @@ class NewGELU(CustomOp):
                                            (x + 0.044715 * torch.pow(x, 3.0))))
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        from vllm._custom_ops import ops
+        from vllm import _custom_ops as ops
 
         out = torch.empty_like(x)
         ops.gelu_new(out, x)
@@ -99,7 +99,7 @@ class FastGELU(CustomOp):
                                            (1.0 + 0.044715 * x * x)))
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        from vllm._custom_ops import ops
+        from vllm import _custom_ops as ops
 
         out = torch.empty_like(x)
         ops.gelu_fast(out, x)
