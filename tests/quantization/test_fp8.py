@@ -8,9 +8,6 @@ import torch
 from tests.utils import is_quant_method_supported
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
-
 
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="FP8 is not supported on this GPU type.")
