@@ -29,7 +29,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
         max_num_seqs: int,
         max_num_batched_tokens: int,
         device: torch.device,
-        prompt_adapter_config: Type[PromptAdapterConfig],
+        prompt_adapter_config: PromptAdapterConfig,
         prompt_adapter_model_cls: Type[PromptAdapterModel] = PromptAdapterModel
     ):
         self._prompt_adapter_manager: Optional[

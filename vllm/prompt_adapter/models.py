@@ -159,6 +159,7 @@ class PromptAdapterModelManager(AdapterModelManager):
 
     def reset_adapter(self):
         try:
+            self.remove_all_prompt_adapters()
             for module_name, module in self.model.named_modules():
                 if 'Model' in (module.__class__.__name__):
                     del module.prefix_encoder
