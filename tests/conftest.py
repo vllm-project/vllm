@@ -8,7 +8,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,
-                          LlavaConfig, LlavaForConditionalGeneration)
+                          LlavaConfig, LlavaForConditionalGeneration,
+                          LlavaNextConfig, LlavaNextForConditionalGeneration)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
@@ -143,6 +144,8 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 AutoModelForCausalLM.register(LlavaConfig, LlavaForConditionalGeneration)
+AutoModelForCausalLM.register(LlavaNextConfig,
+                              LlavaNextForConditionalGeneration)
 
 _EMBEDDING_MODELS = [
     "intfloat/e5-mistral-7b-instruct",

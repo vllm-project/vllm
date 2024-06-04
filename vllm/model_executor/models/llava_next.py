@@ -6,8 +6,9 @@ from transformers import LlavaNextConfig
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 
-from vllm.config import VisionLanguageConfig
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 
 from .llava import (LlavaForConditionalGeneration, LlavaImageFeatureInputs,
                     LlavaImagePixelInputs)
@@ -46,8 +47,14 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
     def __init__(self,
                  config: LlavaNextConfig,
                  vision_language_config: VisionLanguageConfig,
-                 linear_method: Optional[LinearMethodBase] = None) -> None:
-        super().__init__(config, vision_language_config, linear_method)
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
+        super().__init__(
+            config,  # type: ignore
+            vision_language_config,
+            cache_config,
+            quant_config,
+        )
 
         # Update the type annotation from that of its superclass
         self.config = config
