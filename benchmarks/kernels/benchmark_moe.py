@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 import ray
+from ray.experimental.tqdm_ray import tqdm
 import torch
 import triton
 from transformers import AutoConfig
@@ -178,7 +179,7 @@ class BenchmarkWorker:
     ) -> Dict[str, int]:
         best_config = None
         best_time = float("inf")
-        for config in search_space:
+        for config in tqdm(search_space):
             try:
                 kernel_time = benchmark_config(config,
                                                num_tokens,
