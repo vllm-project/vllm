@@ -11,10 +11,15 @@ from ..conftest import IMAGE_FILES
 
 pytestmark = pytest.mark.llava
 
+_PREFACE = (
+    "A chat between a curious human and an artificial intelligence assistant. "
+    "The assistant gives helpful, detailed, and polite answers to the human's "
+    "questions.")
+
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = [
-    "<|im_start|>system\nAnswer the questions.<|im_end|><|im_start|><image>\nuser\nWhat's the content of the image?<|im_end|><|im_start|>assistant\n",  # noqa: E501
-    "<|im_start|>system\nAnswer the questions.<|im_end|><|im_start|><image>\nuser\nWhat is the season?<|im_end|><|im_start|>assistant\n",  # noqa: E501
+    f"{_PREFACE} <image>\nUSER: What's the content of the image? ASSISTANT:",
+    f"{_PREFACE} <image>\nUSER: What is the season? ASSISTANT:",
 ]
 
 assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
@@ -36,14 +41,14 @@ def iter_llava_next_configs(model_name: str):
             yield (model_name,
                    VisionLanguageConfig(image_input_type=input_type,
                                         image_feature_size=f,
-                                        image_token_id=64000,
+                                        image_token_id=32000,
                                         image_input_shape=input_shape,
                                         image_processor=model_name,
                                         image_processor_revision=None))
 
 
 model_and_vl_config = [
-    *iter_llava_next_configs("llava-hf/llava-v1.6-34b-hf"),
+    *iter_llava_next_configs("llava-hf/llava-v1.6-vicuna-7b-hf"),
 ]
 
 
@@ -65,9 +70,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
         if input_id != image_token_id or input_ids[idx - 1] != image_token_id
     ]
     hf_output_str = output_str \
-        .replace(image_token_str * vlm_config.image_feature_size, "") \
-        .replace("<|im_start|>", "<|im_start|> ") \
-        .replace("<|im_end|>", "")
+        .replace(image_token_str * vlm_config.image_feature_size, " ")
 
     return hf_input_ids, hf_output_str
 
@@ -75,7 +78,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("tensor_parallel_size", [2])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
                 model_and_config, dtype: str, max_tokens: int,
                 tensor_parallel_size: int) -> None:
