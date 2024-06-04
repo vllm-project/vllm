@@ -54,13 +54,15 @@ def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
     return sanitized_input_ids, sanitzied_output_str
 
 
-@pytest.mark.parametrize("worker_use_ray", [False])
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("worker_use_ray", [False])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                 vllm_image_prompts, vllm_images, model_and_config, dtype: str,
-                max_tokens: int, worker_use_ray: bool) -> None:
+                max_tokens: int, worker_use_ray: bool,
+                tensor_parallel_size: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -70,6 +72,9 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
+    if torch.cuda.device_count() < tensor_parallel_size:
+        pytest.skip(f"Need at least {tensor_parallel_size} GPUs.")
+
     model_id, vision_language_config = model_and_config
 
     hf_model = hf_runner(model_id, dtype=dtype)
@@ -81,6 +86,7 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
     vllm_model = vllm_runner(model_id,
                              dtype=dtype,
                              worker_use_ray=worker_use_ray,
+                             tensor_parallel_size=tensor_parallel_size,
                              enforce_eager=True,
                              **vision_language_config.as_cli_args_dict())
     vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
@@ -99,7 +105,3 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
-
-
-# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
-# (Requires multiple GPUs)

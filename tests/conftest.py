@@ -176,7 +176,8 @@ class HfRunner:
                 model_name,
                 torch_dtype=torch_dtype,
                 trust_remote_code=True,
-            ).cuda()
+                device_map="auto",
+            )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
