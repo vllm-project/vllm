@@ -218,7 +218,6 @@ def calculate_metrics(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
             stacklevel=2)
-    print(itls)
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
