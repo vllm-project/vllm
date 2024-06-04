@@ -48,7 +48,7 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        from vllm._C import ops
+        from vllm._custom_ops import ops
 
         if residual is not None:
             ops.fused_add_rms_norm(
