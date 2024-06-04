@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
+from vllm.utils import is_cpu
 
 logger = init_logger(__name__)
 
@@ -58,7 +59,8 @@ def cleanup():
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
-    torch.cuda.empty_cache()
+    if not is_cpu():
+        torch.cuda.empty_cache()
 
 
 @pytest.fixture()
@@ -151,6 +153,12 @@ _EMBEDDING_MODELS = [
 
 class HfRunner:
 
+    def wrap_device(self, input: any):
+        if not is_cpu():
+            return input.to("cuda")
+        else:
+            return input.to("cpu")
+
     def __init__(
         self,
         model_name: str,
@@ -164,16 +172,18 @@ class HfRunner:
         if model_name in _EMBEDDING_MODELS:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(
-                model_name,
-                device="cpu",
-            ).to(dtype=torch_dtype).cuda()
+            self.model = self.wrap_device(
+                SentenceTransformer(
+                    model_name,
+                    device="cpu",
+                ).to(dtype=torch_dtype))
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            ).cuda()
+            self.model = self.wrap_device(
+                AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=True,
+                ))
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
@@ -214,7 +224,7 @@ class HfRunner:
             inputs = self.processor(**processor_kwargs)
 
             output_ids = self.model.generate(
-                **inputs.to("cuda"),
+                **self.wrap_device(inputs),
                 use_cache=True,
                 **kwargs,
             )
@@ -271,7 +281,7 @@ class HfRunner:
         for prompt in prompts:
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
             output = self.model.generate(
-                input_ids.cuda(),
+                self.wrap_device(input_ids),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
@@ -306,7 +316,7 @@ class HfRunner:
         for prompt in prompts:
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
             output = self.model.generate(
-                input_ids.cuda(),
+                self.wrap_device(input_ids),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
