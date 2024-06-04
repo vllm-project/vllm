@@ -1854,11 +1854,3 @@ void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit) {
           : (int*)q_perm.data_ptr(),
       q_weight.size(0) * 32 / bit, q_weight.size(1), bit);
 }
-
-torch::Tensor gptq_gemm_meta(torch::Tensor a, torch::Tensor b_q_weight,
-                             torch::Tensor b_gptq_qzeros,
-                             torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                             bool use_exllama, int64_t bit) {
-  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  return torch::empty({a.size(0), b_q_weight.size(1)}, options);
-}
