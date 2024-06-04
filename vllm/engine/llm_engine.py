@@ -1001,9 +1001,7 @@ class LLMEngine:
         self.model_executor.check_health()
 
     def create_trace_span(self, seq_group: SequenceGroup, now: float) -> None:
-        if self.tracer is None:
-            return
-        if seq_group.trace_context is None:
+        if self.tracer is None or seq_group.sampling_params is None:
             return
         arrival_time_nano_seconds = int(seq_group.metrics.arrival_time * 1e9)
 
