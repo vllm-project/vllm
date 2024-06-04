@@ -71,7 +71,7 @@ def _bgmv_expand_slice_kernel(
         accumulator = tl.sum(tiled_a * tiled_b, 1)
 
         c_ptr = (out_ptr + cur_batch * cm_stride + pid_sn * split_n_length +
-                 slice_offset * cn_stride +current_n * cn_stride)
+                 slice_offset * cn_stride + current_n * cn_stride)
         c_mask = current_n < split_n_length
         if ADD_INPUTS:
             tiled_out = tl.load(c_ptr, mask=c_mask)

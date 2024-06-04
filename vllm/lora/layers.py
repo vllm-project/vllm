@@ -127,10 +127,12 @@ def _apply_lora_triton(
     batch_size = batch_mlen_stage_lst[0]
     max_length = batch_mlen_stage_lst[1]
     is_prefilling = bool(batch_mlen_stage_lst[2])
-
+    # maybe we need not  restrict  range to [:batch_size]
     add_lora_triton(output, x, lora_a_stacked, lora_b_stacked,
-                    b_seq_start_tensor, seq_length_tensor, lora_index_tensor,
-                    batch_size, max_length, 0, 1.0, is_prefilling)
+                    b_seq_start_tensor[:batch_size],
+                    seq_length_tensor[:batch_size],
+                    lora_index_tensor[:batch_size], batch_size, max_length, 0,
+                    1.0, is_prefilling)
     return output.view_as(org_output)
 
 
@@ -211,11 +213,11 @@ def _apply_lora_triton_nslice(
     offset_left = 0
     #TODO fuse these kernel
     for slice_idx in range(len(output_slices)):
-        add_lora_triton_slice(output, x, lora_a_stacked[slice_idx],
-                              lora_b_stacked[slice_idx], b_seq_start_tensor,
-                              seq_length_tensor, lora_index_tensor, batch_size,
-                              max_length, 0, 1.0, offset_left,
-                              output_slices[slice_idx], is_prefilling)
+        add_lora_triton_slice(
+            output, x, lora_a_stacked[slice_idx], lora_b_stacked[slice_idx],
+            b_seq_start_tensor[:batch_size], seq_length_tensor[:batch_size],
+            lora_index_tensor[:batch_size], batch_size, max_length, 0, 1.0,
+            offset_left, output_slices[slice_idx], is_prefilling)
         offset_left += output_slices[slice_idx]
 
     return output.view_as(org_output)
@@ -554,13 +556,9 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        batch_size = self.batch_mlen_stage_lst[0]
-        # maybe we need not  restrict  range to [:batch_size]
         _apply_lora_triton(x, self.lora_a_stacked, self.lora_b_stacked,
-                           self.b_seq_start_tensor[:batch_size],
-                           self.seq_length_tensor[:batch_size],
-                           self.indices[:batch_size],
-                           self.batch_mlen_stage_lst, output)
+                           self.b_seq_start_tensor, self.seq_length_tensor,
+                           self.indices, self.batch_mlen_stage_lst, output)
         return output
 
     def forward(self, input_):
@@ -722,14 +720,13 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         #     output,
         #     (self.output_dim, self.output_dim),
         # )
-        batch_size = self.batch_mlen_stage_lst[0]
         _apply_lora_triton_nslice(
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
-            self.b_seq_start_tensor[:batch_size],
-            self.seq_length_tensor[:batch_size],
-            self.indices[:batch_size],
+            self.b_seq_start_tensor,
+            self.seq_length_tensor,
+            self.indices,
             self.batch_mlen_stage_lst,
             output,
             (self.output_dim, self.output_dim),
@@ -998,14 +995,13 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         #     output,
         #     self.output_slices,
         # )
-        batch_size = self.batch_mlen_stage_lst[0]
         _apply_lora_triton_nslice(
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
-            self.b_seq_start_tensor[:batch_size],
-            self.seq_length_tensor[:batch_size],
-            self.indices[:batch_size],
+            self.b_seq_start_tensor,
+            self.seq_length_tensor,
+            self.indices,
             self.batch_mlen_stage_lst,
             output,
             self.output_slices,
@@ -1121,13 +1117,10 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def apply(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x)
-        batch_size = self.batch_mlen_stage_lst[0]
         # maybe we need not  restrict  range to [:batch_size]
         _apply_lora_triton(x, self.lora_a_stacked, self.lora_b_stacked,
-                           self.b_seq_start_tensor[:batch_size],
-                           self.seq_length_tensor[:batch_size],
-                           self.indices[:batch_size],
-                           self.batch_mlen_stage_lst, output)
+                           self.b_seq_start_tensor, self.seq_length_tensor,
+                           self.indices, self.batch_mlen_stage_lst, output)
         return output
 
     # def apply(self, x: torch.Tensor) -> torch.Tensor:
@@ -1373,17 +1366,17 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             logits,
         )
 
-        # batch_size=self.batch_mlen_stage_lst[0]
-        # _apply_lora_triton(hidden_states, self.lora_a_stacked, self.lora_b_stacked,
-        #                    self.b_seq_start_tensor[:batch_size],
-        #                    self.seq_length_tensor[:batch_size],
-        #                    self.indices[:self.indices_len[1]],
-        #                    self.batch_mlen_stage_lst, logits_temp)
-        # flag=torch.allclose(logits_temp,logits,rtol=1e-2,atol=1e-2)
-        # if flag:
-        #     print("pass")
-        # else:
-        #     print("error")
+        logits_temp = logits.clone()
+        _apply_lora_triton(hidden_states, self.lora_a_stacked,
+                           self.lora_b_stacked, self.b_seq_start_tensor,
+                           self.seq_length_tensor,
+                           self.indices[:self.indices_len[1]],
+                           self.batch_mlen_stage_lst, logits_temp)
+        flag = torch.allclose(logits_temp, logits, rtol=1e-2, atol=1e-2)
+        if flag:
+            print("pass")
+        else:
+            print("error")
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.base_layer.vocab_size]
 
