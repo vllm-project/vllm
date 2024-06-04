@@ -2,7 +2,7 @@ from abc import abstractmethod
 
 import torch.nn as nn
 
-from vllm.utils import is_hip, is_cpu
+from vllm.utils import is_cpu, is_hip
 
 
 class CustomOp(nn.Module):
