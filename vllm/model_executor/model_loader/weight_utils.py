@@ -15,15 +15,15 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from transformers.integrations.ggml import load_dequant_gguf_tensor
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.gguf import load_gguf_tensor
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
+from vllm.model_executor.model_loader.gguf import load_gguf_tensor
 
 logger = init_logger(__name__)
 
@@ -381,19 +381,22 @@ def pt_weights_iterator(
         torch.cuda.empty_cache()
 
 
-def gguf_dequant_weights_iterator(gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
+def gguf_dequant_weights_iterator(
+        gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the dequant weights in the model gguf files."""
     from gguf import GGUFReader
 
     reader = GGUFReader(gguf_file)
     for tensor in reader.tensors:
         name = tensor.name
-        weights = load_dequant_gguf_tensor(tensor.shape, tensor.tensor_type, tensor.data)
+        weights = load_dequant_gguf_tensor(tensor.shape, tensor.tensor_type,
+                                           tensor.data)
         weights = torch.from_numpy(weights.copy())
         yield name, weights
 
 
-def gguf_quant_weights_iterator(gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
+def gguf_quant_weights_iterator(
+        gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the quant weights in the model gguf files."""
     from gguf import GGUFReader
 
@@ -405,7 +408,8 @@ def gguf_quant_weights_iterator(gguf_file: str) -> Generator[Tuple[str, torch.Te
         if scales is not None and "weight" in name:
             scales_name = name.replace("weight", "scales")
             quants_name = name.replace("weight", "quants")
-            for new_name, param in zip([scales_name, quants_name], [scales, quants]):
+            for new_name, param in zip([scales_name, quants_name],
+                                       [scales, quants]):
                 yield new_name, param
         else:
             yield name, quants

@@ -22,6 +22,7 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.ggml import GGMLConfig
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     tensorizer_weights_iterator)
@@ -30,12 +31,12 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
-    pt_weights_iterator, safetensors_weights_iterator, gguf_quant_weights_iterator,
-    gguf_dequant_weights_iterator)
+    get_quant_config, gguf_dequant_weights_iterator,
+    gguf_quant_weights_iterator, initialize_dummy_weights,
+    np_cache_weights_iterator, pt_weights_iterator,
+    safetensors_weights_iterator)
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.layers.quantization.ggml import GGMLConfig
 
 logger = init_logger(__name__)
 
@@ -51,8 +52,8 @@ def _get_quantization_config(
             capability = capability[0] * 10 + capability[1]
             if capability < quant_config.get_min_capability():
                 raise ValueError(
-                    f"The quantization method {model_config.quantization} is not "
-                    "supported for the current GPU. "
+                    f"The quantization method {model_config.quantization} "
+                    f"is not supported for the current GPU. "
                     f"Minimum capability: {quant_config.get_min_capability()}. "
                     f"Current capability: {capability}.")
         supported_dtypes = quant_config.get_supported_act_dtypes()
@@ -804,9 +805,10 @@ class GGUFModelLoader(BaseModelLoader):
             raise ValueError(f"{model_name_or_path} is not a file.")
 
     def _get_weights_iterator(
-            self, model_name_or_path: str, quantization:str) -> Generator[Tuple[str, torch.Tensor], None, None]:
+            self, model_name_or_path: str, quantization: str
+    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         local_model_path = self._prepare_weights(model_name_or_path)
-        if quantization=="ggml":
+        if quantization == "ggml":
             return gguf_quant_weights_iterator(local_model_path)
         else:
             return gguf_dequant_weights_iterator(local_model_path)
@@ -823,7 +825,9 @@ class GGUFModelLoader(BaseModelLoader):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config,
                                           cache_config)
-            model.load_weights(self._get_weights_iterator(model_config.model, model_config.quantization))
+            model.load_weights(
+                self._get_weights_iterator(model_config.model,
+                                           model_config.quantization))
         return model
 
 
@@ -844,7 +848,7 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.BITSANDBYTES:
         return BitsAndBytesModelLoader(load_config)
-    
+
     if load_config.load_format == LoadFormat.GGUF:
         return GGUFModelLoader(load_config)
 

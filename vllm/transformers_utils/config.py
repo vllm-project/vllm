@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 from transformers import AutoConfig, PretrainedConfig
 
@@ -18,13 +18,10 @@ _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
     "jais": JAISConfig,
 }
 
-
-_GGUF_ARCHITECTURE_REGISTRY: Dict[str, str] = {
-    "llama": "LlamaForCausalLM"
-}
+_GGUF_ARCHITECTURE_REGISTRY: Dict[str, str] = {"llama": "LlamaForCausalLM"}
 
 
-def get_config(model: str,
+def get_config(model: Union[str, Path],
                trust_remote_code: bool,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None,
@@ -59,7 +56,7 @@ def get_config(model: str,
                                               code_revision=code_revision)
     if config.model_type in _GGUF_ARCHITECTURE_REGISTRY and is_gguf:
         model_type = _GGUF_ARCHITECTURE_REGISTRY[config.model_type]
-        config.update({"architectures":[model_type]})
+        config.update({"architectures": [model_type]})
     if rope_scaling is not None:
         logger.info("Updating rope_scaling from %r to %r",
                     getattr(config, "rope_scaling", None), rope_scaling)
