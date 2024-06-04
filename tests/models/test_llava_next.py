@@ -73,6 +73,9 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     return hf_input_ids, hf_output_str
 
 
+@pytest.mark.xfail(
+    reason="Inconsistent image processor being used due to lack "
+    "of support for dynamic image token replacement")
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])

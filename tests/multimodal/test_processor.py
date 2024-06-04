@@ -101,6 +101,8 @@ def test_llava_next_image_processor(hf_images, dtype):
             assert np.allclose(hf_arr, vllm_arr), f"Failed for key={key}"
 
 
+@pytest.mark.xfail(
+    reason="Example image pixels were not processed using HuggingFace")
 @pytest.mark.parametrize("dtype", ["float"])
 def test_image_pixel_types(hf_images, vllm_image_tensors, dtype):
     MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
@@ -141,7 +143,4 @@ def test_image_pixel_types(hf_images, vllm_image_tensors, dtype):
             tensor_arr: np.ndarray = tensor_result[key].numpy()
 
             assert image_arr.shape == tensor_arr.shape, f"Failed for key={key}"
-
-            # The examples in PR#3042 have slightly different preprocessing from
-            # HuggingFace's LlavaProcessor, causing the test to fail.
-            # assert np.allclose(image_arr, tensor_arr), f"Failed for key={key}"
+            assert np.allclose(image_arr, tensor_arr), f"Failed for key={key}"
