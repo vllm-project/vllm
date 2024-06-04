@@ -102,10 +102,12 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
                 return None
 
             if not isinstance(pixel_values, torch.Tensor):
-                raise ValueError("Incorrect type of pixel values")
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
             if not isinstance(image_sizes, torch.Tensor):
-                raise ValueError("Incorrect type of image sizes")
+                raise ValueError("Incorrect type of image sizes. "
+                                 f"Got type: {type(image_sizes)}")
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
@@ -121,7 +123,8 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
                 return None
 
             if not isinstance(image_features, torch.Tensor):
-                raise ValueError("Incorrect type of image features")
+                raise ValueError("Incorrect type of image features. "
+                                 f"Got type: {type(image_features)}")
 
             return LlavaNextImageFeatureInputs(
                 type="image_features",
