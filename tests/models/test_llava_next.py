@@ -7,6 +7,8 @@ from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
 
+pytestmark = pytest.mark.llava
+
 
 def iter_llava_next_configs(model_name: str):
     image_hw_to_feature_size = {
