@@ -95,18 +95,9 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
     model_id, vision_language_config = model_and_config
 
     hf_model = hf_runner(model_id, dtype=dtype)
-    _, vision_language_config = model_and_config
-    if vision_language_config.image_input_type == (
-            VisionLanguageConfig.ImageInputType.IMAGE_FEATURES):
-        # HuggingFace does not support image feature input
-        hf_outputs = [None] * len(hf_image_prompts)
-    else:
-        _, _, h, w = vision_language_config.image_input_shape
-        hf_outputs = hf_model.generate_greedy(
-            hf_image_prompts,
-            max_tokens,
-            # To be compatible with the patch for LLaVA-NeXT
-            images=[im.resize((w, h)) for im in hf_images])
+    hf_outputs = hf_model.generate_greedy(hf_image_prompts,
+                                          max_tokens,
+                                          images=hf_images)
     del hf_model
 
     vllm_model = vllm_runner(model_id,
@@ -116,21 +107,16 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                              **as_dict(vision_language_config))
     vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
                                               max_tokens,
-                                              multi_modal_datas=vllm_images)
+                                              images=vllm_images)
     del vllm_model
 
     gc.collect()
     torch.cuda.empty_cache()
 
     for i in range(len(hf_image_prompts)):
-        hf_output = hf_outputs[i]
-        if hf_output is None:
-            continue
-
-        hf_output_ids, hf_output_str = hf_output
+        hf_output_ids, hf_output_str = hf_outputs[i]
         vllm_output_ids, vllm_output_str = sanitize_vllm_output(
             vllm_outputs[i], vision_language_config, model_id)
-        print(f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_str == vllm_output_str, (
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (

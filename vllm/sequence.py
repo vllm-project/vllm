@@ -649,7 +649,7 @@ class SequenceGroupMetadata:
         self.pooling_params = pooling_params
         self.lora_request = lora_request
         self.computed_block_nums = computed_block_nums
-        self.multi_modal_data = multi_modal_data or {}
+        self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
         self.encoder_seq_data = encoder_seq_data
         self.cross_block_table = cross_block_table
