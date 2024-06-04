@@ -65,7 +65,7 @@ def _image_pixel_processor(
 
     if isinstance(image, torch.Tensor):
         pixel_values = image.to(model_config.dtype)
-        batch_size, _, h, w = pixel_values.shape
+        batch_size, _, _, h, w = pixel_values.shape
         image_sizes = torch.tensor([(w, h) for _ in range(batch_size)])
 
         return {"pixel_values": pixel_values, "image_sizes": image_sizes}
