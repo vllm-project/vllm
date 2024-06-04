@@ -466,6 +466,17 @@ class ModelRunner:
                      and seq_group_metadata.sampling_params.prompt_logprobs
                      is not None else 1))
 
+                mm_data = seq_group_metadata.multi_modal_data
+                if mm_data is not None:
+                    # Process multi-modal data
+                    if self.multi_modal_input_processor is None:
+                        raise ValueError(
+                            "Multi-modal inputs are only supported by "
+                            "vision language models.")
+                    mm_kwargs = self.multi_modal_input_processor(mm_data)
+                    for k, v in mm_kwargs.items():
+                        multi_modal_kwargs_list[k].append(v)
+                        
                 if prompt_adapter_id > 0:
                     prompt_adapter_requests.add(
                         seq_group_metadata.prompt_adapter_request)

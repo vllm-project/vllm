@@ -105,7 +105,7 @@ class EmbeddingModelRunner(ModelRunner):
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
             (input_tokens, input_positions, attn_metadata, seq_lens, _,
-             lora_mapping, lora_requests, multi_modal_input, slot_mapping,
+             lora_mapping, lora_requests, multi_modal_kwargs, slot_mapping,
              num_prefill_tokens, num_decode_tokens, num_prefills,
              prompt_adapter_mapping, prompt_adapter_requests
              ) = self._prepare_model_input(seq_group_metadata_list)
@@ -118,7 +118,7 @@ class EmbeddingModelRunner(ModelRunner):
                 "input_positions": input_positions,
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
-                "multi_modal_input": multi_modal_input,
+                "multi_modal_kwargs": multi_modal_kwargs,
                 "num_prefill_tokens": num_prefill_tokens,
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
@@ -135,7 +135,7 @@ class EmbeddingModelRunner(ModelRunner):
             input_positions = metadata_dict.pop("input_positions")
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
-            multi_modal_input = metadata_dict.pop("multi_modal_input")
+            multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
             prompt_adapter_mapping = metadata_dict.pop(
                 "prompt_adapter_mapping")
             prompt_adapter_requests = metadata_dict.pop(
@@ -150,7 +150,7 @@ class EmbeddingModelRunner(ModelRunner):
                                                prompt_lens=None)
 
         return (input_tokens, input_positions, attn_metadata, pooling_metadata,
-                lora_requests, lora_mapping, multi_modal_input,
+                lora_requests, lora_mapping, multi_modal_kwargs,
                 prompt_adapter_requests, prompt_adapter_mapping)
 
     def _prepare_pooling(
