@@ -124,6 +124,14 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
 
         return data
 
+    def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
+        if list(data.shape[1:]) != [2]:
+            raise ValueError(
+                f"The expected image sizes shape is batch dimension plus "
+                f"{[2]}. You supplied {data.shape}.")
+
+        return data
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaNextImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -151,7 +159,7 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_image_pixels(pixel_values),
-                image_sizes=image_sizes,
+                image_sizes=self._validate_image_sizes(image_sizes),
             )
 
         if expected_input_type == ImageInputType.IMAGE_FEATURES:
