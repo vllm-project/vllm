@@ -460,16 +460,7 @@ class LlamaForCausalLM(nn.Module):
             if loaded_weight.dtype == torch.int8:
                 loaded_weight[loaded_weight == -128] = 0
                 assert loaded_weight.is_contiguous
-                # ops.rocm_convert_fp8(loaded_weight,
-                #                  fp8_loaded,
-                #                  torch.tensor(1.0, dtype=torch.float32, device='cuda'))
                 loaded_weight = loaded_weight.view(torch.float8_e4m3fnuz)
-            #if "output_scaling_factor" in name:
-            #    print(f"{name} {loaded_weight}")
-            #if "kv_cache_scaling_factor" in name:
-            #    print(f"KVK: {name} {loaded_weight}")
-            #if "lm_head" in name:
-            #    print(f"LM {name}: {loaded_weight}")
             for (param_name, weight_name, shard_id) in quant_shards:
                 if weight_name not in name:
                     continue
