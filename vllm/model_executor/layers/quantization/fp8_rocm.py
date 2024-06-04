@@ -214,7 +214,7 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         osf: torch.Tensor,
     ) -> torch.Tensor:
         x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        vllm_ops.convert_fp8(x, x8, asf)
+        vllm_ops.convert_fp8(x8, x, asf)
         m = weight.shape[0]
         n = x.shape[0]
         k = x.shape[1]
@@ -247,7 +247,7 @@ class Fp8RocmLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         assert not bias
         x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        vllm_ops.convert_fp8(x, x8, asf)
+        vllm_ops.convert_fp8(x8, x, asf)
         m = weight.shape[0]
         n = x.shape[0]
         k = x.shape[1]
@@ -269,7 +269,7 @@ class Fp8RocmLinearMethod(LinearMethodBase):
 
         res = vllm_ops.fp8_gemm(x8, weight.t(), asf, wsf, osf, int(algo))
         res16 = torch.empty_like(res, dtype=torch.float16)
-        vllm_ops.convert_fp8(res, res16, 1/osf)
+        vllm_ops.convert_fp8(res16, res, 1/osf)
         return res16
 
     def apply(

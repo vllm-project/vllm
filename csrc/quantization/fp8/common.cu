@@ -185,7 +185,7 @@ struct call_convert_fp8
     }
 };
 
-void convert_fp8(torch::Tensor& src_data, torch::Tensor& dst_data, torch::Tensor& scale)
+void convert_fp8(torch::Tensor& dst_data, torch::Tensor& src_data, torch::Tensor& scale)
 {
     torch::Device src_device = src_data.device();
     torch::Device dst_device = dst_data.device();
