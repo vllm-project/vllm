@@ -284,6 +284,10 @@ class BlockTable:
         return len(self._blocks) > 0
 
     @property
+    def blocks(self) -> Optional[List[Block]]:
+        return self._blocks
+
+    @property
     def _num_empty_slots(self) -> int:
         assert self._is_allocated
         return len(self._blocks) * self._block_size - self._num_full_slots
