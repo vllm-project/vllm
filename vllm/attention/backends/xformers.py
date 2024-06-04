@@ -273,7 +273,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self._cached_decode_metadata
 
 def _get_attn_bias(attn_metadata: XFormersMetadata) -> \
-    Optional[List[Optional[AttentionBias]]]:
+    Optional[AttentionBias]:
     '''
     Extract appropriate attention bias from attention metadata
     according to attention type.
@@ -621,10 +621,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         # Enforce that the appropriate *_seq_lens attribute of attn_metadata
         # (seq_lens or encoder_seq_lens) is set.
-        seq_lens, \
-        _,\
-        _ = _get_seq_len_block_table_args(attn_metadata, True)
-        assert seq_lens is not None
+        # seq_lens, \
+        # _,\
+        # _ = _get_seq_len_block_table_args(attn_metadata, True)
+        # assert seq_lens is not None
 
         original_query = query
         if self.num_kv_heads != self.num_heads:
@@ -648,15 +648,22 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             if self.alibi_slopes is None:
                 if attn_metadata.attention_type == \
                     AttentionType.ENCODER_DECODER:
+                    assert attn_metadata.seq_lens is not None
+                    assert attn_metadata.encoder_seq_lens is not None
+
                     # Default enc/dec cross-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
                         attn_metadata.seq_lens, attn_metadata.encoder_seq_lens)
                 else:
                     if attn_metadata.attention_type == AttentionType.ENCODER:
+                        assert attn_metadata.encoder_seq_lens is not None
+
                         # Default encoder self-attention mask is non-causal
                         attn_bias = BlockDiagonalMask.from_seqlens(
                             attn_metadata.encoder_seq_lens)
                     else:
+                        assert attn_metadata.seq_lens is not None
+
                         # Default decoder self-attention mask is causal
                         attn_bias = BlockDiagonalCausalMask.from_seqlens(
                             attn_metadata.seq_lens)
@@ -665,6 +672,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                         self.sliding_window)
                 attn_bias = [attn_bias]
             else:
+                assert attn_metadata.seq_lens is not None
                 attn_bias = _make_alibi_bias(self.alibi_slopes,
                                              self.num_kv_heads, query.dtype,
                                              attn_metadata.seq_lens)
@@ -692,6 +700,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # FIXME(woosuk): Because xformers does not support dynamic sequence
         # lengths with custom attention bias, we process each prompt one by
         # one. This is inefficient, especially when we have many short prompts.
+        assert attn_metadata.seq_lens is not None
         output = torch.empty_like(original_query)
         start = 0
         for i, seq_len in enumerate(attn_metadata.seq_lens):
