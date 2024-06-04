@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import openai
 import pytest
 import ray
