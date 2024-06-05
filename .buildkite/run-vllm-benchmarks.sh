@@ -21,6 +21,9 @@ else
   exit 1
 fi
 
+gpu_type=$(echo $(nvidia-smi --query-gpu=name --format=csv,noheader) | awk '{print $2}')
+echo "GPU type is $gpu_type"
+
 
 # check if HF_TOKEN exists and starts with "hf_"
 if [[ -z "$HF_TOKEN" ]]; then
@@ -53,6 +56,7 @@ jq -c '.[]' $PARAMS_FILE | while read -r params; do
 
     # extract some parameters
     testname=$(echo $params | jq -r '.testname')
+    testname="${testname}_${gpu_type}"
     model=$(echo $params | jq -r '.model')
     tp=$(echo $params | jq -r '.["tensor-parallel-size"]')
 
@@ -61,11 +65,11 @@ jq -c '.[]' $PARAMS_FILE | while read -r params; do
       continue
     fi
 
-    # initialize the command with the script name
+    # initialize the benchmarking command
     offline_command="python3 benchmark_throughput.py --output-json $RESULTS_FOLDER/offline_$testname.json "
     online_client_command="python3 benchmark_serving.py --backend vllm --save-result --result-dir $RESULTS_FOLDER "
     
-    # iteratre over each key to dynamically create variables and build the command
+    # iteratre over each key in `benchmark-parameters.json`
     for key in $keys; do
         echo $key
         value=$(echo $params | jq -r ".[\"$key\"]")
@@ -88,7 +92,7 @@ jq -c '.[]' $PARAMS_FILE | while read -r params; do
     echo "Testing offline inference throughput ($testname)"
     eval $offline_command 2>&1 | tee $RESULTS_FOLDER/offline_$testname.txt
 
-    echo "### Offline inference throughput ($testname)" >> $RESULTS_FOLDER/benchmark_results.md
+    echo "### vllm offline inference throughput ($testname)" >> $RESULTS_FOLDER/benchmark_results.md
     sed -n '1p' $RESULTS_FOLDER/offline_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # first line
     echo "" >> $RESULTS_FOLDER/benchmark_results.md
     grep 'Throughput: ' $RESULTS_FOLDER/offline_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # last line
@@ -108,14 +112,14 @@ jq -c '.[]' $PARAMS_FILE | while read -r params; do
 
 
     # document the results
-    echo "### Online serving throughput ($testname)" >> $RESULTS_FOLDER/benchmark_results.md
+    echo "### vllm online serving throughput ($testname)" >> $RESULTS_FOLDER/benchmark_results.md
     sed -n '1p' $RESULTS_FOLDER/online_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # first line
     echo "" >> $RESULTS_FOLDER/benchmark_results.md
     echo '```' >> $RESULTS_FOLDER/benchmark_results.md
     tail -n 17 $RESULTS_FOLDER/online_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # last 20 lines
     echo '```' >> $RESULTS_FOLDER/benchmark_results.md
 
-    # wait until the server process fully terminates
+    # wait for the OS to collect GPU memory
     sleep 10
 
 done
@@ -130,3 +134,6 @@ fi
 
 # upload artifacts
 /workspace/buildkite-agent artifact upload $RESULTS_FOLDER/*
+
+used_memory=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '{sum+=$1} END {print sum}')
+echo $used_memory
