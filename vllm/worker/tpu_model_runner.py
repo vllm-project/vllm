@@ -10,7 +10,6 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
                            SequenceGroupMetadata, SequenceOutput, Logprob)
 from vllm.utils import make_tensor_with_pad
@@ -132,10 +131,13 @@ class TPUModelRunner:
                 is_prompt=False,
             )
 
+        t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
+        p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
+
         xm.mark_step()
         # Dummy run.
         self.model(token_ids, position_ids, kv_caches, attn_metadata,
-                   input_lens)
+                   input_lens, t, p)
         xm.mark_step()
 
     def warmup_model(
@@ -305,6 +307,25 @@ class TPUModelRunner:
         )
         return input_tokens, input_positions, attn_metadata, input_lens
 
+    def _prepare_sample(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert len(seq_group_metadata_list) > 0
+        t = []
+        p = []
+        for seq_group_metadata in seq_group_metadata_list:
+            assert seq_group_metadata.sampling_params is not None
+            sampling_params = seq_group_metadata.sampling_params
+
+            t.append(sampling_params.temperature
+                     if sampling_params.temperature >= 1e-5 else 1e-5)
+            p.append(sampling_params.top_p)
+
+        t = torch.tensor(t, dtype=torch.float32, device=self.device)
+        p = torch.tensor(p, dtype=torch.float32, device=self.device)
+        return t, p
+
     def prepare_inputs(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
@@ -314,11 +335,12 @@ class TPUModelRunner:
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
-        # Prepare input tensors.
         if is_prompt:
-            return self._prepare_prompt(seq_group_metadata_list)
+            inputs = self._prepare_prompt(seq_group_metadata_list)
         else:
-            return self._prepare_decode(seq_group_metadata_list)
+            inputs = self._prepare_decode(seq_group_metadata_list)
+        sample_inputs = self._prepare_sample(seq_group_metadata_list)
+        return inputs + sample_inputs
 
     def execute_model(
         self,
@@ -336,8 +358,8 @@ class TPUModelRunner:
         # print(f"prepare_inputs(): {(end - start) * 1000:.2f} ms")
 
         start = time.time()
-        next_token_ids = self.model(inputs[0], inputs[1], kv_caches, inputs[2],
-                                    inputs[3])
+        next_token_ids = self.model(inputs[0], inputs[1], kv_caches,
+                                    *inputs[2:])
         end = time.time()
         # print(f"model(): {(end - start) * 1000:.2f} ms")
 
@@ -375,6 +397,8 @@ class ModelWrapper(nn.Module):
         kv_caches: List[Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]],
         attn_metadata: AttentionMetadata,
         input_lens: torch.Tensor,
+        t: torch.Tensor,
+        p: torch.Tensor,
     ) -> torch.Tensor:
         batch_size, seq_len = token_ids.shape
         base_indicies = torch.arange(
@@ -403,8 +427,12 @@ class ModelWrapper(nn.Module):
             attn_metadata,
         )
         logits = self.model.compute_logits(hidden_states, logits_indices)
-        # TODO(woosuk): Support sampling with temperature and top_p.
-        next_token_ids = torch.argmax(logits, axis=-1)
+
+        logits = logits.div_(t.unsqueeze(dim=1))
+        # TODO(woosuk): Support top-p sampling.
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
+        # FIXME(woosuk): best_of > 1 is not supported.
+        next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(dim=1)
         return next_token_ids
 
 
