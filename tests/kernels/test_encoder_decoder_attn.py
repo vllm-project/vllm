@@ -12,6 +12,8 @@ from typing import List, Optional
 import pytest
 import torch
 
+import collections
+
 from tests.kernels.utils import (make_backend, make_block_tables_slot_mapping,
                                  make_empty_block_tables_tensor,
                                  make_empty_slot_mapping_tensor, make_kv_cache,
@@ -132,8 +134,6 @@ def _encoder_attn_setup(batch_size: int, num_heads: int, head_size: int,
     _, \
     q_seq_lens, \
     kv_seq_lens, \
-    _, \
-    _, \
     _, \
     _, \
     _, \
@@ -268,8 +268,6 @@ def _decoder_attn_setup(batch_size: int,
     decode_value, \
     q_seq_lens, \
     kv_seq_lens, \
-    _, \
-    _, \
     prefill_q_seq_lens, \
     prefill_kv_seq_lens, \
     decode_q_seq_lens, \
@@ -458,8 +456,6 @@ def _enc_dec_cross_attn_setup_reuses_query(query: torch.Tensor,
     _, \
     _, \
     kv_seq_lens, \
-    _, \
-    _, \
     _, \
     _, \
     _, \

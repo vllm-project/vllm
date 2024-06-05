@@ -243,8 +243,6 @@ def make_qkv(
            decode_value, \
            q_seq_lens, \
            kv_seq_lens, \
-           actual_max_q_seq_len, \
-           actual_max_kv_seq_len, \
            prefill_q_seq_lens, \
            prefill_kv_seq_lens, \
            decode_q_seq_lens, \
