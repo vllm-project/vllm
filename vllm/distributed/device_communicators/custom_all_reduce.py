@@ -8,8 +8,7 @@ from torch.distributed import ProcessGroup
 import vllm.envs as envs
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
-from vllm.distributed.parallel_state import (
-    get_local_rank, get_tensor_model_parallel_cpu_group)
+from vllm.distributed.parallel_state import get_local_rank
 from vllm.logger import init_logger
 
 try:
@@ -81,7 +80,7 @@ class CustomAllreduce:
 
     # max_size: max supported allreduce size
     def __init__(self,
-                 group: Optional[ProcessGroup] = None,
+                 group: ProcessGroup,
                  device: Optional[Union[int, str, torch.device]] = None,
                  max_size=8192 * 1024) -> None:
         """
@@ -102,7 +101,6 @@ class CustomAllreduce:
             # e.g. in a non-cuda environment
             return
 
-        group = group or get_tensor_model_parallel_cpu_group()
         self.group = group
 
         assert dist.get_backend(group) != dist.Backend.NCCL, (

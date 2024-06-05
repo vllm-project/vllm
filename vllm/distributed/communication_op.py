@@ -1,22 +1,14 @@
 from collections import namedtuple
-from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.distributed import ProcessGroup
 
-from .parallel_state import (get_cpu_world_group, get_pp_pynccl_communicator,
+from .parallel_state import (get_cpu_world_group, get_pp,
                              get_tensor_model_parallel_group,
                              get_tensor_model_parallel_rank,
-                             get_tensor_model_parallel_world_size,
-                             get_tp_ca_communicator,
-                             get_tp_pynccl_communicator)
-
-
-@dataclass
-class GraphCaptureContext:
-    stream: torch.cuda.Stream
+                             get_tensor_model_parallel_world_size, get_tp)
 
 
 @contextmanager
@@ -34,70 +26,13 @@ def graph_capture():
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
-    stream = torch.cuda.Stream()
-    graph_capture_context = GraphCaptureContext(stream)
-    ca_comm = get_tp_ca_communicator()
-    maybe_ca_context = nullcontext() if ca_comm is None else ca_comm.capture()
-    with torch.cuda.stream(stream), maybe_ca_context:
-        # In graph mode, we have to be very careful about the collective
-        # operations. The current status is:
-        #     allreduce \ Mode   |  Eager  |  Graph  |
-        # --------------------------------------------
-        # custom allreduce       | enabled | enabled |
-        # PyNccl                 | disabled| enabled |
-        # torch.distributed      | enabled | disabled|
-        #
-        # Note that custom allreduce will have a runtime check, if the tensor
-        #  size is too large, it will fallback to the next available option.
-        # In summary: When using CUDA graph, we use
-        # either custom all-reduce kernel or pynccl. When not using CUDA
-        # graph, we use either custom all-reduce kernel or PyTorch NCCL.
-        # We always prioritize using custom all-reduce kernel but fall back
-        # to PyTorch or pynccl if it is disabled or not supported.
-        tp_pynccl_comm = get_tp_pynccl_communicator()
-        pp_pynccl_comm = get_pp_pynccl_communicator()
-        if not tp_pynccl_comm:
-            maybe_tp_pynccl_context = nullcontext()
-        else:
-            maybe_tp_pynccl_context = tp_pynccl_comm.change_state(
-                enable=True, stream=torch.cuda.current_stream())
-        if not pp_pynccl_comm:
-            maybe_pp_pynccl_context = nullcontext()
-        else:
-            maybe_pp_pynccl_context = pp_pynccl_comm.change_state(
-                enable=True, stream=torch.cuda.current_stream())
-        with maybe_tp_pynccl_context, maybe_pp_pynccl_context:
-            yield graph_capture_context
+    with get_tp().graph_capture() as context, get_pp().graph_capture(context):
+        yield
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
-    """All-reduce the input tensor across model parallel group.
-
-    NOTE: This operation will be applied in-place on the input tensor if
-    disable_custom_all_reduce is set to True. Otherwise, this operation may or
-    may not be applied in place depending on whether custom all reduce is
-    invoked for a particular tensor, which further depends on the tensor size
-    and GPU topology.
-
-    TLDR: always assume this function modifies its input, but use the return
-    value as the output.
-    """
-    ca_comm = get_tp_ca_communicator()
-
-    # Bypass the function if we are using only 1 GPU.
-    if get_tensor_model_parallel_world_size() == 1:
-        return input_
-    if ca_comm is not None:
-        out = ca_comm.custom_all_reduce(input_)
-        if out is not None:
-            return out
-    pynccl_comm = get_tp_pynccl_communicator()
-    if (pynccl_comm is not None and not pynccl_comm.disabled):
-        pynccl_comm.all_reduce(input_)
-    else:
-        torch.distributed.all_reduce(input_,
-                                     group=get_tensor_model_parallel_group())
-    return input_
+    """All-reduce the input tensor across model parallel group."""
+    return get_tp().all_reduce(input_)
 
 
 def tensor_model_parallel_all_gather(input_: torch.Tensor,

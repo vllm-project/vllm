@@ -3,7 +3,9 @@
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
-from typing import List, Optional, Union
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
+from typing import Any, List, Optional, Union
 
 import torch
 from torch.distributed import Backend, ProcessGroup
@@ -13,6 +15,11 @@ from vllm.distributed.device_communicators.custom_all_reduce import (
     CustomAllreduce)
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
+
+
+@dataclass
+class GraphCaptureContext:
+    stream: torch.cuda.Stream
 
 
 class GroupCoordinator:
@@ -31,6 +38,9 @@ class GroupCoordinator:
     rank_in_group: int  # rank inside the group
     cpu_group: ProcessGroup  # group for CPU communication
     device_group: ProcessGroup  # group for device communication
+    use_pynccl: bool  # a hint of whether to use PyNccl
+    use_custom_allreduce: bool  # a hint of whether to use CustomAllreduce
+    # communicators are only created for world size > 1
     pynccl_comm: Optional[PyNcclCommunicator]  # PyNccl communicator
     ca_comm: Optional[CustomAllreduce]  # Custom allreduce communicator
 
@@ -41,7 +51,6 @@ class GroupCoordinator:
         torch_distributed_backend: Union[str, Backend],
         use_pynccl: bool,
         use_custom_allreduce: bool,
-        is_world: bool,
     ):
 
         self.rank = torch.distributed.get_rank()
@@ -74,7 +83,7 @@ class GroupCoordinator:
         self.use_custom_allreduce = use_custom_allreduce
 
         self.pynccl_comm: Optional[PyNcclCommunicator]
-        if use_pynccl:
+        if use_pynccl and self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group,
                 device=self.device,
@@ -83,7 +92,7 @@ class GroupCoordinator:
             self.pynccl_comm = None
 
         self.ca_comm: Optional[CustomAllreduce]
-        if use_custom_allreduce:
+        if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
                 group=self.cpu_group,
@@ -91,6 +100,68 @@ class GroupCoordinator:
             )
         else:
             self.ca_comm = None
+
+    @contextmanager
+    def graph_capture(
+            self, graph_capture_context: Optional[GraphCaptureContext] = None):
+        if graph_capture_context is None:
+            stream = torch.cuda.Stream()
+            graph_capture_context = GraphCaptureContext(stream)
+        else:
+            stream = graph_capture_context.stream
+
+        ca_comm = self.ca_comm
+        maybe_ca_context = nullcontext(
+        ) if ca_comm is None else ca_comm.capture()
+        with torch.cuda.stream(stream), maybe_ca_context:
+            # In graph mode, we have to be very careful about the collective
+            # operations. The current status is:
+            #     allreduce \ Mode   |  Eager  |  Graph  |
+            # --------------------------------------------
+            # custom allreduce       | enabled | enabled |
+            # PyNccl                 | disabled| enabled |
+            # torch.distributed      | enabled | disabled|
+            #
+            # Note that custom allreduce will have a runtime check, if the
+            #  tensor size is too large, it will fallback to the next
+            #  available option.
+            # In summary: When using CUDA graph, we use
+            #  either custom all-reduce kernel or pynccl. When not using
+            #  CUDA graph, we use either custom all-reduce kernel or
+            #  PyTorch NCCL. We always prioritize using custom all-reduce
+            #  kernel but fall back to PyTorch or pynccl if it is
+            #  disabled or not supported.
+            pynccl_comm = self.pynccl_comm
+            maybe_pynccl_context: Any
+            if not pynccl_comm:
+                maybe_pynccl_context = nullcontext()
+            else:
+                maybe_pynccl_context = pynccl_comm.change_state(
+                    enable=True, stream=torch.cuda.current_stream())
+            with maybe_pynccl_context:
+                yield graph_capture_context
+
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        """
+        NOTE: This operation will be applied in-place or out-of-place. 
+        Always assume this function modifies its input, but use the return
+        value as the output.
+        """
+        ca_comm = self.ca_comm
+
+        # Bypass the function if we are using only 1 GPU.
+        if self.world_size == 1:
+            return input_
+        if ca_comm is not None:
+            out = ca_comm.custom_all_reduce(input_)
+            if out is not None:
+                return out
+        pynccl_comm = self.pynccl_comm
+        if (pynccl_comm is not None and not pynccl_comm.disabled):
+            pynccl_comm.all_reduce(input_)
+        else:
+            torch.distributed.all_reduce(input_, group=self.device_group)
+        return input_
 
     def destroy(self):
         if self.device_group is not None:
@@ -134,11 +205,6 @@ logger = init_logger(__name__)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
-# Tensor model parallel group that the current rank belongs to.
-_TP_DEVICE_GROUP: Optional[ProcessGroup] = None
-_TP_CPU_GROUP: Optional[ProcessGroup] = None
-_TP_PYNCCL_COMMUNICATOR = None
-_TP_CA_COMMUNICATOR = None
 # Pipeline model parallel group that the current rank belongs to.
 _PP_DEVICE_GROUP: Optional[ProcessGroup] = None
 _PP_CPU_GROUP: Optional[ProcessGroup] = None
@@ -174,21 +240,6 @@ _LOCAL_RANK = -1
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
     _ENABLE_CUSTOM_ALL_REDUCE = enable
-
-
-def get_pp_pynccl_communicator():
-    global _PP_PYNCCL_COMMUNICATOR
-    return _PP_PYNCCL_COMMUNICATOR
-
-
-def get_tp_pynccl_communicator():
-    global _TP_PYNCCL_COMMUNICATOR
-    return _TP_PYNCCL_COMMUNICATOR
-
-
-def get_tp_ca_communicator():
-    global _TP_CA_COMMUNICATOR
-    return _TP_CA_COMMUNICATOR
 
 
 def get_local_rank():
@@ -291,35 +342,22 @@ def initialize_model_parallel(
     rank = torch.distributed.get_rank()
 
     # Build the tensor model-parallel groups.
-    global _TP_DEVICE_GROUP, _TP_CPU_GROUP
-    global _TP_PYNCCL_COMMUNICATOR, _TP_CA_COMMUNICATOR
-    assert _TP_DEVICE_GROUP is None, (
-        "tensor model parallel group is already initialized")
+    global _TP
+    assert _TP is None, ("tensor model parallel group is already initialized")
+    group_ranks = []
     for i in range(num_tensor_model_parallel_groups):
         ranks = list(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
-        group = torch.distributed.new_group(ranks, backend=backend)
-        cpu_group = torch.distributed.new_group(ranks, backend="gloo")
-        if rank in ranks:
-            _TP_DEVICE_GROUP = group
-            _TP_CPU_GROUP = cpu_group
-
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-    if tensor_model_parallel_size > 1:
-        _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
-            group=_TP_CPU_GROUP,
-            device=_LOCAL_RANK,
-        )
-
-    # Initialize a custom fast all-reduce implementation.
-    if _ENABLE_CUSTOM_ALL_REDUCE:
-        from vllm.distributed.device_communicators.custom_all_reduce import (
-            CustomAllreduce)
-        _TP_CA_COMMUNICATOR = CustomAllreduce(
-            group=_TP_CPU_GROUP,
-            device=_LOCAL_RANK,
-        )
+        group_ranks.append(ranks)
+    global _TP
+    _TP = GroupCoordinator(
+        group_ranks=group_ranks,
+        local_rank=_LOCAL_RANK,
+        torch_distributed_backend=backend,
+        use_pynccl=True,
+        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
+    )
 
     # Build the pipeline model-parallel groups.
     global _PP_DEVICE_GROUP, _PP_CPU_GROUP
@@ -373,7 +411,7 @@ def ensure_model_parallel_initialized(
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
-    return (_TP_DEVICE_GROUP is not None and _PP_DEVICE_GROUP is not None)
+    return (_TP is not None and _PP_DEVICE_GROUP is not None)
 
 
 def get_cpu_world_group():
@@ -384,16 +422,8 @@ def get_cpu_world_group():
 
 def get_tensor_model_parallel_group():
     """Get the tensor model parallel group the caller rank belongs to."""
-    assert _TP_DEVICE_GROUP is not None, (
-        "tensor model parallel group is not initialized")
-    return _TP_DEVICE_GROUP
-
-
-def get_tensor_model_parallel_cpu_group():
-    """Get the tensor model parallel cpu group the caller rank belongs to."""
-    assert _TP_CPU_GROUP is not None, (
-        "tensor model parallel cpu group is not initialized")
-    return _TP_CPU_GROUP
+    assert _TP is not None, ("tensor model parallel group is not initialized")
+    return _TP
 
 
 def get_pipeline_model_parallel_group():
@@ -478,16 +508,10 @@ def get_pipeline_model_parallel_prev_rank():
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _TP_DEVICE_GROUP
-    if _TP_DEVICE_GROUP:
-        torch.distributed.destroy_process_group(_TP_DEVICE_GROUP)
-    _TP_DEVICE_GROUP = None
-    global _TP_CPU_GROUP
-    if _TP_CPU_GROUP:
-        torch.distributed.destroy_process_group(_TP_CPU_GROUP)
-    _TP_CPU_GROUP = None
-    global _TP_PYNCCL_COMMUNICATOR
-    _TP_PYNCCL_COMMUNICATOR = None
+    global _TP
+    if _TP:
+        _TP.destroy()
+    _TP = None
 
     global _PP_DEVICE_GROUP
     if _PP_DEVICE_GROUP:
