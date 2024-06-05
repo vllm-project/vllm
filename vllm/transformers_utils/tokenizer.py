@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Optional, Union
 
 import huggingface_hub
@@ -88,7 +89,11 @@ def get_tokenizer(
                 "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
+    is_gguf = Path(tokenizer_name).is_file() and tokenizer_name.endswith(".gguf")
     try:
+        if is_gguf:
+            kwargs["gguf_file"] = Path(tokenizer_name).name
+            tokenizer_name = Path(tokenizer_name).parent
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name,
             *args,
