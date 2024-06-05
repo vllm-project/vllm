@@ -1,0 +1,14 @@
+[
+    {
+        "test_name": "Llama7B_ShareGPT",
+        "server_parameters": {
+            "model": "meta-llama/Llama-2-7b-chat-hf",
+            "tensor_parallel_size": 1
+        },
+        "client_parameters": {
+            "model": "meta-llama/Llama-2-7b-chat-hf",
+            "dataset": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num-prompts": 1000
+        }
+    }
+]
