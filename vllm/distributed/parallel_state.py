@@ -479,26 +479,6 @@ logger = init_logger(__name__)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
-# when people blindly call `torch.distributed.all_reduce` etc,
-# it will use this group. It is initialized with the `backend`
-# parameter of `init_distributed_environment` below.
-# Essentially, this is `torch.distributed.group.WORLD`.
-# We leave a line here to note that this is device-specific.
-# Note that this variable is not safe to use, because when users
-# call `init_distributed_environment` first, and then destroy
-# the process group themselves, this variable will keep a reference to the
-# destroyed process group, which is not useful.
-_DEVICE_WORLD_GROUP = None
-
-# duing `init_distributed_environment`, we will also initialize a
-# group with `gloo` backend, to allow direct coordination between
-# processes through the CPU.
-_CPU_WORLD_GROUP = None
-
-# In summary, after calling `init_distributed_environment`, we will
-# always have two groups: one for device-specific (and is the default)
-# and one for CPU. All processes will be part of both groups.
-
 
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
@@ -520,26 +500,26 @@ def init_distributed_environment(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
         distributed_init_method, backend)
-    if not torch.distributed.is_initialized():
-        assert distributed_init_method is not None, (
-            "distributed_init_method must be provided when initializing "
-            "distributed environment")
-        # this backend is used for WORLD
-        torch.distributed.init_process_group(
-            backend=backend,
-            init_method=distributed_init_method,
-            world_size=world_size,
-            rank=rank)
-        # set the local rank
-        # local_rank is not available in torch ProcessGroup,
-        # see https://github.com/pytorch/pytorch/issues/122816
-        if local_rank == -1:
-            # local rank not set, this usually happens in single-node
-            # setting, where we can use rank as local rank
-            if distributed_init_method == "env://":
-                local_rank = envs.LOCAL_RANK
-            else:
-                local_rank = rank
+    assert not torch.distributed.is_initialized(), ("distributed environment "
+                                                    "is already initialized")
+    assert distributed_init_method is not None, (
+        "distributed_init_method must be provided when initializing "
+        "distributed environment")
+    # this backend is used for WORLD
+    torch.distributed.init_process_group(backend=backend,
+                                         init_method=distributed_init_method,
+                                         world_size=world_size,
+                                         rank=rank)
+    # set the local rank
+    # local_rank is not available in torch ProcessGroup,
+    # see https://github.com/pytorch/pytorch/issues/122816
+    if local_rank == -1:
+        # local rank not set, this usually happens in single-node
+        # setting, where we can use rank as local rank
+        if distributed_init_method == "env://":
+            local_rank = envs.LOCAL_RANK
+        else:
+            local_rank = rank
     global _WORLD
     assert _WORLD is None, ("world group is already initialized")
     ranks = list(range(torch.distributed.get_world_size()))
@@ -591,8 +571,8 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
-    # get the backend of _DEVICE_WORLD_GROUP
-    backend = backend or torch.distributed.get_backend()
+    backend = backend or torch.distributed.get_backend(
+        get_world().device_group)
 
     if (world_size !=
             tensor_model_parallel_size * pipeline_model_parallel_size):
@@ -648,8 +628,8 @@ def ensure_model_parallel_initialized(
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
     values if the model parallel groups are initialized.
     """
-    # get the backend of _DEVICE_WORLD_GROUP
-    backend = backend or torch.distributed.get_backend()
+    backend = backend or torch.distributed.get_backend(
+        get_world().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
                                   pipeline_model_parallel_size, backend)
@@ -693,3 +673,11 @@ def destroy_model_parallel():
     if _PP:
         _PP.destroy()
     _PP = None
+
+
+def destroy_distributed_environment():
+    global _WORLD
+    if _WORLD:
+        _WORLD.destroy()
+    _WORLD = None
+    torch.distributed.destroy_process_group()
