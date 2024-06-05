@@ -46,11 +46,11 @@ fi
 
 # TODO: assumed we are in root directory of vLLM
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-PARAMS_FILE=.buildkite/benchmark-parameters.json
 
 
 pushd benchmarks
 RESULTS_FOLDER=results/
+PARAMS_FILE=../.buildkite/nightly-benchmarks/benchmark-parameters.json
 mkdir -p $RESULTS_FOLDER
 
 (which jq) || (apt-get update && apt-get -y install jq)
