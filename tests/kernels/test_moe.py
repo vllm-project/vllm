@@ -130,6 +130,17 @@ import triton
             plot_name=f"moe-bf16-speed-benchmark",
             args={"seq_len": 4096, "hidden_size": 4096, "intermediate_size": 14336, "num_local_experts": 8, "num_experts_per_tok": 2, "dtype": torch.bfloat16},
         ),
+        triton.testing.Benchmark(
+            x_names=["bsz"],
+            x_vals=[i for i in range(4, 8, 2)],
+            line_arg="provider",
+            line_vals=["vllm", "hf"],
+            line_names=["vLLM", "HF"],
+            styles=[("blue", "-"), ("green", "-")],
+            ylabel="time (ms)",
+            plot_name=f"moe-fp16-speed-benchmark",
+            args={"seq_len": 4096, "hidden_size": 4096, "intermediate_size": 14336, "num_local_experts": 8, "num_experts_per_tok": 2, "dtype": torch.float16},
+        ),
     ]
 )
 def bench_speed_moe(bsz, seq_len, hidden_size, intermediate_size, num_local_experts, num_experts_per_tok, provider, dtype):
