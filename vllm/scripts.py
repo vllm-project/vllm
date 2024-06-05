@@ -8,9 +8,6 @@ from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (CompletionRequest, ChatCompletionRequest)
 
-COMPLETE_ROUTE = "/v1/completions"
-CHAT_COMPLETE_ROUTE = "/v1/chat/completions"
-LIST_MODELS_ROUTE = "/v1/models"
 
 def main():
     parser = argparse.ArgumentParser(description="vLLM CLI")
@@ -79,14 +76,14 @@ def main():
 def interactive_cli(args: argparse.Namespace) -> None:
     base_url = getattr(args, "url")
     openai_api_key = getattr(args, "openai-api-key", os.environ.get("OPENAI_API_KEY"))
-    create_completion_url = base_url + COMPLETE_ROUTE
-    create_chat_completion_url = base_url + CHAT_COMPLETE_ROUTE
-
     http_headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {openai_api_key}"
     }
-    openai_client = OpenAI(api_key=openai_api_key, default_headers=http_headers)
+    openai_client = OpenAI(
+        api_key=openai_api_key,
+        default_headers=http_headers,
+        base_url=base_url)
 
     if args.model_name:
         model_name = args.model_name
@@ -95,18 +92,13 @@ def interactive_cli(args: argparse.Namespace) -> None:
         model_name = available_models["data"][0]["id"]
 
     if args.command == "complete":
-        complete(create_completion_url, model_name, openai_client)
+        complete(model_name, openai_client)
     elif args.command == "chat":
         optional_system_prompt = getattr(args, "system-prompt")
-        chat(
-            optional_system_prompt,
-            create_chat_completion_url,
-            model_name,
-            openai_client
-        )
+        chat(optional_system_prompt, model_name, openai_client)
 
 
-def complete(create_completion_url: str, model_name: str, client: OpenAI) -> None:
+def complete(model_name: str, client: OpenAI) -> None:
     while True:
         input_prompt = input("Please enter prompt to complete:\n>")
         
@@ -118,11 +110,7 @@ def complete(create_completion_url: str, model_name: str, client: OpenAI) -> Non
         print(f"Response Content: {choice}")
 
 
-def chat(system_prompt: Optional[str],
-         create_chat_completion_url: str,
-         model_name: str,
-         client: OpenAI
-    ) -> None:
+def chat(system_prompt: Optional[str], model_name: str, client: OpenAI) -> None:
     conversation = []
     if system_prompt is not None:
         conversation.append({
