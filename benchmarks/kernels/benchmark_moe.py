@@ -254,7 +254,9 @@ def main(args: argparse.Namespace):
     use_fp8 = args.dtype == "fp8"
 
     if args.batch_size is None:
-        batch_sizes = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 2048, 4096]
+        batch_sizes = [
+            1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 2048, 4096
+        ]
     else:
         batch_sizes = [args.batch_size]
 
