@@ -1,10 +1,10 @@
 import functools
+from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Callable, Dict, Optional, Tuple, Type,
                     TypeVar)
 
 from torch import nn
 from transformers import PretrainedConfig
-from typing_extensions import Concatenate, ParamSpec
 
 from vllm.logger import init_logger
 
@@ -17,158 +17,43 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-D = TypeVar("D", bound="MultiModalData")
-N = TypeVar("N", bound=Type[nn.Module])
-
-DummyDataFactory = Callable[["ModelConfig", int],
-                            Tuple["SequenceData", Optional["MultiModalData"]]]
-"""Create dummy data to be inputted into the model."""
-
-InputProcessor = Callable[["ModelConfig", LLMInputs], LLMInputs]
-"""Preprocess the inputs to the model."""
-
-P, R = ParamSpec("P"), TypeVar("R")
 C = TypeVar("C", bound=PretrainedConfig)
 
 
-def _for_hf(hf_config_type: Type[C]):
+@dataclass(frozen=True)
+class InputContext:
+    model_config: "ModelConfig"
 
-    def wrapper(
-        fn: Callable[Concatenate["ModelConfig", C, P], R],
-    ) -> Callable[Concatenate["ModelConfig", P], R]:
+    def get_multimodal_config(self) -> "VisionLanguageConfig":
+        multimodal_config = self.model_config.multimodal_config
+        if multimodal_config is None:
+            raise ValueError("No multimodal config found")
 
-        def inner(
-            model_config: "ModelConfig",
-            *args: P.args,
-            **kwargs: P.kwargs,
-        ) -> R:
-            hf_config = model_config.hf_config
-            if not isinstance(hf_config, hf_config_type):
-                raise TypeError("Invalid type of HuggingFace config. "
-                                f"Expected type: {hf_config_type}, but "
-                                f"received type: {type(hf_config)}")
+        return multimodal_config
 
-            return fn(model_config, hf_config, *args, **kwargs)
+    def get_hf_config(self, hf_config_type: Type[C]) -> C:
+        hf_config = self.model_config.hf_config
+        if not isinstance(hf_config, hf_config_type):
+            raise TypeError("Invalid type of HuggingFace config. "
+                            f"Expected type: {hf_config_type}, but "
+                            f"found type: {type(hf_config)}")
 
-        return inner
-
-    return wrapper
+        return hf_config
 
 
-def _for_multimodal_hf(hf_config_type: Type[C]):
+N = TypeVar("N", bound=Type[nn.Module])
 
-    def wrapper(
-        factory: Callable[Concatenate["ModelConfig", "VisionLanguageConfig", C,
-                                      P], R],
-    ) -> Callable[Concatenate["ModelConfig", P], R]:
+DummyDataFactory = Callable[[InputContext, int],
+                            Tuple["SequenceData", Optional["MultiModalData"]]]
+"""
+Create dummy data to be inputted into the model.
 
-        def inner(
-            model_config: "ModelConfig",
-            *args: P.args,
-            **kwargs: P.kwargs,
-        ) -> R:
-            multimodal_config = model_config.multimodal_config
-            if multimodal_config is None:
-                raise ValueError("No multimodal config found")
+Note:
+    :data:`InputProcessor` is not applied to the dummy data.
+"""
 
-            hf_config = model_config.hf_config
-            if not isinstance(hf_config, hf_config_type):
-                raise TypeError("Invalid type of HuggingFace config. "
-                                f"Expected type: {hf_config_type}, but "
-                                f"received type: {type(hf_config)}")
-
-            return factory(model_config, multimodal_config, hf_config, *args,
-                           **kwargs)
-
-        return inner
-
-    return wrapper
-
-
-class DummyDataFactories:
-    """Contains factories for dummy data factories."""
-
-    @classmethod
-    def for_hf(cls, hf_config_type: Type[C]):
-        """
-        Decorate a dummy data factory that uses a specific type of
-        HuggingFace config.
-        
-        The returned function satisfies the interface of
-        :data:`DummyDataFactory`, with runtime checks being made to ensure
-        the validity of the inputs.
-        """
-
-        def wrapper(
-            factory: Callable[["ModelConfig", C, int],
-                              Tuple["SequenceData",
-                                    Optional["MultiModalData"]]],
-        ) -> DummyDataFactory:
-            return _for_hf(hf_config_type)(factory)
-
-        return wrapper
-
-    @classmethod
-    def for_multimodal_hf(cls, hf_config_type: Type[C]):
-        """
-        Decorate a dummy data factory that uses multimodal config as well
-        as a specific type of HuggingFace config.
-        
-        The returned function satisfies the interface of
-        :data:`DummyDataFactory`, with runtime checks being made to ensure
-        the validity of the inputs.
-        """
-
-        def wrapper(
-            factory: Callable[["ModelConfig", "VisionLanguageConfig", C, int],
-                              Tuple["SequenceData",
-                                    Optional["MultiModalData"]]],
-        ) -> DummyDataFactory:
-            return _for_multimodal_hf(hf_config_type)(factory)
-
-        return wrapper
-
-
-class InputProcessors:
-    """Contains factories for input processors."""
-
-    @classmethod
-    def for_hf(cls, hf_config_type: Type[C]):
-        """
-        Decorate an input processor that uses a specific type of
-        HuggingFace config.
-        
-        The returned function satisfies the interface of
-        :data:`InputProcessor`, with runtime checks being made to ensure
-        the validity of the inputs.
-        """
-
-        def wrapper(
-            processor: Callable[["ModelConfig", C, LLMInputs], LLMInputs]
-        ) -> InputProcessor:
-            return _for_hf(hf_config_type)(processor)
-
-        return wrapper
-
-    @classmethod
-    def for_multimodal_hf(cls, hf_config_type: Type[C]):
-        """
-        Decorate an input processor that uses multimodal config as well
-        as a specific type of HuggingFace config.
-        
-        The returned function satisfies the interface of
-        :data:`InputProcessor`, with runtime checks being made to ensure
-        the validity of the inputs.
-        """
-
-        def wrapper(
-            processor: Callable[
-                ["ModelConfig", "VisionLanguageConfig", C, LLMInputs],
-                LLMInputs]
-        ) -> InputProcessor:
-            return _for_multimodal_hf(hf_config_type)(processor)
-
-        return wrapper
+InputProcessor = Callable[[InputContext, LLMInputs], LLMInputs]
+"""Preprocess the inputs to the model."""
 
 
 class InputRegistry:
@@ -192,10 +77,15 @@ class InputRegistry:
 
     def _default_dummy_data_factory(
         self,
-        model_config: "ModelConfig",
+        ctx: InputContext,
         seq_len: int,
     ) -> Tuple["SequenceData", Optional["MultiModalData"]]:
-        """Create dummy data to be inputted into the model."""
+        """
+        Create dummy data to be inputted into the model.
+
+        Note:
+            :data:`InputProcessor` is not applied to the dummy data.
+        """
         # Avoid circular import
         from vllm.sequence import SequenceData
 
@@ -236,9 +126,9 @@ class InputRegistry:
         dummy_factory = self._dummy_factories_by_model_type \
             .get(model_cls, self._default_dummy_data_factory)
 
-        return dummy_factory(model_config, seq_len)
+        return dummy_factory(InputContext(model_config), seq_len)
 
-    def _default_input_processor(self, model_config: "ModelConfig",
+    def _default_input_processor(self, ctx: InputContext,
                                  inputs: LLMInputs) -> LLMInputs:
         """Preprocess the inputs to the model."""
         return inputs
@@ -281,7 +171,7 @@ class InputRegistry:
         processor = self._input_processors_by_model_type \
             .get(model_cls, self._default_input_processor)
 
-        return processor(model_config, inputs)
+        return processor(InputContext(model_config), inputs)
 
     def create_input_processor(self, model_config: "ModelConfig"):
         """

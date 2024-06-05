@@ -9,17 +9,15 @@ from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape)
 
 from vllm.config import ModelConfig, VisionLanguageConfig
-from vllm.inputs.registry import DummyDataFactories, DummyDataFactory
+from vllm.inputs.registry import DummyDataFactory, InputContext
 from vllm.logger import init_logger
 from vllm.sequence import SequenceData
 from vllm.transformers_utils.image_processor import get_image_processor
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from .base import MultiModalData, MultiModalPlugin
 
 logger = init_logger(__name__)
 
-_cached_get_tokenizer = lru_cache(get_tokenizer)
 _cached_get_image_processor = lru_cache(get_image_processor)
 
 
@@ -202,11 +200,19 @@ class DummyImageDataFactories:
         by the config type.
         """
         if hf_config_type == LlavaConfig:
-            return DummyDataFactories.for_multimodal_hf(LlavaConfig) \
-                (cls._dummy_data_for_llava)
+            return lambda ctx, seq_len: cls._dummy_data_for_llava(
+                ctx.model_config,
+                ctx.get_multimodal_config(),
+                ctx.get_hf_config(LlavaConfig),
+                seq_len=seq_len,
+            )
         if hf_config_type == LlavaNextConfig:
-            return DummyDataFactories.for_multimodal_hf(LlavaNextConfig) \
-                (cls._dummy_data_for_llava_next)
+            return lambda ctx, seq_len: cls._dummy_data_for_llava_next(
+                ctx.model_config,
+                ctx.get_multimodal_config(),
+                ctx.get_hf_config(LlavaNextConfig),
+                seq_len=seq_len,
+            )
 
         msg = f"Unsupported model config: {type(hf_config_type)}"
         raise NotImplementedError(msg)
@@ -246,8 +252,9 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
             revision=vlm_config.image_processor_revision,
         )
 
-    def _default_input_mapper(self, model_config: ModelConfig,
+    def _default_input_mapper(self, ctx: InputContext,
                               data: ImagePixelData) -> Dict[str, torch.Tensor]:
+        model_config = ctx.model_config
         image = data.image
         image_processor = self._get_hf_image_processor(model_config)
 
@@ -286,8 +293,9 @@ class ImageFeaturePlugin(MultiModalPlugin[ImageFeatureData]):
         return ImageFeatureData
 
     def _default_input_mapper(
-            self, model_config: ModelConfig,
+            self, ctx: InputContext,
             data: ImageFeatureData) -> Dict[str, torch.Tensor]:
+        model_config = ctx.model_config
         image_features = data.image_features.to(model_config.dtype)
 
         return {"image_features": image_features}
