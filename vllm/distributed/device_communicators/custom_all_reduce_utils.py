@@ -11,7 +11,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 import vllm.envs as envs
-from vllm.distributed.parallel_state import get_cpu_world_group, get_local_rank
+from vllm.distributed.parallel_state import get_local_rank, get_world
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -174,8 +174,7 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         with open(path, "w") as f:
             json.dump(cache, f, indent=4)
     if is_distributed:
-        cpu_world_group = get_cpu_world_group()
-        dist.barrier(cpu_world_group)
+        get_world().barrier()
     logger.info("reading GPU P2P access cache from %s", path)
     with open(path, "r") as f:
         cache = json.load(f)

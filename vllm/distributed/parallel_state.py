@@ -402,6 +402,15 @@ class GroupCoordinator:
                 async_handle.wait()
         return tensor_dict
 
+    def barrier(self):
+        """Barrier synchronization among the group.
+        NOTE: don't use `device_group` here! `barrier` in NCCL is
+        terrible because it is internally a broadcast operation with
+        secretly created GPU tensors. It is easy to mess up the current
+        device. Use the CPU group instead.
+        """
+        torch.distributed.barrier(group=self.cpu_group)
+
     def destroy(self):
         if self.device_group is not None:
             torch.distributed.destroy_process_group(self.device_group)
