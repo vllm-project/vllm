@@ -5,8 +5,9 @@ import torch
 import torch_xla.runtime as xr
 import torch_xla.core.xla_model as xm
 
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+from vllm.distributed import (init_distributed_environment, ensure_model_parallel_initialized)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
@@ -26,16 +27,24 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         cache_config: CacheConfig,
+        load_config: LoadConfig,
         vision_language_config: Optional[VisionLanguageConfig],
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
+        self.load_config = load_config
         self.vision_language_config = vision_language_config
-        assert self.device_config.device_type == "tpu"
+        self.local_rank = local_rank
+        self.rank = rank
+        self.distributed_init_method = distributed_init_method
 
+        assert self.device_config.device_type == "tpu"
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
@@ -48,7 +57,8 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             scheduler_config,
             device_config,
             cache_config,
-            vision_language_config=vision_language_config)
+            load_config,
+            vision_language_config)
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
@@ -56,6 +66,19 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.device_config.device = self.device
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
+
+        # NOTE(woosuk): This is just a hack to initialize the TP group.
+        # This cannot perform the actual communication ops.
+        init_distributed_environment(
+            world_size=self.parallel_config.world_size,
+            rank=self.rank,
+            local_rank=self.local_rank,
+            distributed_init_method=self.distributed_init_method,
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size)
 
         # Set random seed.
         # TODO: Set random seed for JAX
