@@ -491,10 +491,6 @@ _CPU_WORLD_GROUP = None
 # always have two groups: one for device-specific (and is the default)
 # and one for CPU. All processes will be part of both groups.
 
-# A list of global ranks for each pipeline group to ease calculation of the
-# source rank when broadcasting from the first or last pipeline stage.
-_PP_GLOBAL_RANKS: Optional[List[int]] = None
-
 _LOCAL_RANK = -1
 
 
@@ -623,7 +619,6 @@ def initialize_model_parallel(
     # Build the pipeline model-parallel groups.
     global _PP_DEVICE_GROUP, _PP_CPU_GROUP
     global _PP_PYNCCL_COMMUNICATOR
-    global _PP_GLOBAL_RANKS
     assert _PP_DEVICE_GROUP is None, (
         "pipeline model parallel group is already initialized")
     for i in range(num_pipeline_model_parallel_groups):
@@ -633,7 +628,6 @@ def initialize_model_parallel(
         if rank in ranks:
             _PP_DEVICE_GROUP = group
             _PP_CPU_GROUP = cpu_group
-            _PP_GLOBAL_RANKS = ranks
 
     if pipeline_model_parallel_size > 1:
         _PP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
@@ -736,5 +730,3 @@ def destroy_model_parallel():
     if _PP_DEVICE_GROUP:
         torch.distributed.destroy_process_group(_PP_DEVICE_GROUP)
     _PP_DEVICE_GROUP = None
-    global _PP_GLOBAL_RANKS
-    _PP_GLOBAL_RANKS = None
