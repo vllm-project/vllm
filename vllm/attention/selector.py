@@ -32,9 +32,7 @@ def get_attn_backend(
     block_size: int,
     is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
-    """Determine which attention backend to use and only import
-    the selected backend module.
-    """
+    """Selects which attention backend to use and lazily imports it."""
 
     if is_blocksparse:
         logger.info("Using BlocksparseFlashAttention backend.")
