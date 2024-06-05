@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Tuple
 
+
 @dataclass
 class AdapterMapping:
     # Per every token in input_ids:
