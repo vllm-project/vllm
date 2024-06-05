@@ -245,7 +245,7 @@ struct sm90_fp8_config<InType, OutType, Epilogue, 128> {
 
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
-struct sm90_fp8_config<InType, OutType, 64> {
+struct sm90_fp8_config<InType, OutType, Epilogue, 64> {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
