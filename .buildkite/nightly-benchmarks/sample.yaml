@@ -11,7 +11,7 @@ steps:
           # TODO(simon): check latest main branch or use the PR image.
           - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:45c35f0d58f4508bf43bd6af1d3d0d0ec0c915e6
             command:
-            - bash -c 'nvidia-smi && nvidia-smi topo -m && pwd && ls'
+            - bash .buildkite/nightly-benchmarks/run-vllm-benchmarks.sh
             resources:
               limits:
                 nvidia.com/gpu: 8
