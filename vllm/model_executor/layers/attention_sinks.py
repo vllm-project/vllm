@@ -124,22 +124,14 @@ class StreamingAttentionSink(nn.Module):
             else:
                 seq_lens = attn_metadata.seq_lens_tensor.tolist()
                 attn_metadata.seq_lens_clone = seq_lens
-            
-            # cache block_tables
-            if hasattr(attn_metadata, 'block_tables_clone'):
-                original_block_tables = attn_metadata.block_tables_clone
-            else:
-                original_block_tables = attn_metadata.decode_metadata.block_tables.clone()
-                attn_metadata.block_tables_clone = original_block_tables
-
-            block_tables_tensor = attn_metadata.decode_metadata.block_tables
-            block_tables: List[List[int]] = []
 
             # cache phys_bnums
             if hasattr(attn_metadata, 'phys_bnums_list'):
                 phys_bnums_list = attn_metadata.phys_bnums_list
             else:
                 phys_bnums_list = []
+            
+            block_tables_tensor = attn_metadata.decode_metadata.block_tables
 
             # batch size = num sequences
             batch_size = block_tables_tensor.shape[0]
@@ -152,15 +144,11 @@ class StreamingAttentionSink(nn.Module):
                 if hasattr(attn_metadata, 'phys_bnums_list'):
                     phys_bnums = phys_bnums_list[i]
                 else:
-                    if within_context_len:
-                        phys_bnums = block_table[:-1]
-                    else:
-                        start_logic_bnum = (num_past_tokens - model_context_len) // block_size + 2
-                        phys_bnums = torch.cat((block_table[0:1], block_table[start_logic_bnum : -1]))
+                    phys_bnums = block_table[:-1]
                     phys_bnums_list.append(phys_bnums)
                 
                 rem = num_past_tokens % block_size
-                rem_phys_bnum = block_table[num_past_tokens // block_size]
+                rem_phys_bnum = block_table[-1]
                 
                 # read unrotated keys from cache
                 # FA shape: [len(phys_bnums), block_size, num_heads, head_size]
@@ -218,24 +206,9 @@ class StreamingAttentionSink(nn.Module):
                     key_cache[rem_phys_bnum, :, :, :rem, :] = rem_past_keys
                 
                 if not within_context_len:
-                    # edit block table for attention kernel
-                    capped_block_table = phys_bnums.tolist()
-                    capped_block_table.append(rem_phys_bnum.item())
-                    block_tables.append(capped_block_table)
-
                     # cap number of tokens to consider with model context len
                     attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
                     positions[i] = model_context_len - 1
-                else:
-                    block_tables.append(block_table.tolist())
-
-            attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(
-                block_tables,
-                max_len=model_context_len // block_size,
-                pad=0,
-                dtype=torch.int,
-                device=device
-            )
 
             if not hasattr(attn_metadata, 'phys_bnums_list'):
                 attn_metadata.phys_bnums_list = phys_bnums_list
@@ -248,11 +221,11 @@ class StreamingAttentionSink(nn.Module):
             for i in range(batch_size):
                 num_past_tokens = seq_lens[i] - 1
                 within_context_len = num_past_tokens < model_context_len
-                block_table = original_block_tables[i]
+                block_table = block_tables_tensor[i]
                 phys_bnums = phys_bnums_list[i]
 
                 rem = num_past_tokens % block_size
-                rem_phys_bnum = block_table[num_past_tokens // block_size]
+                rem_phys_bnum = block_table[-1]
 
                 full_past_keys, rem_past_keys = original_keys[i]
                 key_cache.index_put_((phys_bnums,), full_past_keys)
@@ -284,9 +257,8 @@ class StreamingAttentionSink(nn.Module):
                     self.kv_scale
                 )
             
-            # revert block_tables and seq_lens inside metadata
-            # so that next attn layer starts with same fields
-            attn_metadata.decode_metadata.block_tables = original_block_tables
+            # revert seq_lens inside metadata
+            # so that next attn layer starts with same seq lens
             attn_metadata.seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
             
             return attn_output
@@ -312,50 +284,23 @@ class StreamingAttentionSink(nn.Module):
             else:
                 seq_lens = attn_metadata.seq_lens_tensor.tolist()
                 attn_metadata.seq_lens_clone = seq_lens
-            
-            # cache block_tables
-            if hasattr(attn_metadata, 'block_tables_clone'):
-                original_block_tables = attn_metadata.block_tables_clone
-            else:
-                original_block_tables = attn_metadata.decode_metadata.block_tables.clone()
-                attn_metadata.block_tables_clone = original_block_tables
 
             block_tables_tensor = attn_metadata.decode_metadata.block_tables
-            block_tables: List[List[int]] = []
 
             # batch size = num sequences
             batch_size = block_tables_tensor.shape[0]
             for i in range(batch_size):
                 num_past_tokens = seq_lens[i] - 1  # assumes decode only yields 1 token
-                block_table = block_tables_tensor[i]                
-                
-                if num_past_tokens < model_context_len:
-                    block_tables.append(block_table.tolist())
-                    continue
-                
-                # edit block table for attention kernel
-                start_logic_bnum = (num_past_tokens - model_context_len) // block_size + 2
-                capped_block_table = [block_table[0].item()] + block_table[start_logic_bnum:].tolist()
-                block_tables.append(capped_block_table)
 
                 # cap number of tokens to consider with model context len
                 rem = num_past_tokens % block_size
                 attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
 
-            attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(
-                block_tables,
-                max_len=model_context_len // block_size,
-                pad=0,
-                dtype=torch.int,
-                device=device
-            )
-
             # compute attention in kernel
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata, self.kv_scale)
             
-            # revert block_tables and seq_lens inside metadata
-            # so that next attn layer starts with same fields
-            attn_metadata.decode_metadata.block_tables = original_block_tables
+            # revert seq_lens inside metadata
+            # so that next attn layer starts with same seq lens
             attn_metadata.seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
             
             return attn_output

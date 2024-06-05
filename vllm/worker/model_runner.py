@@ -418,11 +418,21 @@ class ModelRunner:
                     # to save memory.
                     start_idx = max(0, query_len - self.sliding_window)
 
+                max_model_len = self.model_config.max_model_len
+                start_logic_bnum = (seq_len - max_model_len - 1) // self.block_size + 2
+                evicted_end = start_logic_bnum * self.block_size
                 for i in range(context_len, seq_len):
                     if i < start_idx:
                         slot_mapping.append(_PAD_SLOT_ID)
                         continue
 
+                    # Attention sinks: abs pos for slot needs to be shifted
+                    #                  back when past max model length
+                    if self.model_config.use_attention_sinks and \
+                        seq_len > max_model_len:
+                        if self.block_size <= i < evicted_end: continue
+                        else: i -= evicted_end - self.block_size
+                    
                     block_number = block_table[i // self.block_size]
                     block_offset = i % self.block_size
                     slot = block_number * self.block_size + block_offset

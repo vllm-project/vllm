@@ -6,7 +6,7 @@ from huggingface_hub import login
 from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 
 
-login(token=os.environ.get("HF_TOKEN"))
+# login(token=os.environ.get("HF_TOKEN"))
 MAX_GEN_TOKENS = 1000
 
 
@@ -60,15 +60,15 @@ def main():
     model = "meta-llama/Llama-2-13b-chat-hf"
     model = "mistralai/Mixtral-8x7B-Instruct-v0.1" # TODO
     model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
-    model = "mosaicml/mpt-7b-chat"
     model = "bigscience/bloom-7b1"
     model = "tiiuae/falcon-7b-instruct"
     model = "lmsys/vicuna-7b-v1.5"
+    model = "mosaicml/mpt-7b-chat"
     args = EngineArgs(
         model=model,
         enforce_eager=True,
         block_size=16,
-        use_attention_sinks=False
+        use_attention_sinks=True
     )
 
     engine = LLMEngine.from_engine_args(args)

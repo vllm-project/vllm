@@ -279,7 +279,9 @@ class Scheduler:
             num_gpu_blocks=self.cache_config.num_gpu_blocks,
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+            enable_caching=self.cache_config.enable_prefix_caching,
+            attn_sink_context_len=self.scheduler_config.max_model_len
+                if self.cache_config.use_attention_sinks else None)
 
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
@@ -959,18 +961,6 @@ class Scheduler:
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
-
-                use_attn_sinks = True
-                max_context_len = self.scheduler_config.max_model_len
-                seq_len = seq.get_len()
-                block_size = self.block_manager.block_size
-                if use_attn_sinks and seq_len > max_context_len:
-                    # 0th block is attention sink
-                    block_idx_to_free = (seq_len - max_context_len - 1) // block_size + 1
-                    block_to_free = self.block_manager.block_tables[seq_id][block_idx_to_free]
-                    if block_to_free.ref_count > 0:
-                        # print("\nFREE BLOCK", block_to_free.block_number, "seqlen", seq_len, "last token id", seq.get_token_ids()[-1], "\n")
-                        self.block_manager.gpu_allocator.free(block_to_free)
 
             common_computed_block_nums = (
                 self.block_manager.get_common_computed_block_ids(
