@@ -733,7 +733,8 @@ class EngineArgs:
         )
 
         prompt_adapter_config = PromptAdapterConfig(
-            max_prompt_adapters=self.max_prompt_adapters) if self.enable_prompt_adapter else None
+            max_prompt_adapters=self.max_prompt_adapters) \
+                                        if self.enable_prompt_adapter else None
 
         if self.image_input_type:
             if (not self.image_token_id or not self.image_input_shape
