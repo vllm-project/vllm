@@ -9,7 +9,6 @@ from torch.distributed import ProcessGroup, ReduceOp
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
     ncclRedOpTypeEnum, ncclUniqueId)
-from vllm.distributed.parallel_state import get_local_rank
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -20,7 +19,7 @@ class PyNcclCommunicator:
     def __init__(
         self,
         group: ProcessGroup,
-        device: Optional[Union[int, str, torch.device]] = None,
+        device: Union[int, str, torch.device],
         library_path: Optional[str] = None,
     ):
         """
@@ -76,10 +75,7 @@ class PyNcclCommunicator:
         byte_list = tensor.tolist()
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
-        if device is None:
-            local_rank = get_local_rank()
-            device = torch.device(f"cuda:{local_rank}")
-        elif isinstance(device, int):
+        if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
             device = torch.device(device)

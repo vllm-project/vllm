@@ -485,10 +485,6 @@ def set_custom_all_reduce(enable: bool):
     _ENABLE_CUSTOM_ALL_REDUCE = enable
 
 
-def get_local_rank():
-    return get_world().local_rank
-
-
 def init_distributed_environment(
     world_size: int = -1,
     rank: int = -1,
