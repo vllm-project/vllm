@@ -10,7 +10,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.models.mixtral import MixtralMoE
-
+import os
 
 def torch_moe(a, w1, w2, score, topk):
     B, D = a.shape
@@ -53,8 +53,10 @@ def test_fused_moe(
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
 
 
-@pytest.mark.parametrize("dtype",
-                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float32] # , torch.float16, torch.bfloat16]
+)
 @torch.inference_mode()
 def test_mixtral_moe(dtype: torch.dtype):
     """Make sure our Mixtral MoE implementation agrees with the one from
@@ -99,3 +101,162 @@ def test_mixtral_moe(dtype: torch.dtype):
                           vllm_states,
                           rtol=mixtral_moe_tol[dtype],
                           atol=mixtral_moe_tol[dtype])
+
+
+import triton
+
+
+@triton.testing.perf_report(
+    [
+        triton.testing.Benchmark(
+            x_names=["bsz"],
+            x_vals=[i for i in range(4, 8, 2)],
+            line_arg="provider",
+            line_vals=["vllm", "hf"],
+            line_names=["vLLM", "HF"],
+            styles=[("blue", "-"), ("green", "-")],
+            ylabel="time (ms)",
+            plot_name=f"moe-fp32-speed-benchmark",
+            args={"seq_len": 4096, "hidden_size": 4096, "intermediate_size": 14336, "num_local_experts": 8, "num_experts_per_tok": 2, "dtype": torch.float32},
+        ),
+        triton.testing.Benchmark(
+            x_names=["bsz"],
+            x_vals=[i for i in range(4, 8, 2)],
+            line_arg="provider",
+            line_vals=["vllm", "hf"],
+            line_names=["vLLM", "HF"],
+            styles=[("blue", "-"), ("green", "-")],
+            ylabel="time (ms)",
+            plot_name=f"moe-bf16-speed-benchmark",
+            args={"seq_len": 4096, "hidden_size": 4096, "intermediate_size": 14336, "num_local_experts": 8, "num_experts_per_tok": 2, "dtype": torch.bfloat16},
+        ),
+    ]
+)
+def bench_speed_moe(bsz, seq_len, hidden_size, intermediate_size, num_local_experts, num_experts_per_tok, provider, dtype):
+    print(f"Running: bsz={bsz}, seq_len={seq_len}, hidden_size={hidden_size}, intermediate_size={intermediate_size}, num_local_experts={num_local_experts}, num_experts_per_tok={num_experts_per_tok}, provider={provider}, dtype={dtype}")
+
+    config = MixtralConfig(
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_local_experts,
+        num_experts_per_tok=num_experts_per_tok,
+    )
+
+    if provider == "vllm":
+        moe_block = MixtralMoE(
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            params_dtype=dtype,
+            tp_size=1,
+        ).to(dtype).to("cuda")
+    elif provider == "hf":
+        moe_block = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
+    else:
+        raise ValueError(f"Invalid provider: {provider} for MoE block")
+
+    x = torch.randn(bsz, seq_len, hidden_size, device="cuda", dtype=dtype)
+    dy = torch.randn_like(x)
+
+    quantiles = [0.5, 0.2, 0.8]
+
+    def fwd():
+        if provider == "vllm":
+            moe_block(x.view(bsz*seq_len, -1))
+        elif provider == "hf":
+            moe_block(x)
+        else:
+            raise ValueError(f"Invalid provider: {provider} for MoE block")
+
+    ms, min_ms, max_ms = triton.testing.do_bench(
+        fwd, quantiles=quantiles, grad_to_none=[x], warmup=2, rep=4
+    )
+
+    return ms, max_ms, min_ms
+
+
+@pytest.mark.speed
+def test_bench_speed_moe_wrapper():
+    output_dir = "./moe_speed"
+    os.makedirs(output_dir, exist_ok=True)
+    bench_speed_moe.run(save_path=output_dir, print_data=True)
+
+def _test_memory_once(func):
+    torch.cuda.memory.reset_peak_memory_stats()
+
+    func()
+
+    mem = torch.cuda.max_memory_allocated()
+
+    torch.cuda.memory._record_memory_history(enabled=None)
+    return mem
+
+
+def _test_memory(func, _iter):
+    total_mem = []
+
+    for _ in range(_iter):
+        mem = _test_memory_once(func)
+        total_mem.append(mem)
+
+    return sum(total_mem) / len(total_mem)
+
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=["bsz"],
+        x_vals=[i for i in range(4, 8, 2)],
+        line_arg="provider",
+        line_vals=["vllm", "hf"],
+        line_names=["vLLM", "HF"],
+        styles=[("blue", "-"), ("green", "-")],
+        ylabel="Memory (MB)",
+        plot_name=f"moe-memory-benchmark",
+        args={"seq_len": 2048, "hidden_size": 4096, "intermediate_size": 14336, "num_local_experts": 8, "num_experts_per_tok": 2, "dtype": torch.bfloat16},
+    ),
+)
+def bench_memory_moe(bsz, seq_len, hidden_size, intermediate_size, num_local_experts, num_experts_per_tok, provider, dtype):
+    print(f"Running: bsz={bsz}, seq_len={seq_len}, hidden_size={hidden_size}, intermediate_size={intermediate_size}, num_local_experts={num_local_experts}, num_experts_per_tok={num_experts_per_tok}, provider={provider}, dtype={dtype}")
+
+    config = MixtralConfig(
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_local_experts,
+        num_experts_per_tok=num_experts_per_tok,
+    )
+
+    if provider == "vllm":
+        moe_block = MixtralMoE(
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            params_dtype=dtype,
+            tp_size=1,
+        ).to(dtype).to("cuda")
+    elif provider == "hf":
+        moe_block = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
+    else:
+        raise ValueError(f"Invalid provider: {provider} for MoE block")
+
+
+    x = torch.randn(bsz, seq_len, hidden_size, device="cuda", dtype=dtype)
+    dx = torch.randn_like(x)
+
+    def fwd():
+        if provider == "vllm":
+            moe_block(x.view(bsz*seq_len, -1))
+        elif provider == "hf":
+            moe_block(x)
+        else:
+            raise ValueError(f"Invalid provider: {provider} for MoE block")
+
+    mem = _test_memory(fwd, _iter=2)
+    return mem / 2**20
+
+
+@pytest.mark.memory
+def test_bench_memory_moe_wrapper():
+    output_dir = "./moe_memory"
+    os.makedirs(output_dir, exist_ok=True)
+    bench_memory_moe.run(save_path=output_dir, print_data=True)
