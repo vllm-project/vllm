@@ -30,18 +30,20 @@
 1. In a new shell, export Jaeger IP:
     ```
     export JAEGER_IP=$(docker inspect   --format '{{ .NetworkSettings.IPAddress }}' jaeger)
-    export OTEL_EXPORTER_OTLP_ENDPOINT=http://$JAEGER_IP:4318
+    export OTEL_EXPORTER_OTLP_ENDPOINT=grpc://$JAEGER_IP:4317
     ```
-    Then set vLLM's service name for OpenTelemetry and run vLLM:
+    Then set vLLM's service name for OpenTelemetry, enable insecure connections to Jaeger and run vLLM:
     ```
     export OTEL_SERVICE_NAME="vllm-server"
-    python -m vllm.entrypoints.openai.api_server --model="facebook/opt-125m" --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces"
+    export OTEL_EXPORTER_OTLP_TRACES_INSECURE=true
+    python -m vllm.entrypoints.openai.api_server --model="facebook/opt-125m" --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_ENDPOINT"
     ```
 
 1. In a new shell, send requests with trace context from a dummy client
     ```
     export JAEGER_IP=$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' jaeger)
-    export OTEL_EXPORTER_OTLP_ENDPOINT=http://$JAEGER_IP:4318
+    export OTEL_EXPORTER_OTLP_ENDPOINT=grpc://$JAEGER_IP:4317
+    export OTEL_EXPORTER_OTLP_TRACES_INSECURE=true
     export OTEL_SERVICE_NAME="client-service"
     python dummy_client.py
     ```
@@ -54,12 +56,15 @@
 1. Clicking on a trace will show its spans and their tags. In this demo, each trace has 2 spans. One from the dummy client containing the prompt text and one from vLLM containing metadata about the request.
 ![Spans details](https://i.imgur.com/OPf6CBL.png)
 
+## Exporter Protocol
+OpenTelemetry supports either `grpc` or `http/protobuf` as the transport protocol for trace data in the exporter.
+By default, `grpc` is used. To set `http/protobuf` as the protocol, configure the `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` environment variable as follows:
 
-## Disabling tracing
-OpenTelemetry tracing can be disabled by setting the environment variable:
-```
-export OTEL_SDK_DISABLED=true
-```
+    ```
+    export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+    export OTEL_EXPORTER_OTLP_ENDPOINT=http://$JAEGER_IP:4318/v1/traces
+    python -m vllm.entrypoints.openai.api_server --model="facebook/opt-125m" --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_ENDPOINT"
+    ```
 
 ## Instrumentation of FastAPI
 OpenTelemetry allows automatic instrumentation of FastAPI.
