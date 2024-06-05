@@ -692,4 +692,5 @@ def destroy_distributed_environment():
     if _WORLD:
         _WORLD.destroy()
     _WORLD = None
-    torch.distributed.destroy_process_group()
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
