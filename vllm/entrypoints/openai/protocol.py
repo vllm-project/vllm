@@ -179,10 +179,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     add_special_tokens: Optional[bool] = Field(
         default=False,
         description=(
-            "If true, special tokens (e.g. BOS) will be added to the prompt on top "
-            "of what is added by the chat template. "
-            "For most models, the chat template takes care of adding the special tokens "
-            "so this should be set to False (as is the default)."),
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to False (as is the "
+            "default)."),
     )
     include_stop_str_in_output: Optional[bool] = Field(
         default=False,
