@@ -732,7 +732,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     self_prefill_packed_actual_output: torch.Tensor = \
       _run_decoder_self_attention_test(
         attn,
-        prephase_dec_pckd_qkv,
+        prephase_dec_test_params,
         kv_cache,
         prephase_attn_metadata,
         attn_type=AttentionType.DECODER)
@@ -746,8 +746,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     prephase_cross_pckd_act_out: torch.Tensor = \
       _run_encoder_decoder_cross_attention_test(
         attn,
-        prephase_dec_pckd_qkv,
-        prephase_cross_pckd_qkv,
+        prephase_dec_test_params,
+        prephase_cross_test_params,
         kv_cache,
         prephase_attn_metadata)
 
