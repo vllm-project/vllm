@@ -61,15 +61,15 @@ Online OpenAI Vision API Compatible Inference
 You can serve vision language models with vLLM's HTTP server that is compatible with `OpenAI Vision API <https://platform.openai.com/docs/guides/vision>`_.
 
 .. note::
-    Currently, vLLM supports only **single ``image_url`` input** per ``messages``. Support for multi-image inputs will be
+    Currently, vLLM supports only **single** ``image_url`` input per ``messages``. Support for multi-image inputs will be
     added in the future.
 
-Below is an example on how to launch the same `llava-hf/llava-1.5-7b-hf` with vLLM API server.
+Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with vLLM API server.
 
 .. important::
     Since OpenAI Vision API is based on `Chat <https://platform.openai.com/docs/api-reference/chat>`_ API, a chat template 
-    is **required** to launch the API server. In this example, we use the Vicuna chat template that you can 
-    find `here in the example folder <https://github.com/vllm-project/vllm/blob/main/examples/template_vicuna.jinja>`_.
+    is **required** to launch the API server if the model's tokenizer does not come with one. In this example, we use the 
+    Vicuna chat template that you can find `here in the example folder <https://github.com/vllm-project/vllm/blob/main/examples/template_vicuna.jinja>`_.
 
 .. code-block:: bash
 
@@ -81,9 +81,10 @@ Below is an example on how to launch the same `llava-hf/llava-1.5-7b-hf` with vL
         --image-feature-size 576 \
         --chat-template template_vicuna.jinja \
 
-To consume the server, you can use the OpenAI client
+To consume the server, you can use the OpenAI client like in the example below:
 
 .. code-block:: python
+
     from openai import OpenAI
     openai_api_key = "EMPTY"
     openai_api_base = "http://localhost:8000/v1"
@@ -107,3 +108,4 @@ To consume the server, you can use the OpenAI client
         }],
     )
     print("Chat response:", chat_response)
+
