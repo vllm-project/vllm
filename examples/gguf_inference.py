@@ -15,10 +15,7 @@ def run_gguf_inference(model_path):
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Create an LLM.
-    llm = LLM(model=model_path,
-              tokenizer="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-              load_format="gguf",
-              quantization="gguf")
+    llm = LLM(model=model_path, tokenizer="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
