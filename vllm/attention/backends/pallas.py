@@ -168,11 +168,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # Decoding run.
             assert kv_cache is not None
 
-            megacore_mode = self.megacore_mode
-            if megacore_mode == "batch":
-                if batch_size % 2 != 0:
-                    megacore_mode = None
-
+            if self.megacore_mode == "batch" and batch_size % 2 != 0:
+                megacore_mode = None
+            else:
+                megacore_mode = self.megacore_mode
             output = torch.ops.xla.paged_attention(
                 query.squeeze(dim=1),
                 key_cache,
