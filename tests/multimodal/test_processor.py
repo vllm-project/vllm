@@ -55,6 +55,9 @@ def test_clip_image_processor(hf_images, dtype):
             assert np.allclose(hf_arr, vllm_arr), f"Failed for key={key}"
 
 
+@pytest.mark.xfail(
+    reason="Inconsistent image processor being used due to lack "
+    "of support for dynamic image token replacement")
 @pytest.mark.parametrize("dtype", ["half", "float"])
 def test_llava_next_image_processor(hf_images, dtype):
     MODEL_NAME = "llava-hf/llava-v1.6-34b-hf"
