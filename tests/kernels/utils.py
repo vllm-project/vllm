@@ -7,6 +7,8 @@ from typing import List, Optional, Union
 import pytest
 import torch
 
+from collections import namedtuple
+
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.xformers import XFormersBackend
@@ -90,6 +92,23 @@ def ref_masked_attention(query: torch.Tensor,
     out = torch.einsum("bhqk,bkhd->bqhd", attn_weights, value)
     return out
 
+# batch_size x max_q_seq_len x num_heads x head_size
+QKVInputs = namedtuple("QKVInputs", 
+                       ["query",
+                       "key",
+                       "value",
+                       "q_seq_lens",
+                       "kv_seq_lens"])
+
+# total_num_tokens x (num_heads*head_size)
+PackedQKVInputs = namedtuple("PackedQKVInputs", 
+                             ["query",
+                             "key",
+                             "value",
+                             "q_start_loc_list",
+                             "kv_start_loc_list",
+                             "q_seq_lens",
+                             "kv_seq_lens"])
 
 def make_qkv(
     batch_size: int,
@@ -101,7 +120,7 @@ def make_qkv(
     force_kv_seq_lens: List[int] = None,
     attn_type: AttentionType = AttentionType.ENCODER_DECODER,
     force_max_len: bool = False,
-) -> tuple:
+) -> tuple[QKVInputs,QKVInputs,QKVInputs]:
     '''
     Construct QKV test tensors for self- and cross-attention.
 
@@ -136,29 +155,7 @@ def make_qkv(
 
     Returns:
 
-    * query: "baseline" query; batch_size x max_q_seq_len x num_heads x
-      head_size
-    * key: "baseline" key; batch_size x max_kv_seq_len x num_heads x
-      head_size
-    * value: "baseline" value; batch_size x max_kv_seq_len x num_heads x
-      head_size
-    * prefill_query: batch_size x (max_q_seq_len-1) x num_heads x head_size
-    * prefill_key: batch_size x (max_kv_seq_len-1) x num_heads x head_size
-    * prefill_value: batch_size x (max_kv_seq_len-1) x num_heads x head_size
-    * decode_query: batch_size x 1 x num_heads x head_size
-    * decode_key: batch_size x 1 x num_heads x head_size
-    * decode_value: batch_size x 1 x num_heads x head_size
-    * q_seq_lens: "baseline" query seqlen list
-    * kv_seq_lens: "baseline" key/value seqlen list; overridden by non-None
-                   force_encoder_kv_seq_lens
-    * actual_max_q_seq_len: actual "baseline" query max seq len (may be <=
-      max_q_seq_len due to randomness)
-    * actual_max_kv_seq_len: actual "baseline" key/value max seq len (may
-      be <= max_kv_seq_len due to randomness)
-    * prefill_q_seq_lens: "prefill" query seqlen list
-    * prefill_kv_seq_lens: "prefill" key/value seqlen list
-    * decode_q_seq_lens: "decode" query seqlen list (all ones)
-    * decode_kv_seq_lens: "decode" key/value seqlen list
+    * QKVInputs structure
     '''
 
     if force_max_len:
@@ -181,9 +178,6 @@ def make_qkv(
             kv_seq_lens = [
                 random.randint(2, max_kv_seq_len) for _ in range(batch_size)
             ]
-
-    actual_max_q_seq_len = max(q_seq_lens)
-    actual_max_kv_seq_len = max(kv_seq_lens)
 
     query = torch.rand(
         (batch_size, max_q_seq_len, num_heads, head_size)).to(device)
@@ -232,21 +226,22 @@ def make_qkv(
     decode_q_seq_lens = [1 for _ in q_seq_lens]
     decode_kv_seq_lens = [1 for _ in kv_seq_lens]
 
-    return query, \
-           key, \
-           value, \
-           prefill_query, \
-           prefill_key, \
-           prefill_value, \
-           decode_query, \
-           decode_key, \
-           decode_value, \
-           q_seq_lens, \
-           kv_seq_lens, \
-           prefill_q_seq_lens, \
-           prefill_kv_seq_lens, \
-           decode_q_seq_lens, \
-           decode_kv_seq_lens
+    return QKVInputs(query,
+                     key,
+                     value,
+                     q_seq_lens,
+                     kv_seq_lens), \
+           QKVInputs(prefill_query,
+                     prefill_key,
+                     prefill_value,
+                     prefill_q_seq_lens,
+                     prefill_kv_seq_lens), \
+           QKVInputs(
+                     decode_query,
+                     decode_key,
+                     decode_value,
+                     decode_q_seq_lens,
+                     decode_kv_seq_lens)
 
 
 def pack_tensor(unpacked_tensor: torch.Tensor, seq_lens: List[int],
@@ -283,9 +278,8 @@ def pack_tensor(unpacked_tensor: torch.Tensor, seq_lens: List[int],
     return packed_tensor, start_loc_list
 
 
-def pack_qkv(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
-             q_seq_lens: List[int], kv_seq_lens: List[int],
-             device: Union[torch.device, str]) -> tuple:
+def pack_qkv(qkv: QKVInputs,
+             device: Union[torch.device, str]) -> PackedQKVInputs:
     '''
     Individually pack each of Q, K and V, each with dimensions batch_size x
     padded_seq_len x num_heads x head_size, into respective number_of_tokens x
@@ -312,22 +306,25 @@ def pack_qkv(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
     * kv_start_loc_list: start idx of each {key,value} in packed_{key,value}
     '''
 
-    if query is None:
+    if qkv.query is None:
         packed_query = None
         q_start_loc_list = None
     else:
-        packed_query, q_start_loc_list = pack_tensor(query,
-                                                     q_seq_lens,
+        packed_query, q_start_loc_list = pack_tensor(qkv.query,
+                                                     qkv.q_seq_lens,
                                                      device=device)
-    packed_key, kv_start_loc_list = pack_tensor(key,
-                                                kv_seq_lens,
+    packed_key, kv_start_loc_list = pack_tensor(qkv.key,
+                                                qkv.kv_seq_lens,
                                                 device=device)
-    packed_value, _ = pack_tensor(value, kv_seq_lens, device=device)
-    return packed_query, \
-           packed_key, \
-           packed_value, \
-           q_start_loc_list, \
-           kv_start_loc_list
+    packed_value, _ = pack_tensor(qkv.value, qkv.kv_seq_lens, device=device)
+    return PackedQKVInputs(packed_query, \
+                           packed_key, \
+                           packed_value, \
+                           q_start_loc_list, \
+                           kv_start_loc_list, \
+                           None if q_start_loc_list is None else \
+                            qkv.q_seq_lens, \
+                           qkv.kv_seq_lens)
 
 
 def make_backend(backend_name: str) -> AttentionBackend:
@@ -589,7 +586,7 @@ def make_test_metadata(
     seq_lens: List[int],
     block_tables: torch.Tensor,
     slot_mapping: torch.Tensor,
-    is_encoder_only_test: bool,
+    default_attn_type: AttentionType,
     num_prefills_or_decodes: int,
     num_prefill_or_decode_tokens: int,
     device: Union[torch.device, str],
@@ -630,9 +627,6 @@ def make_test_metadata(
 
     * AttentionMetadata structure supporting self- and cross-attention
     '''
-
-    default_attn_type = AttentionType.ENCODER if is_encoder_only_test \
-                          else AttentionType.DECODER
 
     if is_prompt:
         num_prefills = num_prefills_or_decodes
