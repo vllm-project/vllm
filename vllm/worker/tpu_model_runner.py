@@ -59,6 +59,10 @@ class TPUModelRunner:
 
     def load_model(self) -> None:
         self.device = self.device_config.device
+
+        # Temporary workaround for the issue with the model loading.
+        # Without this, the model loading will fail with OOM.
+        self.device_config.device = torch.device("cpu")
         model = get_model(
             model_config=self.model_config,
             load_config=self.load_config,
@@ -69,6 +73,12 @@ class TPUModelRunner:
             vision_language_config=self.vision_language_config,
             lora_config=None,
         )
+        xm.mark_step()
+        xm.wait_device_ops()
+        self.device_config.device = self.device
+
+        model = model.to(self.device)
+        xm.mark_step()
         xm.wait_device_ops()
 
         model = ModelWrapper(model)
@@ -82,6 +92,7 @@ class TPUModelRunner:
         is_prompt: bool,
     ) -> None:
         if is_prompt:
+            seq_len = (seq_len + 15) // 16 * 16
             token_ids = torch.zeros((batch_size, seq_len),
                                     dtype=torch.int32,
                                     device=self.device)
