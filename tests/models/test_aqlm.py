@@ -5,7 +5,7 @@ Run `pytest tests/models/test_aqlm.py`.
 
 import pytest
 
-from tests.utils import is_quant_method_supported
+from tests.quantization.utils import is_quant_method_supported
 
 # In this test we hardcode prompts and generations for the model so we don't
 # need to require the AQLM package as a dependency

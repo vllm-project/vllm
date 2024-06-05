@@ -5,7 +5,7 @@ Run `pytest tests/quantization/test_bitsandbytes.py`.
 import pytest
 import torch
 
-from tests.utils import is_quant_method_supported
+from tests.quantization.utils import is_quant_method_supported
 from vllm import SamplingParams
 
 

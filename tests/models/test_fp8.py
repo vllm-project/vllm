@@ -8,7 +8,7 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
-from tests.utils import is_quant_method_supported
+from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
