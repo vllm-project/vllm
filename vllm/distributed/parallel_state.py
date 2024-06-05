@@ -3,13 +3,113 @@
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import torch
-from torch.distributed import ProcessGroup
+from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+
+
+class GroupCoordinator:
+
+    def __init__(
+        self,
+        group_ranks: List[List[int]],
+        local_rank: int,
+        torch_distributed_backend: Union[str, Backend],
+        use_pynccl: bool,
+        use_custom_allreduce: bool,
+        is_world: bool,
+    ):
+
+        self.rank = torch.distributed.get_rank()
+        self.local_rank = local_rank
+        self.device_group = None
+        self.cpu_group = None
+
+        for ranks in group_ranks:
+            device_group = torch.distributed.new_group(
+                ranks, backend=torch_distributed_backend)
+            # a group with `gloo` backend, to allow direct coordination between
+            # processes through the CPU.
+            cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            if self.rank in ranks:
+                self.ranks = ranks
+                self.world_size = len(ranks)
+                self.rank_in_group = ranks.index(self.rank)
+                self.device_group = device_group
+                self.cpu_group = cpu_group
+
+        if torch.cuda.is_available():
+            self.device = torch.device(f"cuda:{local_rank}")
+        else:
+            self.device = torch.device("cpu")
+
+        self.use_pynccl = use_pynccl
+        self.use_custom_allreduce = use_custom_allreduce
+
+        from vllm.distributed.device_communicators.pynccl import (
+            PyNcclCommunicator)
+        self.pynccl_comm: Optional[PyNcclCommunicator]
+        if use_pynccl:
+            self.pynccl_comm = PyNcclCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
+        else:
+            self.pynccl_comm = None
+
+        from vllm.distributed.device_communicators.custom_all_reduce import (
+            CustomAllreduce)
+        self.ca_comm: Optional[CustomAllreduce]
+        if use_custom_allreduce:
+            # Initialize a custom fast all-reduce implementation.
+            self.ca_comm = CustomAllreduce(
+                group=self.cpu_group,
+                device=self.device,
+            )
+        else:
+            self.ca_comm = None
+
+    def destroy(self):
+        if self.device_group is not None:
+            torch.distributed.destroy_process_group(self.device_group)
+            self.device_group = None
+        if self.cpu_group is not None:
+            torch.distributed.destroy_process_group(self.cpu_group)
+            self.cpu_group = None
+        if self.pynccl_comm is not None:
+            self.pynccl_comm = None
+        if self.ca_comm is not None:
+            self.ca_comm = None
+
+
+_WORLD: Optional[GroupCoordinator] = None
+
+
+def get_world() -> GroupCoordinator:
+    assert _WORLD is not None, ("world group is not initialized")
+    return _WORLD
+
+
+_TP: Optional[GroupCoordinator] = None
+
+
+def get_tp() -> GroupCoordinator:
+    assert _TP is not None, ("tensor model parallel group is not initialized")
+    return _TP
+
+
+_PP: Optional[GroupCoordinator] = None
+
+
+def get_pp() -> GroupCoordinator:
+    assert _PP is not None, (
+        "pipeline model parallel group is not initialized")
+    return _PP
+
 
 logger = init_logger(__name__)
 
