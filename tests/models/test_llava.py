@@ -94,7 +94,7 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
     """
     model_id, vision_language_config = model_and_config
 
-    hf_model = hf_runner(model_id, dtype=dtype)
+    hf_model = hf_runner(model_id, dtype=dtype, is_vision_model=True)
     hf_outputs = hf_model.generate_greedy(hf_image_prompts,
                                           max_tokens,
                                           images=hf_images)
