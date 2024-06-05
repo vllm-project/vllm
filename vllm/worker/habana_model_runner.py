@@ -145,6 +145,8 @@ class HpuModelAdapter():
     def forward(self, *args, **kwargs):
         kwargs = kwargs.copy()
         selected_token_indices = kwargs.pop('selected_token_indices')
+        if 'bypass_hpu_graphs' in kwargs:
+            kwargs.pop('bypass_hpu_graphs') # required for PT eager
         input_ids = kwargs['input_ids']
         kwargs['attn_metadata'] = self._set_attn_bias(kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1), input_ids.device, torch.bfloat16)
         hidden_states = self.model(*args, **kwargs)
@@ -279,7 +281,7 @@ class HabanaModelRunner:
                 scheduler_config=self.scheduler_config,
             )
             # FIXME: Running with disable_tensor_cache=True causes RuntimeErrors. This needs to be debugged
-            self.model = htorch.hpu.wrap_in_hpu_graph(HpuModelAdapter(self.model))
+            self.model = _maybe_wrap_in_hpu_graph(self.model)
 
         self.model_memory_usage = m.consumed_memory
         logger.info(f"Loading model weights took "
@@ -1004,3 +1006,6 @@ class HabanaModelRunner:
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+
+def _maybe_wrap_in_hpu_graph(model):
+    return htorch.hpu.wrap_in_hpu_graph(HpuModelAdapter(model)) if htorch.utils.internal.is_lazy() else HpuModelAdapter(model)
