@@ -7,9 +7,9 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.communication_op import (  # noqa
-    graph_capture, tensor_model_parallel_all_reduce)
+    tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
-                                             get_tp)
+                                             get_tp, graph_capture)
 
 from ..utils import (init_test_distributed_environment,
                      multi_process_tensor_parallel)

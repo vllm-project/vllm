@@ -6,10 +6,11 @@ import torch
 import torch.distributed
 
 from vllm.distributed.communication_op import (  # noqa
-    graph_capture, tensor_model_parallel_all_reduce)
+    tensor_model_parallel_all_reduce)
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             graph_capture,
                                              init_distributed_environment)
 from vllm.utils import update_environment_variables
 

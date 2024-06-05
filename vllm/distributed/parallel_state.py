@@ -298,6 +298,25 @@ def get_pp() -> GroupCoordinator:
     return _PP
 
 
+@contextmanager
+def graph_capture():
+    """
+    `graph_capture` is a context manager which should surround the code that
+    is capturing the CUDA graph. Its main purpose is to ensure that the
+    some operations will be run after the graph is captured, before the graph
+    is replayed. It returns a `GraphCaptureContext` object which contains the
+    necessary data for the graph capture. Currently, it only contains the
+    stream that the graph capture is running on. This stream is set to the
+    current CUDA stream when the context manager is entered and reset to the
+    default stream when the context manager is exited. This is to ensure that
+    the graph capture is running on a separate stream from the default stream,
+    in order to explicitly distinguish the kernels to capture
+    from other kernels possibly launched on background in the default stream.
+    """
+    with get_tp().graph_capture() as context, get_pp().graph_capture(context):
+        yield
+
+
 logger = init_logger(__name__)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
