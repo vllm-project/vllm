@@ -1,6 +1,7 @@
 # The CLI entrypoint to vLLM.
 import argparse
-import requests
+from openai import OpenAI
+import os
 from typing import Dict, Any
 
 from vllm.entrypoints.openai.api_server import run_server
@@ -33,11 +34,17 @@ def main():
         usage="vllm complete [options]")
     complete_parser.add_argument("--url",
                                  type=str,
-                                 default=None,
+                                 default="http://localhost:8000",
                                  help="url of the running OpenAI-Compatible RESTful API server")
-    complete_parser.add_argument("--complete-model-name",
+    complete_parser.add_argument("--model-name",
                                 type=str, default=None,
-                                help="the model name used in prompt completion")
+                                help="the model name used in prompt completion, \
+                                    default to the first model in list models API call.")
+    complete_parser.add_argument("--openai-api-key",
+                                 type=str,
+                                 default=None,
+                                 help="API key for OpenAI services. If provided, this api key will \
+                                    overwrite the api key obtained through environment variables.")
     complete_parser.set_defaults(func=interactive_cli)
 
     chat_parser = subparsers.add_parser(
@@ -47,14 +54,16 @@ def main():
     )
     chat_parser.add_argument("--url",
                                  type=str,
-                                 default=None,
+                                 default="http://localhost:8000",
                                  help="url of the running OpenAI-Compatible RESTful API server")
-    chat_parser.add_argument("--chat-model-name",
+    chat_parser.add_argument("--model-name",
                                 type=str, default=None,
-                                help="the model name used in chat completions")
-    chat_parser.add_argument("--generation-prompt",
+                                help="the model name used in chat completions, \
+                                    default to the first model in list models API call.")
+    chat_parser.add_argument("--system-prompt",
                              type=str,
-                             help="the generation prompt to be added to the chat template")
+                             help="the system prompt to be added to the chat template, used for \
+                                 methods that support system prompts.")
     chat_parser.set_defaults(func=interactive_cli)
 
     args = parser.parse_args()
@@ -65,128 +74,65 @@ def main():
 
 
 def interactive_cli(args: argparse.Namespace) -> None:
+    base_url = getattr(args, "url")
+    openai_api_key = getattr(args, "openai-api-key", os.environ.get("OPENAI_API_KEY"))
+    create_completion_url = base_url + COMPLETE_ROUTE
+    create_chat_completion_url = base_url + CHAT_COMPLETE_ROUTE
+
+    http_headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {openai_api_key}"
+    }
+    openai_client = OpenAI(api_key=openai_api_key, default_headers=http_headers)
+
+    if args.model_name:
+        model_name = args.model_name
+    else:
+        available_models = openai_client.models.list()
+        model_name = available_models["data"][0]["id"]
+
     if args.command == "complete":
-        complete(args)
+        complete(create_completion_url, model_name, openai_client)
     elif args.command == "chat":
-        chat(args)
+        chat(create_chat_completion_url, model_name, openai_client)
 
 
-def complete(args: argparse.Namespace) -> None:
+def complete(create_completion_url: str, model_name: str, client: OpenAI) -> None:
     while True:
-        input_prompt = input("Please enter prompt to complete:")
-
-        base_url = getattr(args, "url", f"http://{args.host}:{args.port}")
-
-        create_completion_url = base_url + COMPLETE_ROUTE
-        create_completion_headers = {
-            "Content-Type": "application/json"
-        }
-
-        if args.complete_model_name:
-            complete_model_name = args.complete_model_name
-        else:
-            complete_model_name = _default_model(base_url)
+        input_prompt = input("Please enter prompt to complete:\n>")
         
-        completion_request_data = CompletionRequest(
-            model=complete_model_name,
+        completion = client.completions.create(
+            model=model_name,
             prompt=input_prompt
-        ).model_dump()
-        
-        try:
-            completion = _post_response_dict(create_completion_url,
-                                            create_completion_headers,
-                                            completion_request_data)
-            choice = completion.get("choices", [])[0].get("text", "No completion found.")
-            print(f"Response Content: {choice}")
-        except Exception as err:
-            print(f"Error occurred in prompt completion: {err}")
-            return
+        )
+        choice = completion.get("choices", [])[0].get("text", "No completion found.")
+        print(f"Response Content: {choice}")
 
 
-def chat(args: argparse.Namespace) -> None:
+def chat(create_chat_completion_url: str, model_name: str, client: OpenAI) -> None:
     conversation = []
     while True:
-        input_message = input("Please enter a message for the chat model:")
+        input_message = input("Please enter a message for the chat model:\n>")
         message = {
             "role": "user",
             "content": input_message
         }
-        if args.generation_prompt:
-            message["generation prompt"] = args.generation_prompt
         conversation.append(message)
 
-        base_url = getattr(args, "url", f"http://{args.host}:{args.port}")
+        chat_completion = client.chat.completions.create(
+            model=model_name,
+            messages=conversation
+        )
 
-        create_chat_completion_url = base_url + CHAT_COMPLETE_ROUTE
-        create_chat_completion_headers = {
-            "Content-Type": "application/json"
-        }
+        response_message = (
+            chat_completion.get("content", {})
+                            .get("choices", [])[0]
+                            .get("message", {})
+        )
+        choice = response_message.get("content", "No response message found.")
 
-        if args.chat_model_name:
-            chat_model_name = args.chat_model_name
-        else:
-            chat_model_name = _default_model(base_url)
-
-        chat_request_data = ChatCompletionRequest(
-            messages=conversation,
-            model=chat_model_name
-        ).model_dump()
-
-        try:
-            chat_completion = _post_response_dict(create_chat_completion_url,
-                                            create_chat_completion_headers,
-                                            chat_request_data)
-            choice = (
-                chat_completion.get("content", {})
-                               .get("choices", [])[0]
-                               .get("message", {})
-                               .get("content", "No chat completion found.")
-            )
-            print(f"Response Content: {choice}")
-        except Exception as err:
-            print(f"Error occurred in chat completion: {err}")
-            return
-
-
-def _default_model(base_url: str) -> str:
-    list_models_url = base_url + LIST_MODELS_ROUTE
-    try:
-        models_dict = _get_response_dict(list_models_url)
-        if "data" in models_dict and models_dict["data"]:
-            return models_dict["data"][0]["id"]
-        else:
-            raise Exception("No models available for completion.")
-    except Exception as err:
-        raise Exception(f"Error occurred when getting default model for completion: {err}")
-
-    
-def _get_response_dict(url: str) -> Dict[str, Any]:
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as http_err:
-        raise Exception(f"HTTP error occurred: {http_err}")
-    except requests.exceptions.JSONDecodeError as json_err:
-        raise Exception(f"Invalid JSON response: {json_err}")
-    except Exception as err:
-        raise Exception(f"Error occurred: {err}")
-    
-def _post_response_dict(
-        url: str,
-        headers: Dict[str, str],
-        json_data: Dict[str, Any]
-    ) -> Dict[str, Any]:
-    try:
-        response = requests.post(url, headers=headers, json=json_data)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as http_err:
-        raise Exception(f"HTTP error occurred: {http_err}")
-    except requests.exceptions.JSONDecodeError as json_err:
-        raise Exception(f"Invalid JSON response: {json_err}")
-    except Exception as err:
-        raise Exception(f"Error occurred: {err}")
+        conversation.append(response_message)
+        print(f"Response Content: {choice}")
 
 
 if __name__ == "__main__":
