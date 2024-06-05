@@ -8,7 +8,7 @@ try:
 except ImportError as e:
     from vllm.logger import init_logger
     logger = init_logger(__name__)
-    logger.error("Failed to import from vllm._C with %r", e)
+    logger.warning("Failed to import from vllm._C with %r", e)
 
 
 # activation ops
