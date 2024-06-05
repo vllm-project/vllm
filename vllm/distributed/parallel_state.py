@@ -140,6 +140,20 @@ class GroupCoordinator:
         """Return the global rank of the last process in the group"""
         return self.ranks[-1]
 
+    @property
+    def next_rank(self):
+        """Return the global rank of the process that follows the caller"""
+        rank_in_group = self.rank_in_group
+        world_size = self.world_size
+        return self.ranks[(rank_in_group + 1) % world_size]
+
+    @property
+    def prev_rank(self):
+        """Return the global rank of the process that precedes the caller"""
+        rank_in_group = self.rank_in_group
+        world_size = self.world_size
+        return self.ranks[(rank_in_group - 1) % world_size]
+
     @contextmanager
     def graph_capture(
             self, graph_capture_context: Optional[GraphCaptureContext] = None):
@@ -709,24 +723,6 @@ def get_tensor_model_parallel_src_rank():
     global_rank = torch.distributed.get_rank()
     local_world_size = get_tensor_model_parallel_world_size()
     return (global_rank // local_world_size) * local_world_size
-
-
-def get_pipeline_model_parallel_next_rank():
-    """Return the global rank that follows the caller in the pipeline"""
-    assert _PP_GLOBAL_RANKS is not None, (
-        "Pipeline parallel group is not initialized")
-    rank_in_pipeline = get_pipeline_model_parallel_rank()
-    world_size = get_pipeline_model_parallel_world_size()
-    return _PP_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]
-
-
-def get_pipeline_model_parallel_prev_rank():
-    """Return the global rank that precedes the caller in the pipeline"""
-    assert _PP_GLOBAL_RANKS is not None, (
-        "Pipeline parallel group is not initialized")
-    rank_in_pipeline = get_pipeline_model_parallel_rank()
-    world_size = get_pipeline_model_parallel_world_size()
-    return _PP_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
 
 
 def destroy_model_parallel():
