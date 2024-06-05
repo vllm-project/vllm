@@ -1,10 +1,9 @@
-from typing import Dict, List, Set, Tuple
+from typing import List, Set, Tuple
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
@@ -43,8 +42,8 @@ class TPUExecutor(ExecutorBase):
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
-        logger.info(f"# TPU blocks: {num_gpu_blocks}, "
-                    f"# CPU blocks: {num_cpu_blocks}")
+        logger.info("# TPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
+                    num_cpu_blocks)
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:

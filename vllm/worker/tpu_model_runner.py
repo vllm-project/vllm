@@ -5,7 +5,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch_xla.core.xla_model as xm
-import torch_xla.debug.profiler as xp
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
@@ -54,9 +53,6 @@ class TPUModelRunner:
             self.cache_config.cache_dtype,
             self.block_size,
         )
-
-        self.device = None
-        self.model = None
 
     def load_model(self) -> None:
         self.device = self.device_config.device
@@ -146,7 +142,6 @@ class TPUModelRunner:
         self,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> None:
-        return
         torch._dynamo.config.cache_size_limit = 128
         # Prefill
         logger.info("Compiling the model with different input shapes...")
@@ -157,10 +152,10 @@ class TPUModelRunner:
                     continue
                 self._dummy_run(batch_size, seq_len, kv_caches, is_prompt=True)
                 xm.wait_device_ops()
-                logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
+                logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
 
         end = time.time()
-        logger.info(f"Compilation for prefill done in {(end - start):.2f} s.")
+        logger.info("Compilation for prefill done in %.2f s.", end - start)
 
         # Decode
         start = time.time()
@@ -168,15 +163,10 @@ class TPUModelRunner:
             seq_len = 1
             self._dummy_run(batch_size, seq_len, kv_caches, is_prompt=False)
             xm.wait_device_ops()
-            logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
+            logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
 
         end = time.time()
-        logger.info(f"Compilation for decode done in {(end - start):.2f} s.")
-
-        # self.server = xp.start_server(9012)
-        # # Update to your own gs bucket address if you want to profile
-        # profile_logdir = "gs://tpu-pytorch/tmp/woosuk/"
-        # xp.trace_detached('localhost:9012', profile_logdir, duration_ms=120 * 1000)
+        logger.info("Compilation for decode done in %.2f s.", end - start)
 
     def _prepare_prompt(
         self,
@@ -320,6 +310,8 @@ class TPUModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ):
+        assert seq_group_metadata_list is not None
+        assert len(seq_group_metadata_list) > 0
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
@@ -334,6 +326,7 @@ class TPUModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> Optional[SamplerOutput]:
+        assert seq_group_metadata_list is not None
 
         start = time.time()
         inputs = self.prepare_inputs(seq_group_metadata_list)

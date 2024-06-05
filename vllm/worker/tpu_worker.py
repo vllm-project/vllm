@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch_xla.runtime as xr
@@ -49,9 +49,6 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             device_config,
             cache_config,
             vision_language_config=vision_language_config)
-
-        self.device = None
-        self.tpu_cache = None
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
