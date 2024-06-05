@@ -347,9 +347,7 @@ async def benchmark(
     print("{:<40} {:<10.2f}".format("Median TPOT (ms):",
                                     metrics.median_tpot_ms))
     print("{:<40} {:<10.2f}".format("P99 TPOT (ms):", metrics.p99_tpot_ms))
-    print("{s:{c}^{n}}".format(s='Inter-token Latency',
-                               n=50,
-                               c='-'))
+    print("{s:{c}^{n}}".format(s='Inter-token Latency', n=50, c='-'))
     print("{:<40} {:<10.2f}".format("Mean ITL (ms):", metrics.mean_itl_ms))
     print("{:<40} {:<10.2f}".format("Median ITL (ms):", metrics.median_itl_ms))
     print("{:<40} {:<10.2f}".format("P99 ITL (ms):", metrics.p99_itl_ms))
