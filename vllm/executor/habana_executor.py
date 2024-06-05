@@ -80,8 +80,7 @@ class HabanaExecutor(ExecutorBase):
 
         with HabanaMemoryProfiler() as cache_init_m:
             self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
-        logger.info(f"init_cache_engine took "
-                    f"{format_bytes(cache_init_m.consumed_memory)} ({cache_init_m.consumed_memory/HabanaMemoryProfiler.total_memory():.2%} of total memory, gpu_memory_utilization: {self.cache_config.gpu_memory_utilization}, {format_bytes(HabanaMemoryProfiler.current_memory_usage())}/{format_bytes(HabanaMemoryProfiler.total_memory())} used)")
+        logger.info(f"init_cache_engine took {cache_init_m.get_summary_string()}")
 
     def execute_model(
             self,

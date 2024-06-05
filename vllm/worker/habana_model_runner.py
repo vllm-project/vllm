@@ -271,21 +271,25 @@ class HabanaModelRunner:
 
     def load_model(self) -> None:
         with HabanaMemoryProfiler() as m:
-            self.model = get_model(
-                model_config=self.model_config,
-                device_config=self.device_config,
-                load_config=self.load_config,
-                lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-            )
-            # FIXME: Running with disable_tensor_cache=True causes RuntimeErrors. This needs to be debugged
-            self.model = _maybe_wrap_in_hpu_graph(self.model)
+            with HabanaMemoryProfiler() as m_getmodel:
+                self.model = get_model(
+                    model_config=self.model_config,
+                    device_config=self.device_config,
+                    load_config=self.load_config,
+                    lora_config=self.lora_config,
+                    vision_language_config=self.vision_language_config,
+                    parallel_config=self.parallel_config,
+                    scheduler_config=self.scheduler_config,
+                )
+            logger.info(f"Pre-loading model weights on {next(self.model.parameters()).device} took {m_getmodel.get_summary_string()}")
 
-        self.model_memory_usage = m.consumed_memory
-        logger.info(f"Loading model weights took "
-                    f"{format_bytes(self.model_memory_usage)} ({format_bytes(HabanaMemoryProfiler.current_memory_usage())}/{format_bytes(HabanaMemoryProfiler.total_memory())} used)")
+            # FIXME: Running with disable_tensor_cache=True causes RuntimeErrors. This needs to be debugged
+            with HabanaMemoryProfiler() as m_wrap:
+                self.model = _maybe_wrap_in_hpu_graph(self.model)
+            logger.info(f"Wrapping in HPU Graph took {m_wrap.get_summary_string()}")
+            
+        self.model_memory_usage = m.consumed_device_memory
+        logger.info(f"Loading model weights took in total {m.get_summary_string()}")
 
         if self.lora_config:
             assert hasattr(self.model, "supported_lora_modules"
@@ -932,12 +936,12 @@ class HabanaModelRunner:
         gc.collect()
 
     def log_warmup(self, phase, i, max_i, batch_size, seq_len):
-        free_mem = format_bytes(HabanaMemoryProfiler.current_free_memory())
+        free_mem = format_bytes(HabanaMemoryProfiler.current_free_device_memory())
         logger.info(f"[Warmup][{phase}][{i+1}/{max_i}] batch_size:{batch_size} seq_len:{seq_len} free_mem:{free_mem}")
 
     def warmup_all_buckets(self, buckets, is_prompt, kv_caches):
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
-            mem_usage = 100.0 * HabanaMemoryProfiler.current_memory_usage() / HabanaMemoryProfiler.total_memory()
+            mem_usage = 100.0 * HabanaMemoryProfiler.current_device_memory_usage() / HabanaMemoryProfiler.total_device_memory()
             self.log_warmup('Prompt' if is_prompt else 'Decode', i, len(buckets), batch_size, seq_len)
             self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
 
@@ -966,7 +970,7 @@ class HabanaModelRunner:
             self.log_warmup(phase, idx, num_candidates, batch_size, seq_len)
             with HabanaMemoryProfiler() as mem_prof:
                 self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
-            used_mem = align_workers(mem_prof.consumed_memory, torch.distributed.ReduceOp.MAX)
+            used_mem = align_workers(mem_prof.consumed_device_memory, torch.distributed.ReduceOp.MAX)
             available_mem -= used_mem
             total_mem += used_mem
             total_batch_seq += batch_seq
@@ -980,14 +984,14 @@ class HabanaModelRunner:
             logger.info("Skipping warmup...")
             return
         self.profiler.start('internal', 'warmup')
-        start_mem = HabanaMemoryProfiler.current_memory_usage()
+        start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
         self.warmup_all_buckets(self.prompt_buckets, True, kv_caches)
         self.warmup_all_buckets(self.decode_buckets, False, kv_caches)
 
         if not self.enforce_eager:
             mem_margin = 1.0 - float(os.environ.get('VLLM_GRAPH_MEM_MARGIN', '0.02'))
-            free_mem = mem_margin * HabanaMemoryProfiler.current_free_memory()
+            free_mem = mem_margin * HabanaMemoryProfiler.current_free_device_memory()
             free_mem = align_workers(free_mem, torch.distributed.ReduceOp.MIN)
             prompt_graph_mem_ratio = float(os.environ.get('VLLM_GRAPH_PROMPT_RATIO', '0.5'))
             prompt_available_memory = prompt_graph_mem_ratio * free_mem
@@ -998,7 +1002,7 @@ class HabanaModelRunner:
             self.warmup_graphs(decode_strategy, self.decode_buckets, False, kv_caches, decode_available_memory)
 
         end_time = time.perf_counter()
-        end_mem = HabanaMemoryProfiler.current_memory_usage()
+        end_mem = HabanaMemoryProfiler.current_device_memory_usage()
         elapsed_time = end_time - start_time
         logger.info(f"Warmup finished in {elapsed_time:.0f} secs, allocated {format_bytes(end_mem - start_mem)} of device memory")
         self.profiler.end()
