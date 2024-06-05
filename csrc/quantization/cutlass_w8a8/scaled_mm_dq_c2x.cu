@@ -74,7 +74,7 @@ struct enable_sm80_to_sm89 : Kernel {
 };
 
 template <typename Kernel>
-struct enable_sm89 : Kernel {
+struct enable_sm89_to_90 : Kernel {
   template <typename... Args>
   CUTLASS_DEVICE static void invoke(Args&&... args) {
 #if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 890 && __CUDA_ARCH__ < 900
@@ -299,13 +299,13 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor& out, torch::Tensor const& a,
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89, int8_t, cutlass::bfloat16_t,
+          cutlass::arch::Sm89, enable_sm89_to_90, int8_t, cutlass::bfloat16_t,
           TileShape, WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
                                                       b_scales);
     } else {
       assert(out.dtype() == torch::kFloat16);
       return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89, int8_t, cutlass::half_t, TileShape,
+          cutlass::arch::Sm89, enable_sm89_to_90, int8_t, cutlass::half_t, TileShape,
           WarpShape, InstructionShape, 5>>(out, a, b, a_scales, b_scales);
     }
   } else {
@@ -314,13 +314,13 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor& out, torch::Tensor const& a,
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89, cutlass::float_e4m3_t,
+          cutlass::arch::Sm89, enable_sm89_to_90, cutlass::float_e4m3_t,
           cutlass::bfloat16_t, TileShape, WarpShape, InstructionShape, 5>>(
           out, a, b, a_scales, b_scales);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89, cutlass::float_e4m3_t,
+          cutlass::arch::Sm89, enable_sm89_to_90, cutlass::float_e4m3_t,
           cutlass::half_t, TileShape, WarpShape, InstructionShape, 5>>(
           out, a, b, a_scales, b_scales);
     }
