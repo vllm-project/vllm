@@ -56,6 +56,9 @@ class BenchmarkMetrics:
     mean_tpot_ms: float
     median_tpot_ms: float
     p99_tpot_ms: float
+    mean_itl_ms: float
+    median_itl_ms: float
+    p99_itl_ms: float
 
 
 def sample_sharegpt_requests(
@@ -200,16 +203,24 @@ def calculate_metrics(
     actual_output_lens = []
     total_input = 0
     completed = 0
+    itls = []
     tpots = []
     ttfts = []
     for i in range(len(outputs)):
         if outputs[i].success:
-            output_len = len(tokenizer(outputs[i].generated_text).input_ids)
+            # We use the tokenizer to count the number of output tokens for all
+            # serving backends instead of looking at len(outputs[i].itl) since
+            # multiple output tokens may be bundled together
+            # Note: this may inflate the output token count slightly
+            output_len = len(
+                tokenizer(outputs[i].generated_text,
+                          add_special_tokens=False).input_ids)
             actual_output_lens.append(output_len)
             total_input += input_requests[i][1]
             if output_len > 1:
                 tpots.append(
                     (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
+            itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             completed += 1
         else:
@@ -234,6 +245,9 @@ def calculate_metrics(
         mean_tpot_ms=np.mean(tpots or 0) * 1000,
         median_tpot_ms=np.median(tpots or 0) * 1000,
         p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
+        mean_itl_ms=np.mean(itls or 0) * 1000,
+        median_itl_ms=np.median(itls or 0) * 1000,
+        p99_itl_ms=np.percentile(itls or 0, 99) * 1000,
     )
 
     return metrics, actual_output_lens
@@ -333,6 +347,10 @@ async def benchmark(
     print("{:<40} {:<10.2f}".format("Median TPOT (ms):",
                                     metrics.median_tpot_ms))
     print("{:<40} {:<10.2f}".format("P99 TPOT (ms):", metrics.p99_tpot_ms))
+    print("{s:{c}^{n}}".format(s='Inter-token Latency', n=50, c='-'))
+    print("{:<40} {:<10.2f}".format("Mean ITL (ms):", metrics.mean_itl_ms))
+    print("{:<40} {:<10.2f}".format("Median ITL (ms):", metrics.median_itl_ms))
+    print("{:<40} {:<10.2f}".format("P99 ITL (ms):", metrics.p99_itl_ms))
     print("=" * 50)
 
     result = {
@@ -349,6 +367,9 @@ async def benchmark(
         "mean_tpot_ms": metrics.mean_tpot_ms,
         "median_tpot_ms": metrics.median_tpot_ms,
         "p99_tpot_ms": metrics.p99_tpot_ms,
+        "mean_itl_ms": metrics.mean_itl_ms,
+        "median_itl_ms": metrics.median_itl_ms,
+        "p99_itl_ms": metrics.p99_itl_ms,
         "input_lens": [output.prompt_len for output in outputs],
         "output_lens": actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
