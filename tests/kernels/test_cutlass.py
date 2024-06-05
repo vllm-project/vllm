@@ -79,12 +79,10 @@ def cutlass_int8_gemm_helper(m: int,
         (1, n_b_scales), device=device, dtype=torch.float32) / 10)
 
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
-    baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
-                        scale_b *
-                        b.to(dtype=torch.float32)).to(dtype=out_dtype)
+    baseline = (scale_b * scale_a * torch.mm(a.to(dtype=torch.float32),
+                        b.to(dtype=torch.float32))).to(dtype=out_dtype)
 
-    rtol = 1e0 if out_dtype is torch.int8 else 1e-1
-    assert torch.allclose(out, baseline, rtol=rtol, atol=1e0)
+    assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
 
 
 @pytest.mark.parametrize("m", [512, 222, 100, 33, 1])

@@ -57,7 +57,7 @@ uint32_t next_pow_2(uint32_t const num) {
 }
 
 template <typename ElementD, typename EpilogueDescriptor>
-struct ScaledDequantEpilogue {
+struct ScaledEpilogue {
  private:
   using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
 
@@ -163,7 +163,7 @@ struct cutlass_3x_gemm {
 template <typename Gemm, typename... EpilogueArgs>
 void cutlass_scaled_mm_dispatcher(torch::Tensor& out, torch::Tensor const& a,
                                   torch::Tensor const& b,
-                                  EpilogueArgs... epilogue_params) {
+                                  EpilogueArgs&&... epilogue_params) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
@@ -193,8 +193,9 @@ void cutlass_scaled_mm_dispatcher(torch::Tensor& out, torch::Tensor const& a,
 
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
-      Gemm::Epilogue::prepare_args(epilogue_params...), c_ptr, c_stride, c_ptr,
-      c_stride};
+      Gemm::Epilogue::prepare_args(
+          std::forward<EpilogueArgs>(epilogue_params)...),
+      c_ptr, c_stride, c_ptr, c_stride};
 
   typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
                                       prob_shape, mainloop_args, epilogue_args};
@@ -273,13 +274,13 @@ void cutlass_scaled_mm_sm90_fp8_dispatch(torch::Tensor& out,
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
 
   using Cutlass3xGemmDefault =
-      typename sm90_fp8_config<InType, OutType, ScaledDequantEpilogue,
+      typename sm90_fp8_config<InType, OutType, ScaledEpilogue,
                                0>::Cutlass3xGemm;
   using Cutlass3xGemmM64 =
-      typename sm90_fp8_config<InType, OutType, ScaledDequantEpilogue,
+      typename sm90_fp8_config<InType, OutType, ScaledEpilogue,
                                64>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
-      typename sm90_fp8_config<InType, OutType, ScaledDequantEpilogue,
+      typename sm90_fp8_config<InType, OutType, ScaledEpilogue,
                                128>::Cutlass3xGemm;
 
   uint32_t const m = a.size(0);
@@ -319,21 +320,20 @@ void cutlass_scaled_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
 
     if (out.dtype() == torch::kInt8) {
       return cutlass_scaled_mm_dispatcher<
-          cutlass_3x_gemm<int8_t, int8_t, ScaledDequantEpilogue, TileShape,
+          cutlass_3x_gemm<int8_t, int8_t, ScaledEpilogue, TileShape,
                           ClusterShape, KernelSchedule, EpilogueSchedule>>(
           out, a, b, a_scales, b_scales);
     } else if (out.dtype() == torch::kBFloat16) {
       return cutlass_scaled_mm_dispatcher<cutlass_3x_gemm<
-          int8_t, cutlass::bfloat16_t, ScaledDequantEpilogue, TileShape,
-          ClusterShape, KernelSchedule, EpilogueSchedule>>(out, a, b, a_scales,
-                                                           b_scales);
+          int8_t, cutlass::bfloat16_t, ScaledEpilogue, TileShape, ClusterShape,
+          KernelSchedule, EpilogueSchedule>>(out, a, b, a_scales, b_scales);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
 
-      return cutlass_scaled_mm_dispatcher<cutlass_3x_gemm<
-          int8_t, cutlass::half_t, ScaledDequantEpilogue, TileShape,
-          ClusterShape, KernelSchedule, EpilogueSchedule>>(out, a, b, a_scales,
-                                                           b_scales);
+      return cutlass_scaled_mm_dispatcher<
+          cutlass_3x_gemm<int8_t, cutlass::half_t, ScaledEpilogue, TileShape,
+                          ClusterShape, KernelSchedule, EpilogueSchedule>>(
+          out, a, b, a_scales, b_scales);
     }
   } else {
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
