@@ -11,10 +11,6 @@ steps:
       - "docker pull {{ ecr_repo }}:latest || true"
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
-      {% if ${"BUILDKITE_BRANCH"} == "main" %}
-      - "docker tag {{ docker_image }} {{ ecr_repo }}:latest"
-      - "docker push {{ ecr_repo }}:latest"
-      {% endif %}
     env:
       DOCKER_BUILDKIT: "1"
     retry:
@@ -24,6 +20,14 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 5
   - wait
+
+  - label: ":docker: tag image as latest"
+    agents:
+      queue: small_cpu_queue
+    if: build.branch == 'main'
+    commands:
+      - "docker tag {{ docker_image }} {{ ecr_repo }}:latest"
+      - "docker push {{ ecr_repo }}:latest"
 
 
   {% for step in steps %}
