@@ -499,8 +499,6 @@ _CPU_WORLD_GROUP = None
 # always have two groups: one for device-specific (and is the default)
 # and one for CPU. All processes will be part of both groups.
 
-_LOCAL_RANK = -1
-
 
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
@@ -508,8 +506,7 @@ def set_custom_all_reduce(enable: bool):
 
 
 def get_local_rank():
-    global _LOCAL_RANK
-    return _LOCAL_RANK
+    return get_world().local_rank
 
 
 def init_distributed_environment(
@@ -543,14 +540,12 @@ def init_distributed_environment(
                 local_rank = envs.LOCAL_RANK
             else:
                 local_rank = rank
-        global _LOCAL_RANK
-        _LOCAL_RANK = local_rank
     global _WORLD
     assert _WORLD is None, ("world group is already initialized")
     ranks = list(range(torch.distributed.get_world_size()))
     _WORLD = GroupCoordinator(
         group_ranks=[ranks],
-        local_rank=_LOCAL_RANK,
+        local_rank=local_rank,
         torch_distributed_backend=backend,
         use_pynccl=False,
         use_custom_allreduce=False,
@@ -619,7 +614,7 @@ def initialize_model_parallel(
         group_ranks.append(ranks)
     _TP = GroupCoordinator(
         group_ranks=group_ranks,
-        local_rank=_LOCAL_RANK,
+        local_rank=get_world().local_rank,
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
@@ -637,7 +632,7 @@ def initialize_model_parallel(
         group_ranks.append(ranks)
     _PP = GroupCoordinator(
         group_ranks=group_ranks,
-        local_rank=_LOCAL_RANK,
+        local_rank=get_world().local_rank,
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
