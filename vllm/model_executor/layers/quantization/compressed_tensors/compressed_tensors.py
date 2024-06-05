@@ -47,6 +47,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
         layer_quant_details: Dict[str, Any] = dict()
+        print(config)
         ignore: List[str] = config.get("ignore", None)
 
         for key, quant_config in config["config_groups"].items():
@@ -101,9 +102,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         elif self._is_static_tensor_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8StaticTensor()
         """
-        return CompressedTensors24(strategy=weight_quant.strategy, 
+        return CompressedTensors24(strategy=weight_quant.strategy,
                                     num_bits=weight_quant.num_bits,
                                     group_size=weight_quant.group_size)
+      
         
         raise NotImplementedError("Scheme not supported.")
 
