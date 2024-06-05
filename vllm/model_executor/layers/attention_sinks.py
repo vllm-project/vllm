@@ -11,7 +11,7 @@ import torch.nn as nn
 from vllm._C import cache_ops
 from vllm.attention import AttentionMetadata
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.attention.selector import _Backend, _which_attn_to_use
+from vllm.attention.selector import _Backend, which_attn_to_use
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.utils import make_tensor_with_pad
@@ -310,18 +310,19 @@ class StreamingAttentionSink(nn.Module):
 def get_attention_sink(
     model_attn: nn.Module,
     cache_config: Optional[CacheConfig],
-    sliding_window: Optional[int],
     model_context_len: int
 ) -> StreamingAttentionSink:
     if cache_config is not None:
+        sliding_window = cache_config.sliding_window
         kv_cache_dtype = cache_config.cache_dtype
         block_size = cache_config.block_size
     else:
+        sliding_window = None
         kv_cache_dtype = "auto"
         block_size = 16
     
     num_kv_heads = getattr(model_attn, "num_kv_heads", model_attn.num_heads)
-    attn_backend = _which_attn_to_use(
+    attn_backend = which_attn_to_use(
         model_attn.num_heads,
         model_attn.head_dim,
         num_kv_heads,

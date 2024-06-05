@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include <torch/extension.h>
 
+#include <ATen/cuda/CUDAContext.h>
+
 // clang-format will break include orders
 // clang-format off
 #include "cute/tensor.hpp"
@@ -20,7 +22,7 @@
 #include "cutlass/epilogue/threadblock/fusion/visitors.hpp"
 #include "cutlass/gemm/kernel/default_gemm_universal_with_visitor.h"
 
-#include "cutlass_visitor_2x_broadcast_epilogue.hpp"
+#include "broadcast_load_epilogue_c2x.hpp"
 #include "common.hpp"
 // clang-format on
 
@@ -117,10 +119,10 @@ struct cutlass_2x_gemm {
 };
 
 template <typename Gemm>
-void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
-                                     torch::Tensor const &b,
-                                     torch::Tensor const &a_scales,
-                                     torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq_dispatcher(torch::Tensor& out, torch::Tensor const& a,
+                                     torch::Tensor const& b,
+                                     torch::Tensor const& a_scales,
+                                     torch::Tensor const& b_scales) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
@@ -136,24 +138,18 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   using StrideC = Stride<int64_t, Int<1>, Int<0>>;
   StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
 
-  auto a_ptr = static_cast<ElementAB const *>(a.data_ptr());
-  auto b_ptr = static_cast<ElementAB const *>(b.data_ptr());
-  auto c_ptr = static_cast<ElementD *>(out.data_ptr());
+  auto a_ptr = static_cast<ElementAB const*>(a.data_ptr());
+  auto b_ptr = static_cast<ElementAB const*>(b.data_ptr());
+  auto c_ptr = static_cast<ElementD*>(out.data_ptr());
 
   auto a_scales_ptr = a_scales.data_ptr<float>();
   auto b_scales_ptr = b_scales.data_ptr<float>();
 
-  // If A and B are quantized per-tensor, then these scale tensors are scalars,
-  // and they are passed in via the second argument.
   using ScaleAArgs = typename Gemm::ScaleA::Arguments;
-  ScaleAArgs a_args = a_scales.numel() == 1
-                          ? ScaleAArgs{nullptr, a_scales.item<float>(), {}}
-                          : ScaleAArgs{a_scales.data_ptr<float>(), {}, {}};
-
   using ScaleBArgs = typename Gemm::ScaleB::Arguments;
-  ScaleBArgs b_args = b_scales.numel() == 1
-                          ? ScaleBArgs{nullptr, b_scales.item<float>(), {}}
-                          : ScaleBArgs{b_scales.data_ptr<float>(), {}, {}};
+
+  ScaleBArgs b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
+  ScaleAArgs a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
 
   typename Gemm::EVTCompute0::Arguments evt0_compute_args{b_args};
 
@@ -189,17 +185,19 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   size_t workspace_size = gemm_op.get_workspace_size(args);
   cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
+  auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
+
   CUTLASS_CHECK(gemm_op.can_implement(args));
-  cutlass::Status status = gemm_op(args, workspace.get());
+  cutlass::Status status = gemm_op(args, workspace.get(), stream);
   CUTLASS_CHECK(status);
 }
 
 }  // namespace
 
-void cutlass_scaled_mm_dq_sm75(torch::Tensor &out, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq_sm75(torch::Tensor& out, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales) {
   TORCH_CHECK(a.dtype() == torch::kInt8);
   TORCH_CHECK(b.dtype() == torch::kInt8);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
@@ -223,10 +221,10 @@ void cutlass_scaled_mm_dq_sm75(torch::Tensor &out, torch::Tensor const &a,
   }
 }
 
-void cutlass_scaled_mm_dq_sm80(torch::Tensor &out, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq_sm80(torch::Tensor& out, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales) {
   TORCH_CHECK(a.dtype() == torch::kInt8);
   TORCH_CHECK(b.dtype() == torch::kInt8);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
@@ -250,10 +248,10 @@ void cutlass_scaled_mm_dq_sm80(torch::Tensor &out, torch::Tensor const &a,
   }
 }
 
-void cutlass_scaled_mm_dq_sm89(torch::Tensor &out, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq_sm89(torch::Tensor& out, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales) {
   using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;

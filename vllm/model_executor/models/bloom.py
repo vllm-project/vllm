@@ -113,14 +113,14 @@ class BloomAttention(nn.Module):
                               self.head_dim,
                               scaling,
                               alibi_slopes=alibi_slopes,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
         
         self.use_attention_sinks = use_attention_sinks
         if use_attention_sinks:
             self.attention_sink = get_attention_sink(
                 self,
                 cache_config,
-                sliding_window=None,
                 model_context_len=2048
             )
 
