@@ -5,10 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 from torch.distributed import ProcessGroup
 
-from .parallel_state import (get_cpu_world_group, get_pp,
-                             get_tensor_model_parallel_group,
-                             get_tensor_model_parallel_rank,
-                             get_tensor_model_parallel_world_size, get_tp)
+from .parallel_state import get_cpu_world_group, get_pp, get_tp
 
 
 @contextmanager
@@ -44,35 +41,8 @@ def tensor_model_parallel_all_gather(input_: torch.Tensor,
 def tensor_model_parallel_gather(input_: torch.Tensor,
                                  dst: int = 0,
                                  dim: int = -1) -> torch.Tensor:
-    """Gather the input tensor across model parallel group.
-
-    NOTE: We assume that the input tensor is on the same device across
-    all the ranks.
-    """
-    world_size = get_tensor_model_parallel_world_size()
-    # Bypass the function if we are using only 1 GPU.
-    if world_size == 1:
-        return input_
-    assert -input_.dim() <= dim < input_.dim(), (
-        f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
-    if dim < 0:
-        # Convert negative dim to positive.
-        dim += input_.dim()
-    # Allocate output tensor.
-    if get_tensor_model_parallel_rank() == dst:
-        gather_list = [torch.empty_like(input_) for _ in range(world_size)]
-    else:
-        gather_list = None
-    # Gather.
-    torch.distributed.gather(input_,
-                             gather_list,
-                             dst=dst,
-                             group=get_tensor_model_parallel_group())
-    if get_tensor_model_parallel_rank() == dst:
-        output_tensor = torch.cat(gather_list, dim=dim)
-    else:
-        output_tensor = None
-    return output_tensor
+    """Gather the input tensor across model parallel group."""
+    return get_tp().gather(input_, dst, dim)
 
 
 def broadcast(input_: torch.Tensor,

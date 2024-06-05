@@ -190,6 +190,39 @@ class GroupCoordinator:
                                               input_size[dim + 1:])
         return output_tensor
 
+    def gather(self,
+               input_: torch.Tensor,
+               dst: int = 0,
+               dim: int = -1) -> torch.Tensor:
+        """
+        NOTE: We assume that the input tensor is on the same device across
+        all the ranks.
+        """
+        world_size = self.world_size
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return input_
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
+        if dim < 0:
+            # Convert negative dim to positive.
+            dim += input_.dim()
+        # Allocate output tensor.
+        if self.rank_in_group == dst:
+            gather_list = [torch.empty_like(input_) for _ in range(world_size)]
+        else:
+            gather_list = None
+        # Gather.
+        torch.distributed.gather(input_,
+                                 gather_list,
+                                 dst=dst,
+                                 group=self.device_group)
+        if self.rank_in_group == dst:
+            output_tensor = torch.cat(gather_list, dim=dim)
+        else:
+            output_tensor = None
+        return output_tensor
+
     def destroy(self):
         if self.device_group is not None:
             torch.distributed.destroy_process_group(self.device_group)
@@ -218,6 +251,9 @@ def get_tp() -> GroupCoordinator:
     assert _TP is not None, ("tensor model parallel group is not initialized")
     return _TP
 
+
+# kept for backward compatibility
+get_tensor_model_parallel_group = get_tp
 
 _PP: Optional[GroupCoordinator] = None
 
@@ -447,12 +483,6 @@ def get_cpu_world_group():
     return _CPU_WORLD_GROUP
 
 
-def get_tensor_model_parallel_group():
-    """Get the tensor model parallel group the caller rank belongs to."""
-    assert _TP is not None, ("tensor model parallel group is not initialized")
-    return _TP
-
-
 def get_pipeline_model_parallel_group():
     """Get the pipeline model parallel group the caller rank belongs to."""
     assert _PP_DEVICE_GROUP is not None, (
@@ -469,8 +499,7 @@ def get_pipeline_model_parallel_cpu_group():
 
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
-    return torch.distributed.get_world_size(
-        group=get_tensor_model_parallel_group())
+    return get_tp().world_size
 
 
 def get_pipeline_model_parallel_world_size():
@@ -481,7 +510,7 @@ def get_pipeline_model_parallel_world_size():
 
 def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
-    return torch.distributed.get_rank(group=get_tensor_model_parallel_group())
+    return get_tp().rank_in_group
 
 
 def get_pipeline_model_parallel_rank():
