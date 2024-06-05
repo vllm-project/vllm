@@ -38,29 +38,7 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
 def tensor_model_parallel_all_gather(input_: torch.Tensor,
                                      dim: int = -1) -> torch.Tensor:
     """All-gather the input tensor across model parallel group."""
-    world_size = get_tensor_model_parallel_world_size()
-    # Bypass the function if we are using only 1 GPU.
-    if world_size == 1:
-        return input_
-    assert -input_.dim() <= dim < input_.dim(), (
-        f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
-    if dim < 0:
-        # Convert negative dim to positive.
-        dim += input_.dim()
-    input_size = input_.size()
-    # Allocate output tensor.
-    output_tensor = torch.empty((world_size, ) + input_size,
-                                dtype=input_.dtype,
-                                device=input_.device)
-    # All-gather.
-    torch.distributed.all_gather_into_tensor(
-        output_tensor, input_, group=get_tensor_model_parallel_group())
-    # Reshape
-    output_tensor = output_tensor.movedim(0, dim)
-    output_tensor = output_tensor.reshape(input_size[:dim] +
-                                          (world_size * input_size[dim], ) +
-                                          input_size[dim + 1:])
-    return output_tensor
+    return get_tp().all_gather(input_, dim)
 
 
 def tensor_model_parallel_gather(input_: torch.Tensor,
