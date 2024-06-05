@@ -103,16 +103,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if blocksparse_params is not None:
             raise NotImplementedError("Blocksparse is not supported.")
 
+        self.megacore_mode = None
         if torch_xla.tpu.version() == 4:
             if self.num_kv_heads % 2 == 0:
                 self.megacore_mode = "kv_head"
             else:
                 # NOTE(woosuk): If the batch size is not a multiple of 2, the
-                # megacore mode should be None.
+                # megacore mode will be None.
                 self.megacore_mode = "batch"
-        else:
-            # Do not utilize megacore.
-            self.megacore_mode = None
 
     def forward(
         self,
