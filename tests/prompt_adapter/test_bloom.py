@@ -12,7 +12,9 @@ def do_sample(llm, pa_name: str, pa_id: int):
         current and paid. Can you do something about this? Label : ",
         "Tweet text : @nationalgridus Looks good thanks! Label : "
     ]
-    sampling_params = vllm.SamplingParams(temperature=0.0, max_tokens=3, stop_token_ids=[3])
+    sampling_params = vllm.SamplingParams(temperature=0.0,
+                                          max_tokens=3,
+                                          stop_token_ids=[3])
 
     outputs = llm.generate(prompts,
                            sampling_params,
