@@ -375,7 +375,6 @@ class HfRunner:
 
     def __del__(self):
         del self.model
-        cleanup()
 
 
 @pytest.fixture
