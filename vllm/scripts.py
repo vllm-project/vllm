@@ -144,8 +144,8 @@ def main():
         "--system-prompt",
         type=str,
         default=None,
-        help="the system prompt to be added to the chat template, used for \
-                                 methods that support system prompts.")
+        help=("The system prompt to be added to the chat template, "
+              "used for models that support system prompts."))
     chat_parser.set_defaults(dispatch_function=interactive_cli, command="chat")
 
     args = parser.parse_args()
