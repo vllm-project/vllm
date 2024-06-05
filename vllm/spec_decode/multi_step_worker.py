@@ -7,11 +7,12 @@ import torch
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import SpeculativeProposals
+from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
 
 
-class MultiStepWorker(Worker):
+class MultiStepWorker(Worker, ProposerWorkerBase):
     """The MultiStepWorker is equivalent to a Worker except that it allows
     multiple forward passes in a single call, assuming the scheduler has
     allocated enough space to store the additional KV. This reduces overhead
@@ -33,7 +34,7 @@ class MultiStepWorker(Worker):
         super().init_device()
 
         self._proposer = Top1Proposer(
-            weakref.proxy(self),
+            weakref.proxy(self),  # type: ignore[arg-type]
             self.device,
             self.vocab_size,
             max_proposal_len=self.max_model_len,
@@ -92,11 +93,12 @@ class MultiStepWorker(Worker):
         speculative tokens per sequence is determined by max_proposal_len.
         """
 
-        return self._proposer.get_proposals(execute_model_req)
+        return self._proposer.get_spec_proposals(execute_model_req)
 
+    @staticmethod
     def _append_new_tokens(
-            self, model_output: SamplerOutput,
-            seq_group_metadata_list: SequenceGroupMetadata) -> None:
+            model_output: List[SamplerOutput],
+            seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
         """Given model output from a single run, append the tokens to the
         sequences. This is normally done outside of the worker, but it is
         required if the worker is to perform multiple forward passes.
@@ -116,8 +118,9 @@ class MultiStepWorker(Worker):
                 seq.append_token_id(token_id, token_logprob.logprob)
                 seq.update_num_computed_tokens(1)
 
+    @staticmethod
     def _shallow_copy_inputs(
-        self, seq_group_metadata_list: List[SequenceGroupMetadata]
+        seq_group_metadata_list: List[SequenceGroupMetadata]
     ) -> List[SequenceGroupMetadata]:
         """Copy input data structures to remove side-effects when input data
         structures are shared with other modules.

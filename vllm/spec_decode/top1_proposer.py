@@ -6,8 +6,8 @@ from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
+from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.util import sampler_output_to_torch
-from vllm.worker.worker_base import WorkerBase
 
 
 class Top1Proposer(SpeculativeProposer):
@@ -29,7 +29,7 @@ class Top1Proposer(SpeculativeProposer):
 
     def __init__(
         self,
-        worker: WorkerBase,
+        worker: ProposerWorkerBase,
         device: str,
         vocab_size: int,
         max_proposal_len: Optional[int] = None,
@@ -39,7 +39,7 @@ class Top1Proposer(SpeculativeProposer):
         self.max_proposal_len = max_proposal_len
         self._vocab_size = vocab_size
 
-    def get_proposals(
+    def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> SpeculativeProposals:
