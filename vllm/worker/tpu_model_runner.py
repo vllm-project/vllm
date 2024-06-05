@@ -60,7 +60,7 @@ class TPUModelRunner:
     def load_model(self) -> None:
         self.device = self.device_config.device
 
-        # Temporary workaround for the issue with the model loading.
+        # A temporary workaround for the issue with the model loading.
         # Without this, the model loading will fail with OOM.
         self.device_config.device = torch.device("cpu")
         model = get_model(
