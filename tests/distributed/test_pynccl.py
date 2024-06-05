@@ -54,7 +54,8 @@ def worker_fn_wrapper(fn):
 
 @worker_fn_wrapper
 def worker_fn():
-    pynccl_comm = PyNcclCommunicator(get_world().cpu_group)
+    pynccl_comm = PyNcclCommunicator(get_world().cpu_group,
+                                     device=get_world().device)
     tensor = torch.ones(16, 1024, 1024,
                         dtype=torch.float32).cuda(pynccl_comm.rank)
     with pynccl_comm.change_state(enable=True):
@@ -130,7 +131,8 @@ def test_pynccl_multiple_allreduce_with_vllm():
 def worker_fn_with_cudagraph():
     with torch.no_grad():
         graph = torch.cuda.CUDAGraph()
-        pynccl_comm = PyNcclCommunicator(get_world().cpu_group)
+        pynccl_comm = PyNcclCommunicator(get_world().cpu_group,
+                                         device=get_world().device)
         # run something in the default stream to initialize torch engine
         a = torch.ones((4, 4), device=f'cuda:{pynccl_comm.rank}')
         torch.cuda.synchronize()
@@ -155,7 +157,8 @@ def test_pynccl_with_cudagraph():
 
 @worker_fn_wrapper
 def send_recv_worker_fn():
-    pynccl_comm = PyNcclCommunicator(get_world().cpu_group)
+    pynccl_comm = PyNcclCommunicator(get_world().cpu_group,
+                                     device=get_world().device)
     if pynccl_comm.rank == 0:
         tensor = torch.ones(16, 1024, 1024,
                             dtype=torch.float32).cuda(pynccl_comm.rank)
