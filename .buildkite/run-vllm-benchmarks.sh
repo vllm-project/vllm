@@ -3,8 +3,9 @@
 # This script should be run inside the vllm container. Enter the latest vllm container by
 # docker run -it --runtime nvidia --gpus all --env "HF_TOKEN=<your HF TOKEN>"  --entrypoint /bin/bash  vllm/vllm-openai:latest
 # (please modify `<your HF TOKEN>` to your own huggingface token in the above command
-# Then, copy-paste this file into the docker and execute it using bash.
+# Then, copy-paste this file into the docker (any path in the docker works) and execute it using bash.
 # Benchmarking results will be at /vllm/benchmarks/results/benchmark_results.md
+
 
 set -xe
 set -o pipefail
@@ -35,10 +36,8 @@ fi
 # install wget and curl
 (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
 cd /
-# git clone https://github.com/vllm-project/vllm.git
-git clone https://github.com/KuntaiDu/vllm.git
+git clone https://github.com/vllm-project/vllm.git
 cd vllm
-git checkout kuntai-tgibench-dev
 cd benchmarks
 mkdir results
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
@@ -92,7 +91,7 @@ jq -c '.[]' $PARAMS_FILE | while read -r params; do
     echo "### Offline inference throughput ($testname)" >> $RESULTS_FOLDER/benchmark_results.md
     sed -n '1p' $RESULTS_FOLDER/offline_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # first line
     echo "" >> $RESULTS_FOLDER/benchmark_results.md
-    sed -n '$p' $RESULTS_FOLDER/offline_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # last line
+    grep 'Throughput: ' $RESULTS_FOLDER/offline_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # last line
 
     # online serving
     echo "Testing online serving throughput ($testname)"
@@ -115,6 +114,9 @@ jq -c '.[]' $PARAMS_FILE | while read -r params; do
     echo '```' >> $RESULTS_FOLDER/benchmark_results.md
     tail -n 17 $RESULTS_FOLDER/online_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # last 20 lines
     echo '```' >> $RESULTS_FOLDER/benchmark_results.md
+
+    # wait until the server process fully terminates
+    sleep 10
 
 done
 
