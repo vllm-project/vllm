@@ -33,11 +33,9 @@ sentence-transformers # required for embedding
 # Benchmarking
 aiohttp
 
-# Multimodal
-pillow
 
 # GGUF
-gguf
+gguf==0.9.0
 
 # quantization
 bitsandbytes==0.42.0
