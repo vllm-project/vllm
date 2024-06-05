@@ -143,6 +143,7 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
 
         """
         super().__init__(CFGLogitsProcessor._get_guide(cfg, tokenizer))
+        self._guide = self._guide.copy()
 
 
 @lru_cache(maxsize=32)
