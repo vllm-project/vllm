@@ -30,7 +30,7 @@ def do_sample(llm, pa_name: str, pa_id: int):
 
 
 def test_twitter_prompt_adapter():
-    llm = vllm.LLM(MODEL_PATH)
+    llm = vllm.LLM(MODEL_PATH, enable_prompt_adapter=True)
 
     expected_output = ['complaint', 'no complaint']
 
