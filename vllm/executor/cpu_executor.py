@@ -156,6 +156,12 @@ class CPUExecutor(ExecutorBase):
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
+
+        if self.parallel_config.tensor_parallel_size > 1:
+            for child in self.children_workers:
+                child.warming_up_model.remote()
+        self.driver_worker.warming_up_model()
+
         return self.driver_worker.determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int,

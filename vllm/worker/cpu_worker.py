@@ -190,7 +190,12 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
     def load_model(self):
         self.model_runner.load_model()
-    
+
+    def warming_up_model(self):
+        logger.info("Warming up...")
+        self.model_runner.profile_run()
+        logger.info("Warming up done.")
+
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of blocks available for the KV cache.
 
