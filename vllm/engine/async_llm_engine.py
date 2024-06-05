@@ -29,23 +29,32 @@ class AsyncEngineDeadError(RuntimeError):
     pass
 
 
-def _raise_exception_on_finish(
-        task: asyncio.Task, error_callback: Callable[[Exception],
-                                                     None]) -> None:
-    msg = ("Task finished unexpectedly. This should never happen! "
-           "Please open an issue on Github.")
+def _log_task_completion(task: asyncio.Task,
+                         error_callback: Callable[[Exception], None]) -> None:
+    """This function is only intended for the `engine.run_engine_loop()` task.
+
+    In particular, that task runs a `while True` loop that can only exit if
+    there is an exception.
+    """
 
     exception = None
     try:
-        task.result()
-        # NOTE: This will be thrown if task exits normally (which it should not)
-        raise AsyncEngineDeadError(msg)
+        return_value = task.result()
+        raise AssertionError(
+            f"The engine background task should never finish without an "
+            f"exception. {return_value}")
+    except asyncio.exceptions.CancelledError:
+        # We assume that if the task is cancelled, we are gracefully shutting
+        # down. This should only happen on program exit.
+        logger.info("Engine is gracefully shutting down.")
     except Exception as e:
         exception = e
         logger.error("Engine background task failed", exc_info=e)
         error_callback(exception)
         raise AsyncEngineDeadError(
-            msg + " See stack trace above for the actual cause.") from e
+            "Task finished unexpectedly. This should never happen! "
+            "Please open an issue on Github. See stack trace above for the"
+            "actual cause.") from e
 
 
 class AsyncStream:
@@ -438,8 +447,7 @@ class AsyncLLMEngine:
         self._background_loop_unshielded = asyncio.get_event_loop(
         ).create_task(self.run_engine_loop())
         self._background_loop_unshielded.add_done_callback(
-            partial(_raise_exception_on_finish,
-                    error_callback=self._error_callback))
+            partial(_log_task_completion, error_callback=self._error_callback))
         self.background_loop = asyncio.shield(self._background_loop_unshielded)
 
     def _init_engine(self, *args,
