@@ -6,7 +6,7 @@ from .code_cache import CodeCache
 from .fusion import FusedOpGenerator, pointwise_fusion
 from .register import SUPPORTED
 from .rewrite_quantized_gemms import rewrite_quantized_gemms
-from .utils import ModuleInputGenerator, graph_print_tabular, is_call, call_method_class
+from .utils import ModuleInputGenerator, graph_print_tabular, is_call, call_method_class, add_uses_for_mutable_inputs
 
 from torch._dynamo import register_backend, lookup_backend
 from torch.fx.passes.operator_support import create_op_support
@@ -163,10 +163,22 @@ class backend_class:
         self.backend = backend
 
     def __call__(self, gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]) -> Callable:
+
+        from torch.fx.experimental.proxy_tensor import make_fx
+        from torch._functorch.eager_transforms import functionalize
+        from torch.fx import symbolic_trace
+
         # Must make a copy so that inductor backend doesn't choke.
         gm = copy.copy(gm)
 
-        gm.graph.eliminate_dead_code()
+        #gm = make_fx(functionalize(gm, remove='mutations'))(*example_inputs)
+
+        #add_uses_for_mutable_inputs(gm.graph)
+
+        # TODO: this is eliminating functions that write to an input
+        #gm.graph.eliminate_dead_code()
+
+        print(f"Original module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}")
 
         logger.debug(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
         logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")
