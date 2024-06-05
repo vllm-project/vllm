@@ -40,6 +40,18 @@ runs:
       if [ ${SUCCESS} -ne 0 ]; then
         exit 1
       fi
+      # strip binaries
+      if [ ! $(command -v strip) ]; then
+          sudo apt install -y binutils
+      fi
+      if [ ! $(command -v file) ]; then
+          sudo apt install -y file
+      fi
+      for eachso in $(find . -type f -name '*.so')
+      do
+          strip $eachso
+          file $eachso
+      done
       # whl
       SUCCESS=0
       pip3 wheel --no-deps -w dist . || SUCCESS=$?
