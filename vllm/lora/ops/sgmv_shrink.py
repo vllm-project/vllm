@@ -144,12 +144,6 @@ def sgmv_shrink(
     assert output_tensor.is_contiguous()
     # TODO tuning this config
     N, K = lora_a_weights.shape[-2:]  # K=hidden_size,N=rank
-    # BLOCK_M = config.get("BLOCK_M", 32)
-    # BLOCK_N = config.get("BLOCK_N", 32)
-    # BLOCK_K = config.get("BLOCK_K", 32)
-    # SPLIT_K = config.get("SPLIT_K", 16)
-    # num_warps = config.get("num_warps", 4)
-    # num_stages = config.get("num_stages", 3)
     BLOCK_M = 32
     BLOCK_N = 16
     BLOCK_K = 32

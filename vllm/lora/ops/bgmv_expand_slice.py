@@ -93,15 +93,14 @@ def bgmv_expand_slice(
     """
     Args:
         inputs (torch.Tensor): input tensor
-        lora_b_weights (torch.Tensor): lora'a weight
+        lora_b_weights (torch.Tensor): lora'b weight
         output_tensor (torch.Tensor): output tensor
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch
-        batchs (int): batch size
         slice_offst (int): output_tensor's offst
         slice_size (int): current output_tensor's size
+        batchs (int): batch size
         add_inputs (bool, optional): _description_. Defaults to False.
-        cast_type (bool, optional): _description_. Defaults to False.
     """
 
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
