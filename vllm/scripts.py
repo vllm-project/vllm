@@ -1,9 +1,9 @@
 # The CLI entrypoint to vLLM.
 import argparse
 import os
-from typing import Optional
 import signal
 import sys
+from typing import Optional
 
 from openai import OpenAI
 
