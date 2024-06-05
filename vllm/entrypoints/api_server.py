@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.async_llm_engine import AsyncLLMEngine,RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
@@ -53,11 +53,8 @@ async def generate(request: Request) -> Response:
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
-            prompt = request_output.prompt
-            text_outputs = [
-                prompt + output.text for output in request_output.outputs
-            ]
-            ret = {"text": text_outputs}
+            # process output depending upon detokenize== True/False
+            ret = process_output(request_output,sampling_params)
             yield (json.dumps(ret) + "\0").encode("utf-8")
 
     if stream:
@@ -74,17 +71,25 @@ async def generate(request: Request) -> Response:
 
     assert final_output is not None
 
+    # process output depending upon detokenize== True/False
+    ret = process_output(final_output,sampling_params)
+
+    return JSONResponse(ret)
+
+def process_output(final_output:RequestOutput,sampling_params:SamplingParams):
     # make sure prompt is a valid string, to prevent errors
-    prompt = final_output.prompt if isinstance(final_output.prompt,str) else ""
+    # https://github.com/vllm-project/vllm/issues/5186
+    prompt = final_output.prompt if isinstance(final_output.prompt,
+                                               str) else ""
     text_outputs = [prompt + output.text for output in final_output.outputs]
 
     ## add token_ids to response if detokenize==False
     token_outputs = []
     if not sampling_params.detokenize:
-        token_outputs = [output.token_ids for output in final_output.outputs] 
+        token_outputs = [output.token_ids for output in final_output.outputs]
 
-    ret = {"text": text_outputs,"token_ids":token_outputs}
-    return JSONResponse(ret)
+    return {"text": text_outputs, "token_ids": token_outputs}
+
 
 
 if __name__ == "__main__":
