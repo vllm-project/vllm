@@ -2,7 +2,7 @@
 import argparse
 import os
 from openai import OpenAI
-from typing import Dict
+from typing import Dict, Optional
 
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
@@ -97,7 +97,13 @@ def interactive_cli(args: argparse.Namespace) -> None:
     if args.command == "complete":
         complete(create_completion_url, model_name, openai_client)
     elif args.command == "chat":
-        chat(create_chat_completion_url, model_name, openai_client)
+        optional_system_prompt = getattr(args, "system-prompt")
+        chat(
+            optional_system_prompt,
+            create_chat_completion_url,
+            model_name,
+            openai_client
+        )
 
 
 def complete(create_completion_url: str, model_name: str, client: OpenAI) -> None:
@@ -112,8 +118,18 @@ def complete(create_completion_url: str, model_name: str, client: OpenAI) -> Non
         print(f"Response Content: {choice}")
 
 
-def chat(create_chat_completion_url: str, model_name: str, client: OpenAI) -> None:
+def chat(system_prompt: Optional[str],
+         create_chat_completion_url: str,
+         model_name: str,
+         client: OpenAI
+    ) -> None:
     conversation = []
+    if system_prompt is not None:
+        conversation.append({
+            "role": "system",
+            "content": system_prompt
+        })
+
     while True:
         input_message = input("Please enter a message for the chat model:\n>")
         message = {
