@@ -45,7 +45,9 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
             self.model_runner.pin_memory)
 
         model_outputs = self.model_runner.model.generate_proposals(
-            input_ids=input_tokens, sampling_metadata=sampling_metadata)
+            input_ids=input_tokens,
+            sample_len=sample_len,
+            sampling_metadata=sampling_metadata)
 
         assert len(model_outputs) == sample_len
 

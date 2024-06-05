@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -86,54 +86,61 @@ class MLPSpeculator(nn.Module):
                                                 config.vocab_size, 1.0)
         self.sampler = Sampler()
 
+        self.previous_hidden_state: Optional[torch.Tensor] = None
+        self.accepted_token_lengths: Optional[torch.Tensor] = None
+        self.first_decode_step: bool = False
+
     def generate_proposals(
         self,
         input_ids: torch.Tensor,
+        sample_len: int,
         sampling_metadata: SamplingMetadata,
     ) -> List[SamplerOutput]:
+        if sample_len > self.n_predict:
+            raise ValueError(f"Speculator model can predict at most "
+                             f"{self.n_predict} future tokens, {sample_len} "
+                             "were requested")
+
+        previous_hidden_state = self.previous_hidden_state
+        self.previous_hidden_state = None
+        num_predict_tokens = min(sample_len, self.n_predict)
 
         if self.first_decode_step:
             self.first_decode_step = False
         else:
-            self.previous_hidden_state = self.previous_hidden_state.reshape(
-                -1, self.n_predict + 1, self.previous_hidden_state.size(1))
-            self.previous_hidden_state = self.previous_hidden_state.gather(
+            previous_hidden_state = previous_hidden_state.reshape(
+                -1, num_predict_tokens + 1, previous_hidden_state.size(1))
+            previous_hidden_state = previous_hidden_state.gather(
                 1, (self.accepted_token_lengths - 1)[:, None, None].expand(
-                    -1, 1,
-                    self.previous_hidden_state.size(2))).squeeze(1)  # b x d
+                    -1, 1, previous_hidden_state.size(2))).squeeze(1)  # b x d
 
         # b x 1 x d
-        self.previous_hidden_state = self.previous_hidden_state.reshape(
-            self.previous_hidden_state.size(0), 1,
-            self.previous_hidden_state.size(1))
+        previous_hidden_state = previous_hidden_state.unsqueeze(1)
 
         # b x 1
-        last_tokens = input_ids.reshape(-1, 1)
+        last_tokens = input_ids.unsqueeze(1)
 
         next_tokens = []
 
-        for head_index in range(self.n_predict):
+        for head_index in range(num_predict_tokens):
 
             # Project and predict
             z = self.emb[head_index](last_tokens)  # b k d
-            state = self.proj[head_index](self.previous_hidden_state)
+            state = self.proj[head_index](previous_hidden_state)
 
             # Weighted add of state_weight*state and emb_weight*z
             # Let subsequent LN take care of denominator
             # state_weight is close to 1, so shouldn't be any precision issues
-            state = torch.add(state,
-                              z,
-                              alpha=self.emb_weight / self.state_weight)
+            state.add_(z, alpha=self.emb_weight / self.state_weight)
 
             state = self.activation(self.ln[head_index](state))  # b k d
             # TODO: not yet supporting top_k_tokens_per_head
-            self.previous_hidden_state = state
+            previous_hidden_state = state
 
             logits = self.logits_processor(self.head[head_index].weight, state,
                                            sampling_metadata)
 
-            tmp = logits.reshape(-1, logits.size(2))
-            output = self.sampler(tmp, sampling_metadata)
+            output = self.sampler(logits.flatten(0, 1), sampling_metadata)
             last_tokens = output.sampled_token_ids
             next_tokens.append(output)
 
