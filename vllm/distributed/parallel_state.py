@@ -452,6 +452,10 @@ def get_pp() -> GroupCoordinator:
     return _PP
 
 
+# kept for backward compatibility
+get_pipeline_model_parallel_group = get_pp
+
+
 @contextmanager
 def graph_capture():
     """
@@ -474,11 +478,6 @@ def graph_capture():
 logger = init_logger(__name__)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
-
-# Pipeline model parallel group that the current rank belongs to.
-_PP_DEVICE_GROUP: Optional[ProcessGroup] = None
-_PP_CPU_GROUP: Optional[ProcessGroup] = None
-_PP_PYNCCL_COMMUNICATOR = None
 
 # when people blindly call `torch.distributed.all_reduce` etc,
 # it will use this group. It is initialized with the `backend`
@@ -605,7 +604,6 @@ def initialize_model_parallel(
                                              tensor_model_parallel_size)
     num_pipeline_model_parallel_groups: int = (world_size //
                                                pipeline_model_parallel_size)
-    rank = torch.distributed.get_rank()
 
     # Build the tensor model-parallel groups.
     global _TP
@@ -616,7 +614,6 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
-    global _TP
     _TP = GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=_LOCAL_RANK,
@@ -626,23 +623,20 @@ def initialize_model_parallel(
     )
 
     # Build the pipeline model-parallel groups.
-    global _PP_DEVICE_GROUP, _PP_CPU_GROUP
-    global _PP_PYNCCL_COMMUNICATOR
-    assert _PP_DEVICE_GROUP is None, (
+    global _PP
+    assert _PP is None, (
         "pipeline model parallel group is already initialized")
+    group_ranks = []
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
-        group = torch.distributed.new_group(ranks, backend=backend)
-        cpu_group = torch.distributed.new_group(ranks, backend="gloo")
-        if rank in ranks:
-            _PP_DEVICE_GROUP = group
-            _PP_CPU_GROUP = cpu_group
-
-    if pipeline_model_parallel_size > 1:
-        _PP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
-            group=_PP_CPU_GROUP,
-            device=_LOCAL_RANK,
-        )
+        group_ranks.append(ranks)
+    _PP = GroupCoordinator(
+        group_ranks=group_ranks,
+        local_rank=_LOCAL_RANK,
+        torch_distributed_backend=backend,
+        use_pynccl=True,
+        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
+    )
 
 
 def ensure_model_parallel_initialized(
@@ -675,21 +669,7 @@ def ensure_model_parallel_initialized(
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
-    return (_TP is not None and _PP_DEVICE_GROUP is not None)
-
-
-def get_pipeline_model_parallel_group():
-    """Get the pipeline model parallel group the caller rank belongs to."""
-    assert _PP_DEVICE_GROUP is not None, (
-        "pipeline model parallel group is not initialized")
-    return _PP_DEVICE_GROUP
-
-
-def get_pipeline_model_parallel_cpu_group():
-    """Get the pipeline model parallel cpu group the caller rank belongs to."""
-    assert _PP_CPU_GROUP is not None, (
-        "pipeline model parallel cpu group is not initialized")
-    return _PP_CPU_GROUP
+    return (_TP is not None and _PP is not None)
 
 
 def get_tensor_model_parallel_world_size():
@@ -729,7 +709,7 @@ def destroy_model_parallel():
         _TP.destroy()
     _TP = None
 
-    global _PP_DEVICE_GROUP
-    if _PP_DEVICE_GROUP:
-        torch.distributed.destroy_process_group(_PP_DEVICE_GROUP)
-    _PP_DEVICE_GROUP = None
+    global _PP
+    if _PP:
+        _PP.destroy()
+    _PP = None
