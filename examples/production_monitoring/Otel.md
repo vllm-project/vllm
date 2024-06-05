@@ -1,5 +1,14 @@
 # Setup OpenTelemetry POC
 
+1. Install OpenTelemetry packages:
+    ```
+    pip install \
+        opentelemetry-sdk \
+        opentelemetry-api \
+        opentelemetry-exporter-otlp \
+        opentelemetry-semantic-conventions-ai
+    ```
+
 1. Start Jaeger in a docker container:
     ```
     # From: https://www.jaegertracing.io/docs/1.57/getting-started/
@@ -26,7 +35,7 @@
     Then set vLLM's service name for OpenTelemetry and run vLLM:
     ```
     export OTEL_SERVICE_NAME="vllm-server"
-    python -m vllm.entrypoints.openai.api_server --model="facebook/opt-125m"                                             
+    python -m vllm.entrypoints.openai.api_server --model="facebook/opt-125m" --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces"
     ```
 
 1. In a new shell, send requests with trace context from a dummy client
