@@ -95,7 +95,8 @@ template, or the template in string form. Without a chat template, the server wi
 and all chat requests will error.
 
 ```bash
-vllm serve ... \
+python -m vllm.entrypoints.openai.api_server \
+  --model ... \
   --chat-template ./path-to-chat-template.jinja
 ```
 
@@ -113,7 +114,7 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 ## Tool calling in the chat completion API
 vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
 
-To use a named function you need to define the function in the `tools` parameter and call it in the `tool_choice` parameter.
+To use a named function you need to define the function in the `tools` parameter and call it in the `tool_choice` parameter. 
 
 It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt. **This may change in the future.**
 
