@@ -660,10 +660,10 @@ def ensure_model_parallel_initialized(
     ), ("tensor parallel group already initialized, but of unexpected size: "
         f"{get_tensor_model_parallel_world_size()=} vs. "
         f"{tensor_model_parallel_size=}")
-    assert (get_pipeline_model_parallel_world_size(
-    ) == pipeline_model_parallel_size), (
+    pp_world_size = get_pp().world_size
+    assert (pp_world_size == pipeline_model_parallel_size), (
         "pipeline parallel group already initialized, but of unexpected size: "
-        f"{get_pipeline_model_parallel_world_size()=} vs. "
+        f"{pp_world_size=} vs. "
         f"{pipeline_model_parallel_size=}")
 
 
@@ -677,29 +677,9 @@ def get_tensor_model_parallel_world_size():
     return get_tp().world_size
 
 
-def get_pipeline_model_parallel_world_size():
-    """Return world size for the pipeline model parallel group."""
-    return torch.distributed.get_world_size(
-        group=get_pipeline_model_parallel_group())
-
-
 def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
     return get_tp().rank_in_group
-
-
-def get_pipeline_model_parallel_rank():
-    """Return my rank for the pipeline model parallel group."""
-    return torch.distributed.get_rank(
-        group=get_pipeline_model_parallel_group())
-
-
-def get_tensor_model_parallel_src_rank():
-    """Calculate the global rank corresponding to the first local rank
-    in the tensor model parallel group."""
-    global_rank = torch.distributed.get_rank()
-    local_world_size = get_tensor_model_parallel_world_size()
-    return (global_rank // local_world_size) * local_world_size
 
 
 def destroy_model_parallel():
