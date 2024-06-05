@@ -45,40 +45,6 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     return get_tp().gather(input_, dst, dim)
 
 
-def broadcast(input_: torch.Tensor,
-              src: int = 0,
-              group: Optional[ProcessGroup] = None):
-    """Broadcast the input tensor."""
-    group = group or torch.distributed.group.WORLD
-    ranks = torch.distributed.get_process_group_ranks(group)
-    assert src in ranks, f"Invalid src rank ({src})"
-
-    # Bypass the function if we are using only 1 GPU.
-    world_size = torch.distributed.get_world_size(group=group)
-    if world_size == 1:
-        return input_
-    # Broadcast.
-    torch.distributed.broadcast(input_, src=src, group=group)
-    return input_
-
-
-def broadcast_object_list(obj_list: List[Any],
-                          src: int = 0,
-                          group: Optional[ProcessGroup] = None):
-    """Broadcast the input object list."""
-    group = group or torch.distributed.group.WORLD
-    ranks = torch.distributed.get_process_group_ranks(group)
-    assert src in ranks, f"Invalid src rank ({src})"
-
-    # Bypass the function if we are using only 1 GPU.
-    world_size = torch.distributed.get_world_size(group=group)
-    if world_size == 1:
-        return obj_list
-    # Broadcast.
-    torch.distributed.broadcast_object_list(obj_list, src=src, group=group)
-    return obj_list
-
-
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 

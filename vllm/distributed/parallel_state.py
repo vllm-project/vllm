@@ -197,6 +197,7 @@ class GroupCoordinator:
         """
         NOTE: We assume that the input tensor is on the same device across
         all the ranks.
+        NOTE: `dst` is the local rank of the destination rank.
         """
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.
@@ -215,13 +216,46 @@ class GroupCoordinator:
         # Gather.
         torch.distributed.gather(input_,
                                  gather_list,
-                                 dst=dst,
+                                 dst=self.ranks[dst],
                                  group=self.device_group)
         if self.rank_in_group == dst:
             output_tensor = torch.cat(gather_list, dim=dim)
         else:
             output_tensor = None
         return output_tensor
+
+    def broadcast(self, input_: torch.Tensor, src: int = 0):
+        """Broadcast the input tensor.
+        NOTE: `src` is the local rank of the source rank.
+        """
+        assert src < self.world_size, f"Invalid src rank ({src})"
+
+        # Bypass the function if we are using only 1 GPU.
+        if self.world_size == 1:
+            return input_
+        # Broadcast.
+        torch.distributed.broadcast(input_,
+                                    src=self.ranks[src],
+                                    group=self.device_group)
+        return input_
+
+    def broadcast_object_list(self,
+                              obj_list: List[Any],
+                              src: int = 0,
+                              group: Optional[ProcessGroup] = None):
+        """Broadcast the input object list.
+        NOTE: `src` is the local rank of the source rank.
+        """
+        assert src < self.world_size, f"Invalid src rank ({src})"
+
+        # Bypass the function if we are using only 1 GPU.
+        if self.world_size == 1:
+            return obj_list
+        # Broadcast.
+        torch.distributed.broadcast_object_list(obj_list,
+                                                src=self.ranks[src],
+                                                group=self.device_group)
+        return obj_list
 
     def destroy(self):
         if self.device_group is not None:
