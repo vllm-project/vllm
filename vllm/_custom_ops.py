@@ -2,13 +2,12 @@ from typing import Optional, Tuple, Type
 
 import torch
 
-from vllm.logger import init_logger
-logger = init_logger(__name__)
-
 try:
     from vllm._C import cache_ops as vllm_cache_ops
     from vllm._C import ops as vllm_ops
 except ImportError as e:
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
     logger.error("Failed to import from vllm._C with %r", e)
 
 
