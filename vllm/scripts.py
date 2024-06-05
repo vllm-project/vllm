@@ -1,8 +1,8 @@
 # The CLI entrypoint to vLLM.
 import argparse
-from openai import OpenAI
 import os
-from typing import Dict, Any
+from openai import OpenAI
+from typing import Dict
 
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
