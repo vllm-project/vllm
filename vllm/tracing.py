@@ -37,14 +37,14 @@ def is_otel_installed() -> bool:
 
 
 def init_tracer(instrumenting_module_name: str,
-                otlp_endpoint: str) -> Optional[Tracer]:
+                otlp_traces_endpoint: str) -> Optional[Tracer]:
     trace_provider = TracerProvider()
 
     # The endpoint of OTLPSpanExporter is set from envvars:
     #  OTEL_EXPORTER_OTLP_ENDPOINT
     #  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
     trace_provider.add_span_processor(
-        BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint)))
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_traces_endpoint)))
     set_tracer_provider(trace_provider)
 
     tracer = trace_provider.get_tracer(instrumenting_module_name)

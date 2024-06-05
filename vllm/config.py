@@ -1366,12 +1366,12 @@ class DecodingConfig:
 @dataclass
 class ObservabilityConfig:
     """Configuration for observability."""
-    otlp_endpoint: Optional[str] = None
+    otlp_traces_endpoint: Optional[str] = None
 
     def __post_init__(self):
-        if not is_otel_installed() and self.otlp_endpoint is not None:
+        if not is_otel_installed() and self.otlp_traces_endpoint is not None:
             raise ValueError("OpenTelemetry packages must be installed before "
-                             "configuring 'otlp_endpoint'")
+                             "configuring 'otlp_traces_endpoint'")
 
 
 @dataclass(frozen=True)

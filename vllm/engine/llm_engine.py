@@ -294,9 +294,10 @@ class LLMEngine:
             self.stat_logger.info("cache_config", self.cache_config)
 
         self.tracer = None
-        if self.observability_config.otlp_endpoint:
-            self.tracer = init_tracer("vllm.llm_engine",
-                                      self.observability_config.otlp_endpoint)
+        if self.observability_config.otlp_traces_endpoint:
+            self.tracer = init_tracer(
+                "vllm.llm_engine",
+                self.observability_config.otlp_traces_endpoint)
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.

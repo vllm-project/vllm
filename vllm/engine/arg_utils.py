@@ -102,7 +102,7 @@ class EngineArgs:
 
     qlora_adapter_name_or_path: Optional[str] = None
 
-    otlp_endpoint: Optional[str] = None
+    otlp_traces_endpoint: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -603,7 +603,7 @@ class EngineArgs:
                             help='Name or path of the QLoRA adapter.')
 
         parser.add_argument(
-            '--otlp-endpoint',
+            '--otlp-traces-endpoint',
             type=str,
             default=None,
             help='Target URL to which OpenTelemetry traces will be sent.')
@@ -767,7 +767,7 @@ class EngineArgs:
             guided_decoding_backend=self.guided_decoding_backend)
 
         observability_config = ObservabilityConfig(
-            otlp_endpoint=self.otlp_endpoint)
+            otlp_traces_endpoint=self.otlp_traces_endpoint)
 
         if (model_config.get_sliding_window() is not None
                 and scheduler_config.chunked_prefill_enabled
