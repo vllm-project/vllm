@@ -3,7 +3,7 @@
 Using VLMs
 ==========
 
-This document shows you how to run and serve Vision Language Models (VLMs) using vLLM.
+vLLM provides experimental support for Vision Language Models (VLMs). This document shows you how to run and serve these models using vLLM.
 
 Engine Arguments
 ----------------
