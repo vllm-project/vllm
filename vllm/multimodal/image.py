@@ -490,6 +490,14 @@ class ImagePixelData(MultiModalData):
 
         self.image = image
 
+    def __repr__(self) -> str:
+        image = self.image
+        if isinstance(image, Image.Image):
+            return f"{type(self).__name__}(image={image})"
+
+        return (f"{type(self).__name__}(image=torch.Tensor(shape="
+                f"{image.shape}, dtype={image.dtype}))")
+
 
 class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
 
@@ -511,9 +519,9 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
                               data: ImagePixelData) -> Dict[str, torch.Tensor]:
         model_config = ctx.model_config
         image = data.image
-        image_processor = self._get_hf_image_processor(model_config)
 
         if isinstance(image, Image.Image):
+            image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available"
                                    "to process the image object")
@@ -540,6 +548,12 @@ class ImageFeatureData(MultiModalData):
 
     def __init__(self, image_features: torch.Tensor) -> None:
         self.image_features = image_features
+
+    def __repr__(self) -> str:
+        image_features = self.image_features
+
+        return (f"{type(self).__name__}(image_features=torch.Tensor(shape="
+                f"{image_features.shape}, dtype={image_features.dtype}))")
 
 
 class ImageFeaturePlugin(MultiModalPlugin[ImageFeatureData]):

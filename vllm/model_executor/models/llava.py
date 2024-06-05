@@ -154,7 +154,8 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
                 return None
 
             if not isinstance(pixel_values, torch.Tensor):
-                raise ValueError("Incorrect type of pixel values")
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
             return LlavaImagePixelInputs(
                 type="pixel_values",
@@ -169,7 +170,8 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
                 return None
 
             if not isinstance(image_features, torch.Tensor):
-                raise ValueError("Incorrect type of image features")
+                raise ValueError("Incorrect type of image features. "
+                                 f"Got type: {type(image_features)}")
 
             return LlavaImageFeatureInputs(
                 type="image_features",
