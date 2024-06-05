@@ -10,6 +10,7 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
                            SequenceGroupMetadata, SequenceOutput, Logprob)
@@ -417,6 +418,15 @@ class ModelWrapper(nn.Module):
             batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
         logits_indices = base_indicies + input_lens - 1
 
+        # FIXME(woosuk): This is a temporary hack to avoid using the existing
+        # sampler and sampling metadata.
+        sampling_metadata = SamplingMetadata(
+            seq_groups=[],
+            selected_token_indices=logits_indices,
+            categorized_sample_indices={},
+            num_prompts=attn_metadata.num_prefills,
+        )
+
         if kv_caches[0][0] is not None:
             num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
             slot_mapping = attn_metadata.slot_mapping
@@ -438,7 +448,8 @@ class ModelWrapper(nn.Module):
             kv_caches,
             attn_metadata,
         )
-        logits = self.model.compute_logits(hidden_states, logits_indices)
+        hidden_states = hidden_states.flatten(0, 1)
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         logits = logits.div_(t.unsqueeze(dim=1))
         # TODO(woosuk): Support top-p sampling.
