@@ -10,10 +10,11 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
-                           SequenceGroupMetadata, SequenceOutput, Logprob)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
+                           SamplerOutput, SequenceGroupMetadata,
+                           SequenceOutput)
 from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
@@ -362,24 +363,10 @@ class TPUModelRunner:
     ) -> Optional[SamplerOutput]:
         assert seq_group_metadata_list is not None
 
-        start = time.time()
         inputs = self.prepare_inputs(seq_group_metadata_list)
-        end = time.time()
-        # phase = "prompt" if inputs[2].is_prompt else "decode"
-        # batch_size, seq_len = inputs[0].shape
-        # print(f"{phase} inputs: batch_size={batch_size}, seq_len={seq_len}")
-        # print(f"prepare_inputs(): {(end - start) * 1000:.2f} ms")
-
-        start = time.time()
         next_token_ids = self.model(inputs[0], inputs[1], kv_caches,
                                     *inputs[2:])
-        end = time.time()
-        # print(f"model(): {(end - start) * 1000:.2f} ms")
-
-        start = time.time()
         next_token_ids = next_token_ids.cpu().tolist()
-        end = time.time()
-        # print(f".cpu(): {(end - start) * 1000:.2f} ms")
 
         i = 0
         sampler_outputs = []

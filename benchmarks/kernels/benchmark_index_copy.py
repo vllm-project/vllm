@@ -1,13 +1,11 @@
 import os
 import time
 
-os.environ["PJRT_DEVICE"] = "TPU"
-
 import torch
 import torch_xla.core.xla_model as xm
-import torch_xla.experimental.custom_kernel  # Required to register custom ops.
-import torch_xla.experimental.dynamo_set_buffer_donor
+import torch_xla.experimental.dynamo_set_buffer_donor  # noqa: F401
 
+os.environ["PJRT_DEVICE"] = "TPU"
 device = xm.xla_device()
 
 BATCH_SIZE = 1

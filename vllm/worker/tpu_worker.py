@@ -2,19 +2,19 @@ import os
 from typing import List, Optional, Tuple
 
 import torch
-import torch_xla.runtime as xr
 import torch_xla.core.xla_model as xm
+import torch_xla.runtime as xr
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
-from vllm.distributed import (init_distributed_environment,
-                              ensure_model_parallel_initialized)
+from vllm.distributed import (ensure_model_parallel_initialized,
+                              init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.worker.tpu_model_runner import TPUModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
-from vllm.utils import get_dtype_size, STR_DTYPE_TO_TORCH_DTYPE
 
 logger = init_logger(__name__)
 

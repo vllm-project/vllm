@@ -1,11 +1,13 @@
 from typing import List, Set, Tuple
 
+import torch
+
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (make_async, get_distributed_init_method, get_ip,
-                        get_open_port)
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+                        make_async)
 
 logger = init_logger(__name__)
 
@@ -15,6 +17,12 @@ class TPUExecutor(ExecutorBase):
     def _init_executor(self) -> None:
         assert not self.speculative_config, (
             "Speculative decoding not yet supported for TPU backend")
+        if self.model_config.dtype in (torch.float16, torch.float32):
+            logger.warning(
+                "The TPU backend currently does not support $%s. "
+                "Using bfloat16 instead.", self.model_config.dtype)
+            self.model_config.dtype = torch.bfloat16
+
         # Instantiate the worker and load the model to the device.
         self._init_worker()
 
