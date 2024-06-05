@@ -678,12 +678,6 @@ def model_parallel_is_initialized():
     return (_TP is not None and _PP_DEVICE_GROUP is not None)
 
 
-def get_cpu_world_group():
-    """Get the CPU world group."""
-    assert _CPU_WORLD_GROUP is not None, ("CPU world group is not initialized")
-    return _CPU_WORLD_GROUP
-
-
 def get_pipeline_model_parallel_group():
     """Get the pipeline model parallel group the caller rank belongs to."""
     assert _PP_DEVICE_GROUP is not None, (

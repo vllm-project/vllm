@@ -10,7 +10,7 @@ from vllm.distributed.communication_op import (  # noqa
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
-                                             graph_capture,
+                                             get_world, graph_capture,
                                              init_distributed_environment)
 from vllm.utils import update_environment_variables
 
@@ -54,7 +54,7 @@ def worker_fn_wrapper(fn):
 
 @worker_fn_wrapper
 def worker_fn():
-    pynccl_comm = PyNcclCommunicator()
+    pynccl_comm = PyNcclCommunicator(get_world().cpu_group)
     tensor = torch.ones(16, 1024, 1024,
                         dtype=torch.float32).cuda(pynccl_comm.rank)
     with pynccl_comm.change_state(enable=True):
@@ -130,7 +130,7 @@ def test_pynccl_multiple_allreduce_with_vllm():
 def worker_fn_with_cudagraph():
     with torch.no_grad():
         graph = torch.cuda.CUDAGraph()
-        pynccl_comm = PyNcclCommunicator()
+        pynccl_comm = PyNcclCommunicator(get_world().cpu_group)
         # run something in the default stream to initialize torch engine
         a = torch.ones((4, 4), device=f'cuda:{pynccl_comm.rank}')
         torch.cuda.synchronize()
@@ -155,7 +155,7 @@ def test_pynccl_with_cudagraph():
 
 @worker_fn_wrapper
 def send_recv_worker_fn():
-    pynccl_comm = PyNcclCommunicator()
+    pynccl_comm = PyNcclCommunicator(get_world().cpu_group)
     if pynccl_comm.rank == 0:
         tensor = torch.ones(16, 1024, 1024,
                             dtype=torch.float32).cuda(pynccl_comm.rank)

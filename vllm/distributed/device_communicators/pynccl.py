@@ -9,7 +9,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
     ncclRedOpTypeEnum, ncclUniqueId)
-from vllm.distributed.parallel_state import get_cpu_world_group, get_local_rank
+from vllm.distributed.parallel_state import get_local_rank
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -19,7 +19,7 @@ class PyNcclCommunicator:
 
     def __init__(
         self,
-        group: Optional[ProcessGroup] = None,
+        group: ProcessGroup,
         device: Optional[Union[int, str, torch.device]] = None,
         library_path: Optional[str] = None,
     ):
@@ -35,7 +35,6 @@ class PyNcclCommunicator:
         is bind to a unique device.
         """
         assert dist.is_initialized()
-        group = get_cpu_world_group() if group is None else group
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "PyNcclCommunicator should be attached to a non-NCCL group.")
         self.group = group
