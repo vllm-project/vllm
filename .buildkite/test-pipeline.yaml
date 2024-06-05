@@ -94,7 +94,7 @@ steps:
   #mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models -m "not llava"
+    - pytest -v -s models -m \"not llava\"
 
 - label: Llava Test
   mirror_hardwares: [amd]
