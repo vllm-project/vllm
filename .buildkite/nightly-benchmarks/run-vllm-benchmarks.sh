@@ -38,15 +38,20 @@ fi
 
 # install wget and curl
 (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
-cd /
-git clone https://github.com/vllm-project/vllm.git
-cd vllm
-cd benchmarks
-mkdir results
-wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-PARAMS_FILE=/vllm/.buildkite/benchmark-parameters.json
-RESULTS_FOLDER=/vllm/benchmarks/results/
+# cd /
+# git clone https://github.com/vllm-project/vllm.git
+# cd vllm
+# cd benchmarks
+# mkdir results
 
+# TODO: assumed we are in root directory of vLLM
+wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+PARAMS_FILE=.buildkite/benchmark-parameters.json
+
+
+pushd benchmarks
+RESULTS_FOLDER=results/
+mkdir -p $RESULTS_FOLDER
 
 (which jq) || (apt-get update && apt-get -y install jq)
 # iterate over the test cases
@@ -68,7 +73,7 @@ jq -c '.[]' $PARAMS_FILE | while read -r params; do
     # initialize the benchmarking command
     offline_command="python3 benchmark_throughput.py --output-json $RESULTS_FOLDER/offline_$testname.json "
     online_client_command="python3 benchmark_serving.py --backend vllm --save-result --result-dir $RESULTS_FOLDER "
-    
+
     # iteratre over each key in `benchmark-parameters.json`
     for key in $keys; do
         echo $key
@@ -78,16 +83,16 @@ jq -c '.[]' $PARAMS_FILE | while read -r params; do
           continue
         fi
         offline_command="$offline_command --$key $value"
-        
+
         if [[ $key == "tensor-parallel-size" ]]; then
           # tensor-parallel-size is the server argument not the client.
           continue
         fi
         online_client_command="$online_client_command --$key $value"
-        
+
         echo $online_client_command
     done
-    
+
     # offline inference
     echo "Testing offline inference throughput ($testname)"
     eval $offline_command 2>&1 | tee $RESULTS_FOLDER/offline_$testname.txt
