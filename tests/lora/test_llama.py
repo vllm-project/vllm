@@ -36,7 +36,7 @@ def do_sample(llm, lora_path: str, lora_id: int):
     return generated_texts
 
 
-@pytest.mark.parametrize("tp_size", [1, 8])
+@pytest.mark.parametrize("tp_size", [1])
 def test_llama_lora(sql_lora_files, tp_size):
     # Cannot use as it will initialize torch.cuda too early...
     # if torch.cuda.device_count() < tp_size:
@@ -119,6 +119,18 @@ def test_llama_tensor_parallel_equality(sql_lora_files):
     cleanup()
 
     assert output_tp1 == output_tp4
+
+    llm_tp8 = vllm.LLM(MODEL_PATH,
+                       enable_lora=True,
+                       max_num_seqs=16,
+                       max_loras=4,
+                       tensor_parallel_size=8)
+    output_tp8 = do_sample(llm_tp8, sql_lora_files, lora_id=1)
+
+    del llm_tp8
+    cleanup()
+
+    assert output_tp1 == output_tp8
 
 
 def test_llama_lora_warmup(sql_lora_files):
