@@ -40,7 +40,7 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
 def test_fetch_image_base64(url_images: Dict[str, Image.Image], image_url: str,
-                          suffix: str):
+                            suffix: str):
     url_image = url_images[image_url]
 
     try:
