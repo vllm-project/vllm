@@ -22,7 +22,7 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.quantization.ggml import GGMLConfig
+from vllm.model_executor.layers.quantization.gguf import GGUFConfig
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     tensorizer_weights_iterator)
@@ -47,7 +47,7 @@ def _get_quantization_config(
     """Get the quantization config."""
     if model_config.quantization is not None:
         quant_config = get_quant_config(model_config, load_config)
-        if not isinstance(quant_config, GGMLConfig):
+        if not isinstance(quant_config, GGUFConfig):
             capability = torch.cuda.get_device_capability()
             capability = capability[0] * 10 + capability[1]
             if capability < quant_config.get_min_capability():
@@ -808,7 +808,7 @@ class GGUFModelLoader(BaseModelLoader):
             self, model_name_or_path: str, quantization: str
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         local_model_path = self._prepare_weights(model_name_or_path)
-        if quantization == "ggml":
+        if quantization == "gguf":
             return gguf_quant_weights_iterator(local_model_path)
         else:
             return gguf_dequant_weights_iterator(local_model_path)

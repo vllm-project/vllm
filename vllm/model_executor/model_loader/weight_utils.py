@@ -121,7 +121,7 @@ def get_quant_config(model_config: ModelConfig,
                      load_config: LoadConfig) -> QuantizationConfig:
     quant_cls = get_quantization_config(model_config.quantization)
     # GGUF doesn't have config file
-    if model_config.quantization == "ggml":
+    if model_config.quantization == "gguf":
         return quant_cls()
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
@@ -407,7 +407,7 @@ def gguf_quant_weights_iterator(
         # for F32, scales is None
         if scales is not None and "weight" in name:
             scales_name = name.replace("weight", "scales")
-            quants_name = name.replace("weight", "quants")
+            quants_name = name.replace("weight", "qweight")
             for new_name, param in zip([scales_name, quants_name],
                                        [scales, quants]):
                 yield new_name, param

@@ -18,7 +18,7 @@ def run_gguf_inference(model_path):
     llm = LLM(model=model_path,
               tokenizer="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
               load_format="gguf",
-              quantization="ggml")
+              quantization="gguf")
 
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
