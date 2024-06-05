@@ -16,8 +16,8 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_gather)
 from vllm.distributed.utils import divide
-from vllm.lora.punica import (add_lora, add_lora_triton, add_lora_slice,
-                              add_lora_triton_slice, bgmv)
+from vllm.lora.punica import (add_lora_triton,
+                              add_lora_triton_slice)
 from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -63,38 +63,6 @@ def _not_fully_sharded_can_replace(can_replace):
 
     return dec
 
-
-def _apply_lora(
-    x: torch.Tensor,
-    lora_a_stacked: torch.Tensor,
-    lora_b_stacked: torch.Tensor,
-    indices: torch.Tensor,
-    output: torch.Tensor,
-):
-    """Applies lora to each input.
-
-    This method applies all loras to each input. It uses the
-    indices vector to determine which lora yields the
-    correct output. An index of -1 means no lora should be
-    applied. This method adds the final lora results to the
-    output.
-
-    Input shapes:
-        x:               (batch_size, hidden_dim)
-        lora_a_stacked:  (num_loras, lora_rank, hidden_dim)
-        lora_b_stacked:  (num_loras, output_dim, lora_rank)
-        indices:         (batch_size)
-        output:          (batch_size, output_dim)
-    """
-    org_output = output
-    x = x.view(-1, x.shape[-1])
-    output = output.view(-1, output.shape[-1])
-    indices = indices.view(-1)
-    buffer = add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0,
-                      1.0)
-    return buffer, output.view_as(org_output)
-
-
 def _apply_lora_triton(
     x: torch.Tensor,
     lora_a_stacked: torch.Tensor,
@@ -133,47 +101,6 @@ def _apply_lora_triton(
                     seq_length_tensor[:batch_size],
                     lora_index_tensor[:batch_size], batch_size, max_length, 0,
                     1.0, is_prefilling)
-    return output.view_as(org_output)
-
-
-def _apply_lora_packed_nslice(
-    x: torch.Tensor,
-    lora_a_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    lora_b_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    indices: torch.Tensor,
-    output: torch.Tensor,
-    output_slices: Tuple[int, ...],
-):
-    """Applies lora to each input.
-
-    This method applies all loras to each input. It uses the
-    indices vector to determine which lora yields the
-    correct output. An index of -1 means no lora should be
-    applied. This method adds the final lora results to the
-    output.
-
-    This method is used for layers that are composed of multiple sublayers
-    (slices) packed together.
-
-    Input shapes:
-        x:                 (batch_size, hidden_dim)
-        lora_a_stacked:    3 element tuple of (num_loras, lora_rank, hidden_dim)
-        lora_b_stacked:    3 element tuple of (num_loras, output_dim, lora_rank)
-        indices:           (batch_size)
-        output:            (batch_size, q_slice_size + 2*kv_slice_size)
-        output_slices:     n-1 element tuple of (slice_size...),
-                           where n is number of slices
-    """
-    org_output = output
-    x = x.view(-1, x.shape[-1])
-    output = output.view(-1, output.shape[-1])
-    indices = indices.view(-1)
-    offset_left = 0
-    for slice_idx in range(len(output_slices)):
-        add_lora_slice(output, x, lora_a_stacked[slice_idx],
-                       lora_b_stacked[slice_idx], indices, 0, 1.0, offset_left,
-                       output_slices[slice_idx])
-        offset_left += output_slices[slice_idx]
     return output.view_as(org_output)
 
 
@@ -711,15 +638,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        # output_temp=output.clone()
-        # _apply_lora_packed_nslice(
-        #     x,
-        #     self.lora_a_stacked,
-        #     self.lora_b_stacked,
-        #     self.indices[:self.indices_len[0]],
-        #     output,
-        #     (self.output_dim, self.output_dim),
-        # )
         _apply_lora_triton_nslice(
             x,
             self.lora_a_stacked,
@@ -731,11 +649,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             output,
             (self.output_dim, self.output_dim),
         )
-        # flag=torch.allclose(output,output_temp,1e-2,1e-2)
-        # if flag:
-        #     print("pass")
-        # else:
-        #     print()
         return output
 
     @classmethod
@@ -987,14 +900,6 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        # _apply_lora_packed_nslice(
-        #     x,
-        #     self.lora_a_stacked,
-        #     self.lora_b_stacked,
-        #     self.indices[:self.indices_len[0]],
-        #     output,
-        #     self.output_slices,
-        # )
         _apply_lora_triton_nslice(
             x,
             self.lora_a_stacked,
@@ -1122,31 +1027,6 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
                            self.b_seq_start_tensor, self.seq_length_tensor,
                            self.indices, self.batch_mlen_stage_lst, output)
         return output
-
-    # def apply(self, x: torch.Tensor) -> torch.Tensor:
-    #     output = self.base_layer.quant_method.apply(self.base_layer, x)
-    #     temp_output = output.clone()
-    #     output2 = output.clone()
-    #     mid_buffer,_=_apply_lora(
-    #         x,
-    #         self.lora_a_stacked,
-    #         self.lora_b_stacked,
-    #         self.indices[:self.indices_len[0]],
-    #         output,
-    #     )
-    #     batch_size = self.batch_mlen_stage_lst[0]
-    #     mid2_buffer,_=_apply_lora_triton(x, self.lora_a_stacked,
-    #                         self.lora_b_stacked,
-    #                        self.b_seq_start_tensor[:batch_size],
-    #                        self.seq_length_tensor[:batch_size],
-    #                        self.indices[:batch_size],
-    #                        self.batch_mlen_stage_lst, output)
-    #     flag = torch.allclose(mid_buffer, mid2_buffer, 3e-2, 2e-2)
-    #     # if not flag:
-    #     #     print("error")
-    #     # else:
-    #     #     print("pass")
-    #     return temp_output
 
     def forward(self, input_):
         """Forward of RowParallelLinear
@@ -1358,25 +1238,14 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits
 
-        _apply_lora(
-            hidden_states,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            self.indices[:self.indices_len[1]],
-            logits,
-        )
-
-        logits_temp = logits.clone()
+        batch_mlen_stage_lst=self.batch_mlen_stage_lst.copy()
+        # LogitsProcessorWithLoRA always using bgmv
+        batch_mlen_stage_lst[2]=False
         _apply_lora_triton(hidden_states, self.lora_a_stacked,
                            self.lora_b_stacked, self.b_seq_start_tensor,
                            self.seq_length_tensor,
                            self.indices[:self.indices_len[1]],
-                           self.batch_mlen_stage_lst, logits_temp)
-        flag = torch.allclose(logits_temp, logits, rtol=1e-2, atol=1e-2)
-        if flag:
-            print("pass")
-        else:
-            print("error")
+                           batch_mlen_stage_lst, logits)
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.base_layer.vocab_size]
 
