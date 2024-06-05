@@ -3,7 +3,8 @@ from typing import Dict, List, Set, Tuple
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceGroupMetadata)
+from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
@@ -53,7 +54,8 @@ class TPUExecutor(ExecutorBase):
         return self.driver_worker.determine_num_available_blocks()
 
     def execute_model(
-        self, execute_model_req: ExecuteModelRequest
+        self,
+        execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
@@ -76,14 +78,8 @@ class TPUExecutorAsync(TPUExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
+        sexecute_model_req: ExecuteModelRequest,
     ) -> SamplerOutput:
-        output = await make_async(self.driver_worker.execute_model)(
-            seq_group_metadata_list=seq_group_metadata_list,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy)
+        output = await make_async(self.driver_worker.execute_model
+                                  )(sexecute_model_req)
         return output
