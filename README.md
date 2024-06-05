@@ -21,7 +21,7 @@ Easy, fast, and cheap LLM serving for everyone
 We are thrilled to announce our fourth vLLM Meetup!
 The vLLM team will share recent updates and roadmap.
 We will also have vLLM collaborators from BentoML and Cloudflare coming up to the stage to discuss their experience in deploying LLMs with vLLM.
-Please register [here](https://lu.ma/agivllm) and join us!
+Please register [link](https://lu.ma/agivllm) and join us!
 
 ---
 
