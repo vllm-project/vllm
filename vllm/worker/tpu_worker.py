@@ -7,7 +7,8 @@ import torch_xla.core.xla_model as xm
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
-from vllm.distributed import (init_distributed_environment, ensure_model_parallel_initialized)
+from vllm.distributed import (init_distributed_environment,
+                              ensure_model_parallel_initialized)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
@@ -51,14 +52,10 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
 
-        self.model_runner = TPUModelRunner(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            cache_config,
-            load_config,
-            vision_language_config)
+        self.model_runner = TPUModelRunner(model_config, parallel_config,
+                                           scheduler_config, device_config,
+                                           cache_config, load_config,
+                                           vision_language_config)
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"

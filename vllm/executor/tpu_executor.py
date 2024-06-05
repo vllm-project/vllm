@@ -4,7 +4,8 @@ from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import make_async
+from vllm.utils import (make_async, get_distributed_init_method, get_ip,
+                        get_open_port)
 
 logger = init_logger(__name__)
 
@@ -22,13 +23,19 @@ class TPUExecutor(ExecutorBase):
 
         assert self.parallel_config.world_size == 1, (
             "TPUExecutor currently only supports a single TPU chip.")
+        distributed_init_method = get_distributed_init_method(
+            get_ip(), get_open_port())
         self.driver_worker = TPUWorker(
             self.model_config,
             self.parallel_config,
             self.scheduler_config,
             self.device_config,
             self.cache_config,
+            self.load_config,
             self.vision_language_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method=distributed_init_method,
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()

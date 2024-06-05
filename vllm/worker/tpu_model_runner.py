@@ -7,9 +7,10 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader import get_model
 from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
                            SequenceGroupMetadata, SequenceOutput, Logprob)
 from vllm.utils import make_tensor_with_pad
@@ -28,6 +29,7 @@ class TPUModelRunner:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         cache_config: CacheConfig,
+        load_config: LoadConfig,
         vision_language_config: Optional[VisionLanguageConfig] = None,
     ):
         self.model_config = model_config
@@ -35,6 +37,7 @@ class TPUModelRunner:
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
+        self.load_config = load_config
         self.vision_language_config = vision_language_config
 
         self.block_size = self.cache_config.block_size
@@ -56,16 +59,16 @@ class TPUModelRunner:
 
     def load_model(self) -> None:
         self.device = self.device_config.device
-
-        from vllm.model_executor.models.tpu.gemma import GemmaForCausalLM
-        model_arch = self.model_config.hf_config.architectures[0]
-        if model_arch != "GemmaForCausalLM":
-            raise NotImplementedError("Currently, only Gemma is supported. "
-                                      f"Got {model_arch}.")
-
-        model = GemmaForCausalLM.from_pretrained(
-            self.model_config.model, config=self.model_config.hf_config)
-        model = model.to(self.device)
+        model = get_model(
+            model_config=self.model_config,
+            load_config=self.load_config,
+            device_config=self.device_config,
+            parallel_config=self.parallel_config,
+            cache_config=self.cache_config,
+            scheduler_config=self.scheduler_config,
+            vision_language_config=self.vision_language_config,
+            lora_config=None,
+        )
         model = ModelWrapper(model)
         self.model = torch.compile(model, backend="openxla", fullgraph=True)
 
