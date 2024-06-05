@@ -1,15 +1,15 @@
 import logging
 import math
-from typing import Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Callable, Dict, List, Optional, Type
 
-import torch
 from peft.utils import load_peft_weights
 from torch import nn
 
 from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
                                          AdapterModelManager)
 from vllm.config import PromptAdapterConfig
-from vllm.prompt_adapter.layers import PromptAdapterMapping
+from vllm.prompt_adapter.layers import (
+    PromptAdapterMapping, VocabParallelEmbeddingWithPromptAdapter)
 
 logger = logging.getLogger(__name__)
 
@@ -20,69 +20,6 @@ def get_prompt_adapter_id():
     global _GLOBAL_PROMPT_ADAPTER_ID
     _GLOBAL_PROMPT_ADAPTER_ID += 1
     return _GLOBAL_PROMPT_ADAPTER_ID
-
-
-def convert_mapping(
-    mapping: PromptAdapterMapping,
-    prompt_adapter_index_to_id: List[Optional[int]], max_prompt_adapters: int
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[int]]:
-    """Converts PromptAdapterMapping to index tensors.
-
-    Args:
-        mapping: PromptAdapterMapping mapping rows in a batch to ids.
-        prompt_adapter_index_to_id: List mapping PromptAdapter ids to indices.
-        max_prompt_adapters: Maximum number of PromptAdapters.
-    Returns:
-        A tuple of tensors:
-            base_indices: Tensor of shape [batch_size] mapping batch rows to
-                PromptAdapter indices.
-            sampler_indices: Tensor of shape [batch_size] mapping requests to
-                PromptAdapter indices for sampler. For generation, this will be
-                same as base_indicies. For prefill, this will map requests
-                to PromptAdapter indices.
-            sampler_indices_padded: Tensor of shape [batch_size] mapping
-                requests to PromptAdapter indices for sampler with padding.
-                Same as sampler_indicies, but -1 is replaced with
-                max_promt_adapters.
-            indices_len: List of lengths of the above tensors.
-                Used to index into each tensor. It contains length for
-                (base_indices, sampler_indices, sampler_indices_padded).
-    """
-    index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
-    prompt_adapter_indices = index_mapping_indices.copy()
-    prompt_mapping: List[int] = [
-        prompt_adapter_index_to_id.index(x) if x > 0 else -1
-        for x in mapping.prompt_mapping
-    ]
-    prompt_adapter_idx = None
-    for i in range(len(index_mapping_indices)):
-        # TODO index can be slow. optimize
-        prompt_adapter_idx = (prompt_adapter_index_to_id.index(
-            index_mapping_indices[i]) if index_mapping_indices[i] > 0 else -1)
-        prompt_adapter_indices[i] = prompt_adapter_idx
-
-    indices_list: List[Union[List[int], torch.Tensor]] = [
-        index_mapping_indices, prompt_adapter_indices
-    ]
-    indices = torch.tensor(indices_list, dtype=torch.long, device="cuda")
-    prompt_mapping_tensor = torch.tensor(prompt_mapping,
-                                         device="cuda",
-                                         dtype=torch.long)
-    base_indices = indices[1]
-    sampler_indices = prompt_mapping_tensor
-    sampler_indices_padded = sampler_indices.clone()
-    sampler_indices_padded[sampler_indices_padded ==
-                           -1] = max_prompt_adapters - 1
-    sampler_indices_padded = (
-        torch.arange(
-            0, len(sampler_indices_padded), device="cuda", dtype=torch.long) +
-        (sampler_indices_padded * len(sampler_indices_padded)))
-    # Contain length of indices tensors. Used to index into each tensor.
-    indices_len = [
-        base_indices.shape[-1], sampler_indices.shape[-1],
-        sampler_indices_padded.shape[-1]
-    ]
-    return (base_indices, sampler_indices, sampler_indices_padded, indices_len)
 
 
 class PromptAdapterModel(AdapterModel):
@@ -133,16 +70,9 @@ class PromptAdapterModelManager(AdapterModelManager):
         self.model.prompt_adapter_manager = self
         self.adapter_type = 'PromptAdapter'
 
-        self.base_indices = torch.empty(self.max_num_batched_tokens,
-                                        dtype=torch.long,
-                                        device="cuda")
-        self.sampler_indices = torch.empty(self.max_num_batched_tokens,
-                                           dtype=torch.long,
-                                           device="cuda")
-        self.sampler_indices_padded = torch.empty(self.max_num_batched_tokens,
-                                                  dtype=torch.long,
-                                                  device="cuda")
-        self.indices_len: List[Optional[int]] = [None] * 3
+        self.base_indices = [0]
+        self.modules: Dict[str, nn.Module] = {}
+        self._create_prompt_adapter_modules()
         self._last_mapping: Optional[PromptAdapterMapping] = None
 
     @property
@@ -156,15 +86,6 @@ class PromptAdapterModelManager(AdapterModelManager):
     @property
     def capacity(self) -> int:
         return self.prompt_adapter_config.max_cpu_prompt_adapters
-
-    def reset_adapter(self):
-        try:
-            self.remove_all_prompt_adapters()
-            for module_name, module in self.model.named_modules():
-                if 'Model' in (module.__class__.__name__):
-                    del module.prefix_encoder
-        except Exception:
-            pass
 
     def activate_prompt_adapter(
         self,
@@ -187,10 +108,8 @@ class PromptAdapterModelManager(AdapterModelManager):
         logger.debug("Activating prompt_adapter. int id: %d, slot index: %d",
                      prompt_adapter_model.id, index)
         self.prompt_adapter_index_to_id[index] = prompt_adapter_model.id
-        for module_name, module in self.model.named_modules():
-            if 'Model' in (module.__class__.__name__):
-                module.prefix_encoder = prompt_adapter_model
-                break
+        for _, v in self.modules.items():
+            v.set_prompt_adapter(prompt_adapter_id, prompt_adapter_model)
         return True
 
     @property
@@ -201,9 +120,8 @@ class PromptAdapterModelManager(AdapterModelManager):
         try:
             index = self.prompt_adapter_index_to_id.index(prompt_adapter_id)
             self.prompt_adapter_index_to_id[index] = None
-            for module_name, module in self.model.named_modules():
-                if 'Model' in (module.__class__.__name__):
-                    del module.prefix_encoder
+            for _, v in self.modules.items():
+                v.reset_prompt_adapter(prompt_adapter_id)
         except ValueError:
             pass
 
@@ -232,16 +150,30 @@ class PromptAdapterModelManager(AdapterModelManager):
 
     def _set_prompt_adapter_mapping(self,
                                     mapping: PromptAdapterMapping) -> None:
-        (base_indices, sampler_indices, sampler_indices_padded,
-         indices_len) = convert_mapping(mapping,
-                                        self.prompt_adapter_index_to_id,
-                                        self.prompt_adapter_slots + 1)
-        self.base_indices[:base_indices.shape[0]].copy_(base_indices)
-        self.sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices)
-        self.sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
-            sampler_indices_padded)
-        # Maintain the reference
-        self.indices_len[:] = indices_len
+        for k, v in self.modules.items():
+            v.set_mapping(mapping.index_mapping)
+
+    def _create_prompt_adapter_modules(self):
+        for module_name, module in self.model.named_modules(
+                remove_duplicate=False):
+            if "VocabParallel" in module.__class__.__name__:
+                new_module = VocabParallelEmbeddingWithPromptAdapter(module)
+                replaced_module = self.replace_submodule(
+                    self.model, module_name, new_module)
+                self.register_module(module.__class__.__name__,
+                                     replaced_module)
+                replaced_module.set_mapping(self.base_indices)
+
+    def replace_submodule(self, model: nn.Module, module_name: str,
+                          new_module: nn.Module) -> nn.Module:
+        """Replace a submodule in a model with a new module."""
+        parent = model.get_submodule(".".join(module_name.split(".")[:-1]))
+        target_name = module_name.split(".")[-1]
+        setattr(parent, target_name, new_module)
+        return new_module
+
+    def register_module(self, module_name: str, module: nn.Module):
+        self.modules[module_name] = module
 
     @property
     def set_prompt_adapter_mapping(self):

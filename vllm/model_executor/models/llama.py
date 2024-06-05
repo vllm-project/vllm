@@ -46,7 +46,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.prompt_adapter.layers import apply_prompt_adapter
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
 
@@ -283,7 +282,6 @@ class LlamaModel(nn.Module):
             hidden_states = inputs_embeds
         else:
             hidden_states = self.get_input_embeddings(input_ids)
-        hidden_states = apply_prompt_adapter(self, hidden_states, positions)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]

@@ -476,12 +476,16 @@ class ModelRunner:
                     mm_kwargs = self.multi_modal_input_processor(mm_data)
                     for k, v in mm_kwargs.items():
                         multi_modal_kwargs_list[k].append(v)
-                        
+
                 if prompt_adapter_id > 0:
                     prompt_adapter_requests.add(
                         seq_group_metadata.prompt_adapter_request)
 
-                prompt_adapter_index_mapping += [prompt_adapter_id] * query_len
+                num_tokens = seq_group_metadata.\
+                                        prompt_adapter_num_virtual_tokens
+                pm = [prompt_adapter_id
+                      ] * num_tokens + [0] * (query_len - num_tokens)
+                prompt_adapter_index_mapping += pm
                 prompt_adapter_prompt_mapping.extend(
                     [prompt_adapter_id] *
                     (query_len if seq_group_metadata.sampling_params
@@ -786,11 +790,8 @@ class ModelRunner:
             self.set_active_loras(lora_requests, lora_mapping)
 
         if self.prompt_adapter_config:
-            if len(prompt_adapter_requests) >= 1:
-                self.set_active_prompt_adapters(prompt_adapter_requests,
-                                                prompt_adapter_mapping)
-            else:
-                self.reset_adapter()
+            self.set_active_prompt_adapters(prompt_adapter_requests,
+                                            prompt_adapter_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
         prefill_meta = attn_metadata.prefill_metadata
@@ -925,11 +926,6 @@ class ModelRunner:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
-
-    def reset_adapter(self):
-        if not self.prompt_adapter_manager:
-            raise RuntimeError("PromptAdapter is not enabled.")
-        self.prompt_adapter_manager.reset_adapter()
 
     def remove_all_prompt_adapters(self):
         if not self.prompt_adapter_manager:
