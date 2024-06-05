@@ -12,11 +12,14 @@ from typing import Optional
 import pytest
 import torch
 
-from tests.kernels.utils import (
-    PackedQKVInputs, QKVInputs, make_backend, make_block_tables_slot_mapping,
-    make_empty_block_tables_tensor, make_empty_slot_mapping_tensor,
-    make_kv_cache, make_qkv, make_test_metadata, override_backend_env_variable,
-    pack_qkv, pack_tensor, ref_masked_attention, split_slot_mapping)
+from tests.kernels.utils import (PackedQKVInputs, QKVInputs, make_backend,
+                                 make_block_tables_slot_mapping,
+                                 make_empty_block_tables_tensor,
+                                 make_empty_slot_mapping_tensor, make_kv_cache,
+                                 make_qkv, make_test_metadata,
+                                 override_backend_env_variable, pack_qkv,
+                                 pack_tensor, ref_masked_attention,
+                                 split_slot_mapping)
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.utils import (
