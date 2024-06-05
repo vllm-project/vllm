@@ -16,6 +16,13 @@ def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     return Image.open(BytesIO(base64.b64decode(image)))
 
 
+def encode_image_base64(image: Image.Image) -> str:
+    """encode image to base64 format."""
+    buffered = BytesIO()
+    image.save(buffered, format='JPEG')
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+
 def fetch_image(image_url: str) -> Image.Image:
     """Load image from a url or base64 encoded openai GPT4V format"""
 

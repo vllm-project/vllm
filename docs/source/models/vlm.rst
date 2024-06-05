@@ -69,7 +69,7 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 .. important::
     Since OpenAI Vision API is based on `Chat <https://platform.openai.com/docs/api-reference/chat>`_ API, a chat template 
     is **required** to launch the API server if the model's tokenizer does not come with one. In this example, we use the 
-    Vicuna chat template that you can find `here in the example folder <https://github.com/vllm-project/vllm/blob/main/examples/template_vicuna.jinja>`_.
+    HuggingFace Llava chat template that you can find in the example folder `here <https://github.com/vllm-project/vllm/blob/main/examples/template_llava.jinja>`_.
 
 .. code-block:: bash
 
@@ -79,7 +79,7 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
         --image-token-id 32000 \
         --image-input-shape 1,3,336,336 \
         --image-feature-size 576 \
-        --chat-template template_vicuna.jinja
+        --chat-template template_llava.jinja
 
 To consume the server, you can use the OpenAI client like in the example below:
 
