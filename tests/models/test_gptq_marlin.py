@@ -22,10 +22,13 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
 
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
-gptq_marlin_not_supported = (
-    capability < QUANTIZATION_METHODS["gptq_marlin"].get_min_capability())
+gptq_marlin_not_supported = True
+
+if torch.cuda.is_available():
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    gptq_marlin_not_supported = (
+        capability < QUANTIZATION_METHODS["gptq_marlin"].get_min_capability())
 
 MODELS = [
     # act_order==False, group_size=channelwise
