@@ -515,8 +515,18 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                                                     self.kv_cache_dtype,
                                                     kv_scale)
 
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_decode_tokens = attn_metadata.num_decode_tokens
+        if attn_metadata.attention_type != AttentionType.ENCODER:
+            # Decoder self-attention supports chunked prefill.
+            # Encoder/decoder cross-attention requires no chunked
+            # prefill (100% prefill or 100% decode tokens, no mix)
+            num_prefill_tokens = attn_metadata.num_prefill_tokens
+            num_decode_tokens = attn_metadata.num_decode_tokens
+        else:
+            # Encoder attention - chunked prefill is not applicable;
+            # derive token-count from query shape & and treat them
+            # as 100% prefill tokens
+            num_prefill_tokens = query.shape[0]
+            num_decode_tokens = 0
 
         if attn_type != AttentionType.ENCODER_DECODER:
             # Only enforce this shape-constraint for decoder

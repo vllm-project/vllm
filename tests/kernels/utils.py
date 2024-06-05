@@ -94,10 +94,11 @@ def ref_masked_attention(query: torch.Tensor,
 def make_qkv(
     batch_size: int,
     max_q_seq_len: int,
-    max_kv_seq_len: int,
+    max_kv_seq_len: Optional[int],
     num_heads: int,
     head_size: int,
     device: Union[torch.device, str],
+    force_kv_seq_lens: List[int] = None,
     attn_type: AttentionType = AttentionType.ENCODER_DECODER,
     force_max_len: bool = False,
 ) -> tuple:
@@ -126,6 +127,8 @@ def make_qkv(
       key/value seqlen (as is often the case for cross-attention); 
       o/w, query/key/value seqlens match at each batch index 
       (max_kv_seq_len is unused)
+    * force_kv_seq_lens: if not None, overrides kv sequence lengths
+    * attn_type: encoder, decoder self, or enc/dec cross attention
     * force_max_len: if True, all query seqlens are max_q_seq_len; o/w query
       seqlens are random in [2,max_q_seq_lens]. Same for key/value seqlens
       and max_kv_seq_len, unless forced by is_encoder_decoder_attn=False
@@ -146,7 +149,8 @@ def make_qkv(
     * decode_key: batch_size x 1 x num_heads x head_size
     * decode_value: batch_size x 1 x num_heads x head_size
     * q_seq_lens: "baseline" query seqlen list
-    * kv_seq_lens: "baseline" key/value seqlen list
+    * kv_seq_lens: "baseline" key/value seqlen list; overridden by non-None
+                   force_encoder_kv_seq_lens
     * actual_max_q_seq_len: actual "baseline" query max seq len (may be <=
       max_q_seq_len due to randomness)
     * actual_max_kv_seq_len: actual "baseline" key/value max seq len (may
@@ -164,7 +168,9 @@ def make_qkv(
             random.randint(2, max_q_seq_len) for _ in range(batch_size)
         ]
     kv_seq_lens = None
-    if attn_type != AttentionType.ENCODER_DECODER:
+    if force_kv_seq_lens is not None:
+        kv_seq_lens = force_kv_seq_lens
+    elif attn_type != AttentionType.ENCODER_DECODER:
         # K,V seq lens match Q for self-attention
         kv_seq_lens = q_seq_lens
     else:
