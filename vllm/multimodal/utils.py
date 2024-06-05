@@ -16,10 +16,13 @@ def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     return Image.open(BytesIO(base64.b64decode(image)))
 
 
-def encode_image_base64(image: Image.Image) -> str:
+def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:
     """encode image to base64 format."""
+
     buffered = BytesIO()
-    image.save(buffered, format='JPEG')
+    if format == 'JPEG':
+        image = image.convert('RGB')
+    image.save(buffered, format)
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 
