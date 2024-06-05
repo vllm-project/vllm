@@ -689,13 +689,10 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     prephase_attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
         True,
-        prephase_dec_pckd_qkv.q_seq_lens,
-        prephase_dec_kv_mmap,
+        decoder_test_params=prephase_dec_test_params,
+        encoder_test_params=enc_test_params,
+        cross_test_params=prephase_cross_test_params,
         default_attn_type=AttentionType.ENCODER,
-        num_prefills_or_decodes=len(prephase_dec_pckd_qkv.q_seq_lens),
-        num_prefill_or_decode_tokens=sum(prephase_dec_pckd_qkv.q_seq_lens),
-        encoder_seq_lens=enc_pckd_qkvo.packed_qkv.q_seq_lens,
-        cross_kv_mmap=prephase_cross_kv_mmap,
         device=CUDA_DEVICE)
 
     # PREFILL: encoder attention

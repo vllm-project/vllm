@@ -596,15 +596,11 @@ def make_block_tables_slot_mapping(block_size: int,
 def make_test_metadata(
     attn_backend: AttentionBackend,
     is_prompt: bool,
-    seq_lens: List[int],
-    kv_mmap: KVMemoryMap, 
+    decoder_test_params: PhaseTestParameters,
     default_attn_type: AttentionType,
-    num_prefills_or_decodes: int,
-    num_prefill_or_decode_tokens: int,
     device: Union[torch.device, str],
-    context_lens: Optional[List[int]] = None,
-    encoder_seq_lens: Optional[List[int]] = None,
-    cross_kv_mmap: Optional[KVMemoryMap] = None,
+    encoder_test_params: Optional[PhaseTestParameters]=None,
+    cross_test_params: Optional[PhaseTestParameters]=None
 ) -> AttentionMetadata:
     '''
     Construct fake attention metadata for a combined self-/cross-attention
@@ -638,6 +634,34 @@ def make_test_metadata(
 
     * AttentionMetadata structure supporting self- and cross-attention
     '''
+
+    # Extract
+    # * Decoder input sequence lengths (seq_lens)
+    # * Decoder self-attention slot mapping & block tables (kv_mmap)
+    seq_lens = decoder_test_params.packed_qkvo.packed_qkv.seq_lens
+    kv_mmap = decoder_test_params.kv_mmap
+
+    # is_prompt determines whether input tokens are treated
+    # as 100% prefill or 100% decode. In either case,
+    # the number of {prefills, decodes} and the number of
+    # {prefill, decode} tokens can be inferred from seq_lens
+    num_prefills_or_decodes = len(seq_lens)
+    num_prefill_or_decode_tokens = sum(seq_lens)
+
+    if encoder_test_params is None:
+        encoder_seq_lens = None
+    else:
+        # Encoder/decoder models only:
+        # * Extract encoder input sequence lengths
+        encoder_seq_lens = encoder_test_params.q_seq_lens
+
+    if cross_test_params is None:
+        cross_kv_mmap = None
+    else:
+        # Encoder/decoder models only:
+        # * Extract *cross-attention* slot_mapping and block table
+        #   (kv_mmap)
+        cross_kv_mmap = cross_test_params.kv_mmap
 
     if is_prompt:
         num_prefills = num_prefills_or_decodes
