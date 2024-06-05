@@ -9,10 +9,30 @@ import torch
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.custom_all_reduce import (
+    CustomAllreduce)
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 
 
 class GroupCoordinator:
+    # available attributes:
+    rank: int  # global rank
+    ranks: List[int]  # global ranks in the group
+    world_size: int  # size of the group
+    # difference between `local_rank` and `rank_in_group`:
+    # if we have a group of size 4 across two nodes:
+    # Process | Node | Rank | Local Rank | Rank in Group
+    #   0     |   0  |  0   |     0      |       0
+    #   1     |   0  |  1   |     1      |       1
+    #   2     |   1  |  2   |     0      |       2
+    #   3     |   1  |  3   |     1      |       3
+    local_rank: int  # local rank used to assign devices
+    rank_in_group: int  # rank inside the group
+    cpu_group: ProcessGroup  # group for CPU communication
+    device_group: ProcessGroup  # group for device communication
+    pynccl_comm: Optional[PyNcclCommunicator]  # PyNccl communicator
+    ca_comm: Optional[CustomAllreduce]  # Custom allreduce communicator
 
     def __init__(
         self,
@@ -42,6 +62,9 @@ class GroupCoordinator:
                 self.device_group = device_group
                 self.cpu_group = cpu_group
 
+        assert self.cpu_group is not None
+        assert self.device_group is not None
+
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{local_rank}")
         else:
@@ -50,8 +73,6 @@ class GroupCoordinator:
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
 
-        from vllm.distributed.device_communicators.pynccl import (
-            PyNcclCommunicator)
         self.pynccl_comm: Optional[PyNcclCommunicator]
         if use_pynccl:
             self.pynccl_comm = PyNcclCommunicator(
@@ -61,8 +82,6 @@ class GroupCoordinator:
         else:
             self.pynccl_comm = None
 
-        from vllm.distributed.device_communicators.custom_all_reduce import (
-            CustomAllreduce)
         self.ca_comm: Optional[CustomAllreduce]
         if use_custom_allreduce:
             # Initialize a custom fast all-reduce implementation.
