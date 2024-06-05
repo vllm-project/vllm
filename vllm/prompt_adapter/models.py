@@ -8,8 +8,8 @@ from torch import nn
 from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
                                          AdapterModelManager)
 from vllm.config import PromptAdapterConfig
-from vllm.prompt_adapter.layers import (
-    PromptAdapterMapping, VocabParallelEmbeddingWithPromptAdapter)
+from vllm.prompt_adapter.layers import (PromptAdapterMapping, 
+                                        VocabParallelEmbeddingWithPromptAdapter)
 
 logger = logging.getLogger(__name__)
 
