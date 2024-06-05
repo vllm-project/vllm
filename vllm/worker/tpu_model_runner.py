@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -7,12 +7,12 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.debug.profiler as xp
 
-from vllm.attention import get_attn_backend
+from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput, SequenceGroupMetadata, SequenceOutput, Logprob)
 from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
@@ -214,8 +214,10 @@ class TPUModelRunner:
                 slot = block_number * self.block_size + block_offset
                 slot_mapping[-1].append(slot)
 
+        assert len(prompt_lens) > 0
+        num_prefills = len(prompt_lens)
+        num_prefill_tokens = sum(prompt_lens)
         max_prompt_len = max(prompt_lens)
-        assert max_prompt_len > 0
         max_prompt_len = _get_padded_prefill_len(max_prompt_len)
 
         input_tokens = make_tensor_with_pad(input_tokens,
@@ -237,16 +239,12 @@ class TPUModelRunner:
                                    dtype=torch.int32,
                                    device=self.device)
         attn_metadata = self.attn_backend.make_metadata(
-            num_prefills=0,
-            num_prefill_tokens=0,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,  # NOTE: This is not used.
             num_decode_tokens=0,
-            prefill_metadata=None,
-            decode_metadata=None,
-            kv_cache_dtype=None,
             slot_mapping=slot_mapping,
             block_tables=None,
             context_lens=None,
-            is_prompt=True,
         )
         return input_tokens, input_positions, attn_metadata, prompt_lens
 
@@ -313,14 +311,10 @@ class TPUModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             num_prefills=0,
             num_prefill_tokens=0,
-            num_decode_tokens=0,
-            prefill_metadata=None,
-            decode_metadata=None,
-            kv_cache_dtype=None,
+            num_decode_tokens=batch_size,
             slot_mapping=slot_mapping,
             block_tables=block_tables,
             context_lens=context_lens,
-            is_prompt=False,
         )
         return input_tokens, input_positions, attn_metadata, input_lens
 
@@ -341,8 +335,7 @@ class TPUModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-    ) -> Optional[List[SamplerOutput]]:
-        from vllm.sequence import SequenceOutput, SequenceGroupOutput, Logprob
+    ) -> Optional[SamplerOutput]:
 
         start = time.time()
         inputs = self.prepare_inputs(seq_group_metadata_list)
@@ -359,17 +352,14 @@ class TPUModelRunner:
         # print(f"model(): {(end - start) * 1000:.2f} ms")
 
         start = time.time()
-        next_token_ids = next_token_ids.cpu()
+        next_token_ids = next_token_ids.cpu().tolist()
         end = time.time()
         # print(f".cpu(): {(end - start) * 1000:.2f} ms")
 
-        next_token_ids = next_token_ids.tolist()
         i = 0
-
         sampler_outputs = []
         for seq_group_metadata in seq_group_metadata_list:
             seq_outputs = []
-
             seq_ids = list(seq_group_metadata.seq_data.keys())
             for seq_id in seq_ids:
                 next_token_id = next_token_ids[i]
@@ -377,9 +367,8 @@ class TPUModelRunner:
                     SequenceOutput(seq_id, next_token_id,
                                    {next_token_id: Logprob(0.0)}))
                 i += 1
-
-            sampler_outputs.append(SequenceGroupOutput(seq_outputs, None))
-        return [SamplerOutput(sampler_outputs)]
+            sampler_outputs.append(CompletionSequenceGroupOutput(seq_outputs, None))
+        return SamplerOutput(sampler_outputs)
 
 
 class ModelWrapper(nn.Module):
@@ -392,8 +381,8 @@ class ModelWrapper(nn.Module):
         self,
         token_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        attn_metadata: Any,
+        kv_caches: List[Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]],
+        attn_metadata: AttentionMetadata,
         input_lens: torch.Tensor,
     ) -> torch.Tensor:
         batch_size, seq_len = token_ids.shape
@@ -402,14 +391,14 @@ class ModelWrapper(nn.Module):
         logits_indices = base_indicies + input_lens - 1
 
         if kv_caches[0][0] is not None:
-            num_kv_heads, num_blocks, _, _ = kv_caches[0][0].shape
+            num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
             slot_mapping = attn_metadata.slot_mapping
             slot_mapping = slot_mapping.flatten()
             head_indicies = torch.arange(0,
                                          num_kv_heads,
                                          device=slot_mapping.device,
                                          dtype=slot_mapping.dtype)
-            head_indicies *= self.block_size * num_blocks
+            head_indicies *= block_size * num_blocks
             slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
                 -1, num_kv_heads)
             slot_mapping = slot_mapping + head_indicies.view(1, -1)

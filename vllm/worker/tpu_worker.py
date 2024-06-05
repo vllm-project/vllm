@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.worker.tpu_model_runner import TPUModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 from vllm.utils import get_dtype_size, STR_DTYPE_TO_TORCH_DTYPE
@@ -141,27 +141,22 @@ class TPUWorker(LoraNotSupportedWorkerBase):
 
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
-        blocks_to_swap_in: Optional[Dict[int, int]] = None,
-        blocks_to_swap_out: Optional[Dict[int, int]] = None,
-        blocks_to_copy: Optional[Dict[int, List[int]]] = None,
-    ) -> Optional[SamplerOutput]:
-        assert seq_group_metadata_list is not None
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        if execute_model_req is None:
+            return []
+
+        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         num_seq_groups = len(seq_group_metadata_list)
-        assert blocks_to_swap_in is not None
-        assert blocks_to_swap_out is not None
-        assert blocks_to_copy is not None
+        if num_seq_groups == 0:
+            return []
 
         # Currently, TPUWorker does not support swapping.
         # TODO(woosuk): Support block copying.
-        assert len(blocks_to_swap_in) == 0
-        assert len(blocks_to_swap_out) == 0
-        assert len(blocks_to_copy) == 0
-
-        # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
-            return {}
+        assert len(execute_model_req.blocks_to_swap_in) == 0
+        assert len(execute_model_req.blocks_to_swap_out) == 0
+        assert len(execute_model_req.blocks_to_copy) == 0
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.tpu_cache)
-        return output
+        return [output]
