@@ -148,7 +148,7 @@ def sgmv_shrink(
     BLOCK_N = 16
     BLOCK_K = 32
     SPLIT_K = 8
-    EVEN_K = K % BLOCK_K == 0
+    EVEN_K = K % (BLOCK_K*SPLIT_K) == 0
     grid = [
         triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         SPLIT_K,
