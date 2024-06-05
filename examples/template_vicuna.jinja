@@ -2,7 +2,7 @@
     {% set system_message = messages[0]['content'] | trim + '\n\n' %}
     {% set messages = messages[1:] %}
 {% else %}
-    {% set system_message = '' %}
+    {% set system_message = 'A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.' %}
 {% endif %}
 
 {{ bos_token + system_message }}
