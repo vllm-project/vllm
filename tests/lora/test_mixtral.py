@@ -29,7 +29,7 @@ def do_sample(llm, lora_path: str, lora_id: int):
     return generated_texts
 
 
-@pytest.mark.parametrize("tp_size", [4])
+@pytest.mark.parametrize("tp_size", [4, 8])
 def test_mixtral_lora(mixtral_lora_files, tp_size):
     if torch.cuda.device_count() < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
