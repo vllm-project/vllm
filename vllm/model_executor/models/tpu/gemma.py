@@ -6,68 +6,9 @@ from torch import nn
 from transformers import GemmaConfig, PreTrainedModel
 
 from vllm.attention import Attention, AttentionMetadata
-
-
-class Linear(nn.Module):
-    """PyTorch Linear layer without parameter initialization."""
-
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        bias: bool = True,
-    ):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty((out_features, in_features)))
-        if bias:
-            self.bias = nn.Parameter(torch.empty(out_features))
-        else:
-            self.bias = None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(x, self.weight, self.bias)
-
-
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    """Precomputes the frequency cis."""
-    freqs = 1.0 / (theta**(torch.arange(0, dim, 2)[:(dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
-
-
-def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-    """Applies the rotary embedding to the query and key tensors."""
-    x_ = torch.view_as_complex(
-        torch.stack(torch.chunk(x.transpose(1, 2).float(), 2, dim=-1), dim=-1))
-    x_out = torch.view_as_real(x_ * freqs_cis).type_as(x)
-    x_out = torch.cat(torch.chunk(x_out, 2, dim=-1), dim=-2)
-    x_out = x_out.reshape(x_out.shape[0], x_out.shape[1], x_out.shape[2],
-                          -1).transpose(1, 2)
-    # Reshape the output tensor to the original shape.
-    return x_out.reshape(x_out.shape[0], x_out.shape[1], -1)
-
-
-class RMSNorm(torch.nn.Module):
-
-    def __init__(
-        self,
-        dim: int,
-        eps: float = 1e-6,
-    ):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        orig_dtype = x.dtype
-        x = self._norm(x.float())
-        output = x * (1 + self.weight.float())
-        return output.to(orig_dtype)
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.rotary_embedding import get_rope
 
 
 class GemmaMLP(nn.Module):
@@ -81,28 +22,28 @@ class GemmaMLP(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
-        self.gate_proj = Linear(
+        self.gate_proj = ColumnParallelLinear(
             hidden_size,
             intermediate_size,
             bias=False,
         )
-        self.up_proj = Linear(
+        self.up_proj = ColumnParallelLinear(
             hidden_size,
             intermediate_size,
             bias=False,
         )
-        self.down_proj = Linear(
+        self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate = self.gate_proj(x)
+        gate, _ = self.gate_proj(x)
         gate = F.gelu(gate, approximate="tanh")
-        up = self.up_proj(x)
+        up, _ = self.up_proj(x)
         fuse = gate * up
-        outputs = self.down_proj(fuse)
+        outputs, _ = self.down_proj(fuse)
         return outputs
 
 
@@ -126,18 +67,20 @@ class GemmaAttention(nn.Module):
         self.head_dim = head_dim
         self.scaling = self.head_dim**-0.5
 
-        self.q_proj = Linear(self.hidden_size,
-                             self.num_heads * self.head_dim,
-                             bias=False)
-        self.k_proj = Linear(self.hidden_size,
-                             self.num_kv_heads * self.head_dim,
-                             bias=False)
-        self.v_proj = Linear(self.hidden_size,
-                             self.num_kv_heads * self.head_dim,
-                             bias=False)
-        self.o_proj = Linear(self.num_heads * self.head_dim,
-                             self.hidden_size,
-                             bias=False)
+        self.q_proj = ColumnParallelLinear(self.hidden_size,
+                                           self.num_heads * self.head_dim,
+                                           bias=False)
+        self.k_proj = ColumnParallelLinear(self.hidden_size,
+                                           self.num_kv_heads * self.head_dim,
+                                           bias=False)
+        self.v_proj = ColumnParallelLinear(self.hidden_size,
+                                           self.num_kv_heads * self.head_dim,
+                                           bias=False)
+        self.o_proj = RowParallelLinear(self.num_heads * self.head_dim,
+                                        self.hidden_size,
+                                        bias=False)
+
+        self.rope = get_rope(self.head_dim, self.head_dim, 8192, 10000)
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
@@ -151,17 +94,18 @@ class GemmaAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
 
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        q = apply_rotary_emb(q, freqs_cis)
         k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        k = apply_rotary_emb(k, freqs_cis)
+        q, k = self.rope(freqs_cis, q, k)
+        q = q.reshape(batch_size, seq_len, -1)
+        k = k.reshape(batch_size, seq_len, -1)
 
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        o = self.o_proj(attn_output)
+        o, _ = self.o_proj(attn_output)
         return o
 
 
@@ -264,14 +208,7 @@ class GemmaForCausalLM(PreTrainedModel):
     ):
         super().__init__(config)
         self.config = config
-
         self.model = GemmaModel(config)
-        rope_theta = getattr(config, 'rope_theta', 10000)
-        # [head_dim * 2, ] -> complex -> two dim (real, imaginary) implicitly
-        freqs_cis = precompute_freqs_cis(config.head_dim,
-                                         config.max_position_embeddings * 2,
-                                         theta=rope_theta)
-        self.register_buffer('freqs_cis', freqs_cis)
 
     def forward(
         self,
@@ -280,12 +217,9 @@ class GemmaForCausalLM(PreTrainedModel):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        batch_size, seq_len = input_ids.shape
-        freqs_cis = self.freqs_cis.index_select(0, positions.flatten())
-        freqs_cis = freqs_cis.view(batch_size, 1, seq_len, -1)
         hidden_states = self.model(
             input_ids=input_ids,
-            freqs_cis=freqs_cis,
+            freqs_cis=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
         )
