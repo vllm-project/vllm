@@ -305,8 +305,9 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor& out, torch::Tensor const& a,
     } else {
       assert(out.dtype() == torch::kFloat16);
       return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89_to_sm90, int8_t, cutlass::half_t, TileShape,
-          WarpShape, InstructionShape, 5>>(out, a, b, a_scales, b_scales);
+          cutlass::arch::Sm89, enable_sm89_to_sm90, int8_t, cutlass::half_t,
+          TileShape, WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
+                                                      b_scales);
     }
   } else {
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
