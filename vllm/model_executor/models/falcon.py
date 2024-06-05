@@ -81,7 +81,6 @@ class FalconAttention(nn.Module):
         config: FalconConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
 
@@ -142,7 +141,7 @@ class FalconAttention(nn.Module):
         assert not (self.use_rotary and self.use_alibi), (
             "Rotary and alibi are mutually exclusive.")
 
-        self.use_attention_sinks = use_attention_sinks
+        self.use_attention_sinks = cache_config.use_attention_sinks
         if self.use_rotary:
             rope_theta = getattr(config, "rope_theta", 10000)
             max_position_embeddings = getattr(config,
@@ -172,7 +171,7 @@ class FalconAttention(nn.Module):
                                   alibi_slopes=alibi_slopes,
                                   quant_config=quant_config)
         else:
-            if use_attention_sinks:
+            if self.use_attention_sinks:
                 raise ValueError("Attention sinks must be used with "
                                  "either RoPE or ALiBi slopes.")
             self.attn = Attention(self.num_heads,
@@ -182,7 +181,7 @@ class FalconAttention(nn.Module):
                                   cache_config=cache_config,
                                   quant_config=quant_config)
         
-        if use_attention_sinks:
+        if self.use_attention_sinks:
             self.attention_sink = get_attention_sink(
                 self,
                 cache_config,
@@ -255,13 +254,12 @@ class FalconDecoderLayer(nn.Module):
         config: FalconConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.self_attention = FalconAttention(config, cache_config,
-                                              quant_config, use_attention_sinks)
+                                              quant_config)
         self.mlp = FalconMLP(config, quant_config)
         self.config = config
 
@@ -352,7 +350,6 @@ class FalconModel(nn.Module):
         config: FalconConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -368,7 +365,7 @@ class FalconModel(nn.Module):
 
         # Transformer blocks
         self.h = nn.ModuleList([
-            FalconDecoderLayer(config, cache_config, quant_config, use_attention_sinks)
+            FalconDecoderLayer(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
 
@@ -402,12 +399,11 @@ class FalconForCausalLM(nn.Module):
         config: FalconConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.transformer = FalconModel(config, cache_config, quant_config, use_attention_sinks)
+        self.transformer = FalconModel(config, cache_config, quant_config)
         # only Falcon-11B doesn't share lm_head weight with word embeddings
         # and previous Falcon model doesn't have tie_word_embeddings config
         # so we set tie_word_embeddings to True by default

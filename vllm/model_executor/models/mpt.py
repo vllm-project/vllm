@@ -47,7 +47,6 @@ class MPTAttention(nn.Module):
         config: MPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -115,8 +114,8 @@ class MPTAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
         
-        self.use_attention_sinks = use_attention_sinks
-        if use_attention_sinks:
+        self.use_attention_sinks = cache_config.use_attention_sinks
+        if self.use_attention_sinks:
             self.attention_sink = get_attention_sink(
                 self,
                 cache_config,
@@ -187,12 +186,11 @@ class MPTBlock(nn.Module):
         config: MPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         hidden_size = config.d_model
         self.norm_1 = nn.LayerNorm(hidden_size)
-        self.attn = MPTAttention(config, cache_config, quant_config, use_attention_sinks)
+        self.attn = MPTAttention(config, cache_config, quant_config)
         self.norm_2 = nn.LayerNorm(hidden_size)
         self.ffn = MPTMLP(config, quant_config)
 
@@ -224,7 +222,6 @@ class MPTModel(nn.Module):
         config: MPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         assert config.embedding_fraction == 1.0
@@ -235,7 +232,7 @@ class MPTModel(nn.Module):
             config.d_model,
         )
         self.blocks = nn.ModuleList([
-            MPTBlock(config, cache_config, quant_config, use_attention_sinks)
+            MPTBlock(config, cache_config, quant_config)
             for _ in range(config.n_layers)
         ])
         self.norm_f = nn.LayerNorm(config.d_model)
@@ -273,14 +270,13 @@ class MPTForCausalLM(nn.Module):
         config: MPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         self.config = config
         assert config.tie_word_embeddings
         self.quant_config = quant_config
 
-        self.transformer = MPTModel(config, cache_config, quant_config, use_attention_sinks)
+        self.transformer = MPTModel(config, cache_config, quant_config)
         self.lm_head_weight = self.transformer.wte.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

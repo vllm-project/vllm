@@ -256,7 +256,6 @@ class MixtralAttention(nn.Module):
         rope_theta: float = 10000,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -308,8 +307,8 @@ class MixtralAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
 
-        self.use_attention_sinks = use_attention_sinks
-        if use_attention_sinks:
+        self.use_attention_sinks = cache_config.use_attention_sinks
+        if self.use_attention_sinks:
             self.attention_sink = get_attention_sink(
                 self,
                 cache_config,
@@ -343,7 +342,6 @@ class MixtralDecoderLayer(nn.Module):
         config: MixtralConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -356,8 +354,7 @@ class MixtralDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             cache_config=cache_config,
-            quant_config=quant_config,
-            use_attention_sinks=use_attention_sinks)
+            quant_config=quant_config)
         self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
@@ -406,7 +403,6 @@ class MixtralModel(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
-        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.padding_idx = config.pad_token_id
@@ -423,8 +419,7 @@ class MixtralModel(nn.Module):
         self.layers = nn.ModuleList([
             MixtralDecoderLayer(config,
                                 cache_config,
-                                quant_config,
-                                use_attention_sinks)
+                                quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -477,15 +472,13 @@ class MixtralForCausalLM(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
-        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
-                                  lora_config,
-                                  use_attention_sinks)
+                                  lora_config)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

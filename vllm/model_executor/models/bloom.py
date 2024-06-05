@@ -75,7 +75,6 @@ class BloomAttention(nn.Module):
         config: BloomConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -116,8 +115,8 @@ class BloomAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
         
-        self.use_attention_sinks = use_attention_sinks
-        if use_attention_sinks:
+        self.use_attention_sinks = cache_config.use_attention_sinks
+        if self.use_attention_sinks:
             self.attention_sink = get_attention_sink(
                 self,
                 cache_config,
@@ -179,7 +178,6 @@ class BloomBlock(nn.Module):
         config: BloomConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -187,7 +185,7 @@ class BloomBlock(nn.Module):
         self.input_layernorm = nn.LayerNorm(hidden_size,
                                             eps=config.layer_norm_epsilon)
         self.self_attention = BloomAttention(config, cache_config,
-                                             quant_config, use_attention_sinks)
+                                             quant_config)
         self.post_attention_layernorm = nn.LayerNorm(
             hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = BloomMLP(config, quant_config)
@@ -238,7 +236,6 @@ class BloomModel(nn.Module):
         config: BloomConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -253,7 +250,7 @@ class BloomModel(nn.Module):
 
         # Transformer blocks
         self.h = nn.ModuleList([
-            BloomBlock(config, cache_config, quant_config, use_attention_sinks)
+            BloomBlock(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
 
@@ -288,12 +285,11 @@ class BloomForCausalLM(nn.Module):
         config: BloomConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.transformer = BloomModel(config, cache_config, quant_config, use_attention_sinks)
+        self.transformer = BloomModel(config, cache_config, quant_config)
         self.lm_head_weight = self.transformer.word_embeddings.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

@@ -14,7 +14,6 @@ from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend, which_attn_to_use
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.utils import make_tensor_with_pad
 
 
 class StreamingAttentionSink(nn.Module):

@@ -96,7 +96,6 @@ class LlamaAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
-        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -150,8 +149,8 @@ class LlamaAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
         
-        self.use_attention_sinks = use_attention_sinks
-        if use_attention_sinks:
+        self.use_attention_sinks = cache_config.use_attention_sinks
+        if self.use_attention_sinks:
             self.attention_sink = get_attention_sink(
                 self,
                 cache_config,
@@ -185,7 +184,6 @@ class LlamaDecoderLayer(nn.Module):
         config: LlamaConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -212,7 +210,6 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=attention_bias,
             cache_config=cache_config,
-            use_attention_sinks=use_attention_sinks,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -263,7 +260,6 @@ class LlamaModel(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
-        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
@@ -280,8 +276,7 @@ class LlamaModel(nn.Module):
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config=config,
                               cache_config=cache_config,
-                              quant_config=quant_config,
-                              use_attention_sinks=use_attention_sinks)
+                              quant_config=quant_config)
             for idx in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -353,15 +348,13 @@ class LlamaForCausalLM(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
-        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
         self.model = LlamaModel(config,
                                 cache_config,
                                 quant_config,
-                                lora_config=lora_config,
-                                use_attention_sinks=use_attention_sinks)
+                                lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
