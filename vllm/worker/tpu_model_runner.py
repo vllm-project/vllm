@@ -69,6 +69,8 @@ class TPUModelRunner:
             vision_language_config=self.vision_language_config,
             lora_config=None,
         )
+        xm.wait_device_ops()
+
         model = ModelWrapper(model)
         self.model = torch.compile(model, backend="openxla", fullgraph=True)
 
@@ -89,15 +91,13 @@ class TPUModelRunner:
             slot_mapping = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int64,
                                        device=self.device)
-            block_tables = None
-            context_lens = None
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=batch_size,
                 num_prefill_tokens=batch_size * seq_len,
                 num_decode_tokens=0,
                 slot_mapping=slot_mapping,
-                block_tables=block_tables,
-                context_lens=context_lens,
+                block_tables=None,
+                context_lens=None,
             )
             input_lens = torch.ones((batch_size, ),
                                     dtype=torch.int32,
@@ -127,13 +127,9 @@ class TPUModelRunner:
                 num_prefills=0,
                 num_prefill_tokens=0,
                 num_decode_tokens=batch_size * seq_len,
-                prefill_metadata=None,
-                decode_metadata=None,
-                kv_cache_dtype=None,
                 slot_mapping=slot_mapping,
                 block_tables=block_tables,
                 context_lens=context_lens,
-                is_prompt=False,
             )
 
         t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
