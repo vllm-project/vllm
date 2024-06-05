@@ -34,7 +34,6 @@ def iter_llava_next_configs(model_name: str):
     for (h, w), f in image_hw_to_feature_size.items():
         for input_type, input_shape in [
             (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
-            (VisionLanguageConfig.ImageInputType.IMAGE_FEATURES, (1, f, 1024)),
         ]:
             yield (model_name,
                    VisionLanguageConfig(image_input_type=input_type,

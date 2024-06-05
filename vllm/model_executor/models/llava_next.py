@@ -78,7 +78,6 @@ def _image_pixel_processor(
         ._default_input_processor(data, model_config, vlm_config)
 
 
-@MULTIMODAL_REGISTRY.register_image_feature_input()
 @MULTIMODAL_REGISTRY.register_image_pixel_input(_image_pixel_processor)
 @MULTIMODAL_REGISTRY.register_dummy_data(_get_dummy_image_data)
 class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
@@ -167,20 +166,7 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
             )
 
         if expected_input_type == ImageInputType.IMAGE_FEATURES:
-            if pixel_values is not None:
-                raise ValueError(
-                    "Expected image features but got pixel values")
-            if image_features is None:
-                return None
-
-            if not isinstance(image_features, torch.Tensor):
-                raise ValueError("Incorrect type of image features. "
-                                 f"Got type: {type(image_features)}")
-
-            return LlavaNextImageFeatureInputs(
-                type="image_features",
-                data=self._validate_image_data(image_features),
-            )
+            raise TypeError("Image features are not supported by LLaVA-NeXT")
 
         return None
 
@@ -270,7 +256,8 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
         image_sizes = image_input.get("image_sizes")
         if image_sizes is None:
             batch_size = image_input["data"].shape[0]
-            default_width, default_height = self.config.vision_config.image_size
+            vision_config = self.config.vision_config
+            default_width = default_height = vision_config.image_size
             image_sizes = torch.as_tensor([[default_width, default_height]
                                            for _ in range(batch_size)])
 
