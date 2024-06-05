@@ -225,7 +225,7 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         # Fetch image data
-        image_data = None
+        image_data: Optional[ImagePixelData] = None
         try:
             if len(image_futures):
                 # since we support only single image currently
@@ -262,7 +262,7 @@ class OpenAIServingChat(OpenAIServing):
             "prompt_token_ids": prompt_ids,
         }
         if image_data is not None:
-            inputs["multi_modal_data"] = ImagePixelData(image_data=image_data)
+            inputs["multi_modal_data"] = image_data
 
         result_generator = self.engine.generate(
             inputs,
