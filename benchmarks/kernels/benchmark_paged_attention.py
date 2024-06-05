@@ -170,7 +170,7 @@ if __name__ == '__main__':
     parser.add_argument("--num-kv-heads", type=int, default=8)
     parser.add_argument("--head-size",
                         type=int,
-                        choices=[64, 80, 96, 112, 128, 256],
+                        choices=[64, 80, 96, 112, 128, 192, 256],
                         default=128)
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
     parser.add_argument("--use-alibi", action="store_true")
