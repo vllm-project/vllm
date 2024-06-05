@@ -273,6 +273,11 @@ class Scheduler:
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
 
+        maybe_attn_sink_context_len = {}
+        if self.cache_config.use_attention_sinks:
+            maybe_attn_sink_context_len["attn_sink_context_len"] = \
+                self.scheduler_config.max_model_len
+        
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
@@ -280,8 +285,7 @@ class Scheduler:
             num_cpu_blocks=self.cache_config.num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching,
-            attn_sink_context_len=self.scheduler_config.max_model_len
-                if self.cache_config.use_attention_sinks else None)
+            **maybe_attn_sink_context_len)
 
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
