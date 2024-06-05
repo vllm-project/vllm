@@ -5,7 +5,6 @@ import torch
 import torch_xla.runtime as xr
 import torch_xla.core.xla_model as xm
 
-from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
@@ -48,8 +47,9 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             parallel_config,
             scheduler_config,
             device_config,
+            cache_config,
             vision_language_config=vision_language_config)
-        self.attn_backend = get_attn_backend(self.model_config.dtype)
+
         self.device = None
         self.tpu_cache = None
 
@@ -83,7 +83,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             batch_size=1,
             seq_len=num_tokens,
             kv_caches=kv_caches,
-            is_prefill=True,
+            is_prompt=True,
         )
         xm.wait_device_ops()
 
@@ -113,7 +113,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         head_size = self.model_config.get_head_size()
 
         self.tpu_cache = []
-        tpu_cache_shape = self.attn_backend.get_kv_cache_shape(
+        tpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
             num_gpu_blocks, self.block_size, num_kv_heads, head_size)
         for _ in range(num_layers):
             key_cache = torch.zeros(tpu_cache_shape,
@@ -121,7 +121,6 @@ class TPUWorker(LoraNotSupportedWorkerBase):
                                     device=self.device)
             value_cache = torch.zeros_like(key_cache)
             self.tpu_cache.append((key_cache, value_cache))
-        self.model_runner.block_size = self.block_size
         self._warmup_model()
 
     def _warmup_model(self) -> None:

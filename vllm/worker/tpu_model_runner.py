@@ -8,12 +8,12 @@ import torch_xla.core.xla_model as xm
 import torch_xla.debug.profiler as xp
 
 from vllm.attention import get_attn_backend
-from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import pad_to_max_length
+from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
 
@@ -30,24 +30,32 @@ class TPUModelRunner:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
-        vision_language_config: Optional[VisionLanguageConfig],
+        cache_config: CacheConfig,
+        vision_language_config: Optional[VisionLanguageConfig] = None,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.cache_config = cache_config
         self.vision_language_config = vision_language_config
 
-        if model_config is not None and model_config.get_sliding_window():
-            logger.warning("Sliding window is not supported on TPU. "
-                           "The model will run without sliding window.")
-        self.model = None
-        self.block_size = None
+        self.block_size = self.cache_config.block_size
         # FIXME(woosuk)
         self.block_tables = np.zeros((_MAX_NUM_SEQS, _MAX_NUM_BLOCKS_PER_SEQ),
                                      dtype=np.int32)
+        self.attn_backend = get_attn_backend(
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.cache_config.cache_dtype,
+            self.block_size,
+        )
+
         self.device = None
-        self.attn_backend = get_attn_backend(torch.bfloat16)
+        self.model = None
 
     def load_model(self) -> None:
         self.device = self.device_config.device
@@ -69,9 +77,9 @@ class TPUModelRunner:
         batch_size: int,
         seq_len: int,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        is_prefill: bool,
+        is_prompt: bool,
     ) -> None:
-        if is_prefill:
+        if is_prompt:
             token_ids = torch.zeros((batch_size, seq_len),
                                     dtype=torch.int32,
                                     device=self.device)
@@ -84,16 +92,12 @@ class TPUModelRunner:
             block_tables = None
             context_lens = None
             attn_metadata = self.attn_backend.make_metadata(
-                num_prefills=0,
-                num_prefill_tokens=0,
+                num_prefills=batch_size,
+                num_prefill_tokens=batch_size * seq_len,
                 num_decode_tokens=0,
-                prefill_metadata=None,
-                decode_metadata=None,
-                kv_cache_dtype=None,
                 slot_mapping=slot_mapping,
                 block_tables=block_tables,
                 context_lens=context_lens,
-                is_prompt=True,
             )
             input_lens = torch.ones((batch_size, ),
                                     dtype=torch.int32,
@@ -121,7 +125,7 @@ class TPUModelRunner:
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=0,
                 num_prefill_tokens=0,
-                num_decode_tokens=0,
+                num_decode_tokens=batch_size * seq_len,
                 prefill_metadata=None,
                 decode_metadata=None,
                 kv_cache_dtype=None,
@@ -153,7 +157,7 @@ class TPUModelRunner:
                 self._dummy_run(batch_size,
                                 seq_len,
                                 kv_caches,
-                                is_prefill=True)
+                                is_prompt=True)
                 xm.wait_device_ops()
                 logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
 
@@ -164,7 +168,7 @@ class TPUModelRunner:
         start = time.time()
         for batch_size in [1, 2, 4, 8] + [16 * i for i in range(1, 17)]:
             seq_len = 1
-            self._dummy_run(batch_size, seq_len, kv_caches, is_prefill=False)
+            self._dummy_run(batch_size, seq_len, kv_caches, is_prompt=False)
             xm.wait_device_ops()
             logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
 
@@ -214,17 +218,17 @@ class TPUModelRunner:
         assert max_prompt_len > 0
         max_prompt_len = _get_padded_prefill_len(max_prompt_len)
 
-        input_tokens = _make_array_with_pad(input_tokens,
+        input_tokens = make_tensor_with_pad(input_tokens,
                                             max_prompt_len,
                                             pad=0,
                                             dtype=torch.int32,
                                             device=self.device)
-        input_positions = _make_array_with_pad(input_positions,
+        input_positions = make_tensor_with_pad(input_positions,
                                                max_prompt_len,
                                                pad=0,
                                                dtype=torch.int32,
                                                device=self.device)
-        slot_mapping = _make_array_with_pad(slot_mapping,
+        slot_mapping = make_tensor_with_pad(slot_mapping,
                                             max_prompt_len,
                                             pad=_PAD_SLOT_ID,
                                             dtype=torch.int64,
@@ -398,14 +402,14 @@ class ModelWrapper(nn.Module):
         logits_indices = base_indicies + input_lens - 1
 
         if kv_caches[0][0] is not None:
-            num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
+            num_kv_heads, num_blocks, _, _ = kv_caches[0][0].shape
             slot_mapping = attn_metadata.slot_mapping
             slot_mapping = slot_mapping.flatten()
             head_indicies = torch.arange(0,
                                          num_kv_heads,
                                          device=slot_mapping.device,
                                          dtype=slot_mapping.dtype)
-            head_indicies *= block_size * num_blocks
+            head_indicies *= self.block_size * num_blocks
             slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
                 -1, num_kv_heads)
             slot_mapping = slot_mapping + head_indicies.view(1, -1)
@@ -422,17 +426,6 @@ class ModelWrapper(nn.Module):
         # TODO(woosuk): Support sampling with temperature and top_p.
         next_token_ids = torch.argmax(logits, axis=-1)
         return next_token_ids
-
-
-def _make_array_with_pad(
-    x: List[List[int]],
-    max_len: int,
-    pad: int,
-    dtype: torch.dtype,
-    device: torch.device,
-) -> torch.Tensor:
-    padded_x = [pad_to_max_length(x_i, max_len, pad) for x_i in x]
-    return torch.tensor(padded_x, dtype=dtype, device=device)
 
 
 def _get_padded_prefill_len(x: int) -> int:

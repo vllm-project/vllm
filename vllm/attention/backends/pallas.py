@@ -6,8 +6,7 @@ import torch_xla.experimental.custom_kernel  # Required to register custom ops.
 import torch_xla.experimental.dynamo_set_buffer_donor
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataPerStage)
+                                              AttentionMetadata)
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -48,11 +47,31 @@ class PallasAttentionBackend(AttentionBackend):
 
 @dataclass
 class PallasMetadata(AttentionMetadata):
-    # Currently, input sequences can only contain all prompts
-    # or all decoding. True if all sequences are prompts.
-    is_prompt: bool
+
+    # Currently, input sequences can only contain all prefills
+    # or all decoding.
     block_tables: Optional[torch.Tensor]
     context_lens: Optional[torch.Tensor]
+
+    @property
+    def prefill_metadata(self) -> Optional["PallasMetadata"]:
+        if self.num_prefills == 0:
+            return None
+
+        assert self.block_tables is None
+        assert self.context_lens is None
+        return self
+
+    @property
+    def decode_metadata(self) -> Optional["PallasMetadata"]:
+        if self.num_decode_tokens == 0:
+            return None
+
+        assert self.num_prefills == 0
+        assert self.num_prefill_tokens == 0
+        assert self.block_tables is not None
+        assert self.context_lens is not None
+        return self
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
@@ -62,9 +81,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -74,15 +95,19 @@ class PallasAttentionBackendImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if alibi_slopes is not None:
-            raise NotImplementedError("Alibi slopes is not implemented.")
+            raise NotImplementedError("Alibi slopes is not supported.")
         if sliding_window is not None:
-            raise NotImplementedError("Sliding window is not implemented.")
+            raise NotImplementedError("Sliding window is not supported.")
+        if kv_cache_dtype != "auto":
+            raise NotImplementedError("FP8 KV cache dtype is not supported.")
+        if blocksparse_params is not None:
+            raise NotImplementedError("Blocksparse is not supported.")
 
         if torch_xla.tpu.version() == 4:
             if self.num_kv_heads % 2 == 0:
                 self.megacore_mode = "kv_head"
             else:
-                # FIXME(woosuk): If the batch size is not a multiple of 2, the
+                # NOTE(woosuk): If the batch size is not a multiple of 2, the
                 # megacore mode should be None.
                 self.megacore_mode = "batch"
         else:
@@ -94,8 +119,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Any,
-        attn_metadata: AttentionMetadata[PallasMetadata],  # type: ignore
+        kv_cache: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
+        attn_metadata: PallasMetadata,
         kv_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
@@ -123,8 +148,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
         query = query * self.scale
-        if attn_metadata.is_prompt:
-            # assert attn_metadata.block_tables is None
+        if attn_metadata.num_prefills > 0:
             assert seq_len % 16 == 0
 
             # Handle GQA/MQA.
