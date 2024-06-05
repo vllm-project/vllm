@@ -470,12 +470,13 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
 
     return packed_cross_kv, \
            prefill_packed_ideal_output, \
+           KVMemoryMap(
+            prefill_block_tables, \
+            prefill_slot_mapping), \
            decode_packed_ideal_output, \
-           decode_block_tables, \
-           decode_slot_mapping, \
-           prefill_slot_mapping, \
-           prefill_block_tables
-
+           KVMemoryMap(
+            decode_block_tables, \
+            decode_slot_mapping), \
 
 def _run_encoder_attention_test(attn: Attention, pckd_qkv: PackedQKVInputs,
                                 attn_metadata: AttentionMetadata,
@@ -659,11 +660,9 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 
     prephase_cross_pckd_qkv, \
     prephase_cross_pckd_idl_out, \
+    prephase_cross_kv_mmap, \
     decphase_cross_pckd_idl_out, \
-    cross_decode_block_tables, \
-    cross_decode_slot_mapping, \
-    cross_prefill_slot_mapping, \
-    cross_prefill_block_tables, \
+    decphase_cross_kv_mmap \
     = _enc_dec_cross_attn_setup_reuses_query(dec_qkv,
                                              enc_pckd_qkv,
                                              prephase_dec_pckd_qkv,
@@ -688,8 +687,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         num_prefills_or_decodes=len(prephase_dec_pckd_qkv.q_seq_lens),
         num_prefill_or_decode_tokens=sum(prephase_dec_pckd_qkv.q_seq_lens),
         encoder_seq_lens=enc_pckd_qkv.q_seq_lens,
-        cross_block_tables=cross_prefill_block_tables,
-        cross_slot_mapping=cross_prefill_slot_mapping,
+        cross_kv_mmap=prephase_cross_kv_mmap,
         device=CUDA_DEVICE)
 
     # PREFILL: encoder attention
@@ -752,8 +750,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         num_prefills_or_decodes=len(dec_qkv.q_seq_lens),
         num_prefill_or_decode_tokens=len(dec_qkv.q_seq_lens),
         encoder_seq_lens=enc_pckd_qkv.q_seq_lens,
-        cross_block_tables=cross_decode_block_tables,
-        cross_slot_mapping=cross_decode_slot_mapping,
+        cross_kv_mmap=decphase_cross_kv_mmap,
         device=CUDA_DEVICE)
 
     # DECODE: self-attention test

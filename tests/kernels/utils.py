@@ -587,8 +587,7 @@ def make_test_metadata(
     device: Union[torch.device, str],
     context_lens: Optional[List[int]] = None,
     encoder_seq_lens: Optional[List[int]] = None,
-    cross_block_tables: Optional[torch.Tensor] = None,
-    cross_slot_mapping: Optional[List[int]] = None,
+    cross_kv_mmap: Optional[KVMemoryMap] = None,
 ) -> AttentionMetadata:
     '''
     Construct fake attention metadata for a combined self-/cross-attention
@@ -655,8 +654,10 @@ def make_test_metadata(
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
             max_encoder_seq_len=max_encoder_seq_len,
-            cross_slot_mapping=cross_slot_mapping,
-            cross_block_tables=cross_block_tables)
+            cross_slot_mapping=None if cross_kv_mmap is None else \
+                                cross_kv_mmap.slot_mapping,
+            cross_block_tables=None if cross_kv_mmap is None else \
+                                cross_kv_mmap.block_tables)
 
     else:  # not is_prompt
 
@@ -691,5 +692,7 @@ def make_test_metadata(
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
             max_encoder_seq_len=max_encoder_seq_len,
-            cross_slot_mapping=cross_slot_mapping,
-            cross_block_tables=cross_block_tables)
+            cross_slot_mapping=None if cross_kv_mmap is None else \
+                                cross_kv_mmap.slot_mapping,
+            cross_block_tables=None if cross_kv_mmap is None else \
+                                cross_kv_mmap.block_tables)
