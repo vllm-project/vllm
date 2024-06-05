@@ -142,7 +142,6 @@ class TPUModelRunner:
         self,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> None:
-        torch._dynamo.config.cache_size_limit = 128
         # Prefill
         logger.info("Compiling the model with different input shapes...")
         start = time.time()

@@ -62,7 +62,11 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         set_random_seed(self.model_config.seed)
         xm.set_rng_state(self.model_config.seed, self.device)
 
-        # Use persistent cache to avoid recompilation.
+        # Increase the cache size limit.
+        torch._dynamo.config.cache_size_limit = 128
+        # Use persistent cache to avoid XLA recompilation.
+        # NOTE(woosuk): This does not completely eliminate the recompilation
+        # overhead because dynamo does not cache the compiled results.
         xr.initialize_cache(os.path.expanduser("~/.vllm/torch_xla_cache"),
                             readonly=False)
 
@@ -121,8 +125,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self._warmup_model()
 
     def _warmup_model(self) -> None:
-        # NOTE(woosuk): Because of buffer donation, the reference to the cache
-        # should be updated after the warmup.
+        return
         self.model_runner.warmup_model(self.tpu_cache)
 
     def get_cache_block_size_bytes(self) -> int:
