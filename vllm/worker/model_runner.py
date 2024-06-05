@@ -24,6 +24,10 @@ from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 
+from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
+from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
@@ -126,6 +130,12 @@ class ModelRunner:
         self.model: nn.Module  # Set after load_model
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+
+        self.paged_kv_indptr_tensor = None
+        self.paged_kv_indices_tensor = None
+        self.paged_kv_last_page_len_tensor = None
+        self.prefill_wrapper = None
+        self.decode_wrapper = None
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -245,24 +255,39 @@ class ModelRunner:
         num_prefills = 0
         num_prefill_tokens = 0
         num_decode_tokens = 0
+        flashinfer_batch_idx = 0
 
-        # The following fields are only for flashinfer
-        # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
-        # for the precise definition of the following fields.
-        # An example:
-        # request 1, page indices [0, 5, 8]
-        # request 2, page indices [1, 6, 7]
-        # request 3, page indices [3, 4]
-        # paged_kv_indices is a concatenation of page indices of all requests:
-        # [0, 5, 8, 1, 6, 7, 3, 4]
-        # paged_kv_indptr is used to index into paged_kv_indices:
-        # [0, 3, 6, 8]
-        paged_kv_indices: List[int] = []
-        # 0 at the beginning of paged_kv_indptr indicates the start of the
-        # first request’s page indices in the paged_kv_indices list.
-        paged_kv_indptr: List[int] = [0]
-        # paged_kv_last_page_len is the length of the last page of each request
-        paged_kv_last_page_len: List[int] = []
+        if self.attn_backend.get_name() == "flashinfer" and \
+              self.paged_kv_indptr_tensor is None and \
+                self.cache_config.num_gpu_blocks is not None:
+            # Preallocate pinned memory to avoid repeated allocations.
+            # The following fields are only for flashinfer
+            # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
+            # for the precise definition of the following fields.
+            # An example:
+            # request 1, page indices [0, 5, 8]
+            # request 2, page indices [1, 6, 7]
+            # request 3, page indices [3, 4]
+            # paged_kv_indices is a concatenation of page indices of all requests:
+            # [0, 5, 8, 1, 6, 7, 3, 4]
+            # paged_kv_indptr is used to index into paged_kv_indices:
+            # [0, 3, 6, 8]
+            self.paged_kv_indptr_tensor = torch.empty(
+                self.scheduler_config.max_num_seqs + 1,
+                dtype=torch.int,
+                device='cpu')
+            self.paged_kv_indptr_tensor[0] = 0
+            # 0 at the beginning of paged_kv_indptr indicates the start of the
+            # first request’s page indices in the paged_kv_indices list.
+            self.paged_kv_indices_tensor = torch.empty(
+                self.cache_config.num_gpu_blocks,
+                dtype=torch.int,
+                device='cpu')
+            # paged_kv_last_page_len is the length of the last page of each request
+            self.paged_kv_last_page_len_tensor = torch.empty(
+                self.scheduler_config.max_num_seqs,
+                dtype=torch.int,
+                device='cpu')
 
         if len(seq_group_metadata_list) == 0:
             return ModelInput.empty(self.device)
@@ -451,13 +476,22 @@ class ModelRunner:
                     slot_mapping.append(slot)
 
                 if self.attn_backend.get_name() == "flashinfer":
-                    paged_kv_indices.extend(block_table)
-                    paged_kv_indptr.append(paged_kv_indptr[-1] +
-                                           len(block_table))
+
+                    start_idx = self.paged_kv_indptr_tensor[
+                        flashinfer_batch_idx]
+                    # end_idx = start_idx + len(block_table)
+                    for idx, block in enumerate(block_table):
+                        self.paged_kv_indices_tensor[start_idx + idx] = block
+                    # self.paged_kv_indices_tensor[start_idx:end_idx] = block_table
+                    self.paged_kv_indptr_tensor[
+                        flashinfer_batch_idx +
+                        1] = start_idx + len(block_table)
                     last_page_len = seq_len % self.block_size
                     if last_page_len == 0:
                         last_page_len = self.block_size
-                    paged_kv_last_page_len.append(last_page_len)
+                    self.paged_kv_last_page_len_tensor[
+                        flashinfer_batch_idx] = last_page_len
+                    flashinfer_batch_idx += 1
 
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
@@ -555,22 +589,62 @@ class ModelRunner:
                                            device=self.device)
 
         if self.attn_backend.get_name() == "flashinfer":
-            paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr,
-                                                  dtype=torch.int,
-                                                  device='cpu')
-            paged_kv_indices_tensor = torch.tensor(paged_kv_indices,
-                                                   dtype=torch.int,
-                                                   device='cpu')
-            paged_kv_last_page_len_tensor = torch.tensor(
-                paged_kv_last_page_len, dtype=torch.int, device='cpu')
+            if self.paged_kv_indices_tensor is not None:
+                end_idx = self.paged_kv_indptr_tensor[
+                    flashinfer_batch_idx].item()
+                paged_kv_indices_tensor = self.paged_kv_indices_tensor[:
+                                                                       end_idx]
+                paged_kv_indptr_tensor = self.paged_kv_indptr_tensor[:
+                                                                     flashinfer_batch_idx
+                                                                     + 1]
+                paged_kv_last_page_len_tensor = self.paged_kv_last_page_len_tensor[:
+                                                                                   flashinfer_batch_idx]
+            else:
+                paged_kv_indices_tensor = None
+                paged_kv_indptr_tensor = None
+                paged_kv_last_page_len_tensor = None
+
+            if num_decode_tokens and self.decode_wrapper is None:
+                self.decode_workspace_buffer = torch.empty(128 * 1024 * 1024,
+                                                           dtype=torch.uint8,
+                                                           device=self.device)
+
+                if use_captured_graph:
+                    self.indptr_buffer = torch.empty(
+                        self.scheduler_config.max_num_seqs + 1,
+                        dtype=torch.int32,
+                        device=self.device)
+                    self.indices_buffer = torch.empty(
+                        self.cache_config.num_gpu_blocks,
+                        dtype=torch.int32,
+                        device=self.device)
+                    self.last_page_len_buffer = torch.empty(
+                        self.scheduler_config.max_num_seqs,
+                        dtype=torch.int32,
+                        device=self.device)
+                    self.decode_wrapper = \
+                            CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
+                            self.decode_workspace_buffer, self.indptr_buffer,
+                            self.indices_buffer, self.last_page_len_buffer, "NHD")
+                else:
+                    self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                        self.decode_workspace_buffer, "NHD")
+
+            if num_prefill_tokens and self.prefill_wrapper is None:
+                self.prefill_workspace_buffer = torch.empty(128 * 1024 * 1024,
+                                                            dtype=torch.uint8,
+                                                            device=self.device)
+                self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self.prefill_workspace_buffer, "NHD")
+
             kv_cache_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype,
                                                       self.model_config.dtype)
+
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=num_prefills,
                 slot_mapping=slot_mapping_tensor,
                 num_prefill_tokens=num_prefill_tokens,
                 num_decode_tokens=num_decode_tokens,
-                use_cuda_graph=False,
                 max_prefill_seq_len=max_prefill_seq_len,
                 block_tables=block_tables,
                 paged_kv_indptr=paged_kv_indptr_tensor,
@@ -582,13 +656,15 @@ class ModelRunner:
                     self.parallel_config),
                 head_dim=self.model_config.get_head_size(),
                 page_size=self.block_size,
-                num_gpu_blocks=self.cache_config.num_gpu_blocks,
-                max_num_seqs=self.scheduler_config.max_num_seqs,
                 seq_start_loc=seq_start_loc,
                 query_start_loc=query_start_loc,
                 device=self.device,
                 data_type=kv_cache_dtype,
-                use_captured_graph=use_captured_graph)
+                use_cuda_graph=use_captured_graph,
+                decode_wrapper=self.decode_wrapper,
+                prefill_wrapper=self.prefill_wrapper,
+            )
+
         else:
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=num_prefills,
@@ -878,6 +954,22 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
+        indptr_buffer = torch.empty(self.scheduler_config.max_num_seqs + 1,
+                                    dtype=torch.int32,
+                                    device=self.device)
+        indices_buffer = torch.empty(self.cache_config.num_gpu_blocks,
+                                     dtype=torch.int32,
+                                     device=self.device)
+        last_page_len_buffer = torch.empty(self.scheduler_config.max_num_seqs,
+                                           dtype=torch.int32,
+                                           device=self.device)
+        decode_workspace_buffer = torch.empty(128 * 1024 * 1024,
+                                              dtype=torch.uint8,
+                                              device=self.device)
+        decode_wrapper = CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
+            decode_workspace_buffer, indptr_buffer, indices_buffer,
+            last_page_len_buffer, "NHD")
+
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
@@ -899,7 +991,6 @@ class ModelRunner:
                         slot_mapping=slot_mapping[:batch_size],
                         num_prefill_tokens=0,
                         num_decode_tokens=batch_size,
-                        use_cuda_graph=False,
                         max_prefill_seq_len=0,
                         block_tables=block_tables,
                         paged_kv_indptr=paged_kv_indptr_tensor_host,
@@ -912,13 +1003,13 @@ class ModelRunner:
                             self.parallel_config),
                         head_dim=self.model_config.get_head_size(),
                         page_size=self.block_size,
-                        num_gpu_blocks=self.cache_config.num_gpu_blocks,
-                        max_num_seqs=self.scheduler_config.max_num_seqs,
                         seq_start_loc=None,
                         query_start_loc=query_start_loc_host,
                         device=self.device,
                         data_type=kv_cache_dtype,
-                        use_captured_graph=True)
+                        use_cuda_graph=True,
+                        decode_wrapper=decode_wrapper,
+                        prefill_wrapper=None)
                 else:
                     attn_metadata = self.attn_backend.make_metadata(
                         num_prefills=0,
@@ -1025,7 +1116,6 @@ class CUDAGraphRunner:
                 "positions": positions,
                 "kv_caches": kv_caches,
                 "slot_mapping": attn_metadata.slot_mapping,
-                "block_tables": attn_metadata.decode_metadata.block_tables,
             }
         else:
             self.input_buffers = {
@@ -1060,8 +1150,8 @@ class CUDAGraphRunner:
             self.input_buffers["seq_lens_tensor"].copy_(
                 attn_metadata.decode_metadata.seq_lens_tensor,
                 non_blocking=True)
-        self.input_buffers["block_tables"].copy_(
-            attn_metadata.decode_metadata.block_tables, non_blocking=True)
+            self.input_buffers["block_tables"].copy_(
+                attn_metadata.decode_metadata.block_tables, non_blocking=True)
         # Run the graph.
         self.graph.replay()
 
