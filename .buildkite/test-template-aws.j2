@@ -11,7 +11,7 @@ steps:
       - "docker pull {{ ecr_repo }}:latest || true"
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
-      {% if ${"BUILDKITE_BRANCH"} == "main" $}
+      {% if ${"BUILDKITE_BRANCH"} == "main" %}
       - "docker tag {{ docker_image }} {{ ecr_repo }}:latest"
       - "docker push {{ ecr_repo }}:latest"
       {% endif %}
