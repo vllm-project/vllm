@@ -116,6 +116,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         num_tpu_blocks = (kv_cache_bytes //
                           (kv_cache_dtype_btyes * block_size * num_layers * 2 *
                            head_size * num_kv_heads))
+        num_tpu_blocks = (num_tpu_blocks // 128) * 128  # Round down to 128.
         return num_tpu_blocks, 0
 
     def initialize_cache(
