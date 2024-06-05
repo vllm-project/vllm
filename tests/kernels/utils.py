@@ -102,6 +102,9 @@ PackedQKVInputs = namedtuple("PackedQKVInputs", [
     "q_seq_lens", "kv_seq_lens"
 ])
 
+KVMemoryMap = namedtuple("KVMemoryMap", [
+    "block_tables", "slot_mapping"
+])
 
 def make_qkv(
     batch_size: int,
@@ -577,8 +580,7 @@ def make_test_metadata(
     attn_backend: AttentionBackend,
     is_prompt: bool,
     seq_lens: List[int],
-    block_tables: torch.Tensor,
-    slot_mapping: torch.Tensor,
+    kv_mmap: KVMemoryMap, 
     default_attn_type: AttentionType,
     num_prefills_or_decodes: int,
     num_prefill_or_decode_tokens: int,
@@ -639,7 +641,7 @@ def make_test_metadata(
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
-            slot_mapping=slot_mapping,
+            slot_mapping=kv_mmap.slot_mapping,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -647,7 +649,7 @@ def make_test_metadata(
             max_prefill_seq_len=None if seq_lens is None else max(seq_lens),
             max_decode_seq_len=0,
             context_lens_tensor=context_lens_tensor,
-            block_tables=block_tables,
+            block_tables=kv_mmap.block_tables,
             use_cuda_graph=False,
             _attn_type=default_attn_type,
             encoder_seq_lens=encoder_seq_lens,
@@ -675,7 +677,7 @@ def make_test_metadata(
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
-            slot_mapping=slot_mapping,
+            slot_mapping=kv_mmap.slot_mapping,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -683,7 +685,7 @@ def make_test_metadata(
             max_prefill_seq_len=0,
             max_decode_seq_len=max(seq_lens),
             context_lens_tensor=context_lens_tensor,
-            block_tables=block_tables,
+            block_tables=kv_mmap.block_tables,
             use_cuda_graph=False,
             _attn_type=default_attn_type,
             encoder_seq_lens=encoder_seq_lens,

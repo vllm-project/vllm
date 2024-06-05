@@ -302,12 +302,14 @@ def _decoder_attn_setup(batch_size: int,
     return qkv, \
     prefill_pckd_qkv, \
     prefill_packed_ideal_output, \
+    KVMemoryMap(
+      prefill_block_tables, \
+      prefill_slot_mapping), \
     decode_pckd_qkv, \
     decode_packed_ideal_output, \
-    decode_block_tables, \
-    decode_slot_mapping, \
-    prefill_slot_mapping, \
-    prefill_block_tables, \
+    KVMemoryMap(
+      decode_block_tables, \
+      decode_slot_mapping), \
     max_block_idx
 
 def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
@@ -642,12 +644,10 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     dec_qkv, \
     prephase_dec_pckd_qkv, \
     prephase_dec_pckd_idl_out, \
+    prephase_dec_kv_mmap, \
     decphase_dec_pckd_qkv, \
     decphase_dec_pckd_idl_out, \
-    decphase_dec_blk_tbls, \
-    decphase_dec_slt_map, \
-    prephase_dec_slt_map, \
-    prephase_dec_blk_tbls, \
+    decphase_dec_kv_mmap, \
     cross_block_base_addr = _decoder_attn_setup(batch_size,
                                                 num_heads,
                                                 head_size,
@@ -683,8 +683,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         attn_backend,
         True,
         prephase_dec_pckd_qkv.q_seq_lens,
-        prephase_dec_blk_tbls,
-        prephase_dec_slt_map,
+        prephase_dec_kv_mmap,
         default_attn_type=AttentionType.ENCODER,
         num_prefills_or_decodes=len(prephase_dec_pckd_qkv.q_seq_lens),
         num_prefill_or_decode_tokens=sum(prephase_dec_pckd_qkv.q_seq_lens),
@@ -747,8 +746,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         attn_backend,
         False,
         dec_qkv.q_seq_lens,
-        decphase_dec_blk_tbls,
-        decphase_dec_slt_map,
+        decphase_dec_kv_mmap,
         default_attn_type=AttentionType.DECODER,
         context_lens=context_lens,
         num_prefills_or_decodes=len(dec_qkv.q_seq_lens),
