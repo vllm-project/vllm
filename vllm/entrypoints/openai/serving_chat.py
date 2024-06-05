@@ -163,7 +163,9 @@ class OpenAIServingChat(OpenAIServing):
         try:
             # Tokenize/detokenize depending on prompt format (string/token list)
             prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
-                request, prompt=prompt, add_special_tokens=False)
+                request,
+                prompt=prompt,
+                add_special_tokens=request.add_special_tokens)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
             decoding_config = await self.engine.get_decoding_config()
