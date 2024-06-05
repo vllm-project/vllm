@@ -2,7 +2,23 @@
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-"""Tensor and pipeline parallel groups."""
+"""vLLM distributed state.
+It takes over the control of the distributed environment from PyTorch.
+The typical workflow is:
+
+call `init_distributed_environment` to initialize the distributed environment.
+call `initialize_model_parallel` or `ensure_model_parallel_initialized` to 
+ initialize the model parallel groups.
+
+any code dealing with the distributed stuff
+
+call `destroy_model_parallel` to destroy the model parallel groups.
+call `destroy_distributed_environment` to destroy the distributed environment.
+
+If you only need to use the distributed environment without model/pipeline
+ parallelism, you can skip the model parallel initialization and destruction
+ steps.
+"""
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
