@@ -495,7 +495,7 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
               decode_block_tables, \
               decode_slot_mapping))
 
-def _run_encoder_attention_test(attn: Attention, pckd_qkv: PackedQKVInputs,
+def _run_encoder_attention_test(attn: Attention, encoder_test_params: PhaseTestParameters,
                                 attn_metadata: AttentionMetadata,
                                 attn_type: AttentionType) -> torch.Tensor:
     '''
@@ -520,12 +520,13 @@ def _run_encoder_attention_test(attn: Attention, pckd_qkv: PackedQKVInputs,
     assert attn_type == AttentionType.ENCODER
     assert attn_metadata.num_decode_tokens == 0
     attn_metadata.attention_type = attn_type
-    return attn.forward(pckd_qkv.query, pckd_qkv.key, pckd_qkv.value, None,
+    packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
+    return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value, None,
                         attn_metadata)
 
 
 def _run_decoder_self_attention_test(attn: Attention,
-                                     pckd_qkv: PackedQKVInputs,
+                                     decoder_test_params: PhaseTestParameters,
                                      kv_cache: torch.Tensor,
                                      attn_metadata: AttentionMetadata,
                                      attn_type: AttentionType) -> torch.Tensor:
@@ -551,13 +552,14 @@ def _run_decoder_self_attention_test(attn: Attention,
     '''
     assert attn_type == AttentionType.DECODER
     attn_metadata.attention_type = attn_type
-    return attn.forward(pckd_qkv.query, pckd_qkv.key, pckd_qkv.value, kv_cache,
+    packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
+    return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value, kv_cache,
                         attn_metadata)
 
 
 def _run_encoder_decoder_cross_attention_test(
-        attn: Attention, dec_pckd_qkv: PackedQKVInputs,
-        cross_pckd_qkv: PackedQKVInputs, kv_cache: torch.Tensor,
+        attn: Attention, decoder_test_params: PhaseTestParameters,
+        cross_test_params: PhaseTestParameters, kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata) -> torch.Tensor:
     '''
     Run encoder/decoder cross-attention test.
@@ -578,13 +580,29 @@ def _run_encoder_decoder_cross_attention_test(
       & attn_metadata
     '''
     attn_metadata.attention_type = AttentionType.ENCODER_DECODER
+    cross_pckd_qkv = cross_test_params.packed_qkvo.packed_qkv
     key = None if cross_pckd_qkv is None else \
             cross_pckd_qkv.key
     value = None if cross_pckd_qkv is None else \
             cross_pckd_qkv.value
-    return attn.forward(dec_pckd_qkv.query, key, value, kv_cache,
+    return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query, key, value, kv_cache,
                         attn_metadata)
 
+def _assert_actual_match_ideal(test_params: PhaseTestParameters,
+                               output_under_test: torch.Tensor) -> None:
+    '''
+    Assert that observed output matches the ideal output
+    contained in the test parameters data structure.
+
+    Arguments:
+
+    * test_params: Test parameters including packed ideal output
+    * output_under_test: actually observed output value
+    '''
+    ideal_output = test_params.packed_qkvo.ideal_output
+    assert torch.allclose(ideal_output,
+                          output_under_test
+                            .view_as(ideal_output))
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -701,14 +719,13 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     enc_packed_actual_output: torch.Tensor = \
       _run_encoder_attention_test(
         attn,
-        enc_pckd_qkvo.packed_qkv,
+        enc_test_params,
         prephase_attn_metadata,
         attn_type=AttentionType.ENCODER)
 
     # - Is encoder attention result correct?
-    assert torch.allclose(enc_pckd_qkvo.ideal_output,
-                          enc_packed_actual_output
-                            .view_as(enc_pckd_qkvo.ideal_output))
+    _assert_actual_match_ideal(enc_test_params,
+                               enc_packed_actual_output)
 
     # PREFILL: self-attention test
 
@@ -721,9 +738,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         attn_type=AttentionType.DECODER)
 
     # - Prefill self-attention correct?
-    assert torch.allclose(
-        prephase_dec_pckd_idl_out,
-        self_prefill_packed_actual_output.view_as(prephase_dec_pckd_idl_out))
+    _assert_actual_match_ideal(prephase_dec_test_params,
+                               self_prefill_packed_actual_output)
 
     # PREFILL: cross-attention test
 
@@ -736,9 +752,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         prephase_attn_metadata)
 
     # - Prefill cross-attention correct?
-    assert torch.allclose(
-        prephase_cross_pckd_idl_out,
-        prephase_cross_pckd_act_out.view_as(prephase_cross_pckd_idl_out))
+    _assert_actual_match_ideal(prephase_cross_test_params,
+                               prephase_cross_pckd_act_out)
 
     # DECODE: build decode-phase attention metadata
 
@@ -770,9 +785,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         attn_type=AttentionType.DECODER)
 
     # - Decode self-attention correct?
-    assert torch.allclose(
-        decphase_dec_pckd_idl_out,
-        decphase_dec_pckd_act_out.view_as(decphase_dec_pckd_idl_out))
+    _assert_actual_match_ideal(decphase_dec_test_params,
+                               decphase_dec_pckd_act_out)
 
     # DECODE: cross-attention test
 
@@ -785,9 +799,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         decphase_attn_metadata)
 
     # - Decode cross-attention correct?
-    assert torch.allclose(
-        decphase_cross_pckd_idl_out,
-        decphase_cross_pckd_act_out.view_as(decphase_cross_pckd_idl_out))
+    _assert_actual_match_ideal(decphase_cross_test_params,
+                               decphase_cross_pckd_act_out)
 
     # The following test conditions could in principle be a
     # standalone test, however the test setup is
