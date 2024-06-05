@@ -96,11 +96,23 @@ def ref_masked_attention(query: torch.Tensor,
 QKVInputs = namedtuple("QKVInputs",
                        ["query", "key", "value", "q_seq_lens", "kv_seq_lens"])
 
+QKVO = namedtuple("QKVO",
+                  [
+                      "qkv",
+                      "ideal_output"
+                  ])
+
 # total_num_tokens x (num_heads*head_size)
 PackedQKVInputs = namedtuple("PackedQKVInputs", [
     "query", "key", "value", "q_start_loc_list", "kv_start_loc_list",
     "q_seq_lens", "kv_seq_lens"
 ])
+
+PackedQKVO = namedtuple("PackedQKVO",
+                  [
+                      "packed_qkv",
+                      "ideal_output"
+                  ])
 
 KVMemoryMap = namedtuple("KVMemoryMap", [
     "block_tables", "slot_mapping"
