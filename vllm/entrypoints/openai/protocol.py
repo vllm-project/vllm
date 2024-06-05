@@ -665,6 +665,8 @@ class TokenizeRequest(OpenAIBaseModel):
 
 class TokenizeResponse(OpenAIBaseModel):
     tokens: List[int]
+    count: int
+    max_model_len: int
 
 
 class DetokenizeRequest(OpenAIBaseModel):

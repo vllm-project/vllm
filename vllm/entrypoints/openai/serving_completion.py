@@ -422,7 +422,9 @@ class OpenAIServingCompletion(OpenAIServing):
             request,
             prompt=request.prompt,
             add_special_tokens=request.add_special_tokens)
-        return TokenizeResponse(tokens=input_ids)
+        return TokenizeResponse(tokens=input_ids,
+                                count=len(input_ids),
+                                max_model_len=self.max_model_len)
 
     def create_detokenize(self,
                           request: DetokenizeRequest) -> DetokenizeResponse:
