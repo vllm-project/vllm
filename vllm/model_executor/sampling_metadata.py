@@ -446,7 +446,7 @@ class SamplingTensors:
         # pinned memory.
         pin_memory = is_pin_memory_available()
 
-        do_penalties = bool(prompt_tokens) or bool(output_tokens)
+        do_penalties = prompt_tokens or output_tokens
 
         if do_penalties:
             prompt_max_len = max([len(tokens) for tokens in prompt_tokens],
