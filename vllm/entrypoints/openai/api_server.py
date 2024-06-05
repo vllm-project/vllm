@@ -208,7 +208,9 @@ def run_server(args):
         # When using single vLLM without engine_use_ray
         model_config = asyncio.run(engine.get_model_config())
 
-    global openai_serving_chat, openai_serving_completion, openai_serving_embedding
+    global openai_serving_chat
+    global openai_serving_completion
+    global openai_serving_embedding
 
     openai_serving_chat = OpenAIServingChat(engine, model_config,
                                             served_model_names,
