@@ -131,7 +131,8 @@ class OpenAIServing:
             prompt_ids: Optional[List[int]] = None,
             truncate_prompt_tokens: Optional[Annotated[int,
                                                        Field(ge=1)]] = None,
-            add_special_tokens: bool = True) -> Tuple[List[int], str]:
+            add_special_tokens: Optional[bool] = True
+    ) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
