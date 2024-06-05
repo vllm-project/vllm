@@ -421,6 +421,11 @@ class LLMEngine:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
+        if (self.model_config.use_attention_sinks
+            and getattr(params, "use_beam_search", False)):
+            logger.warning("Beam search not supported with attention sinks "
+                           f"currently. Aborting request {request_id}.")
+            return
         if arrival_time is None:
             arrival_time = time.time()
         prompt_token_ids = self.encode_request(

@@ -428,8 +428,8 @@ class ModelRunner:
 
                     # Attention sinks: abs pos for slot needs to be shifted
                     #                  back when past max model length
-                    if self.model_config.use_attention_sinks and \
-                        seq_len > max_model_len:
+                    if (self.model_config.use_attention_sinks
+                        and seq_len > max_model_len):
                         if self.block_size <= i < evicted_end: continue
                         else: i -= evicted_end - self.block_size
                     
