@@ -5,12 +5,16 @@
 steps:
   - label: ":docker: build image"
     agents:
-      queue: cpu_queue
+      queue: small_cpu_queue
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "docker pull {{ ecr_repo }}:latest || true"
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
+      {% if ${"BUILDKITE_BRANCH"} == "main" $}
+      - "docker tag {{ docker_image }} {{ ecr_repo }}:latest"
+      - "docker push {{ ecr_repo }}:latest"
+      {% endif %}
     env:
       DOCKER_BUILDKIT: "1"
     retry:
@@ -20,6 +24,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 5
   - wait
+
 
   {% for step in steps %}
   - label: "{{ step.label }}"
@@ -48,6 +53,9 @@ steps:
           propagate-environment: true
           {% if not step.no_gpu %}
           gpus: all
+          {% endif %}
+          {% if step.label == "Benchmarks"}
+          mount-buildkite-agent: true
           {% endif %}
           command: ["bash", "-c", "cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
           environment:
