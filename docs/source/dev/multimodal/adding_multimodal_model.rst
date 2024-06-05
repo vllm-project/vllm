@@ -1,0 +1,94 @@
+.. _adding_a_new_multimodal_model:
+
+Adding a New Multimodal Model
+=============================
+
+This document provides a high-level guide on integrating a :ref:`multimodal model <multi_modality>` into vLLM.
+
+.. note::
+    The complexity of adding a new model depends heavily on the model's architecture.
+    The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
+    However, for models that include new operators (e.g., a new attention mechanism), the process can be a bit more complex.
+
+.. tip::
+    If you are encountering issues while integrating your model into vLLM, feel free to open an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ repository.
+    We will be happy to help you out!
+
+
+0. Set up a base vLLM model
+---------------------------
+
+Follow :ref:`these steps <adding_a_new_model>` to first implement the model in vLLM.
+While implementing the :meth:`~torch.nn.Module.forward` method, reserve a keyword parameter
+for each input tensor that corresponds to a multi-modal input, as shown in the following example:
+
+.. code-block:: diff
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+    +   pixel_values: torch.Tensor,
+    ) -> SamplerOutput:
+
+.. note::
+    The model class does not have to be named :code:`*ForCausalLM`.
+    Check out `the HuggingFace Transformers documentation <https://huggingface.co/docs/transformers/model_doc/auto#multimodal>`__ for some examples.
+
+
+1. Register input mappers
+-------------------------
+
+For each modality type to support, decorate the model class with :meth:`vllm.INPUT_REGISTRY.MULTIMODAL.register_input_mapper <vllm.multimodal.MultiModalRegistry.register_input_mapper>`.
+This decorator accepts a function that maps multi-modal inputs to the keyword arguments you have previously defined in :meth:`~torch.nn.Module.forward`.
+
+.. code-block:: diff
+
+    + from vllm.inputs import INPUT_REGISTRY
+
+    + @INPUT_REGISTRY.MULTIMODAL.register_image_feature_input_mapper()
+    + @INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper()
+    class YourModelForImage2Seq(nn.Module):
+
+A default mapper is available for each modality in the core vLLM library. This input mapper will be used if you do not provide your own function.
+
+
+2. (Optional) Register dummy data
+---------------------------------
+
+During startup, dummy data is passed to the vLLM model to allocate memory. This only consists of text input by default, which may not be applicable to multi-modal models.
+In such cases, you can define your own dummy data by registering a factory method via :meth:`vllm.inputs.INPUT_REGISTRY.register_dummy_data <vllm.inputs.registry.InputRegistry.register_dummy_data>`.
+
+.. code-block:: diff
+
+    from vllm.inputs import INPUT_REGISTRY
+
+    @INPUT_REGISTRY.MULTIMODAL.register_image_feature_input_mapper()
+    @INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper()
+    + @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
+    class YourModelForImage2Seq(nn.Module):
+
+Refer to :class:`vllm.multimodal.image.DummyImageDataFactories` for some examples of dummy data factories.
+
+
+3. (Optional) Register input processor
+--------------------------------------
+
+Sometimes, there is a need to process inputs at the :class:~vllm.LLMEngine` level before they are passed to the model executor.
+You can register input processors via :meth:`vllm.inputs.INPUT_REGISTRY.register_input_processor <vllm.inputs.registry.InputRegistry.register_input_processor>`.
+
+.. code-block:: diff
+
+    from vllm.inputs import INPUT_REGISTRY
+
+    @INPUT_REGISTRY.MULTIMODAL.register_image_feature_input_mapper()
+    @INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper()
+    @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
+    + @INPUT_REGISTRY.register_input_processor(<your_input_processor>)
+    class YourModelForImage2Seq(nn.Module):
+
+A common use case of input processors is inserting extra image tokens to leverage the vLLM framework for attention mask generation.
+More details can be found in :class:`vllm.multimodal.image.ImageInputProcessors`.
+
