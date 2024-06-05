@@ -101,7 +101,7 @@ torch::Tensor fp8_gemm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& scaleA
     auto d_scaleD = scaleD.data_ptr();
 
     auto handle = at::cuda::getCurrentCUDABlasLtHandle();
-    auto stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+    auto stream = at::cuda::getCurrentCUDAStream();
 
     hipblaslt_ext::GemmPreference gemmPref;
     gemmPref.setMaxWorkspaceBytes(0);
@@ -218,7 +218,7 @@ torch::Tensor fp8_gemm_16(
     auto d_scaleB = transpose_result ? scaleA.data_ptr() : scaleB.data_ptr();
 
     auto handle = at::cuda::getCurrentCUDABlasLtHandle();
-    auto stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+    auto stream = at::cuda::getCurrentCUDAStream();
 
     hipblaslt_ext::GemmPreference gemmPref;
     gemmPref.setMaxWorkspaceBytes(0);
