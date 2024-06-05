@@ -1,3 +1,4 @@
+from functools import lru_cache
 from typing import Dict, Optional, Tuple, Type, Union
 
 import torch
@@ -11,11 +12,15 @@ from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.inputs.registry import DummyDataFactories, DummyDataFactory
 from vllm.logger import init_logger
 from vllm.sequence import SequenceData
-from vllm.transformers_utils.image_processor import cached_get_image_processor
+from vllm.transformers_utils.image_processor import get_image_processor
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from .base import MultiModalData, MultiModalPlugin
 
 logger = init_logger(__name__)
+
+_cached_get_tokenizer = lru_cache(get_tokenizer)
+_cached_get_image_processor = lru_cache(get_image_processor)
 
 
 def _get_dummy_seq_data(
@@ -34,23 +39,80 @@ def _get_dummy_seq_data(
     return SequenceData(token_ids)
 
 
+def _get_clip_num_patches(hf_config: CLIPVisionConfig) -> int:
+    image_size = hf_config.image_size
+    patch_size = hf_config.patch_size
+
+    assert image_size % patch_size == 0
+    return image_size // patch_size
+
+
+def _get_clip_image_feature_size(hf_config: CLIPVisionConfig) -> int:
+    num_patches = _get_clip_num_patches(hf_config)
+    return num_patches * num_patches
+
+
+def _get_llava_next_num_unpadded_features(
+    height: int,
+    width: int,
+    npatches: int,
+    num_patch_height: int,
+    num_patch_width: int,
+) -> Tuple[int, int]:
+    # Taken from: https://github.com/huggingface/text-generation-inference/blob/799a193b109662743bed1b18a09af1fdcd508c8b/server/text_generation_server/models/vlm_causal_lm.py#L111
+    current_height = npatches * num_patch_height
+    current_width = npatches * num_patch_width
+
+    aspect_ratio: float = width / height
+    current_aspect_ratio: float = current_width / current_height
+    if aspect_ratio > current_aspect_ratio:
+        new_height = (height * current_width) // width
+        current_height = new_height
+    else:
+        new_width = (width * current_height) // height
+        current_width = new_width
+
+    unpadded_features = current_height * current_width
+    newline_features = current_height
+    return (unpadded_features, newline_features)
+
+
+def _get_llava_next_image_feature_size(hf_config: LlavaNextConfig) -> int:
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, CLIPVisionConfig):
+        num_patches = _get_clip_num_patches(vision_config)
+        base_feature_size = num_patches * num_patches
+
+        # Results in the max possible feature size
+        dummy_height, dummy_width = 448, 448
+        num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+            image_size=(dummy_height, dummy_width),
+            grid_pinpoints=hf_config.image_grid_pinpoints,
+            patch_size=vision_config.image_size,
+        )
+
+        (
+            unpadded_feature_size,
+            newline_feature_size,
+        ) = _get_llava_next_num_unpadded_features(dummy_height, dummy_width,
+                                                  num_patches,
+                                                  num_patch_height,
+                                                  num_patch_width)
+
+        return unpadded_feature_size + newline_feature_size + base_feature_size
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
+
+
 class DummyImageDataFactories:
     """Contains factories for dummy image data factories."""
 
     @classmethod
-    def _get_clip_num_patches(
-        cls,
-        hf_config: CLIPVisionConfig,
-    ) -> int:
-        image_size = hf_config.image_size
-        patch_size = hf_config.patch_size
-
-        assert image_size % patch_size == 0
-        return image_size // patch_size
-
-    @classmethod
     def _dummy_data_for_clip(
         cls,
+        model_config: ModelConfig,
         multimodal_config: VisionLanguageConfig,
         hf_config: CLIPVisionConfig,
         seq_len: int,
@@ -59,8 +121,7 @@ class DummyImageDataFactories:
         image_feature_size_override: Optional[int] = None,
     ):
         if image_feature_size_override is None:
-            num_patches = cls._get_clip_num_patches(hf_config)
-            image_feature_size = num_patches * num_patches
+            image_feature_size = _get_clip_image_feature_size(hf_config)
         else:
             image_feature_size = image_feature_size_override
 
@@ -88,6 +149,7 @@ class DummyImageDataFactories:
     @classmethod
     def _dummy_data_for_llava(
         cls,
+        model_config: ModelConfig,
         multimodal_config: VisionLanguageConfig,
         hf_config: LlavaConfig,
         seq_len: int,
@@ -96,8 +158,9 @@ class DummyImageDataFactories:
 
         if isinstance(vision_config, CLIPVisionConfig):
             return cls._dummy_data_for_clip(
-                multimodal_config=multimodal_config,
-                hf_config=vision_config,
+                model_config,
+                multimodal_config,
+                vision_config,
                 seq_len=seq_len,
                 image_token_id=hf_config.image_token_index,
             )
@@ -106,69 +169,21 @@ class DummyImageDataFactories:
         raise NotImplementedError(msg)
 
     @classmethod
-    def _get_llava_next_num_unpadded_features(
-        cls,
-        height: int,
-        width: int,
-        npatches: int,
-        num_patch_height: int,
-        num_patch_width: int,
-    ) -> Tuple[int, int]:
-        # Taken from: https://github.com/huggingface/text-generation-inference/blob/799a193b109662743bed1b18a09af1fdcd508c8b/server/text_generation_server/models/vlm_causal_lm.py#L111
-        current_height = npatches * num_patch_height
-        current_width = npatches * num_patch_width
-
-        aspect_ratio: float = width / height
-        current_aspect_ratio: float = current_width / current_height
-        if aspect_ratio > current_aspect_ratio:
-            new_height = (height * current_width) // width
-            current_height = new_height
-        else:
-            new_width = (width * current_height) // height
-            current_width = new_width
-
-        unpadded_features = current_height * current_width
-        newline_features = current_height
-        return (unpadded_features, newline_features)
-
-    @classmethod
     def _dummy_data_for_llava_next(
         cls,
+        model_config: ModelConfig,
         multimodal_config: VisionLanguageConfig,
         hf_config: LlavaNextConfig,
         seq_len: int,
     ):
         vision_config = hf_config.vision_config
+        image_feature_size = _get_llava_next_image_feature_size(hf_config)
 
         if isinstance(vision_config, CLIPVisionConfig):
-            num_patches = cls._get_clip_num_patches(vision_config)
-            base_feature_size = num_patches * num_patches
-
-            # Results in the max possible feature size
-            dummy_height, dummy_width = 448, 448
-            num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-                image_size=(dummy_height, dummy_width),
-                grid_pinpoints=hf_config.image_grid_pinpoints,
-                patch_size=vision_config.image_size,
-            )
-
-            (
-                unpadded_feature_size,
-                newline_feature_size,
-            ) = cls._get_llava_next_num_unpadded_features(
-                dummy_height,
-                dummy_width,
-                num_patches,
-                num_patch_height,
-                num_patch_width,
-            )
-
-            image_feature_size = unpadded_feature_size + newline_feature_size \
-                + base_feature_size
-
             return cls._dummy_data_for_clip(
-                multimodal_config=multimodal_config,
-                hf_config=vision_config,
+                model_config,
+                multimodal_config,
+                vision_config,
                 seq_len=seq_len,
                 image_token_id=hf_config.image_token_index,
                 image_feature_size_override=image_feature_size,
@@ -225,7 +240,7 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
         if vlm_config is None or vlm_config.image_processor is None:
             return None
 
-        return cached_get_image_processor(
+        return _cached_get_image_processor(
             vlm_config.image_processor,
             trust_remote_code=model_config.trust_remote_code,
             revision=vlm_config.image_processor_revision,

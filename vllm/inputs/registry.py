@@ -34,7 +34,7 @@ C = TypeVar("C", bound=PretrainedConfig)
 def _for_hf(hf_config_type: Type[C]):
 
     def wrapper(
-        fn: Callable[Concatenate[C, P], R],
+        fn: Callable[Concatenate["ModelConfig", C, P], R],
     ) -> Callable[Concatenate["ModelConfig", P], R]:
 
         def inner(
@@ -48,7 +48,7 @@ def _for_hf(hf_config_type: Type[C]):
                                 f"Expected type: {hf_config_type}, but "
                                 f"received type: {type(hf_config)}")
 
-            return fn(hf_config, *args, **kwargs)
+            return fn(model_config, hf_config, *args, **kwargs)
 
         return inner
 
@@ -58,7 +58,8 @@ def _for_hf(hf_config_type: Type[C]):
 def _for_multimodal_hf(hf_config_type: Type[C]):
 
     def wrapper(
-        factory: Callable[Concatenate["VisionLanguageConfig", C, P], R],
+        factory: Callable[Concatenate["ModelConfig", "VisionLanguageConfig", C,
+                                      P], R],
     ) -> Callable[Concatenate["ModelConfig", P], R]:
 
         def inner(
@@ -76,7 +77,8 @@ def _for_multimodal_hf(hf_config_type: Type[C]):
                                 f"Expected type: {hf_config_type}, but "
                                 f"received type: {type(hf_config)}")
 
-            return factory(multimodal_config, hf_config, *args, **kwargs)
+            return factory(model_config, multimodal_config, hf_config, *args,
+                           **kwargs)
 
         return inner
 
@@ -98,8 +100,9 @@ class DummyDataFactories:
         """
 
         def wrapper(
-            factory: Callable[[C, int], Tuple["SequenceData",
-                                              Optional["MultiModalData"]]],
+            factory: Callable[["ModelConfig", C, int],
+                              Tuple["SequenceData",
+                                    Optional["MultiModalData"]]],
         ) -> DummyDataFactory:
             return _for_hf(hf_config_type)(factory)
 
@@ -117,7 +120,7 @@ class DummyDataFactories:
         """
 
         def wrapper(
-            factory: Callable[["VisionLanguageConfig", C, int],
+            factory: Callable[["ModelConfig", "VisionLanguageConfig", C, int],
                               Tuple["SequenceData",
                                     Optional["MultiModalData"]]],
         ) -> DummyDataFactory:
@@ -141,8 +144,8 @@ class InputProcessors:
         """
 
         def wrapper(
-            processor: Callable[[C, LLMInputs],
-                                LLMInputs], ) -> InputProcessor:
+            processor: Callable[["ModelConfig", C, LLMInputs], LLMInputs]
+        ) -> InputProcessor:
             return _for_hf(hf_config_type)(processor)
 
         return wrapper
@@ -159,8 +162,9 @@ class InputProcessors:
         """
 
         def wrapper(
-            processor: Callable[["VisionLanguageConfig", C, LLMInputs],
-                                LLMInputs],
+            processor: Callable[
+                ["ModelConfig", "VisionLanguageConfig", C, LLMInputs],
+                LLMInputs]
         ) -> InputProcessor:
             return _for_multimodal_hf(hf_config_type)(processor)
 
