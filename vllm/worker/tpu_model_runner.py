@@ -17,8 +17,6 @@ from vllm.utils import make_tensor_with_pad
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = 0  # FIXME(woosuk)
-_MAX_NUM_SEQS = 256
-_MAX_NUM_BLOCKS_PER_SEQ = 8192 // 16
 
 
 class TPUModelRunner:
@@ -40,9 +38,11 @@ class TPUModelRunner:
         self.vision_language_config = vision_language_config
 
         self.block_size = self.cache_config.block_size
-        # FIXME(woosuk)
-        self.block_tables = np.zeros((_MAX_NUM_SEQS, _MAX_NUM_BLOCKS_PER_SEQ),
-                                     dtype=np.int32)
+        self.max_num_blocks_per_seq = (self.model_config.max_model_len //
+                                       self.block_size)
+        self.block_tables = np.zeros(
+            (self.scheduler_config.max_num_seqs, self.max_num_blocks_per_seq),
+            dtype=np.int32)
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
             self.model_config.get_head_size(),
@@ -51,6 +51,7 @@ class TPUModelRunner:
             self.model_config.dtype,
             self.cache_config.cache_dtype,
             self.block_size,
+            False,
         )
 
     def load_model(self) -> None:
@@ -109,9 +110,10 @@ class TPUModelRunner:
             slot_mapping = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int64,
                                        device=self.device)
-            block_tables = torch.zeros((batch_size, _MAX_NUM_BLOCKS_PER_SEQ),
-                                       dtype=torch.int32,
-                                       device=self.device)
+            block_tables = torch.zeros(
+                (batch_size, self.max_num_blocks_per_seq),
+                dtype=torch.int32,
+                device=self.device)
             context_lens = torch.ones((batch_size, ),
                                       dtype=torch.int32,
                                       device=self.device)
