@@ -1,5 +1,5 @@
 # default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.1.1_ubuntu20.04_py3.9_pytorch_release-2.1.2"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1.1_ubuntu20.04_py3.9_pytorch_staging"
 
 ARG COMMON_WORKDIR=/app
 
