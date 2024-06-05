@@ -10,15 +10,15 @@ def do_sample(engine):
 
     prompts = [
         ("Tweet text: I have complaints! Label: ",
-         SamplingParams(temperature=0.0, max_tokens=3),
+         SamplingParams(temperature=0.0, max_tokens=3, stop_token_ids=[3]),
          PromptAdapterRequest("hate_speech", 1, pa_path2, 8)),
         ("Tweet text: I have no problems Label: ",
-         SamplingParams(temperature=0.0, max_tokens=3),
+         SamplingParams(temperature=0.0, max_tokens=3, stop_token_ids=[3]),
          PromptAdapterRequest("hate_speech2", 2, pa_path2, 8)),
         ("Tweet text: I have complaints! Label: ",
          SamplingParams(temperature=0.0, max_tokens=3), None),
         ("Tweet text: I have no problems Label: ",
-         SamplingParams(temperature=0.0, max_tokens=3),
+         SamplingParams(temperature=0.0, max_tokens=3, stop_token_ids=[3]),
          PromptAdapterRequest("complain", 3, pa_path, 8)),
     ]
 

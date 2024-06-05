@@ -17,6 +17,7 @@ from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.lora.request import LoRARequest
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.model_executor.utils import set_random_seed
 from vllm.multimodal import MultiModalData
 from vllm.outputs import RequestOutput
@@ -98,6 +99,7 @@ class AsyncLLM:
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> List[RequestOutput]:
 
         if prompts is None:
