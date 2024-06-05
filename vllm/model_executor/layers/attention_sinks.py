@@ -291,6 +291,7 @@ class StreamingAttentionSink(nn.Module):
             batch_size = block_tables_tensor.shape[0]
             for i in range(batch_size):
                 num_past_tokens = seq_lens[i] - 1  # assumes decode only yields 1 token
+                if num_past_tokens < model_context_len: continue
 
                 # cap number of tokens to consider with model context len
                 rem = num_past_tokens % block_size
