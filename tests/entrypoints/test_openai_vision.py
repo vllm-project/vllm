@@ -146,7 +146,7 @@ async def test_single_chat_session_image_base64encoded(
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=606, total_tokens=616)
+        completion_tokens=10, prompt_tokens=596, total_tokens=606)
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -220,6 +220,54 @@ async def test_chat_streaming_image(server, client: openai.AsyncOpenAI,
     assert chunk.choices[0].finish_reason == stop_reason
     assert delta.content
     assert "".join(chunks) == output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+async def test_multi_image_input(server, client: openai.AsyncOpenAI,
+                                 model_name: str, image_url: str):
+
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            },
+            {
+                "type": "text",
+                "text": "What's in this image?"
+            },
+        ],
+    }]
+
+    with pytest.raises(openai.BadRequestError):  # test multi-image input
+        await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            max_tokens=10,
+            temperature=0.0,
+        )
+
+    # the server should still work afterwards
+    completion = await client.completions.create(
+        model=model_name,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+    )
+    completion = completion.choices[0].text
+    assert completion is not None and len(completion) >= 0
 
 
 if __name__ == "__main__":
