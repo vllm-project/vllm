@@ -79,7 +79,7 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
         --image-token-id 32000 \
         --image-input-shape 1,3,336,336 \
         --image-feature-size 576 \
-        --chat-template template_vicuna.jinja \
+        --chat-template template_vicuna.jinja
 
 To consume the server, you can use the OpenAI client like in the example below:
 
