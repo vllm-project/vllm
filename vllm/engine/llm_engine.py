@@ -804,6 +804,9 @@ class LLMEngine:
         # Log stats.
         self.do_log_stats(scheduler_outputs, output)
 
+        # Tracing
+        self.do_tracing(scheduler_outputs)
+
         if not request_outputs:
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
@@ -938,8 +941,6 @@ class LLMEngine:
                         for seq in seq_group.get_finished_seqs()
                     ])
 
-                    self.create_trace_span(seq_group, now)
-
             # Number of generation tokens.
             #   num_batched_tokens equals the number of prompt_tokens plus the
             #   number of decode_tokens in a single iteration. So,
@@ -1000,7 +1001,16 @@ class LLMEngine:
     def check_health(self) -> None:
         self.model_executor.check_health()
 
-    def create_trace_span(self, seq_group: SequenceGroup, now: float) -> None:
+    def do_tracing(self, scheduler_outputs: SchedulerOutputs) -> None:
+        if self.tracer is None:
+            return
+
+        for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+            seq_group = scheduled_seq_group.seq_group
+            if seq_group.is_finished():
+                self.create_trace_span(seq_group)
+
+    def create_trace_span(self, seq_group: SequenceGroup) -> None:
         if self.tracer is None or seq_group.sampling_params is None:
             return
         arrival_time_nano_seconds = int(seq_group.metrics.arrival_time * 1e9)
@@ -1012,7 +1022,7 @@ class LLMEngine:
                 start_time=arrival_time_nano_seconds) as seq_span:
             metrics = seq_group.metrics
             ttft = metrics.first_token_time - metrics.arrival_time
-            e2e_time = now - seq_group.metrics.arrival_time
+            e2e_time = metrics.finished_time - metrics.arrival_time
             # attribute names are based on
             # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/llm-spans.md
             seq_span.set_attribute(SpanAttributes.LLM_RESPONSE_MODEL,
@@ -1040,7 +1050,7 @@ class LLMEngine:
                     for seq in seq_group.get_finished_seqs()
                 ]))
             seq_span.set_attribute(SpanAttributes.LLM_LATENCY_TIME_IN_QUEUE,
-                                   seq_group.metrics.time_in_queue)
+                                   metrics.time_in_queue)
             seq_span.set_attribute(
                 SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
             seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)
