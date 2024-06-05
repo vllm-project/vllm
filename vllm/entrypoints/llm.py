@@ -14,6 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.tokenizer import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
@@ -152,7 +153,14 @@ class LLM:
         self,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     ) -> None:
-        self.llm_engine.tokenizer.tokenizer = tokenizer
+        # While CachedTokenizer is dynamic, have no choice but
+        # compare class name. Misjudgment will arise from
+        # user-defined tokenizer started with 'Cached'
+        if tokenizer.__class__.__name__.startswith("Cached"):
+            self.llm_engine.tokenizer.tokenizer = tokenizer
+        else:
+            self.llm_engine.tokenizer.tokenizer = get_cached_tokenizer(
+                tokenizer)
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def generate(
