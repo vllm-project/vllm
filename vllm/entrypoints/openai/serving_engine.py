@@ -139,11 +139,12 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
-            # When using OpenAIServingChat for chat completions, the
-            # special tokens (e.g., BOS) have already been added by the
-            # chat template. Therefore, we do not need to add them again.
-            # Set add_special_tokens to False to avoid adding the BOS tokens
-            # again.
+            # When using OpenAIServingChat for chat completions, for
+            # most models the special tokens (e.g., BOS) have already
+            # been added by the chat template. Therefore, we do not
+            # need to add them again.
+            # Set add_special_tokens to False (by default) to avoid
+            # adding the BOS tokens again.
             tokenizer_kwargs: Dict[str, Any] = {
                 "add_special_tokens": add_special_tokens
             }
