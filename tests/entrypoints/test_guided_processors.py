@@ -63,7 +63,6 @@ def test_guided_logits_processors():
                                   tokenizer,
                                   whitespace_pattern=None)
 
-    regex_LP.init_state()
     token_ids = tokenizer.encode(
         f"Give an example IPv4 address with this regex: {TEST_REGEX}")
     tensor = torch.rand(32000)
@@ -72,7 +71,6 @@ def test_guided_logits_processors():
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
-    json_LP.init_state()
     token_ids = tokenizer.encode(
         f"Give an employee profile that fits this schema: {TEST_SCHEMA}")
     tensor = torch.rand(32000)
