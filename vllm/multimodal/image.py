@@ -75,19 +75,12 @@ class DummyImageDataFactories:
         multi_modal_data: MultiModalData
         if image_input_type == ImageInputType.PIXEL_VALUES:
             width = height = hf_config.image_size
-            if multimodal_config.image_processor is None:
-                values_dtype = torch.float16
-            else:
-                values_dtype = torch.uint8
-
-            values = torch.zeros((1, 3, width, height), dtype=values_dtype)
-            multi_modal_data = ImagePixelData(values)
+            image = Image.new("RGB", (width, height), color=0)
+            multi_modal_data = ImagePixelData(image)
         elif image_input_type == ImageInputType.IMAGE_FEATURES:
             depth = hf_config.hidden_size
-            values_dtype = torch.float16
-
             values = torch.zeros((1, image_feature_size, depth),
-                                 dtype=values_dtype)
+                                 dtype=torch.float16)
             multi_modal_data = ImageFeatureData(values)
 
         return seq_data, multi_modal_data
