@@ -118,6 +118,11 @@ KVMemoryMap = namedtuple("KVMemoryMap", [
     "block_tables", "slot_mapping"
 ])
 
+PhaseTestParameters = namedtuple("PhaseTestParameters", [
+    "packed_qkvo",
+    "kv_mmap"
+])
+
 def make_qkv(
     batch_size: int,
     max_q_seq_len: int,

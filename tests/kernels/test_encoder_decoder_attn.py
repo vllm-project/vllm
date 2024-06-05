@@ -78,7 +78,7 @@ def _basic_setup(num_heads: int, head_size: int, num_blocks: int,
 
 def _encoder_attn_setup(batch_size: int, num_heads: int, head_size: int,
                         scale: float, max_q_seq_len: int) \
-                          -> PackedQKVO:
+                          -> PhaseTestParameters:
     '''
     Set up test vectors & data structures for encoder attention test.
 
@@ -138,9 +138,13 @@ def _encoder_attn_setup(batch_size: int, num_heads: int, head_size: int,
 
     packed_qkv = pack_qkv(qkv_in, device=CUDA_DEVICE)
 
-    return PackedQKVO(
-            packed_qkv, \
-            packed_ideal_output)
+    return PhaseTestParameters(
+             PackedQKVO(
+               packed_qkv, \
+               packed_ideal_output),
+
+             None # No KV cache
+           )
 
 
 def _decoder_attn_setup(batch_size: int,
@@ -149,7 +153,10 @@ def _decoder_attn_setup(batch_size: int,
                         block_size: int,
                         scale: float,
                         max_q_seq_len: int,
-                        block_base_addr: int = 0) -> tuple:
+                        block_base_addr: int = 0) -> tuple[QKVInputs,
+                                                           PhaseTestParameters,
+                                                           PhaseTestParameters,
+                                                           int]:
     '''
     Set up test vectors & data structures for self-attention test.
 
@@ -301,23 +308,27 @@ def _decoder_attn_setup(batch_size: int,
     decode_pckd_qkv = pack_qkv(decode_qkv, device=CUDA_DEVICE)
 
     return qkv, \
-    prefill_pckd_qkv, \
-    prefill_packed_ideal_output, \
-    KVMemoryMap(
-      prefill_block_tables, \
-      prefill_slot_mapping), \
-    decode_pckd_qkv, \
-    decode_packed_ideal_output, \
-    KVMemoryMap(
-      decode_block_tables, \
-      decode_slot_mapping), \
-    max_block_idx
+           PhaseTestParameters( # Prefill test params
+              PackedQKVO(
+                  prefill_pckd_qkv, \
+                  prefill_packed_ideal_output), \
+              KVMemoryMap(
+                  prefill_block_tables, \
+                  prefill_slot_mapping)), \
+           PhaseTestParameters( # Decode test params
+              PackedQKVO(
+                decode_pckd_qkv, \
+                decode_packed_ideal_output), \
+              KVMemoryMap(
+                decode_block_tables, \
+                decode_slot_mapping)), \
+           max_block_idx
 
 def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
-                                           encoder_packed_qkv:
-                                            PackedQKVInputs,
-                                           prefill_phase_decoder_packed_qkv:
-                                            PackedQKVInputs,
+                                           encoder_test_params:
+                                            PhaseTestParameters,
+                                           prefill_phase_test_params:
+                                            PhaseTestParameters,
                                            batch_size: int,
                                            num_heads: int,
                                            head_size: int,
@@ -390,8 +401,8 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
 
     decoder_query = decoder_qkv.query
     decoder_seq_lens = decoder_qkv.q_seq_lens
-    encoder_seq_lens = encoder_packed_qkv.q_seq_lens
-    prefill_q_seq_lens = prefill_phase_decoder_packed_qkv.q_seq_lens
+    encoder_seq_lens = encoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
+    prefill_q_seq_lens = prefill_phase_test_params.packed_qkvo.packed_qkv.q_seq_lens
 
 
     cross_kv, \
@@ -469,15 +480,20 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
     # Packed key/value (query is already provided)
     packed_cross_kv = pack_qkv(cross_kv, device=CUDA_DEVICE)
 
-    return packed_cross_kv, \
-           prefill_packed_ideal_output, \
-           KVMemoryMap(
-            prefill_block_tables, \
-            prefill_slot_mapping), \
-           decode_packed_ideal_output, \
-           KVMemoryMap(
-            decode_block_tables, \
-            decode_slot_mapping), \
+    return PhaseTestParameters( # Prefill-phase test params
+            PackedQKVO(
+              packed_cross_kv, \
+              prefill_packed_ideal_output), \
+            KVMemoryMap(
+              prefill_block_tables, \
+              prefill_slot_mapping)), \
+           PhaseTestParameters( # Decode-phase test params
+            PackedQKVO(
+              None,
+              decode_packed_ideal_output), \
+            KVMemoryMap(
+              decode_block_tables, \
+              decode_slot_mapping))
 
 def _run_encoder_attention_test(attn: Attention, pckd_qkv: PackedQKVInputs,
                                 attn_metadata: AttentionMetadata,
@@ -633,21 +649,17 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     # anyway but are required to be present & valid by the
     # backend.
 
-    enc_pckd_qkvo = _encoder_attn_setup(batch_size,
-                                        num_heads,
-                                        head_size,
-                                        scale,
-                                        max_enc_seq_len)
+    enc_test_params = _encoder_attn_setup(batch_size,
+                                          num_heads,
+                                          head_size,
+                                          scale,
+                                          max_enc_seq_len)
 
     # Decoder self-attention setup
 
     dec_qkv, \
-    prephase_dec_pckd_qkv, \
-    prephase_dec_pckd_idl_out, \
-    prephase_dec_kv_mmap, \
-    decphase_dec_pckd_qkv, \
-    decphase_dec_pckd_idl_out, \
-    decphase_dec_kv_mmap, \
+    prephase_dec_test_params, \
+    decphase_dec_test_params, \
     cross_block_base_addr = _decoder_attn_setup(batch_size,
                                                 num_heads,
                                                 head_size,
@@ -657,14 +669,11 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 
     # Cross-attention setup
 
-    prephase_cross_pckd_qkv, \
-    prephase_cross_pckd_idl_out, \
-    prephase_cross_kv_mmap, \
-    decphase_cross_pckd_idl_out, \
-    decphase_cross_kv_mmap \
+    prephase_cross_test_params, \
+    decphase_cross_test_params, \
     = _enc_dec_cross_attn_setup_reuses_query(dec_qkv,
-                                             enc_pckd_qkvo.packed_qkv,
-                                             prephase_dec_pckd_qkv,
+                                             enc_test_params,
+                                             prephase_dec_test_params,
                                              batch_size,
                                              num_heads,
                                              head_size,
