@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm import _custom_ops as ops
+from vllm.model_executor.custom_op import CustomOp
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -43,7 +43,20 @@ def _rotate_gptj(x: torch.Tensor) -> torch.Tensor:
     return x.flatten(-2)
 
 
-class RotaryEmbedding(nn.Module):
+def _apply_rotary_emb(
+    x: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> torch.Tensor:
+    x_ = torch.view_as_complex(
+        torch.stack(torch.chunk(x.transpose(1, 2).float(), 2, dim=-1), dim=-1))
+    x_out = torch.view_as_real(x_ * freqs_cis).type_as(x)
+    x_out = torch.cat(torch.chunk(x_out, 2, dim=-1), dim=-2)
+    x_out = x_out.reshape(x_out.shape[0], x_out.shape[1], x_out.shape[2],
+                          -1).transpose(1, 2)
+    return x_out
+
+
+class RotaryEmbedding(CustomOp):
     """Original rotary positional embedding."""
 
     def __init__(
@@ -64,8 +77,20 @@ class RotaryEmbedding(nn.Module):
         self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
-        cache = cache.to(dtype)
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        if False:
+            cache = cache.to(dtype)
+            self.register_buffer("cos_sin_cache", cache, persistent=False)
+        else:
+            if rotary_dim != head_size:
+                raise NotImplementedError(
+                    "The TPU backend requires rotary_dim == head_size.")
+            if not is_neox_style:
+                raise NotImplementedError(
+                    "The TPU backend only supports Neox-style rotary "
+                    "positional embeddings.")
+            cos, sin = cache.chunk(2, dim=-1)
+            freqs_cis = cos + 1j * sin
+            self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -93,7 +118,7 @@ class RotaryEmbedding(nn.Module):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
-    def _forward(
+    def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
@@ -138,13 +163,15 @@ class RotaryEmbedding(nn.Module):
         key = key.flatten(-2)
         return query, key
 
-    def forward(
+    def forward_cuda(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from vllm import _custom_ops as ops
+
         self.cos_sin_cache = self.cos_sin_cache.to(positions.device,
                                                    dtype=query.dtype)
         # ops.rotary_embedding()/batched_rotary_embedding()
@@ -157,6 +184,31 @@ class RotaryEmbedding(nn.Module):
         else:
             ops.rotary_embedding(positions, query, key, self.head_size,
                                  self.cos_sin_cache, self.is_neox_style)
+        return query, key
+
+    def forward_tpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if positions.dim() == 1:
+            batch_size = 1
+            seq_len = positions.shape[0]
+        else:
+            batch_size, seq_len = positions.shape
+        if offsets is not None:
+            positions += offsets
+        freqs_cis = self.freqs_cis.index_select(0, positions.flatten())
+        freqs_cis = freqs_cis.view(batch_size, 1, seq_len, -1)
+
+        query_shape = query.shape
+        query = query.view(batch_size, seq_len, -1, self.head_size)
+        query = _apply_rotary_emb(query, freqs_cis).reshape(query_shape)
+        key_shape = key.shape
+        key = key.view(batch_size, seq_len, -1, self.head_size)
+        key = _apply_rotary_emb(key, freqs_cis).reshape(key_shape)
         return query, key
 
     def extra_repr(self) -> str:
