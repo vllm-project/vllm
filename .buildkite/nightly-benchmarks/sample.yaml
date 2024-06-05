@@ -18,6 +18,14 @@ steps:
             volumeMounts:
             - name: devshm
               mountPath: /dev/shm
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
           volumes:
