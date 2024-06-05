@@ -616,6 +616,7 @@ class ParallelConfig:
                 from ray.util import get_current_placement_group
                 if self.placement_group or get_current_placement_group():
                     backend = "ray"
+            self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
 
