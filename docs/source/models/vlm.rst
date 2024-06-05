@@ -109,3 +109,6 @@ To consume the server, you can use the OpenAI client like in the example below:
     )
     print("Chat response:", chat_response)
 
+.. note::
+    The prompt formatting with the image token ``<image>`` is not needed when serving VLMs with the API server since the prompt will be 
+    processed automatically by the server.
