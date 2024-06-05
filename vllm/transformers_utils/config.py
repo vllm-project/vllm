@@ -27,18 +27,13 @@ def get_config(model: str,
     try:
         if VLLM_USE_MODELSCOPE:
             from modelscope import AutoConfig
-            config = AutoConfig.from_pretrained(
-                model,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                code_revision=code_revision)
         else:
             from transformers import AutoConfig
-            config = AutoConfig.from_pretrained(
-                model,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                code_revision=code_revision)
+        config = AutoConfig.from_pretrained(
+            model,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            code_revision=code_revision)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
