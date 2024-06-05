@@ -69,161 +69,6 @@ class ModelInput(NamedTuple):
         )
 
 
-class MLPSpeculatorModelRunner("ModelRunner"):
-
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        kv_cache_dtype: Optional[str] = "auto",
-        is_driver_worker: bool = False,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
-    ):
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.load_config = load_config
-        self.is_driver_worker = is_driver_worker
-        self.vision_language_config = vision_language_config
-        self.kv_cache_dtype = kv_cache_dtype
-        self.device = self.device_config.device
-        self.pin_memory = is_pin_memory_available()
-        self.prev_request_context_lengths: Dict[str, int] = {}
-
-    def load_model(self) -> None:
-        with CudaMemoryProfiler():
-            self.model = get_model(
-                model_config=self.model_config,
-                device_config=self.device_config,
-                load_config=self.load_config,
-                lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-                cache_config=self.cache_config,
-            )
-
-    def save_sharded_state(
-        self,
-        path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
-    ) -> None:
-        from vllm.model_executor.model_loader.loader import ShardedStateLoader
-        ShardedStateLoader.save_model(
-            self.model,
-            path,
-            pattern=pattern,
-            max_size=max_size,
-        )
-
-    def prepare_input_tensors(
-        self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ):
-        if not seq_group_metadata_list:
-            return ModelInput.empty(self.device)
-
-        input_tokens: List[int] = []
-        input_positions: List[int] = []
-
-        seq_lens: List[int] = []
-        context_lens: List[int] = []
-        query_lens: List[int] = []
-        accepted_lengths_list: List[int] = []
-
-        for seq_group_metadata in seq_group_metadata_list:
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            is_prompt = seq_group_metadata.is_prompt
-
-            for seq_id in seq_ids:
-
-                seq_data = seq_group_metadata.seq_data[seq_id]
-                if is_prompt:
-                    context_len = seq_data.get_num_computed_tokens()
-                else:
-                    # get_num_computed_tokens is incorrect for spec decoding.
-                    # So, we should have a special logic here.
-                    # TODO(sang): Fix it.
-                    context_len = seq_data.get_len() - 1
-
-                seq_len = min(
-                    seq_data.get_len(),
-                    context_len + seq_group_metadata.token_chunk_size)
-                if is_prompt:
-                    tokens = seq_data.get_token_ids()[context_len:seq_len]
-                else:
-                    # Optimization. get_token_ids requires the entire copy of
-                    # tokens.
-                    tokens = [seq_data.get_last_token_id()]
-
-                seq_lens.append(seq_len)
-                context_lens.append(context_len)
-                query_len = seq_len - context_len
-                query_lens.append(query_len)
-                input_tokens.extend(tokens)
-                input_positions.extend(list(range(context_len, seq_len)))
-
-                if seq_group_metadata.request_id in (
-                        self.prev_request_context_lengths):
-                    prev_context_length = self.prev_request_context_lengths[
-                        seq_group_metadata.request_id]
-                    accepted_length = context_len - prev_context_length
-                    accepted_lengths_list.append(accepted_length)
-                self.prev_request_context_lengths[
-                    seq_group_metadata.request_id] = context_len
-
-        if not self.model.first_decode_step:
-            self.model.accepted_token_lengths = torch.tensor(
-                accepted_lengths_list, device=self.device, dtype=torch.long)
-
-        input_tokens_tensor = torch.tensor(input_tokens,
-                                           dtype=torch.long,
-                                           device=self.device)
-        input_positions_tensor = torch.tensor(input_positions,
-                                              dtype=torch.long,
-                                              device=self.device)
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=self.device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=self.device)
-        return (input_tokens_tensor, input_positions_tensor, seq_lens_tensor,
-                query_lens_tensor)
-
-    @torch.inference_mode()
-    def execute_model(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        kv_caches: List[torch.Tensor],
-    ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, seq_lens,
-         query_lens) = self.prepare_input_tensors(seq_group_metadata_list)
-
-        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                     seq_lens, query_lens,
-                                                     self.device,
-                                                     self.pin_memory)
-
-        output = self.model.generate_proposals(
-            input_ids=input_tokens, sampling_metadata=sampling_metadata)
-
-        return output
-
-    @property
-    def vocab_size(self) -> int:
-        return self.model_config.get_vocab_size()
-
-
 class ModelRunner:
 
     def __init__(
@@ -268,15 +113,17 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
+            num_attn_heads,
             self.model_config.get_head_size(),
             self.model_config.get_num_kv_heads(self.parallel_config),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
-        )
+        ) if num_attn_heads else None
 
         # Create processor for multi-modal data
         if self.vision_language_config is not None:

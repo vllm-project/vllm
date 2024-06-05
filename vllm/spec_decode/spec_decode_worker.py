@@ -225,17 +225,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         num_gpu_blocks, num_cpu_blocks = (
             self.scorer_worker.determine_num_available_blocks())
 
-        if not isinstance(self.scorer_worker, HiddenStatesWorker):
-            scorer_cache_block_size_bytes = (
-                self.scorer_worker.get_cache_block_size_bytes())
-            proposer_cache_block_size_bytes = (
-                self.proposer_worker.get_cache_block_size_bytes())
+        scorer_cache_block_size_bytes = (
+            self.scorer_worker.get_cache_block_size_bytes())
+        proposer_cache_block_size_bytes = (
+            self.proposer_worker.get_cache_block_size_bytes())
 
-            num_gpu_blocks = split_num_cache_blocks_evenly(
-                scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
-                num_gpu_blocks)
-
-        return num_gpu_blocks, num_cpu_blocks
+        new_num_gpu_blocks = split_num_cache_blocks_evenly(
+            scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
+            num_gpu_blocks)
+        return new_num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -243,10 +241,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         self.scorer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                             num_cpu_blocks=num_cpu_blocks)
-
-        if not isinstance(self.scorer_worker, HiddenStatesWorker):
-            self.proposer_worker.initialize_cache(
-                num_gpu_blocks=num_gpu_blocks, num_cpu_blocks=num_cpu_blocks)
+        self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
+                                              num_cpu_blocks=num_cpu_blocks)
 
     @torch.inference_mode()
     def execute_model(
@@ -298,9 +294,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # 3. No request: There are no requests in the batch.
         # In any of these cases, the proposer and scorer workers
         # are called normally.
-        if not disable_all_speculation:
-            disable_all_speculation = isinstance(self.scorer_worker,
-                                                 HiddenStatesWorker)
         if num_lookahead_slots == 0 or len(
                 execute_model_req.seq_group_metadata_list
         ) == 0 or disable_all_speculation:

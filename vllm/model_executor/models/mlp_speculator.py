@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, Tuple
+from typing import Iterable, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.sequence import SamplerOutput
 
 
 class MLPSpeculatorLayerNorm(nn.Module):
@@ -20,10 +21,6 @@ class MLPSpeculatorLayerNorm(nn.Module):
     ----
     normalized_shape : int
         Dimensionality of input data (size of final tensor axis)
-    elementwise_scale_weight : torch.Tensor
-        learned scaling term after normalization?
-    elementwise_shift_bias : torch.Tensor
-        learned bias term after normalization?
     eps : float
         Safety term to prevent division by zero. Make sure the chosen value
          fits in the range of your encoding scheme
@@ -93,7 +90,7 @@ class MLPSpeculator(nn.Module):
         self,
         input_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
+    ) -> List[SamplerOutput]:
 
         if self.first_decode_step:
             self.first_decode_step = False
@@ -129,7 +126,7 @@ class MLPSpeculator(nn.Module):
                               alpha=self.emb_weight / self.state_weight)
 
             state = self.activation(self.ln[head_index](state))  # b k d
-            # todo: not yet supporting top_k_tokens_per_head
+            # TODO: not yet supporting top_k_tokens_per_head
             self.previous_hidden_state = state
 
             logits = self.logits_processor(self.head[head_index].weight, state,

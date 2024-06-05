@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -18,7 +18,7 @@ class HiddenStatesWorker(Worker):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
-    ):
+    ) -> Tuple[SamplerOutput, torch.Tensor]:
 
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input
@@ -53,8 +53,8 @@ class HiddenStatesWorker(Worker):
             hidden_states, sampling_metadata)
 
         # Only perform sampling in the driver worker.
-        if not self.model_runner.is_driver_worker:
-            return None
+        if not self.model_runner.is_driver_worker:  #TODO check this case
+            return None, None
 
         # Sample the next token.
         output = self.model_runner.model.sample(

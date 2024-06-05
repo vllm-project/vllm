@@ -332,8 +332,10 @@ class ModelConfig:
 
     def get_num_attention_heads(self,
                                 parallel_config: "ParallelConfig") -> int:
-        return self.hf_text_config.num_attention_heads // \
-            parallel_config.tensor_parallel_size
+        if hasattr(self.hf_text_config, "num_attention_heads"):
+            return (self.hf_text_config.num_attention_heads //
+                    parallel_config.tensor_parallel_size)
+        return 0
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
