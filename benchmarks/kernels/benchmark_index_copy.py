@@ -72,7 +72,6 @@ def benchmark(num_blocks: int):
     slot_mapping = slot_mapping + head_indicies.view(1, -1)
     slot_mapping = slot_mapping.flatten()
 
-
     @torch.compile(backend="openxla")
     def f():
         for _ in range(100):
