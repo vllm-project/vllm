@@ -15,6 +15,7 @@ vLLM is a community project. Our compute resources for development and testing a
 - Dropbox
 - Lambda Lab
 - NVIDIA
+- Sequoia Capital
 - Replicate
 - Roblox
 - RunPod
