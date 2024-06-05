@@ -37,7 +37,8 @@ def main():
                                  default="http://localhost:8000",
                                  help="url of the running OpenAI-Compatible RESTful API server")
     complete_parser.add_argument("--model-name",
-                                type=str, default=None,
+                                type=str,
+                                default=None,
                                 help="the model name used in prompt completion, \
                                     default to the first model in list models API call.")
     complete_parser.add_argument("--openai-api-key",
@@ -57,11 +58,13 @@ def main():
                                  default="http://localhost:8000",
                                  help="url of the running OpenAI-Compatible RESTful API server")
     chat_parser.add_argument("--model-name",
-                                type=str, default=None,
+                                type=str,
+                                default=None,
                                 help="the model name used in chat completions, \
                                     default to the first model in list models API call.")
     chat_parser.add_argument("--system-prompt",
                              type=str,
+                             default=None,
                              help="the system prompt to be added to the chat template, used for \
                                  methods that support system prompts.")
     chat_parser.set_defaults(func=interactive_cli)
