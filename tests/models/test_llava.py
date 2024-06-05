@@ -81,8 +81,8 @@ def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
-                vllm_image_prompts, vllm_images, model_and_config, dtype: str,
-                max_tokens: int, worker_use_ray: bool) -> None:
+                vllm_images, model_and_config, dtype: str, max_tokens: int,
+                worker_use_ray: bool) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -105,7 +105,7 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                              worker_use_ray=worker_use_ray,
                              enforce_eager=True,
                              **as_dict(vision_language_config))
-    vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+    vllm_outputs = vllm_model.generate_greedy(hf_image_prompts,
                                               max_tokens,
                                               images=vllm_images)
     del vllm_model

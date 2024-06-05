@@ -125,6 +125,11 @@ PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
 
 
 class LLMInputs(TypedDict):
+    """
+    The inputs in :class:`~vllm.LLMEngine` before they are
+    passed to the model executor.
+    """
+
     prompt_token_ids: List[int]
     prompt: NotRequired[Optional[str]]
     multi_modal_data: NotRequired[Optional["MultiModalData"]]

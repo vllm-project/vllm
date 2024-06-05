@@ -113,15 +113,6 @@ def vllm_image_tensors(request) -> List[torch.Tensor]:
     return [torch.load(filename) for filename in _PIXEL_VALUES_FILES]
 
 
-@pytest.fixture()
-def vllm_image_prompts(request) -> List[str]:
-    vision_language_config = request.getfixturevalue("model_and_config")[1]
-    return [
-        "<image>" * (vision_language_config.image_feature_size - 1) + p
-        for p in _IMAGE_PROMPTS
-    ]
-
-
 @pytest.fixture
 def example_prompts() -> List[str]:
     prompts = []

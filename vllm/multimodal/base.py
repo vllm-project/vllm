@@ -3,6 +3,7 @@ from typing import (TYPE_CHECKING, Callable, Dict, Generic, Optional, Type,
                     TypeVar)
 
 from vllm.config import ModelConfig
+from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -32,9 +33,9 @@ class MultiModalData:
 D = TypeVar("D", bound=MultiModalData)
 N = TypeVar("N", bound=Type["nn.Module"])
 
-MultiModalInputMapper = Callable[[ModelConfig, D], Dict[str, "torch.Tensor"]]
+MultiModalInputMapper = Callable[[InputContext, D], Dict[str, "torch.Tensor"]]
 """Return a dictionary to be passed as keyword arguments to
-:meth:`torch.nn.Module.forward`. This is similar in concept to tokenizers
+:meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
 and processors in HuggingFace Transformers."""
 
 
@@ -62,10 +63,10 @@ class MultiModalPlugin(ABC, Generic[D]):
         raise NotImplementedError
 
     @abstractmethod
-    def _default_input_mapper(self, model_config: ModelConfig,
+    def _default_input_mapper(self, ctx: InputContext,
                               data: D) -> Dict[str, "torch.Tensor"]:
         """Return a dictionary to be passed as keyword arguments to
-        :meth:`torch.nn.Module.forward`. This is similar in concept to
+        :meth:`~torch.nn.Module.forward`. This is similar in concept to
         tokenizers and processors in HuggingFace Transformers.
         """
         raise NotImplementedError
@@ -113,4 +114,4 @@ class MultiModalPlugin(ABC, Generic[D]):
             raise KeyError(f"No input mapper in {self} is registered for "
                            f"model class {model_cls.__name__}.")
 
-        return mapper(model_config, data)
+        return mapper(InputContext(model_config), data)

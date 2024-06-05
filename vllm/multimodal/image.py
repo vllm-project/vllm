@@ -1,5 +1,6 @@
 from functools import lru_cache
-from typing import Dict, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, Dict, List, Optional, Tuple, Type, TypeVar,
+                    Union)
 
 import torch
 from PIL import Image
@@ -9,7 +10,7 @@ from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape)
 
 from vllm.config import ModelConfig, VisionLanguageConfig
-from vllm.inputs.registry import DummyDataFactories, DummyDataFactory
+from vllm.inputs.registry import DummyDataFactory, InputContext, InputProcessor
 from vllm.logger import init_logger
 from vllm.sequence import SequenceData
 from vllm.transformers_utils.image_processor import get_image_processor
@@ -17,26 +18,15 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from .base import MultiModalData, MultiModalPlugin
 
+if TYPE_CHECKING:
+    from vllm.inputs import LLMInputs
+else:
+    LLMInputs = dict
+
 logger = init_logger(__name__)
 
 _cached_get_tokenizer = lru_cache(get_tokenizer)
 _cached_get_image_processor = lru_cache(get_image_processor)
-
-
-def _get_dummy_seq_data(
-    *,
-    seq_len: int,
-    image_token_id: int,
-    image_feature_size: int,
-) -> SequenceData:
-    # NOTE: We assume that <image> token is repeated `image_feature_size` times
-    # and then concatenated with the text prompt
-    # TODO: Enable other ways of inserting the image into the prompt
-
-    token_ids = [image_token_id] * image_feature_size
-    token_ids += [0] * (seq_len - image_feature_size)
-
-    return SequenceData(token_ids)
 
 
 def _get_clip_num_patches(hf_config: CLIPVisionConfig) -> int:
@@ -107,7 +97,12 @@ def _get_llava_next_image_feature_size(hf_config: LlavaNextConfig) -> int:
 
 
 class DummyImageDataFactories:
-    """Contains factories for dummy image data factories."""
+    """
+    Contains factories for dummy image data factories.
+
+    See Also:
+        :data:`vllm.inputs.registry.DummyDataFactory`
+    """
 
     @classmethod
     def _dummy_data_for_clip(
@@ -125,11 +120,9 @@ class DummyImageDataFactories:
         else:
             image_feature_size = image_feature_size_override
 
-        seq_data = _get_dummy_seq_data(
-            seq_len=seq_len,
-            image_token_id=image_token_id,
-            image_feature_size=image_feature_size,
-        )
+        token_ids = [image_token_id] * image_feature_size
+        token_ids += [0] * (seq_len - image_feature_size)
+        seq_data = SequenceData(token_ids)
 
         image_input_type = multimodal_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
@@ -202,11 +195,206 @@ class DummyImageDataFactories:
         by the config type.
         """
         if hf_config_type == LlavaConfig:
-            return DummyDataFactories.for_multimodal_hf(LlavaConfig) \
-                (cls._dummy_data_for_llava)
+            return lambda ctx, seq_len: cls._dummy_data_for_llava(
+                ctx.model_config,
+                ctx.get_multimodal_config(),
+                ctx.get_hf_config(LlavaConfig),
+                seq_len=seq_len,
+            )
         if hf_config_type == LlavaNextConfig:
-            return DummyDataFactories.for_multimodal_hf(LlavaNextConfig) \
-                (cls._dummy_data_for_llava_next)
+            return lambda ctx, seq_len: cls._dummy_data_for_llava_next(
+                ctx.model_config,
+                ctx.get_multimodal_config(),
+                ctx.get_hf_config(LlavaNextConfig),
+                seq_len=seq_len,
+            )
+
+        msg = f"Unsupported model config: {type(hf_config_type)}"
+        raise NotImplementedError(msg)
+
+
+_T = TypeVar("_T", str, int)
+
+
+class ImageInputProcessors:
+    """
+    Contains factories for image input processors.
+
+    See Also:
+        :data:`vllm.inputs.registry.InputProcessor`
+    """
+
+    @classmethod
+    def _repeat_and_pad_token(
+        cls,
+        token: _T,
+        *,
+        repeat_count: int = 1,
+        pad_token_left: Optional[_T] = None,
+        pad_token_right: Optional[_T] = None,
+    ) -> List[_T]:
+        replacement = [token] * repeat_count
+        if pad_token_left is not None:
+            replacement = [pad_token_left] + replacement
+        if pad_token_right is not None:
+            replacement = replacement + [pad_token_right]
+
+        return replacement
+
+    @classmethod
+    def _repeat_and_pad_image_tokens(
+        cls,
+        model_config: ModelConfig,
+        llm_inputs: LLMInputs,
+        *,
+        image_token_id: int,
+        repeat_count: int = 1,
+        pad_token_left: Optional[int] = None,
+        pad_token_right: Optional[int] = None,
+    ) -> LLMInputs:
+        multi_modal_data = llm_inputs.get("multi_modal_data")
+        if multi_modal_data is None:
+            return llm_inputs
+
+        tokenizer = _cached_get_tokenizer(model_config.tokenizer)
+        image_token_str = tokenizer.decode(image_token_id)
+        pad_token_str_left = (None if pad_token_left is None else
+                              tokenizer.decode(pad_token_left))
+        pad_token_str_right = (None if pad_token_right is None else
+                               tokenizer.decode(pad_token_right))
+
+        replacement_str = "".join(
+            cls._repeat_and_pad_token(
+                image_token_str,
+                repeat_count=repeat_count,
+                pad_token_left=pad_token_str_left,
+                pad_token_right=pad_token_str_right,
+            ))
+        replacement_ids = cls._repeat_and_pad_token(
+            image_token_id,
+            repeat_count=repeat_count,
+            pad_token_left=pad_token_left,
+            pad_token_right=pad_token_right,
+        )
+
+        # To avoid invoking the tokenizer, we assume that the
+        # image token is called "<image>"
+        prompt = llm_inputs.get("prompt")
+        if prompt is None:
+            new_prompt = None
+        else:
+            # The image tokens are removed to be consistent with HuggingFace
+            new_prompt = prompt.replace(image_token_str, replacement_str, 1)
+
+        prompt_token_ids = llm_inputs["prompt_token_ids"]
+        new_token_ids: List[int] = []
+        for i, token in enumerate(prompt_token_ids):
+            if token == image_token_id:
+                new_token_ids.extend(replacement_ids)
+
+                # No need to further scan the list since we only replace once
+                new_token_ids.extend(prompt_token_ids[i + 1:])
+                break
+            else:
+                new_token_ids.append(token)
+
+        # NOTE: Create a defensive copy of the original inputs
+        return LLMInputs(prompt_token_ids=new_token_ids,
+                         prompt=new_prompt,
+                         multi_modal_data=multi_modal_data)
+
+    @classmethod
+    def _input_processor_for_clip(
+        cls,
+        model_config: ModelConfig,
+        multimodal_config: VisionLanguageConfig,
+        hf_config: CLIPVisionConfig,
+        llm_inputs: LLMInputs,
+        *,
+        image_token_id: int,
+        image_feature_size_override: Optional[int] = None,
+    ):
+        if image_feature_size_override is None:
+            image_feature_size = _get_clip_image_feature_size(hf_config)
+        else:
+            image_feature_size = image_feature_size_override
+
+        return cls._repeat_and_pad_image_tokens(
+            model_config,
+            llm_inputs,
+            image_token_id=image_token_id,
+            repeat_count=image_feature_size,
+        )
+
+    @classmethod
+    def _input_processor_for_llava(
+        cls,
+        model_config: ModelConfig,
+        multimodal_config: VisionLanguageConfig,
+        hf_config: LlavaConfig,
+        llm_inputs: LLMInputs,
+    ):
+        vision_config = hf_config.vision_config
+
+        if isinstance(vision_config, CLIPVisionConfig):
+            return cls._input_processor_for_clip(
+                model_config,
+                multimodal_config,
+                vision_config,
+                llm_inputs,
+                image_token_id=hf_config.image_token_index,
+            )
+
+        msg = f"Unsupported vision config: {type(vision_config)}"
+        raise NotImplementedError(msg)
+
+    @classmethod
+    def _input_processor_for_llava_next(
+        cls,
+        model_config: ModelConfig,
+        multimodal_config: VisionLanguageConfig,
+        hf_config: LlavaNextConfig,
+        llm_inputs: LLMInputs,
+    ):
+        vision_config = hf_config.vision_config
+        image_feature_size = _get_llava_next_image_feature_size(hf_config)
+
+        if isinstance(vision_config, CLIPVisionConfig):
+            return cls._input_processor_for_clip(
+                model_config,
+                multimodal_config,
+                vision_config,
+                llm_inputs,
+                image_token_id=hf_config.image_token_index,
+                image_feature_size_override=image_feature_size,
+            )
+
+        msg = f"Unsupported vision config: {type(vision_config)}"
+        raise NotImplementedError(msg)
+
+    @classmethod
+    def for_model(
+        cls,
+        hf_config_type: Type[PretrainedConfig],
+    ) -> InputProcessor:
+        """
+        Create an input processor for a model as identified
+        by the config type.
+        """
+        if hf_config_type == LlavaConfig:
+            return lambda ctx, llm_inputs: cls._input_processor_for_llava(
+                ctx.model_config,
+                ctx.get_multimodal_config(),
+                ctx.get_hf_config(LlavaConfig),
+                llm_inputs=llm_inputs,
+            )
+        if hf_config_type == LlavaNextConfig:
+            return lambda ctx, llm_inputs: cls._input_processor_for_llava_next(
+                ctx.model_config,
+                ctx.get_multimodal_config(),
+                ctx.get_hf_config(LlavaNextConfig),
+                llm_inputs=llm_inputs,
+            )
 
         msg = f"Unsupported model config: {type(hf_config_type)}"
         raise NotImplementedError(msg)
@@ -216,9 +404,9 @@ class ImagePixelData(MultiModalData):
     """
     The pixel data of an image. Can be one of:
 
-    - :class:``PIL.Image``: An image object. Requires that a HuggingFace
+    - :class:`PIL.Image.Image`: An image object. Requires that a HuggingFace
       processor is available to the model.
-    - :class:``torch.Tensor``: The raw pixel data which is passed to the model
+    - :class:`torch.Tensor`: The raw pixel data which is passed to the model
       without additional pre-processing.
     """
 
@@ -246,8 +434,9 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
             revision=vlm_config.image_processor_revision,
         )
 
-    def _default_input_mapper(self, model_config: ModelConfig,
+    def _default_input_mapper(self, ctx: InputContext,
                               data: ImagePixelData) -> Dict[str, torch.Tensor]:
+        model_config = ctx.model_config
         image = data.image
         image_processor = self._get_hf_image_processor(model_config)
 
@@ -286,8 +475,9 @@ class ImageFeaturePlugin(MultiModalPlugin[ImageFeatureData]):
         return ImageFeatureData
 
     def _default_input_mapper(
-            self, model_config: ModelConfig,
+            self, ctx: InputContext,
             data: ImageFeatureData) -> Dict[str, torch.Tensor]:
+        model_config = ctx.model_config
         image_features = data.image_features.to(model_config.dtype)
 
         return {"image_features": image_features}
