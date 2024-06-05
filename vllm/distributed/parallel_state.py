@@ -533,11 +533,6 @@ def init_distributed_environment(
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank)
-        global _DEVICE_WORLD_GROUP, _CPU_WORLD_GROUP
-        _DEVICE_WORLD_GROUP = torch.distributed.group.WORLD
-        ranks = list(range(torch.distributed.get_world_size()))
-        _CPU_WORLD_GROUP = torch.distributed.new_group(ranks=ranks,
-                                                       backend="gloo")
         # set the local rank
         # local_rank is not available in torch ProcessGroup,
         # see https://github.com/pytorch/pytorch/issues/122816
@@ -550,14 +545,25 @@ def init_distributed_environment(
                 local_rank = rank
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
-        # A small all_reduce for warmup.
-        data = torch.zeros(1)
-        if torch.cuda.is_available():
-            data = data.to(device=f"cuda:{local_rank}")
-        torch.distributed.all_reduce(data)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        del data
+    global _WORLD
+    assert _WORLD is None, ("world group is already initialized")
+    ranks = list(range(torch.distributed.get_world_size()))
+    _WORLD = GroupCoordinator(
+        group_ranks=[ranks],
+        local_rank=_LOCAL_RANK,
+        torch_distributed_backend=backend,
+        use_pynccl=False,
+        use_custom_allreduce=False,
+    )
+
+    # A small all_reduce for warmup.
+    data = torch.zeros(1)
+    if torch.cuda.is_available():
+        data = data.to(device=f"cuda:{local_rank}")
+    _WORLD.all_reduce(data)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    del data
 
 
 def initialize_model_parallel(
