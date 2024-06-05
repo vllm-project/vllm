@@ -4,6 +4,8 @@ import pytest
 
 from vllm import SamplingParams
 
+from .conftest import get_token_ids_from_llm_generator
+
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
@@ -22,7 +24,13 @@ from vllm import SamplingParams
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
     "use_v2_block_manager": False
 }])
-@pytest.mark.parametrize("test_llm_kwargs", [{"use_v2_block_manager": True}])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "use_v2_block_manager": True,
+    "preemption_mode": "swap"
+}, {
+    "use_v2_block_manager": True,
+    "preemption_mode": "recompute"
+}])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
 def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
@@ -93,7 +101,13 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
     "use_v2_block_manager": False
 }])
-@pytest.mark.parametrize("test_llm_kwargs", [{"use_v2_block_manager": True}])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "use_v2_block_manager": True,
+    "preemption_mode": "swap"
+}, {
+    "use_v2_block_manager": True,
+    "preemption_mode": "recompute"
+}])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
 def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
@@ -177,11 +191,18 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
 }])
 @pytest.mark.parametrize(
     "test_llm_kwargs",
-    [{
-        # We run one test with block_size < lookahead_slots, one test with
-        # block_size > lookahead_slots
-        "num_lookahead_slots": 10,
-    }])
+    [
+        {
+            # We run one test with block_size < lookahead_slots, one test with
+            # block_size > lookahead_slots
+            "num_lookahead_slots": 10,
+            "preemption_mode": "swap",
+        },
+        {
+            "num_lookahead_slots": 10,
+            "preemption_mode": "recompute",
+        }
+    ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
 def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
@@ -320,7 +341,13 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
     "use_v2_block_manager": False
 }])
-@pytest.mark.parametrize("test_llm_kwargs", [{"use_v2_block_manager": True}])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "use_v2_block_manager": True,
+    "preemption_mode": "swap"
+}, {
+    "use_v2_block_manager": True,
+    "preemption_mode": "recompute"
+}])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
 def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
@@ -395,7 +422,13 @@ def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
     "enable_prefix_caching": False
 }])
-@pytest.mark.parametrize("test_llm_kwargs", [{"enable_prefix_caching": True}])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "enable_prefix_caching": True,
+    "preemption_mode": "swap"
+}, {
+    "enable_prefix_caching": True,
+    "preemption_mode": "recompute"
+}])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
 def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
@@ -444,12 +477,3 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
         assert expected_token_ids == actual_token_ids
 
     assert baseline_token_ids == test_token_ids
-
-
-def get_token_ids_from_llm_generator(llm_generator, prompts, sampling_params):
-    for llm in llm_generator:
-        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-        token_ids = [output.outputs[0].token_ids for output in outputs]
-        del llm
-
-    return token_ids

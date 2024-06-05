@@ -3,13 +3,14 @@ import argparse
 import json
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
+from vllm.inputs import PromptStrictInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 
@@ -34,7 +35,8 @@ def main(args: argparse.Namespace):
               use_v2_block_manager=args.use_v2_block_manager,
               enable_chunked_prefill=args.enable_chunked_prefill,
               download_dir=args.download_dir,
-              block_size=args.block_size)
+              block_size=args.block_size,
+              gpu_memory_utilization=args.gpu_memory_utilization)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -48,7 +50,9 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_prompt_token_ids = dummy_prompt_token_ids.tolist()
+    dummy_inputs: List[PromptStrictInputs] = [{
+        "prompt_token_ids": batch
+    } for batch in dummy_prompt_token_ids.tolist()]
 
     def run_to_completion(profile_dir: Optional[str] = None):
         if profile_dir:
@@ -59,13 +63,13 @@ def main(args: argparse.Namespace):
                     ],
                     on_trace_ready=torch.profiler.tensorboard_trace_handler(
                         str(profile_dir))) as p:
-                llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+                llm.generate(dummy_inputs,
                              sampling_params=sampling_params,
                              use_tqdm=False)
             print(p.key_averages())
         else:
             start_time = time.perf_counter()
-            llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+            llm.generate(dummy_inputs,
                          sampling_params=sampling_params,
                          use_tqdm=False)
             end_time = time.perf_counter()
@@ -211,5 +215,11 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help='Path to save the latency results in JSON format.')
+    parser.add_argument('--gpu-memory-utilization',
+                        type=float,
+                        default=0.9,
+                        help='the fraction of GPU memory to be used for '
+                        'the model executor, which can range from 0 to 1.'
+                        'If unspecified, will use the default value of 0.9.')
     args = parser.parse_args()
     main(args)

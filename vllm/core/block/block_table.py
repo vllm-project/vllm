@@ -20,6 +20,10 @@ class BlockTable:
         _blocks (Optional[List[Block]], optional): An optional list of existing
             blocks to initialize the BlockTable with. If not provided, an empty
             BlockTable is created.
+        max_block_sliding_window (Optional[int], optional): The number of
+            blocks to keep around for each sequance. If None, all blocks
+            are kept (eg., when sliding window is not used).
+            It should at least fit the sliding window size of the model.
 
     Attributes:
         _block_size (int): The maximum number of tokens that can be stored in a
@@ -37,6 +41,7 @@ class BlockTable:
         block_size: int,
         block_allocator: DeviceAwareBlockAllocator,
         _blocks: Optional[List[Block]] = None,
+        max_block_sliding_window: Optional[int] = None,
     ):
         self._block_size = block_size
         self._allocator = block_allocator
@@ -44,6 +49,7 @@ class BlockTable:
             _blocks = []
         self._blocks: List[Block] = _blocks
 
+        self._max_block_sliding_window = max_block_sliding_window
         # Use helper method instead of directly calculating, as blocks
         # may not be allocated.
         self._num_full_slots = len(self._get_all_token_ids())
@@ -89,7 +95,8 @@ class BlockTable:
 
     def append_token_ids(self,
                          token_ids: List[int],
-                         num_lookahead_slots: int = 0) -> None:
+                         num_lookahead_slots: int = 0,
+                         num_computed_slots: Optional[int] = None) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -104,13 +111,35 @@ class BlockTable:
 
         Args:
             token_ids (List[int]): The sequence of token IDs to be appended.
+            num_computed_slots (Optional[int]): The number of KV cache slots
+                that are already filled (computed).
+                When sliding window is enabled, this is used to compute how many
+                blocks to drop at the front of the sequence.
+                Without sliding window, None can be passed.
+                Without chunked prefill, it should be the same as
+                _num_full_slots.
         """
-        assert self._is_allocated
+        assert self._is_allocated, "no blocks have been allocated"
         assert len(self._blocks) > 0
 
+        # Drop blocks that are no longer needed due to sliding window
+        if self._max_block_sliding_window is not None:
+            null_block = self._allocator.allocate_or_get_null_block()
+            assert num_computed_slots is not None
+            end_block_idx = (num_computed_slots //
+                             self._block_size) - self._max_block_sliding_window
+            for idx in range(0, end_block_idx):
+                b = self._blocks[idx]
+                if b is not null_block:
+                    self._allocator.free(b)
+                    self._blocks[idx] = null_block
+
+        # Ensure there are enough empty slots for the new tokens plus
+        # lookahead slots
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
                                     num_lookahead_slots)
 
+        # Update the blocks with the new tokens
         blocks = self._blocks[self._num_full_slots // self._block_size:]
         token_blocks = self._chunk_token_blocks_for_append(token_ids)
 
@@ -168,6 +197,7 @@ class BlockTable:
             block_size=self._block_size,
             block_allocator=self._allocator,
             _blocks=forked_blocks,
+            max_block_sliding_window=self._max_block_sliding_window,
         )
 
     def free(self) -> None:
@@ -252,6 +282,10 @@ class BlockTable:
     @property
     def _is_allocated(self) -> bool:
         return len(self._blocks) > 0
+
+    @property
+    def blocks(self) -> Optional[List[Block]]:
+        return self._blocks
 
     @property
     def _num_empty_slots(self) -> int:
