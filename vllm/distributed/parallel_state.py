@@ -130,6 +130,16 @@ class GroupCoordinator:
         else:
             self.ca_comm = None
 
+    @property
+    def first_rank(self):
+        """Return the global rank of the first process in the group"""
+        return self.ranks[0]
+
+    @property
+    def last_rank(self):
+        """Return the global rank of the last process in the group"""
+        return self.ranks[-1]
+
     @contextmanager
     def graph_capture(
             self, graph_capture_context: Optional[GraphCaptureContext] = None):
@@ -699,23 +709,6 @@ def get_tensor_model_parallel_src_rank():
     global_rank = torch.distributed.get_rank()
     local_world_size = get_tensor_model_parallel_world_size()
     return (global_rank // local_world_size) * local_world_size
-
-
-def get_pipeline_model_parallel_first_rank():
-    """Return the global rank of the first process in the pipeline for the
-    current tensor parallel group"""
-    assert _PP_GLOBAL_RANKS is not None, (
-        "Pipeline parallel group is not initialized")
-    return _PP_GLOBAL_RANKS[0]
-
-
-def get_pipeline_model_parallel_last_rank():
-    """Return the global rank of the last process in the pipeline for the
-    current tensor parallel group"""
-    assert _PP_GLOBAL_RANKS is not None, (
-        "Pipeline parallel group is not initialized")
-    last_rank_local = get_pipeline_model_parallel_world_size() - 1
-    return _PP_GLOBAL_RANKS[last_rank_local]
 
 
 def get_pipeline_model_parallel_next_rank():
