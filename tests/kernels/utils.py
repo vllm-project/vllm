@@ -2,12 +2,11 @@
 
 import itertools
 import random
+from collections import namedtuple
 from typing import List, Optional, Union
 
 import pytest
 import torch
-
-from collections import namedtuple
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
@@ -92,23 +91,17 @@ def ref_masked_attention(query: torch.Tensor,
     out = torch.einsum("bhqk,bkhd->bqhd", attn_weights, value)
     return out
 
+
 # batch_size x max_q_seq_len x num_heads x head_size
-QKVInputs = namedtuple("QKVInputs", 
-                       ["query",
-                       "key",
-                       "value",
-                       "q_seq_lens",
-                       "kv_seq_lens"])
+QKVInputs = namedtuple("QKVInputs",
+                       ["query", "key", "value", "q_seq_lens", "kv_seq_lens"])
 
 # total_num_tokens x (num_heads*head_size)
-PackedQKVInputs = namedtuple("PackedQKVInputs", 
-                             ["query",
-                             "key",
-                             "value",
-                             "q_start_loc_list",
-                             "kv_start_loc_list",
-                             "q_seq_lens",
-                             "kv_seq_lens"])
+PackedQKVInputs = namedtuple("PackedQKVInputs", [
+    "query", "key", "value", "q_start_loc_list", "kv_start_loc_list",
+    "q_seq_lens", "kv_seq_lens"
+])
+
 
 def make_qkv(
     batch_size: int,
@@ -120,7 +113,7 @@ def make_qkv(
     force_kv_seq_lens: List[int] = None,
     attn_type: AttentionType = AttentionType.ENCODER_DECODER,
     force_max_len: bool = False,
-) -> tuple[QKVInputs,QKVInputs,QKVInputs]:
+) -> tuple[QKVInputs, QKVInputs, QKVInputs]:
     '''
     Construct QKV test tensors for self- and cross-attention.
 
@@ -278,8 +271,8 @@ def pack_tensor(unpacked_tensor: torch.Tensor, seq_lens: List[int],
     return packed_tensor, start_loc_list
 
 
-def pack_qkv(qkv: QKVInputs,
-             device: Union[torch.device, str]) -> PackedQKVInputs:
+def pack_qkv(qkv: QKVInputs, device: Union[torch.device,
+                                           str]) -> PackedQKVInputs:
     '''
     Individually pack each of Q, K and V, each with dimensions batch_size x
     padded_seq_len x num_heads x head_size, into respective number_of_tokens x
