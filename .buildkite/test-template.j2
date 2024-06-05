@@ -3,7 +3,6 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-
   - label: ":docker: build image"
     commands:
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
@@ -14,14 +13,36 @@ steps:
       automatic:
         - exit_status: -1  # Agent was lost
           limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
   - wait
 
-  - label: "AMD Test"
-    agents:
-      queue: amd
-    command: bash .buildkite/run-amd-test.sh
+  - group: "AMD Tests"
+    depends_on: ~
+    steps:
+    {% for step in steps %}
+    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
+      - label: "AMD: {{ step.label }}"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" ; ")) | safe }}"
+        env:
+          DOCKER_BUILDKIT: "1"
+        soft_fail: true
+    {% endif %}
+    {% endfor %}
 
-  - label: "CPU Test"
+  - label: "Neuron Test"
+    depends_on: ~
+    agents:
+      queue: neuron
+    command: bash .buildkite/run-neuron-test.sh
+    soft_fail: false
+
+  - label: "Intel Test"
+    depends_on: ~
+    agents:
+      queue: intel
     command: bash .buildkite/run-cpu-test.sh
 
   {% for step in steps %}
@@ -36,9 +57,14 @@ steps:
       automatic:
         - exit_status: -1  # Agent was lost
           limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
     plugins:
       - kubernetes:
           podSpec:
+            {% if step.num_gpus %}
+            priorityClassName: gpu-priority-cls-{{ step.num_gpus }}
+            {% endif %}
             volumes:
               - name: dshm
                 emptyDir:

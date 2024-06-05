@@ -1,4 +1,4 @@
-from typing import Iterable, List, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -10,6 +10,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.utils import Counter
 
 logger = init_logger(__name__)
 
@@ -33,7 +34,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         scheduler_config: SchedulerConfig,
         detokenizer: Detokenizer,
         scheduler: Scheduler,
-        seq_counter: Iterable[int],
+        seq_counter: Counter,
         stop_checker: StopChecker,
     ):
         self.scheduler_config = scheduler_config
@@ -54,21 +55,28 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 ), f"{type(self)} does not support multiple outputs per step"
         return self._process_sequence_group_outputs(sequence_group, outputs[0])
 
+    def process_prompt_logprob(self, seq_group: SequenceGroup,
+                               outputs: List[SequenceGroupOutput]) -> None:
+        assert len(outputs) == 1, ("Single step should only has 1 output.")
+        output = outputs[0]
+        prompt_logprobs = output.prompt_logprobs
+        if prompt_logprobs is not None:
+            if seq_group.sampling_params.detokenize and self.detokenizer:
+                self.detokenizer.decode_prompt_logprobs_inplace(
+                    seq_group, prompt_logprobs)
+            if not seq_group.prompt_logprobs:
+                # The first prompt token's logprob is None because it doesn't
+                # have tokens that are precedent.
+                seq_group.prompt_logprobs = [None]
+            seq_group.prompt_logprobs.extend(prompt_logprobs)
+
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
-
-        # Process prompt logprobs
-        prompt_logprobs = outputs.prompt_logprobs
-        if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
-            self.detokenizer.decode_prompt_logprobs_inplace(
-                seq_group, prompt_logprobs)
-            seq_group.prompt_logprobs = prompt_logprobs
-
         # Process samples
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         existing_finished_seqs = seq_group.get_finished_seqs()
-        parent_child_dict = {
+        parent_child_dict: Dict[int, List[SequenceOutput]] = {
             parent_seq.seq_id: []
             for parent_seq in parent_seqs
         }
@@ -91,7 +99,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 continue
             # Fork the parent sequence if there are multiple child samples.
             for child_sample in child_samples[:-1]:
-                new_child_seq_id = next(self.seq_counter)
+                new_child_seq_id: int = next(self.seq_counter)
                 child = parent.fork(new_child_seq_id)
                 child.append_token_id(child_sample.output_token,
                                       child_sample.logprobs)
@@ -105,13 +113,17 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            if seq_group.sampling_params.detokenize:
+            if seq_group.sampling_params.detokenize and self.detokenizer:
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, seq_group.sampling_params)
             else:
                 new_char_count = 0
-            self.stop_checker.maybe_stop_sequence(seq, new_char_count,
-                                                  seq_group.sampling_params)
+            self.stop_checker.maybe_stop_sequence(
+                seq,
+                new_char_count,
+                seq_group.sampling_params,
+                lora_req=seq_group.lora_request,
+            )
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:
