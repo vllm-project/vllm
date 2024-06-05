@@ -16,6 +16,13 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
+**Ray Summit CPF is Open (June 4th to June 20th)!**
+
+There will be a track for vLLM at the Ray Summit (09/30-10/02, SF) this year!
+If you have cool projects related to vLLM or LLM inference, we would love to see your proposals.
+This will be a great chance for everyone in the community to get together and learn.
+Please submit your proposal [here](https://raysummit.anyscale.com/flow/anyscale/raysummit2024/landing/page/eventsite)
+
 **The Fourth vLLM Bay Area Meetup (June 11th 5:30pm-8pm PT)**
 
 We are thrilled to announce our fourth vLLM Meetup!
