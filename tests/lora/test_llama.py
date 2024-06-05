@@ -36,7 +36,7 @@ def do_sample(llm, lora_path: str, lora_id: int):
     return generated_texts
 
 
-@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("tp_size", [1, 8])
 def test_llama_lora(sql_lora_files, tp_size):
     # Cannot use as it will initialize torch.cuda too early...
     # if torch.cuda.device_count() < tp_size:
