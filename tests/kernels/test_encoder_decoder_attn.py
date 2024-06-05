@@ -636,13 +636,6 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     # anyway but are required to be present & valid by the
     # backend.
 
-    # encoder_packed_query, \
-    # enc_packed_key, \
-    # enc_packed_value, \
-    # encoder_packed_ideal_output, \
-    # encoder_seq_lens =
-
-
     enc_pckd_qkv, \
     enc_pckd_idl_out = \
       _encoder_attn_setup(batch_size,
@@ -692,7 +685,6 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
                                               cross_block_base_addr)
 
     # Shared prefill metadata structure
-    #
 
     prephase_attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
