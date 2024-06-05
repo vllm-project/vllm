@@ -8,11 +8,12 @@ import torch_xla.core.xla_model as xm
 import torch_xla.debug.profiler as xp
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VisionLanguageConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput, SequenceGroupMetadata, SequenceOutput, Logprob)
+from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
+                           SequenceGroupMetadata, SequenceOutput, Logprob)
 from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
@@ -154,10 +155,7 @@ class TPUModelRunner:
             for seq_len in [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]:
                 if batch_size * seq_len > 8192:
                     continue
-                self._dummy_run(batch_size,
-                                seq_len,
-                                kv_caches,
-                                is_prompt=True)
+                self._dummy_run(batch_size, seq_len, kv_caches, is_prompt=True)
                 xm.wait_device_ops()
                 logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
 
@@ -367,7 +365,8 @@ class TPUModelRunner:
                     SequenceOutput(seq_id, next_token_id,
                                    {next_token_id: Logprob(0.0)}))
                 i += 1
-            sampler_outputs.append(CompletionSequenceGroupOutput(seq_outputs, None))
+            sampler_outputs.append(
+                CompletionSequenceGroupOutput(seq_outputs, None))
         return SamplerOutput(sampler_outputs)
 
 
