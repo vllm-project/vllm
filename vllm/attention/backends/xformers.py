@@ -11,14 +11,12 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import (
+    check_hip_or_chunked_prefill_attention_encdec,
+    fail_encoder_decoder_prefix_caching, is_encoder_decoder_metadata)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
-
-from vllm.attention.backends.utils import (
-    check_hip_or_chunked_prefill_attention_encdec,
-    is_encoder_decoder_metadata,
-    fail_encoder_decoder_prefix_caching)
 
 logger = init_logger(__name__)
 

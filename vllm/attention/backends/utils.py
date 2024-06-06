@@ -29,11 +29,12 @@ STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING = \
 def is_encoder_decoder_metadata(attn_metadata) -> bool:
     return attn_metadata.is_all_encoder_attn_metadata_set
 
+
 def fail_encoder_decoder_prefix_caching() -> None:
     raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING)
 
-def check_hip_or_chunked_prefill_attention_encdec(
-        attn_metadata) -> None:
+
+def check_hip_or_chunked_prefill_attention_encdec(attn_metadata) -> None:
     '''
     Check for unsupported encoder/decoder scenarios when invoking
     attention.

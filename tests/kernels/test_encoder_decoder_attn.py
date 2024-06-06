@@ -16,8 +16,7 @@ from tests.kernels.utils import *
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.utils import (
-    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
-    STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING, 
+    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL, STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING,
     STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 from vllm.utils import is_hip, make_causal_mask, maybe_make_long_tensor
 
@@ -945,13 +944,13 @@ def test_backend_fails_for_chunked_prefill_enc_dec(num_heads: int,
 @pytest.mark.parametrize("max_dec_seq_len", MAX_DEC_SEQ_LENS)
 @pytest.mark.parametrize("max_enc_seq_len", MAX_ENC_SEQ_LENS)
 def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
-                                                   head_size: int,
-                                                   backend_name: str,
-                                                   batch_size: int,
-                                                   block_size: int,
-                                                   max_dec_seq_len: int,
-                                                   max_enc_seq_len: int,
-                                                   monkeypatch) -> None:
+                                                  head_size: int,
+                                                  backend_name: str,
+                                                  batch_size: int,
+                                                  block_size: int,
+                                                  max_dec_seq_len: int,
+                                                  max_enc_seq_len: int,
+                                                  monkeypatch) -> None:
     '''
     Encoder/decoder attention test:
 
@@ -1063,7 +1062,7 @@ def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
         # Fake a non-empty block_tables
         # prephase_dec_test_params.kv_mmap.block_tables = \
         #   decphase_dec_test_params.kv_mmap.block_tables
-        
+
         # prefix_block_tables = decphase_dec_test_params.kv_mmap.block_tables
 
         # prefix_kv_mmap = KVMemoryMap(prefix_block_tables,
@@ -1072,13 +1071,15 @@ def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
         # prefix_test_params = PhaseTestParameters(
         #     prephase_dec_test_params.packed_qkvo,
         #     prefix_kv_mmap
-        # )            
+        # )
 
-        num_seqs = len(prephase_dec_test_params.packed_qkvo.packed_qkv.q_seq_lens)
+        num_seqs = len(
+            prephase_dec_test_params.packed_qkvo.packed_qkv.q_seq_lens)
 
-        prephase_attn_metadata._cached_prefill_metadata.block_tables = torch.randint(0,10,(num_seqs,1))
+        prephase_attn_metadata._cached_prefill_metadata.block_tables = \
+          torch.randint(
+            0, 10, (num_seqs, 1))
 
-      
         _run_decoder_self_attention_test(test_rsrcs,
                                          prephase_dec_test_params,
                                          prephase_attn_metadata,
