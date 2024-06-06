@@ -1,7 +1,5 @@
 import gc
-from dataclasses import fields
-from enum import Enum
-from typing import Any, Dict, List, Tuple
+from typing import List, Tuple
 
 import pytest
 import torch
@@ -34,26 +32,6 @@ model_and_vl_config = [
     # Not enough memory
     # *iter_llava_configs("llava-hf/llava-1.5-13b-hf"),
 ]
-
-
-def as_dict(vlm_config: VisionLanguageConfig) -> Dict[str, Any]:
-    """Flatten vision language config to pure args.
-
-    Compatible with what llm entrypoint expects.
-    """
-    result = {}
-    for field in fields(vlm_config):
-        value = getattr(vlm_config, field.name)
-        if isinstance(value, Enum):
-            result[field.name] = value.name.lower()
-        elif isinstance(value, tuple):
-            result[field.name] = ",".join([str(item) for item in value])
-        else:
-            result[field.name] = value
-
-    result["disable_image_processor"] = vlm_config.image_processor is None
-
-    return result
 
 
 def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
@@ -104,7 +82,7 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                              dtype=dtype,
                              worker_use_ray=worker_use_ray,
                              enforce_eager=True,
-                             **as_dict(vision_language_config))
+                             **vision_language_config.as_cli_args_dict())
     vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
                                               max_tokens,
                                               images=vllm_images)
