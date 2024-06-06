@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm import _custom_C
 from vllm.logger import init_logger
 from vllm.model_executor.layers.tuned_gemm import tgemm
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -15,8 +14,6 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.parallel_utils.utils import (
     divide, split_tensor_along_last_dim)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import is_hip
-from vllm._C import ops
 
 logger = init_logger(__name__)
 
@@ -76,30 +73,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = weights["weight"]
-        if is_hip() and x.view(-1, x.size(-1)).shape[0] == 1:
-            batched = False
-            if x.dim() == 3:
-                inp = x.view(-1, x.size(-1))
-                batched = True
-            else:
-                inp = x
-            m, k = weight.shape[0], inp.shape[1]
-            out = torch.empty(inp.shape[0],
-                              weight.shape[0],
-                              dtype=inp.dtype,
-                              device='cuda')
-            if (k == 8192 and
-                (m == 1280 or m == 7168)) or (k == 3584 and m == 8192):
-                _custom_C.LLMM1(weight, inp, out, 8)
-            elif k <= 8192 and k % 8 == 0 and m % 4 == 0:
-                _custom_C.LLMM1(weight, inp, out, 4)
-            else:
-                out = F.linear(inp, weight)
-            if batched:
-                out = out.view(x.shape[0], x.shape[1], weight.shape[0])
-            if bias is not None:
-                out = out + bias
-            return out
         if self.separate_bias_add:
             if bias is not None:
                 return F.linear(x, weight) + bias
