@@ -42,8 +42,8 @@ class ImageFetchAiohttp:
         if image_url.startswith('http'):
             async with client.get(url=image_url, headers=headers) as response:
                 response.raise_for_status()
-                # Open the image using PIL
-                image = Image.open(BytesIO(response.content))
+                image_raw = await response.read()
+            image = Image.open(BytesIO(image_raw))
 
         elif image_url.startswith('data:image'):
             image = load_image_from_base64(image_url.split(',')[1])
