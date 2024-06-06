@@ -363,6 +363,7 @@ def build_extension(
     )
 
 
+# Turn into functionalization?
 def add_uses_for_mutable_inputs(g: torch.fx.Graph):
     uses = dict()
     for n in g.nodes:
@@ -409,3 +410,43 @@ def add_uses_for_mutable_inputs(g: torch.fx.Graph):
                                 uses[nth_arg] = set([n])
                             else:
                                 uses[nth_arg].add(n)
+
+
+def tag_side_effects(g: torch.fx.Graph):
+    uses = dict()
+    for n in g.nodes:
+        for a in n.args:
+            if isinstance(a, torch.fx.Node) and a in uses:
+                defs = uses[a]
+                for d in defs:
+                    print(f"ADD USE {d}, {n}")
+                    d.users[n] = None
+            elif isinstance(a, tuple) and any([isinstance(aa, torch.fx.Node) and aa in uses for aa in a]):
+                for aa in a:
+                    defs = uses[aa]
+                    for d in defs:
+                        print(f"ADD USE {d}, {n}")
+                        d.users[n] = None
+
+        if n.op != 'call_function':
+            continue
+        sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(n.target, return_schemas=True)
+        if schemas is None or not any([s.is_mutable for s in schemas]):
+            continue
+
+        matched_schemas = []
+        for candidate_signature, schema in zip(sigs, schemas):
+            try:
+                candidate_signature.bind(*n.args, **n.kwargs)
+                matched_schemas.append((candidate_signature, schema))
+            except TypeError as e:
+                continue
+
+        if len(matched_schemas) == 0:
+            # Did not match any schema. Cannot check for mutation
+            continue
+        elif len(matched_schemas) == 1:
+            _, s = matched_schemas[0]
+            if s.is_mutable:
+                torch.fx.node.has_side_effect(n.target)
+                print(f"MUTABLE SIG {n} {s}")

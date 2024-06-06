@@ -28,7 +28,7 @@ class SiluAndMul(CustomOp):
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
         if torch._utils.is_compiling():
             return F.silu(x[..., :d]) * x[..., d:]

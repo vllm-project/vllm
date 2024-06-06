@@ -6,7 +6,7 @@ from .code_cache import CodeCache
 from .fusion import FusedOpGenerator, pointwise_fusion
 from .register import SUPPORTED
 from .rewrite_quantized_gemms import rewrite_quantized_gemms
-from .utils import ModuleInputGenerator, graph_print_tabular, is_call, call_method_class, add_uses_for_mutable_inputs
+from .utils import ModuleInputGenerator, graph_print_tabular, is_call, call_method_class, tag_side_effects
 
 from torch._dynamo import register_backend, lookup_backend
 from torch.fx.passes.operator_support import create_op_support
@@ -171,12 +171,22 @@ class backend_class:
         # Must make a copy so that inductor backend doesn't choke.
         gm = copy.copy(gm)
 
-        #gm = make_fx(functionalize(gm, remove='mutations'))(*example_inputs)
+        # See torch/_subclasses/function_tensor.py FunctionalTensor, FunctionalTensorMode
+        # trace with FunctionTensor args???
 
-        #add_uses_for_mutable_inputs(gm.graph)
+        # See fx/passes/reinplace.py
+
+        # See ./_functorch/_aot_autograd/dispatch_and_compile_graph.py:50 def aot_dispatch_base_graph
+        # post_grad.py: decompose_auto_functionalized(graph):
+        # from torch._higher_order_ops.auto_functionalize import auto_functionalized_dense
+
+        #gm = make_fx(functionalize(gm, remove='mutations'))(*example_inputs)
+        #gm = make_fx(functionalize(gm, remove='mutations_and_views'))(*example_inputs)
+
+        tag_side_effects(gm.graph)
 
         # TODO: this is eliminating functions that write to an input
-        #gm.graph.eliminate_dead_code()
+        gm.graph.eliminate_dead_code()
 
         print(f"Original module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}")
 
@@ -232,6 +242,8 @@ class backend_class:
 
                     if self.backend != None:
                         m.forward = backend_compile(m, module_inputs, backend=self.backend)
+
+        #part_gm = torch.fx.passes.reinplace.reinplace(part_gm, *example_inputs)
 
         part_gm.recompile()
 

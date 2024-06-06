@@ -97,7 +97,7 @@ def register_defaults():
     register_fusable('torch.empty')  # maybe TBD
     register_fusable('torch.relu')
     register_fusable('torch.nn.functional.silu')
-    register_fusable('torch.ops.vllm.silu_and_mul')
+    register_fusable('torch.ops._C.silu_and_mul')
     register_fusable('torch.matmul', True)
     register_fusable('torch._C._nn.linear', True)
     register_fusable('torch.ops._C.cutlass_scaled_mm_dq', True)
