@@ -5,6 +5,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 import pytest
+import pytest_asyncio
 from PIL import Image
 
 from vllm.multimodal.utils import ImageFetchAiohttp
@@ -18,8 +19,7 @@ TEST_IMAGE_URLS = [
 ]
 
 
-@pytest.mark.asyncio
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session")
 async def url_images() -> Dict[str, Image.Image]:
     return {
         image_url: await ImageFetchAiohttp.fetch_image(image_url)
