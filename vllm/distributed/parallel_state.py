@@ -488,7 +488,7 @@ def graph_capture():
     from other kernels possibly launched on background in the default stream.
     """
     with get_tp().graph_capture() as context, get_pp().graph_capture(context):
-        yield
+        yield context
 
 
 logger = init_logger(__name__)
