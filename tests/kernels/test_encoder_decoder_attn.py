@@ -31,6 +31,10 @@ CUDA_DEVICE = "cuda:0"
 MAX_DEC_SEQ_LENS = [128]
 MAX_ENC_SEQ_LENS = [128]
 
+# Narrow teest-cases for unsupported-scenario
+# tests
+HEAD_SIZES_FOR_UNSUPP = [HEAD_SIZES[0]]
+
 TestPoint = namedtuple("TestPoint", [
     "num_heads", "head_size", "backend_name", "batch_size", "block_size",
     "max_dec_seq_len", "max_enc_seq_len", "num_blocks"
@@ -823,7 +827,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("head_size", HEAD_SIZES_FOR_UNSUPP)
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
