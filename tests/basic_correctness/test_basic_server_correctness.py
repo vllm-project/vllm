@@ -54,9 +54,12 @@ async def my_chat(
     ("NousResearch/Llama-2-7b-chat-hf", 4096, None, None),
     ("neuralmagic/Llama-2-7b-pruned70-retrained-ultrachat", 4096,
      "sparse_w16a16", None),
+    ("microsoft/phi-2", 2048, None, None),
+    ("google/gemma-1.1-2b-it", 2056, None, None),
+    ("HuggingFaceH4/zephyr-7b-gemma-v0.1", 4096, None, None),
 ])
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [3])
+@pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tensor_parallel_size", [None])
 # note: repeating the test for 2 values of tensor_parallel_size
 #  increases the overall execution time by unnecessarily
