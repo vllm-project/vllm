@@ -1,6 +1,6 @@
 import codecs
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
                     List, Optional)
 from typing import Sequence as GenericSequence
@@ -9,7 +9,6 @@ from typing import TypedDict, Union, cast, final
 from fastapi import Request
 from openai.types.chat import (ChatCompletionContentPartImageParam,
                                ChatCompletionContentPartTextParam)
-from pydantic import Field
 
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -45,7 +44,7 @@ class ConversationMessage(TypedDict):
 @dataclass(frozen=True)
 class ChatMessageParseResult:
     messages: List[ConversationMessage]
-    image_futures: List[Awaitable[ImagePixelData]]
+    image_futures: List[Awaitable[ImagePixelData]] = field(default_factory=list)
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -100,8 +99,7 @@ class OpenAIServingChat(OpenAIServing):
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
         texts: List[str] = []
-        image_futures: List[Awaitable[ImagePixelData]] = Field(
-            default_factory=list)
+        image_futures: List[Awaitable[ImagePixelData]] = []
 
         vlm_config: Optional[VisionLanguageConfig] = getattr(
             self.engine.engine, "vision_language_config", None)
