@@ -25,12 +25,6 @@ class ImageFetchAiohttp:
         return cls.aiohttp_client
 
     @classmethod
-    async def close_aiohttp_client(cls) -> None:
-        if cls.aiohttp_client:
-            await cls.aiohttp_client.close()
-            cls.aiohttp_client = None
-
-    @classmethod
     async def fetch_image(cls, image_url: str) -> Image.Image:
         """Load image from a url or base64 encoded openai GPT4V format"""
 
