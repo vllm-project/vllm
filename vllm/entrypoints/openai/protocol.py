@@ -275,10 +275,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode='before')
     @classmethod
     def validate_stream_options(cls, values):
-        if values.get('stream_options') is not None and not values.get('stream'):
+        if (values.get('stream_options') is not None and
+            not values.get('stream')):
             raise ValueError("stream_options can only be set if stream is true")
         return values
-    
+
     @model_validator(mode="before")
     @classmethod
     def check_guided_decoding_count(cls, data):
@@ -634,11 +635,6 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
-
-class UsageInfo(OpenAIBaseModel):
-    prompt_tokens: int = 0
-    total_tokens: int = 0
-    completion_tokens: Optional[int] = 0
 
 class BatchRequestInput(OpenAIBaseModel):
     """

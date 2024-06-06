@@ -1347,7 +1347,8 @@ async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME],
 )
-async def test_stream_options(server, client: openai.AsyncOpenAI, model_name: str):
+async def test_stream_options(server, client: openai.AsyncOpenAI, 
+                              model_name: str):
     prompt = "What is the capital of France?"
 
     # Test stream=True, stream_options=None
@@ -1390,7 +1391,6 @@ async def test_stream_options(server, client: openai.AsyncOpenAI, model_name: st
         stream_options={"include_usage": True},
     )
     chunks = []
-    usage_info = None
     finish_reason_count = 0
     async for chunk in stream:
         if chunk.choices[0].finish_reason is None:
@@ -1405,7 +1405,8 @@ async def test_stream_options(server, client: openai.AsyncOpenAI, model_name: st
     assert last_message.usage is not None
     assert last_message.usage.prompt_tokens > 0
     assert last_message.usage.completion_tokens > 0
-    assert last_message.usage.total_tokens == last_message.usage.prompt_tokens + last_message.usage.completion_tokens
+    assert last_message.usage.total_tokens == (last_message.usage.prompt_tokens
+                                         + last_message.usage.completion_tokens)
     assert last_message.choices == []
 
     # Test stream=False, stream_options={"include_usage": None}
