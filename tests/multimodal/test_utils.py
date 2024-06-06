@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from vllm.multimodal.utils import fetch_image
+from vllm.multimodal.utils import ImageFetchAiohttp
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_URLS = [
@@ -18,9 +18,13 @@ TEST_IMAGE_URLS = [
 ]
 
 
+@pytest.mark.asyncio
 @pytest.fixture(scope="session")
-def url_images() -> Dict[str, Image.Image]:
-    return {image_url: fetch_image(image_url) for image_url in TEST_IMAGE_URLS}
+async def url_images() -> Dict[str, Image.Image]:
+    return {
+        image_url: await ImageFetchAiohttp.fetch_image(image_url)
+        for image_url in TEST_IMAGE_URLS
+    }
 
 
 def get_supported_suffixes() -> Tuple[str, ...]:
@@ -37,10 +41,11 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
     return (np.asarray(a) == np.asarray(b.convert(a.mode))).all()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
-def test_fetch_image_base64(url_images: Dict[str, Image.Image], image_url: str,
-                            suffix: str):
+async def test_fetch_image_base64(url_images: Dict[str, Image.Image],
+                                  image_url: str, suffix: str):
     url_image = url_images[image_url]
 
     try:
@@ -63,8 +68,8 @@ def test_fetch_image_base64(url_images: Dict[str, Image.Image], image_url: str,
         base64_image = base64.b64encode(f.read()).decode("utf-8")
         data_url = f"data:{mime_type};base64,{base64_image}"
 
-        with fetch_image(data_url) as data_image:
+        async with ImageFetchAiohttp.fetch_image(data_url) as data_image:
             if _image_equals(url_image, Image.open(f)):
-                assert _image_equals(url_image, data_image)
+                assert _image_equals(url_image, await data_image)
             else:
                 pass  # Lossy format; only check that image can be opened
