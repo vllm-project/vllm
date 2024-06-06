@@ -1,10 +1,10 @@
 from pathlib import Path
+from typing import Dict
 
 import openai
 import pytest
 import pytest_asyncio
 import ray
-from PIL import Image
 
 from vllm.multimodal.utils import ImageFetchAiohttp, encode_image_base64
 
@@ -62,9 +62,12 @@ def client():
 
 
 @pytest_asyncio.fixture(scope="session")
-async def base64_encoded_image(image_url: str) -> Image.Image:
-    return encode_image_base64(
-        await ImageFetchAiohttp.fetch_image(image_url=image_url))
+async def base64_encoded_image() -> Dict[str, str]:
+    return {
+        image_url:
+        encode_image_base64(await ImageFetchAiohttp.fetch_image(image_url))
+        for image_url in TEST_IMAGE_URLS
+    }
 
 
 @pytest.mark.asyncio
@@ -121,9 +124,10 @@ async def test_single_chat_session_image(server, client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded(
-        server, client: openai.AsyncOpenAI, model_name: str,
-        base64_encoded_image: str):
+        server, client: openai.AsyncOpenAI, model_name: str, image_url: str,
+        base64_encoded_image: Dict[str, str]):
 
     messages = [{
         "role":
@@ -132,7 +136,8 @@ async def test_single_chat_session_image_base64encoded(
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": f"data:image/jpeg;base64,{base64_encoded_image}"
+                    "url":
+                    f"data:image/jpeg;base64,{base64_encoded_image[image_url]}"
                 }
             },
             {
