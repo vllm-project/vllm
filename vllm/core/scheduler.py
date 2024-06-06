@@ -649,8 +649,8 @@ class Scheduler:
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
-            # FIXME(woosuk): The TPU backend only supports up to 4 sequence
-            # groups in a single batch.
+            # FIXME(woosuk): The TPU backend only supports up to
+            # `MAX_BATCH_SIZE` groups in a single batch.
             MAX_BATCH_SIZE = 1
             if len(seq_groups) == MAX_BATCH_SIZE:
                 break

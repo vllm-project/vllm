@@ -146,7 +146,6 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self._warmup_model()
 
     def _warmup_model(self) -> None:
-        return
         self.model_runner.warmup_model(self.tpu_cache)
 
     def get_cache_block_size_bytes(self) -> int:
