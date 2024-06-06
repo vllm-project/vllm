@@ -1114,6 +1114,8 @@ class VisionLanguageConfig:
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
 
+    #TODO(ywang96): make this a cached property once we refactor the
+    # VisionLanguageConfig class.
     def get_image_token_text(
             self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
         """Get the image token placeholder text to be inserted into the 

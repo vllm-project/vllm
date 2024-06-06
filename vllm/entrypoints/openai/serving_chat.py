@@ -1,6 +1,6 @@
 import codecs
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
                     List, Optional)
 from typing import Sequence as GenericSequence
@@ -100,7 +100,8 @@ class OpenAIServingChat(OpenAIServing):
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
         texts: List[str] = []
-        image_futures: List[Awaitable[ImagePixelData]] = []
+        image_futures: List[Awaitable[ImagePixelData]] = field(
+            default_factory=list)
 
         vlm_config: Optional[VisionLanguageConfig] = getattr(
             self.engine.engine, "vision_language_config", None)
