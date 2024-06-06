@@ -54,16 +54,13 @@ def interactive_cli(args: argparse.Namespace) -> None:
 
 def complete(model_name: str, client: OpenAI) -> None:
     print("Please enter prompt to complete:")
-    buffer = ""
     while True:
         input_prompt = input("> ")
 
         completion = client.completions.create(model=model_name,
-                                               prompt=buffer + input_prompt)
+                                               prompt=input_prompt)
         output = completion.choices[0].text
         print(output)
-
-        buffer += input_prompt + "\n" + output + "\n"
 
 
 def chat(system_prompt: Optional[str], model_name: str,
