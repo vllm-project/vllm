@@ -168,19 +168,34 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # Decoding run.
             assert kv_cache is not None
 
+            pages_per_compute_block = 16  # TODO(woosuk): Tune this value.
             if self.megacore_mode == "batch" and batch_size % 2 != 0:
                 megacore_mode = None
             else:
                 megacore_mode = self.megacore_mode
-            output = torch.ops.xla.paged_attention(
-                query.squeeze(dim=1),
-                key_cache,
-                value_cache,
-                attn_metadata.context_lens,
-                attn_metadata.block_tables,
-                16,  # pages_per_compute_block. TODO(woosuk): Tune this value.
-                megacore_mode=megacore_mode,
-            )
+
+            # NOTE(woosuk): A temporary workaround to avoid the error:
+            # "xla::paged_attention() Expected a value of type 'str' for
+            # argument 'megacore_mode' but instead found type 'NoneType'."
+            if megacore_mode is not None:
+                output = torch.ops.xla.paged_attention(
+                    query.squeeze(dim=1),
+                    key_cache,
+                    value_cache,
+                    attn_metadata.context_lens,
+                    attn_metadata.block_tables,
+                    pages_per_compute_block,
+                    megacore_mode=megacore_mode,
+                )
+            else:
+                output = torch.ops.xla.paged_attention(
+                    query.squeeze(dim=1),
+                    key_cache,
+                    value_cache,
+                    attn_metadata.context_lens,
+                    attn_metadata.block_tables,
+                    pages_per_compute_block,
+                )
 
         # Reshape the output tensor.
         return output.reshape(batch_size, seq_len, hidden_size)
