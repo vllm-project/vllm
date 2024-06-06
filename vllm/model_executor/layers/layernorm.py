@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple, Type, Union
 import torch
 import torch.nn as nn
 
-from vllm import _custom_ops as ops
+from vllm.model_executor.custom_op import CustomOp
 
 
 def _cast_if_autocast_enabled(tensor: torch.Tensor) -> torch.Tensor:
@@ -54,7 +54,7 @@ class LPLayerNorm(torch.nn.LayerNorm):
             )
 
 
-class RMSNorm(nn.Module):
+class RMSNorm(CustomOp):
     """Root mean square normalization.
 
     Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
@@ -70,7 +70,7 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
-    def _forward(
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
@@ -90,11 +90,13 @@ class RMSNorm(nn.Module):
         else:
             return x, residual
 
-    def forward(
+    def forward_cuda(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from vllm import _custom_ops as ops
+
         if residual is not None:
             ops.fused_add_rms_norm(
                 x,
@@ -111,6 +113,11 @@ class RMSNorm(nn.Module):
             self.variance_epsilon,
         )
         return out
+
+    def extra_repr(self) -> str:
+        s = f"hidden_size={self.weight.data.size(0)}"
+        s += f", eps={self.variance_epsilon}"
+        return s
 
 
 class LPRMSNorm(nn.Module):

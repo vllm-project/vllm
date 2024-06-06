@@ -1,11 +1,11 @@
 import importlib
 import os
 from abc import ABC, abstractmethod
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 
@@ -48,10 +48,9 @@ class WorkerBase(ABC):
 
     @abstractmethod
     def execute_model(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            blocks_to_swap_in: Dict[int, int], blocks_to_swap_out: Dict[int,
-                                                                        int],
-            blocks_to_copy: Dict[int, List[int]]) -> List[SamplerOutput]:
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         raise NotImplementedError
@@ -122,11 +121,13 @@ class WorkerWrapperBase:
 
     def init_worker(self, *args, **kwargs):
         """
-        Actual initialization of the worker class, and set up
-       function tracing if required.
+        Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
         enable_trace_function_call_for_thread()
+
+        # see https://github.com/NVIDIA/nccl/issues/1234
+        os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)

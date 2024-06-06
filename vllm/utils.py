@@ -2,25 +2,26 @@ import asyncio
 import datetime
 import enum
 import gc
-import glob
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
 import warnings
 from collections import defaultdict
-from functools import lru_cache, partial
+from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
                     Union)
 
+import numpy as np
 import psutil
 import torch
-from packaging.version import Version, parse
 
+import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
@@ -31,6 +32,8 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
     "float": torch.float,
     "fp8": torch.uint8,
+    "fp8_e4m3": torch.uint8,
+    "fp8_e5m2": torch.uint8,
 }
 
 
@@ -174,7 +177,7 @@ def get_vllm_instance_id():
     Instance id represents an instance of the VLLM. All processes in the same
     instance should have the same instance id.
     """
-    return os.environ.get("VLLM_INSTANCE_ID", f"vllm-instance-{random_uuid()}")
+    return envs.VLLM_INSTANCE_ID or f"vllm-instance-{random_uuid()}"
 
 
 @lru_cache(maxsize=None)
@@ -233,9 +236,11 @@ def merge_async_iterators(
                 yield item
         except (Exception, asyncio.CancelledError) as e:
             for task in _tasks:
-                # NOTE: Pass the error msg in cancel()
-                # when only Python 3.9+ is supported.
-                task.cancel()
+                if sys.version_info >= (3, 9):
+                    # msg parameter only supported in Python 3.9+
+                    task.cancel(e)
+                else:
+                    task.cancel()
             raise e
         await asyncio.gather(*_tasks)
 
@@ -243,7 +248,7 @@ def merge_async_iterators(
 
 
 def get_ip() -> str:
-    host_ip = os.environ.get("HOST_IP")
+    host_ip = envs.VLLM_HOST_IP
     if host_ip:
         return host_ip
 
@@ -269,7 +274,8 @@ def get_ip() -> str:
 
     warnings.warn(
         "Failed to get the IP address, using 0.0.0.0 by default."
-        "The value can be set by the environment variable HOST_IP.",
+        "The value can be set by the environment variable"
+        " VLLM_HOST_IP or HOST_IP.",
         stacklevel=2)
     return "0.0.0.0"
 
@@ -281,6 +287,9 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 
 
 def get_open_port() -> int:
+    port = envs.VLLM_PORT
+    if port is not None:
+        return port
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -312,27 +321,6 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
-@lru_cache(maxsize=None)
-def get_nvcc_cuda_version() -> Optional[Version]:
-    cuda_home = os.environ.get('CUDA_HOME')
-    if not cuda_home:
-        cuda_home = '/usr/local/cuda'
-        if os.path.isfile(cuda_home + '/bin/nvcc'):
-            logger.info(
-                'CUDA_HOME is not found in the environment. '
-                'Using %s as CUDA_HOME.', cuda_home)
-        else:
-            logger.warning('Not found nvcc in %s. Skip cuda version check!',
-                           cuda_home)
-            return None
-    nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
-                                          universal_newlines=True)
-    output = nvcc_output.split()
-    release_idx = output.index("release") + 1
-    nvcc_cuda_version = parse(output[release_idx].split(",")[0])
-    return nvcc_cuda_version
-
-
 def _generate_random_fp8(
     tensor: torch.tensor,
     low: float,
@@ -349,25 +337,13 @@ def _generate_random_fp8(
     from vllm import _custom_ops as ops
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    ops.convert_fp8(tensor_tmp, tensor)
+    ops.convert_fp8(tensor, tensor_tmp)
     del tensor_tmp
 
 
-def create_kv_caches_with_random(
-    num_blocks: int,
-    block_size: int,
-    num_layers: int,
-    num_heads: int,
-    head_size: int,
-    cache_dtype: Optional[Union[str, torch.dtype]],
-    model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
-    device: Optional[str] = "cuda",
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-
+def get_kv_cache_torch_dtype(
+        cache_dtype: Optional[Union[str, torch.dtype]],
+        model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
             if isinstance(model_dtype, str):
@@ -386,6 +362,55 @@ def create_kv_caches_with_random(
         torch_dtype = cache_dtype
     else:
         raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
+    return torch_dtype
+
+
+def create_kv_caches_with_random_flash(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    seed: int = 0,
+    device: Optional[str] = "cuda",
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    assert cache_dtype != "fp8"
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    scale = head_size**-0.5
+    key_caches, value_caches = [], []
+    for _ in range(num_layers):
+        key_value_cache = torch.empty(size=key_value_cache_shape,
+                                      dtype=torch_dtype,
+                                      device=device)
+        key_value_cache.uniform_(-scale, scale)
+        key_caches.append(key_value_cache[:, 0])
+        value_caches.append(key_value_cache[:, 1])
+    return key_caches, value_caches
+
+
+def create_kv_caches_with_random(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    seed: int = 0,
+    device: Optional[str] = "cuda",
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
@@ -477,11 +502,6 @@ def str_to_int_tuple(s: str) -> Tuple[int, ...]:
             f"(e.g., 1, 2, 3). Given input: {s}") from e
 
 
-def pad_to_max_length(x: List[int], max_len: int, pad: int) -> List[int]:
-    assert len(x) <= max_len
-    return x + [pad] * (max_len - len(x))
-
-
 def make_tensor_with_pad(
     x: List[List[int]],
     max_len: int,
@@ -494,7 +514,10 @@ def make_tensor_with_pad(
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
     """
-    padded_x = [pad_to_max_length(x_i, max_len, pad) for x_i in x]
+    padded_x = np.zeros([len(x), max_len], dtype=np.int32) + pad
+    for ind, blocktb in enumerate(x):
+        assert len(blocktb) <= max_len
+        padded_x[ind, :len(blocktb)] = blocktb
     return torch.tensor(padded_x, dtype=dtype, device=device)
 
 
@@ -521,7 +544,7 @@ def maybe_expand_dim(tensor: torch.Tensor,
 def merge_dicts(dict1: Dict[Any, List[Any]],
                 dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Merge 2 dicts that have key -> List of items.
-    
+
     When a key conflicts, the values in dict1 is prioritized.
     """
     merged_dict = defaultdict(list)
@@ -543,28 +566,6 @@ def init_cached_hf_modules():
     init_hf_modules()
 
 
-def nccl_integrity_check(filepath):
-    """
-    when the library is corrupted, we cannot catch
-    the exception in python. it will crash the process.
-    instead, we use the exit code of `ldd` to check
-    if the library is corrupted. if not, we will return
-    the version of the library.
-    """
-    exit_code = os.system(f"ldd {filepath} 2>&1 > /dev/null")
-    if exit_code != 0:
-        raise RuntimeError(f"Failed to load NCCL library from {filepath} .")
-    import ctypes
-
-    nccl = ctypes.CDLL(filepath)
-    version = ctypes.c_int()
-    nccl.ncclGetVersion.restype = ctypes.c_int
-    nccl.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
-    result = nccl.ncclGetVersion(ctypes.byref(version))
-    assert result == 0
-    return version.value
-
-
 @lru_cache(maxsize=None)
 def find_library(lib_name: str) -> str:
     """
@@ -581,7 +582,7 @@ def find_library(lib_name: str) -> str:
     # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
     locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
     # `LD_LIBRARY_PATH` searches the library in the user-defined paths
-    env_ld_library_path = os.getenv("LD_LIBRARY_PATH")
+    env_ld_library_path = envs.LD_LIBRARY_PATH
     if not locs and env_ld_library_path:
         locs = [
             os.path.join(dir, lib_name)
@@ -594,16 +595,13 @@ def find_library(lib_name: str) -> str:
 
 
 def find_nccl_library():
-    so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
-
-    # check if we have vllm-managed nccl
-    vllm_nccl_path = None
-    if torch.version.cuda is not None:
-        cuda_major = torch.version.cuda.split(".")[0]
-        path = os.path.expanduser(
-            f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
-        files = glob.glob(path)
-        vllm_nccl_path = files[0] if files else None
+    """
+    We either use the library file specified by the `VLLM_NCCL_SO_PATH`
+    environment variable, or we find the library file brought by PyTorch.
+    After importing `torch`, `libnccl.so.2` or `librccl.so.1` can be
+    found by `ctypes` automatically.
+    """
+    so_file = envs.VLLM_NCCL_SO_PATH
 
     # manually load the nccl library
     if so_file:
@@ -612,9 +610,9 @@ def find_nccl_library():
             so_file)
     else:
         if torch.version.cuda is not None:
-            so_file = vllm_nccl_path or find_library("libnccl.so.2")
+            so_file = "libnccl.so.2"
         elif torch.version.hip is not None:
-            so_file = find_library("librccl.so.1")
+            so_file = "librccl.so.1"
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info("Found nccl from library %s", so_file)
@@ -626,7 +624,7 @@ def enable_trace_function_call_for_thread() -> None:
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
 
-    if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
+    if envs.VLLM_TRACE_FUNCTION:
         tmp_dir = tempfile.gettempdir()
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
                     f"_thread_{threading.get_ident()}_"
@@ -635,3 +633,44 @@ def enable_trace_function_call_for_thread() -> None:
                                 filename)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         enable_trace_function_call(log_path)
+
+
+def identity(value: T) -> T:
+    return value
+
+
+F = TypeVar('F', bound=Callable[..., Any])
+
+
+def deprecate_kwargs(
+        *kws: str,
+        is_deprecated: Union[bool, Callable[[], bool]] = True,
+        additional_message: Optional[str] = None) -> Callable[[F], F]:
+    deprecated_kws = set(kws)
+
+    if not callable(is_deprecated):
+        is_deprecated = partial(identity, is_deprecated)
+
+    def wrapper(fn: F) -> F:
+
+        @wraps(fn)
+        def inner(*args, **kwargs):
+            if is_deprecated():
+                deprecated_kwargs = kwargs.keys() & deprecated_kws
+                if deprecated_kwargs:
+                    msg = (
+                        f"The keyword arguments {deprecated_kwargs} are "
+                        "deprecated and will be removed in a future update.")
+                    if additional_message is not None:
+                        msg += f" {additional_message}"
+
+                    warnings.warn(
+                        DeprecationWarning(msg),
+                        stacklevel=3,  # The inner function takes up one level
+                    )
+
+            return fn(*args, **kwargs)
+
+        return inner  # type: ignore
+
+    return wrapper

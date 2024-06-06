@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
@@ -56,6 +57,7 @@ class MPTAttention(nn.Module):
     def __init__(
         self,
         config: MPTConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -131,7 +133,9 @@ class MPTAttention(nn.Module):
                               self.head_dim,
                               scaling,
                               alibi_slopes=alibi_slopes,
-                              num_kv_heads=self.num_kv_heads)
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -224,13 +228,14 @@ class MPTBlock(nn.Module):
     def __init__(
         self,
         config: MPTConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         hidden_size = config.d_model
         norm_class = _get_norm_class(config)
         self.norm_1 = norm_class(hidden_size)
-        self.attn = MPTAttention(config, quant_config)
+        self.attn = MPTAttention(config, cache_config, quant_config)
         self.norm_2 = nn.LayerNorm(hidden_size)
         self.ffn = FFN_CLASS_REGISTRY[config.ffn_config["ffn_type"]](
             config, quant_config)
@@ -261,6 +266,7 @@ class MPTModel(nn.Module):
     def __init__(
         self,
         config: MPTConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -270,8 +276,10 @@ class MPTModel(nn.Module):
             config.vocab_size,
             config.d_model,
         )
-        self.blocks = nn.ModuleList(
-            [MPTBlock(config, quant_config) for _ in range(config.n_layers)])
+        self.blocks = nn.ModuleList([
+            MPTBlock(config, cache_config, quant_config)
+            for _ in range(config.n_layers)
+        ])
         norm_class = _get_norm_class(config)
         self.norm_f = norm_class(config.d_model)
         if config.no_bias:
@@ -306,6 +314,7 @@ class MPTForCausalLM(nn.Module):
     def __init__(
         self,
         config: MPTConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -313,7 +322,7 @@ class MPTForCausalLM(nn.Module):
         assert config.tie_word_embeddings
         self.quant_config = quant_config
 
-        self.transformer = MPTModel(config, quant_config)
+        self.transformer = MPTModel(config, cache_config, quant_config)
         self.lm_head_weight = self.transformer.wte.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
