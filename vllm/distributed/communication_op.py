@@ -23,8 +23,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     return get_tp().gather(input_, dst, dim)
 
 
-def broadcast_tensor_dict(self,
-                          tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
+def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
                                                                 Any]]] = None,
                           src: int = 0):
     return get_tp().broadcast_tensor_dict(tensor_dict, src)
