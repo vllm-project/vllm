@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import FrozenSet, List, Optional, Protocol, Tuple
+from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
 
 from vllm.utils import Device
 
@@ -116,6 +116,18 @@ class BlockAllocator(ABC):
     def get_num_free_blocks(self) -> int:
         pass
 
+    @abstractmethod
+    def get_physical_block_id(self, absolute_id: int) -> int:
+        pass
+
+    @abstractmethod
+    def swap_out(self, blocks: List[Block]) -> None:
+        pass
+
+    @abstractmethod
+    def swap_in(self, blocks: List[Block]) -> None:
+        pass
+
     @property
     @abstractmethod
     def all_block_ids(self) -> FrozenSet[int]:
@@ -147,6 +159,12 @@ class BlockAllocator(ABC):
     @abstractmethod
     def promote_to_immutable_block(self, block: Block) -> BlockId:
         """NOTE: This should not be used besides Block"""
+        pass
+
+    @abstractmethod
+    def get_num_blocks_touched(self,
+                               blocks: List[Block],
+                               num_lookahead_slots: int = 0) -> int:
         pass
 
     class NoFreeBlocksError(ValueError):
@@ -202,6 +220,22 @@ class DeviceAwareBlockAllocator(ABC):
     @abstractmethod
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
+        pass
+
+    @abstractmethod
+    def get_num_blocks_touched(self,
+                               blocks: List[Block],
+                               device: Device,
+                               num_lookahead_slots: int = 0) -> int:
+        pass
+
+    @abstractmethod
+    def swap(self, blocks: List[Block], source_device: Device,
+             dest_device: Device) -> Dict[int, int]:
+        pass
+
+    @abstractmethod
+    def get_physical_block_id(self, device: Device, absolute_id: int) -> int:
         pass
 
     @abstractmethod
