@@ -117,7 +117,7 @@ async def test_single_chat_session_image(server, client: openai.AsyncOpenAI,
 async def test_single_chat_session_image_base64encoded(
         server, client: openai.AsyncOpenAI, model_name: str, image_url: str):
 
-    image_encoded = encode_image_base64(
+    image_encoded = await encode_image_base64(
         ImageFetchAiohttp.fetch_image(image_url=image_url))
     messages = [{
         "role":
