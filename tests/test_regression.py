@@ -52,6 +52,7 @@ def test_gc():
     allocated = torch.cuda.memory_allocated()
     assert allocated < 50 * 1024 * 1024
 
+
 def test_model_from_modelscope(monkeypatch):
     # model: https://modelscope.cn/models/qwen/Qwen1.5-0.5B-Chat/summary
     MODELSCOPE_MODEL_NAME = "qwen/Qwen1.5-0.5B-Chat"
@@ -71,6 +72,7 @@ def test_model_from_modelscope(monkeypatch):
         assert len(outputs) == 4
     finally:
         monkeypatch.delenv("VLLM_USE_MODELSCOPE", raising=False)
+
 
 if __name__ == "__main__":
     import pytest
