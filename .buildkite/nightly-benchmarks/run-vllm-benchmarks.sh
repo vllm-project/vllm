@@ -66,14 +66,15 @@ check_hf_token
 # download ShareGPT dataset
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 
+# get the current IP address, required by benchmark_serving.py
+export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
 # prepare for benchmarking
-export VLLM_HOST_IP=$(hostname -I | awk '{print $1}') # used by benchmark_serving.py
+pushd benchmarks
 RESULTS_FOLDER=results/
 SERVING_TESTS=../.buildkite/nightly-benchmarks/serving-tests.json
 POSTPROCESS_SCRIPT=../.buildkite/nightly-benchmarks/results2md.py
 mkdir -p $RESULTS_FOLDER
-
 
 # Iterate over serving tests
 jq -c '.[]' $SERVING_TESTS | while read -r params; do
@@ -139,14 +140,14 @@ jq -c '.[]' $SERVING_TESTS | while read -r params; do
 
 done
 
+# postprocess benchmarking results
+pip install tabulate
+python3 ../.buildkite/nightly-benchmarks/results2md.py
+
 # if the agent binary is not found, skip uploading the results, exit 0
 if [ ! -f /workspace/buildkite-agent ]; then
     exit 0
 fi
-
-# postprocess benchmarking results
-pip install tabulate
-python3 ../.buildkite/nightly-benchmarks/results2md.py
 
 # upload the results to buildkite
 /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
