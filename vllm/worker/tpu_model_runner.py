@@ -189,10 +189,7 @@ class TPUModelRunner:
 
             if batch_size >= self.scheduler_config.max_num_seqs:
                 break
-            if batch_size <= 16:
-                batch_size = batch_size * 2
-            else:
-                batch_size = batch_size + 16
+            batch_size = batch_size + 16 if batch_size >= 16 else batch_size * 2
 
         end = time.time()
         logger.info("Compilation for decode done in %.2f s.", end - start)
