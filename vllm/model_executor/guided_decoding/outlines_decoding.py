@@ -3,7 +3,7 @@ import concurrent.futures
 from enum import Enum
 from json import dumps as json_dumps
 from re import escape as regex_escape
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
@@ -12,6 +12,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
+from vllm.sampling_params import LogitsProcessor, LogitsProcessorFactory
 
 
 class GuidedDecodingMode(Enum):
@@ -50,12 +51,37 @@ pair   : UNESCAPED_STRING ":" value
 
 global_thread_pool = None  # used for generating logits processor fsm
 
+class OutlinesDecodingLogitsProcessorFactory(LogitsProcessorFactory):
+
+    def __init__(self, guide: str, tokenizer: PreTrainedTokenizerBase,
+                 mode: GuidedDecodingMode, whitespace_pattern: Union[str,
+                                                                     None]):
+        self.guide = guide
+        self.tokenizer = tokenizer
+        self.mode = mode
+        self.whitespace_pattern = whitespace_pattern
+
+    def get_processor(self) -> LogitsProcessor:
+        return _get_logits_processor(self.guide, self.tokenizer, self.mode,
+                                         self.whitespace_pattern)
+
+    async def get_processor_async(self) -> LogitsProcessor:
+        global global_thread_pool
+        if global_thread_pool is None:
+            global_thread_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=2)
+        loop = asyncio.get_running_loop()
+
+        return await loop.run_in_executor(global_thread_pool,
+                                            _get_logits_processor,
+                                            self.guide, self.tokenizer,
+                                            self.mode, self.whitespace_pattern)
+
 
 async def get_outlines_guided_decoding_logits_processor(
     request: Union[CompletionRequest,
                    ChatCompletionRequest], tokenizer: PreTrainedTokenizerBase
-) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
-           None]:
+) -> Optional[OutlinesDecodingLogitsProcessorFactory]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
@@ -66,15 +92,9 @@ async def get_outlines_guided_decoding_logits_processor(
     guide, mode = _get_guide_and_mode(request)
     if not guide or not mode:
         return None
-
-    if global_thread_pool is None:
-        global_thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2)
-    loop = asyncio.get_running_loop()
-
-    return await loop.run_in_executor(global_thread_pool,
-                                      _get_logits_processor, guide, tokenizer,
-                                      mode, request.guided_whitespace_pattern)
+    
+    return OutlinesDecodingLogitsProcessorFactory(
+        guide, tokenizer, mode, request.guided_whitespace_pattern)
 
 
 def _get_guide_and_mode(

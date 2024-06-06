@@ -1,5 +1,6 @@
 """Sampling parameters for text generation."""
 import copy
+from abc import ABC, abstractmethod
 from enum import IntEnum
 from functools import cached_property
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -26,6 +27,29 @@ of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
 first argument, and returns a modified tensor of logits
 to sample from."""
+
+
+class LogitsProcessorFactory(ABC):
+    """Factory for logits processors
+
+    A factory allows the implementation of stateful logits processors by
+    making sure that each sequence gets it's own instance.
+    While a stateless LogitsProcessor callable can be shared between multiple
+    sequences, processors that have internal state that depends on the sequence
+    seen so far inherently can't be shared.
+
+    For logits processors that have expensive initializations, it is
+    recommended to override the get_processor_async method to build the
+    object asynchronously, for example using a thread pool, to prevent the
+    evento pool from being blocked.
+    """
+
+    @abstractmethod
+    def get_processor(self) -> LogitsProcessor:
+        ...
+
+    async def get_processor_async(self) -> LogitsProcessor:
+        return self.get_processor()
 
 
 class SamplingParams:
@@ -132,7 +156,8 @@ class SamplingParams:
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
-        logits_processors: Optional[List[LogitsProcessor]] = None,
+        logits_processors: Optional[List[Union[
+            LogitsProcessor, LogitsProcessorFactory]]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> None:
         self.n = n
@@ -315,6 +340,20 @@ class SamplingParams:
             for lp in self.logits_processors
         }
         return copy.deepcopy(self, memo=logit_processor_refs)
+
+    def get_logits_processors(self):
+        return [] if not self.logits_processors else [
+            lp.get_processor()
+            if isinstance(lp, LogitsProcessorFactory) else lp
+            for lp in self.logits_processors
+        ]
+
+    async def get_logits_processors_async(self):
+        return [] if not self.logits_processors else [
+            await lp.get_processor_async() if isinstance(
+                lp, LogitsProcessorFactory) else lp
+            for lp in self.logits_processors
+        ]
 
     def __repr__(self) -> str:
         return (

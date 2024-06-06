@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.protocol import CompletionRequest
 from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
+    get_guided_decoding_logits_processor_factory)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
 
@@ -89,7 +89,7 @@ async def test_guided_logits_processor_black_box(backend: str):
     regex_request = CompletionRequest(model='test',
                                       prompt=token_ids,
                                       guided_regex=TEST_REGEX)
-    regex_lp = await get_guided_decoding_logits_processor(
+    regex_lp = await get_guided_decoding_logits_processor_factory(
         backend, regex_request, tokenizer)
     assert regex_lp is not None
     tensor = torch.rand(32000)
@@ -103,7 +103,7 @@ async def test_guided_logits_processor_black_box(backend: str):
     json_request = CompletionRequest(model='test',
                                      prompt=token_ids,
                                      guided_json=TEST_SCHEMA)
-    json_lp = await get_guided_decoding_logits_processor(
+    json_lp = await get_guided_decoding_logits_processor_factory(
         backend, json_request, tokenizer)
     assert json_lp is not None
     tensor = torch.rand(32000)

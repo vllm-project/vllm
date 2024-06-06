@@ -425,14 +425,14 @@ class LLMEngine:
 
         return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
 
-    def _add_processed_request(
+    def _create_sequence_group(
         self,
         request_id: str,
         processed_inputs: LLMInputs,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
-    ) -> None:
+    ) -> SequenceGroup:
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
@@ -462,8 +462,7 @@ class LLMEngine:
             raise ValueError(
                 "Either SamplingParams or PoolingParams must be provided.")
 
-        # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+        return seq_group
 
     def process_model_inputs(
         self,
@@ -547,13 +546,20 @@ class LLMEngine:
                                                      inputs=inputs,
                                                      lora_request=lora_request)
 
-        self._add_processed_request(
+        seq_group = self._create_sequence_group(
             request_id=request_id,
             processed_inputs=processed_inputs,
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
         )
+
+        if isinstance(params, SamplingParams):
+            for seq in seq_group.get_seqs():
+                seq.data.logits_processors = params.get_logits_processors()
+
+        # Add the sequence group to the scheduler.
+        self.scheduler.add_seq_group(seq_group)
 
     def _create_sequence_group_with_sampling(
         self,
