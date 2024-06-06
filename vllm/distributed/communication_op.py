@@ -267,7 +267,7 @@ def broadcast_tensor_dict(
                 # use metadata_group for CPU tensors
                 handle = torch.distributed.broadcast(tensor,
                                                      src=src,
-                                                     group=group,
+                                                     group=metadata_group,
                                                      async_op=True)
             else:
                 # use group for GPU tensors
@@ -300,7 +300,7 @@ def broadcast_tensor_dict(
                     # use metadata_group for CPU tensors
                     handle = torch.distributed.broadcast(tensor,
                                                          src=src,
-                                                         group=group,
+                                                         group=metadata_group,
                                                          async_op=True)
                 else:
                     # use group for GPU tensors
