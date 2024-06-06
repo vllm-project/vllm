@@ -48,8 +48,7 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         weight_scale_dim = sum(
             output_partition_sizes) if is_tensor_partitioned else 1
 
-        weight_zero_point = Parameter(torch.empty(1,
-                                                  dtype=torch.int8),
+        weight_zero_point = Parameter(torch.empty(1, dtype=torch.int8),
                                       requires_grad=False)
 
         weight_scale = Parameter(torch.empty(weight_scale_dim,

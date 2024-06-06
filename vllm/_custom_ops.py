@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Type, Union
+from typing import Optional, Tuple, Type
 
 import torch
 
@@ -264,8 +264,10 @@ def scaled_fp8_quant(
 
 
 # int8
-def scaled_int8_quant(input: torch.Tensor,
-                      scale: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+def scaled_int8_quant(
+        input: torch.Tensor,
+        scale: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize the input tensor to int8 and return the quantized tensor and scale.
 

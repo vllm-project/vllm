@@ -54,9 +54,8 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") * 1000
 
-    out1 = (x / scale).round().clamp(
-        torch.iinfo(torch.int8).min,
-        torch.iinfo(torch.int8).max).to(torch.int8)
+    out1 = (x / scale).round().clamp(int8_traits.min,
+                                     int8_traits.max).to(torch.int8)
     out2 = torch.empty_like(x, dtype=torch.int8)
     scale_argument = torch.tensor([scale], dtype=torch.float32, device="cuda")
 
