@@ -151,10 +151,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
             # Handle GQA/MQA.
             if self.num_kv_heads != self.num_heads:
-                key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
+                key = key.repeat_interleave(self.num_queries_per_kv, dim=-2)
                 key = key.view(batch_size, seq_len, self.num_heads,
                                self.head_size)
-                value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
+                value = value.repeat_interleave(self.num_queries_per_kv, dim=-2)
                 value = value.view(batch_size, seq_len, self.num_heads,
                                    self.head_size)
             output = torch.ops.xla.flash_attention(
