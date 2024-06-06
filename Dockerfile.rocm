@@ -1,15 +1,15 @@
 # default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1_ubuntu22.04_py3.10_pytorch_2.1.2"
 
 FROM $BASE_IMAGE
 
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1_ubuntu22.04_py3.10_pytorch_2.1.2"
 
 RUN echo "Base image is $BASE_IMAGE"
 
 # BASE_IMAGE for ROCm_5.7: "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
 # BASE_IMAGE for ROCm_6.0: "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
-
+# BASE_IMAGE for ROCM_6.1: "rocm/pytorch:rocm6.1_ubuntu22.04_py3.10_pytorch_2.1.2"
 
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
 RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
@@ -107,11 +107,13 @@ ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     pip install -U -r requirements-rocm.txt \
-    && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch \
+    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
+       patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch; fi \
     && python3 setup.py install \
-    && cp build/lib.linux-x86_64-cpython-39/vllm/_C.abi3.so vllm/ \
-    && cp build/lib.linux-x86_64-cpython-39/vllm/_punica_C.abi3.so vllm/ \
-    && cp build/lib.linux-x86_64-cpython-39/vllm/_moe_C.abi3.so vllm/ \
+    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
+       cp build/lib.linux-x86_64-cpython-39/vllm/_C.cpython-39-x86_64-linux-gnu.so vllm/ \
+       && cp build/lib.linux-x86_64-cpython-39/vllm/_moe_C.cpython-39-x86_64-linux-gnu.so vllm/ \
+       && cp build/lib.linux-x86_64-cpython-39/vllm/_punica_C.cpython-39-x86_64-linux-gnu.so vllm/; fi \
     && cd ..
 
 
