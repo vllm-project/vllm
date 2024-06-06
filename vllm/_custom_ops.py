@@ -279,18 +279,18 @@ def scaled_int8_quant(
     Returns:
       Tuple[Torch.Tensor, Torch.Tensor] : Output int8 tensor and scales.
     """
-    q = torch.empty_like(input, dtype=torch.int8)
+    output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
-        # Static-per-tensor quantization.
-        vllm_ops.static_scaled_int8_quant(q, input, scale)
-        return q, scale
+        # static-per-tensor quantization.
+        vllm_ops.static_scaled_int8_quant(output, input, scale)
+        return output, scale
 
-    # Dynamic-per-token quantization.
+    # dynamic-per-token quantization.
     input_scales = torch.empty((input.numel() // input.shape[-1], 1),
-                               dtype=torch.float32,
-                               device="cuda")
-    vllm_ops.dynamic_scaled_int8_quant(q, input, input_scales)
-    return q, input_scales
+                               device=input.device,
+                               dtype=torch.float32)
+    vllm_ops.dynamic_scaled_int8_quant(output, input, input_scales)
+    return output, input_scales
 
 
 # moe
