@@ -246,7 +246,6 @@ class Fp8LinearMethod(LinearMethodBase):
 
         return gpu_is_supported
 
-
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
@@ -255,7 +254,6 @@ class Fp8LinearMethod(LinearMethodBase):
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.act_scale is None and x_scale computed from x.
         #   If static,  layer.act_scale is scalar and x_scale set to act_scale.
-
 
         if bias is None and self.cutlass_fp8_supported():
             qinput, x_scale = ops.scaled_fp8_quant(x, layer.act_scale)
