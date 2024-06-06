@@ -6,7 +6,6 @@ Test
 * Encoder/decoder cross-attention
 """
 
-import copy
 from typing import Optional
 
 import pytest
@@ -147,16 +146,15 @@ def _encoder_attn_setup(batch_size: int, num_heads: int, head_size: int,
            )
 
 
-def _decoder_attn_setup(batch_size: int,
-                        num_heads: int,
-                        head_size: int,
-                        block_size: int,
-                        scale: float,
-                        max_q_seq_len: int,
-                        block_base_addr: int = 0) -> tuple[QKVInputs,
-                                                           PhaseTestParameters,
-                                                           PhaseTestParameters,
-                                                           int]:
+def _decoder_attn_setup(
+    batch_size: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    scale: float,
+    max_q_seq_len: int,
+    block_base_addr: int = 0
+) -> tuple[QKVInputs, PhaseTestParameters, PhaseTestParameters, int]:
     '''
     Set up test vectors & data structures for self-attention test.
 
@@ -402,7 +400,8 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
     decoder_query = decoder_qkv.query
     decoder_seq_lens = decoder_qkv.q_seq_lens
     encoder_seq_lens = encoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
-    prefill_q_seq_lens = prefill_phase_test_params.packed_qkvo.packed_qkv.q_seq_lens
+    prefill_q_seq_lens = \
+      prefill_phase_test_params.packed_qkvo.packed_qkv.q_seq_lens
 
 
     cross_kv, \
@@ -495,7 +494,9 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
               decode_block_tables, \
               decode_slot_mapping))
 
-def _run_encoder_attention_test(attn: Attention, encoder_test_params: PhaseTestParameters,
+
+def _run_encoder_attention_test(attn: Attention,
+                                encoder_test_params: PhaseTestParameters,
                                 attn_metadata: AttentionMetadata,
                                 attn_type: AttentionType) -> torch.Tensor:
     '''
@@ -521,8 +522,8 @@ def _run_encoder_attention_test(attn: Attention, encoder_test_params: PhaseTestP
     assert attn_metadata.num_decode_tokens == 0
     attn_metadata.attention_type = attn_type
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
-    return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value, None,
-                        attn_metadata)
+    return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value,
+                        None, attn_metadata)
 
 
 def _run_decoder_self_attention_test(attn: Attention,
@@ -553,8 +554,8 @@ def _run_decoder_self_attention_test(attn: Attention,
     assert attn_type == AttentionType.DECODER
     attn_metadata.attention_type = attn_type
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
-    return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value, kv_cache,
-                        attn_metadata)
+    return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value,
+                        kv_cache, attn_metadata)
 
 
 def _run_encoder_decoder_cross_attention_test(
@@ -589,8 +590,9 @@ def _run_encoder_decoder_cross_attention_test(
                 cross_pckd_qkv.key
         value = None if cross_pckd_qkv is None else \
                 cross_pckd_qkv.value
-    return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query, key, value, kv_cache,
-                        attn_metadata)
+    return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query, key,
+                        value, kv_cache, attn_metadata)
+
 
 def _assert_actual_match_ideal(test_params: PhaseTestParameters,
                                output_under_test: torch.Tensor) -> None:
@@ -605,8 +607,8 @@ def _assert_actual_match_ideal(test_params: PhaseTestParameters,
     '''
     ideal_output = test_params.packed_qkvo.ideal_output
     assert torch.allclose(ideal_output,
-                          output_under_test
-                            .view_as(ideal_output))
+                          output_under_test.view_as(ideal_output))
+
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -671,11 +673,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     # anyway but are required to be present & valid by the
     # backend.
 
-    enc_test_params = _encoder_attn_setup(batch_size,
-                                          num_heads,
-                                          head_size,
-                                          scale,
-                                          max_enc_seq_len)
+    enc_test_params = _encoder_attn_setup(batch_size, num_heads, head_size,
+                                          scale, max_enc_seq_len)
 
     # Decoder self-attention setup
 
@@ -729,8 +728,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         attn_type=AttentionType.ENCODER)
 
     # - Is encoder attention result correct?
-    _assert_actual_match_ideal(enc_test_params,
-                               enc_packed_actual_output)
+    _assert_actual_match_ideal(enc_test_params, enc_packed_actual_output)
 
     # PREFILL: self-attention test
 
@@ -821,7 +819,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     # of prefill and decode tokens.
     decphase_attn_metadata.num_prefill_tokens = 1
     with pytest.raises(NotImplementedError) as exc_info:
-        _run_encoder_decoder_cross_attention_test(attn, decphase_dec_test_params,
+        _run_encoder_decoder_cross_attention_test(attn,
+                                                  decphase_dec_test_params,
                                                   None, kv_cache,
                                                   decphase_attn_metadata)
 

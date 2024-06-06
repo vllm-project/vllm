@@ -96,11 +96,7 @@ def ref_masked_attention(query: torch.Tensor,
 QKVInputs = namedtuple("QKVInputs",
                        ["query", "key", "value", "q_seq_lens", "kv_seq_lens"])
 
-QKVO = namedtuple("QKVO",
-                  [
-                      "qkv",
-                      "ideal_output"
-                  ])
+QKVO = namedtuple("QKVO", ["qkv", "ideal_output"])
 
 # total_num_tokens x (num_heads*head_size)
 PackedQKVInputs = namedtuple("PackedQKVInputs", [
@@ -108,20 +104,13 @@ PackedQKVInputs = namedtuple("PackedQKVInputs", [
     "q_seq_lens", "kv_seq_lens"
 ])
 
-PackedQKVO = namedtuple("PackedQKVO",
-                  [
-                      "packed_qkv",
-                      "ideal_output"
-                  ])
+PackedQKVO = namedtuple("PackedQKVO", ["packed_qkv", "ideal_output"])
 
-KVMemoryMap = namedtuple("KVMemoryMap", [
-    "block_tables", "slot_mapping"
-])
+KVMemoryMap = namedtuple("KVMemoryMap", ["block_tables", "slot_mapping"])
 
-PhaseTestParameters = namedtuple("PhaseTestParameters", [
-    "packed_qkvo",
-    "kv_mmap"
-])
+PhaseTestParameters = namedtuple("PhaseTestParameters",
+                                 ["packed_qkvo", "kv_mmap"])
+
 
 def make_qkv(
     batch_size: int,
@@ -600,8 +589,8 @@ def make_test_metadata(
     decoder_test_params: PhaseTestParameters,
     default_attn_type: AttentionType,
     device: Union[torch.device, str],
-    encoder_test_params: Optional[PhaseTestParameters]=None,
-    cross_test_params: Optional[PhaseTestParameters]=None
+    encoder_test_params: Optional[PhaseTestParameters] = None,
+    cross_test_params: Optional[PhaseTestParameters] = None
 ) -> AttentionMetadata:
     '''
     Construct fake attention metadata for a combined self-/cross-attention
@@ -647,13 +636,12 @@ def make_test_metadata(
     # the number of {prefills, decodes} and the number of
     # {prefill, decode} tokens can be inferred from seq_lens
     num_prefills_or_decodes = len(seq_lens)
-    if is_prompt:
-        # Prefill: operate on total num. of prompt
-        # tokens
-        num_prefill_or_decode_tokens = sum(seq_lens)
-    else:
-        # Decode: operate on one token per seq
-        num_prefill_or_decode_tokens = len(seq_lens)
+
+    # Prefill: operate on total num. of prompt
+    # tokens
+    # Decode: operate on one token per seq
+    num_prefill_or_decode_tokens = \
+        sum(seq_lens) if is_prompt else len(seq_lens)
 
     # Seems for non-prefix-caching scenarios context_lens
     # is never needed
