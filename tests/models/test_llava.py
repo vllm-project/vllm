@@ -88,9 +88,6 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                                               images=vllm_images)
     del vllm_model
 
-    gc.collect()
-    torch.cuda.empty_cache()
-
     for i in range(len(hf_image_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
         vllm_output_ids, vllm_output_str = sanitize_vllm_output(
