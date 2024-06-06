@@ -1,7 +1,8 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 from transformers import PretrainedConfig
@@ -1113,6 +1114,25 @@ class VisionLanguageConfig:
             raise ValueError(f"{value} is not a valid choice. "
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
+
+    def as_cli_args_dict(self) -> Dict[str, Any]:
+        """Flatten vision language config to pure args.
+
+        Compatible with what llm entrypoint expects.
+        """
+        result: Dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, enum.Enum):
+                result[f.name] = value.name.lower()
+            elif isinstance(value, tuple):
+                result[f.name] = ",".join([str(item) for item in value])
+            else:
+                result[f.name] = value
+
+        result["disable_image_processor"] = self.image_processor is None
+
+        return result
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
