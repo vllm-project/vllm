@@ -5,15 +5,16 @@ import torch
 
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
+from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 
-class NGramWorker(LoraNotSupportedWorkerBase):
+class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
     """NGramWorker provides a light drafter without need for model.
 
     Current NGramWorker only implement prompt lookup decoding,
-    and in future we may also do RAG type drafter and other scenerios
+    and in future we may also do RAG type drafter and other scenarios
     which don't rely on LLM model to give proposals.
     """
 
@@ -38,33 +39,10 @@ class NGramWorker(LoraNotSupportedWorkerBase):
 
         # Current only support Top1Proposer
         self._proposer = Top1Proposer(
-            weakref.proxy(self),
+            weakref.proxy(self),  # type: ignore[arg-type]
             device=self.device,
             vocab_size=self.vocab_size,
         )
-
-    def set_include_gpu_probs_tensor(self):
-        # NGram don't need gpu sampler
-        pass
-
-    def execute_model(
-            self,
-            execute_model_req: Optional[ExecuteModelRequest] = None) -> None:
-        """NGram doesn't depend on model execution, just pass this function"""
-        pass
-
-    def determine_num_available_blocks(self) -> None:
-        """NGram doesn't depend on model execution, no need to check blocks"""
-        pass
-
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        """As there is no cache need to handle, just pass this function"""
-        pass
-
-    def get_cache_block_size_bytes(self):
-        """Return the size of a cache block in bytes."""
-        return 0
 
     def sampler_output(
         self,
@@ -97,7 +75,6 @@ class NGramWorker(LoraNotSupportedWorkerBase):
                     -1,
             ):
                 ngram_tensor = input_ids[-ngram_size:]
-                proposal_start_idx = None
                 if ngram_size == 1:
                     # Do not match itself and do not use unfold and all
                     matches = (input_ids[:-1] == ngram_tensor)
@@ -161,7 +138,7 @@ class NGramWorker(LoraNotSupportedWorkerBase):
         speculative tokens per sequence is determined by max_proposal_len.
         """
 
-        return self._proposer.get_proposals(execute_model_req)
+        return self._proposer.get_spec_proposals(execute_model_req)
 
     def _raise_if_unsupported(
         self,
