@@ -16,11 +16,11 @@ logger = logging.get_logger(__name__)
 
 VOCAB_FILES_NAMES = {"vocab_file": "tokenizer.model"}
 
-PRETRAINED_VOCAB_FILES_MAP = {
+PRETRAINED_VOCAB_FILES_MAP = { # type: ignore
     "vocab_file": {},
     "tokenizer_file": {},
 }
-PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {}
+PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {}  # type: ignore
 
 
 class BaichuanTokenizer(PreTrainedTokenizer):
@@ -114,9 +114,9 @@ class BaichuanTokenizer(PreTrainedTokenizer):
         token = self.sp_model.IdToPiece(index)
         return token
 
-    def convert_tokens_to_string(self, tokens):
+    def convert_tokens_to_string(self, tokens: List[str]):
         """Converts a sequence of tokens (string) in a single string."""
-        current_sub_tokens = []
+        current_sub_tokens: List[str] = []
         out_string = ""
         prev_is_special = False
         for i, token in enumerate(tokens):
@@ -148,9 +148,9 @@ class BaichuanTokenizer(PreTrainedTokenizer):
             `Tuple(str)`: Paths to the files saved.
         """
         if not os.path.isdir(save_directory):
-            logger.error(f"Vocabulary path ({save_directory}) "
-                         "should be a directory")
-            return
+            raise ValueError(f"Vocabulary path ({save_directory}) "
+                             "should be a directory")
+
         out_vocab_file = os.path.join(
             save_directory,
             (filename_prefix + "-" if filename_prefix else "") +

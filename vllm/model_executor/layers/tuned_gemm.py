@@ -34,7 +34,7 @@ class TunedGemm:
             self.bestsols = pd.read_csv(self.tune_path)
 
     def create_ds(self):
-        df = self.bestsols
+        df: pd.DataFrame = self.bestsols
         solds = {}
         for i in range(len(df)):
             ds = df.iloc[i]
@@ -75,6 +75,7 @@ class TunedGemm:
             #print(">>> found rocblas")
             out = rocb_mm(inp_view, weights.t(), solidx)
         else:
+
             if (self.save_gemm == 1):
                 #print('>>>Tgemm Default',inp_view.shape,
                 #      inp.shape,weights.shape,soltype,solidx)

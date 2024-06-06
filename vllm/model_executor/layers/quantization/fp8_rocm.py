@@ -1,30 +1,42 @@
-from typing import Any, Dict, Iterator, List, Optional, Tuple
-from safetensors import safe_open
+from typing import Any, Dict, List, Optional, Tuple, Union, Iterator
+
 import torch
+from torch.nn import Module
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
-from vllm.model_executor.layers.linear import LinearMethodBase
+from safetensors import safe_open
+
+from vllm import _custom_ops as ops
+from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
-from vllm._C import ops
+    QuantizationConfig)
+from vllm.model_executor.utils import set_weight_attrs
+
 import pandas as pd
 import os
 
+try:
+    from vllm._C import ops as vllm_ops
+except ImportError:
+    pass
+
+logger = init_logger(__name__)
+
 
 class Fp8RocmConfig(QuantizationConfig):
-    def __init__(self, config) -> None:
-        self.quantized_weights_path = config["quantized_weights"]
+    def __init__(self) -> None:
+        # self.quantized_weights_path = config["quantized_weights"]
         self._tuned = {}
         self._stats = {}
         gemm_type = os.getenv("FP8_GEMM", "fp8_16")
         #print(f"Integral Cross factor = {self.factor}")
         if gemm_type == "fp8_8":
-            self.gemm_method = Fp8RocmLinearLayer.apply_fp8_8
-            tuned_filename = "/tuned_fp8_8.csv"
+            self.gemm_method = Fp8RocmLinearMethod.apply_fp8_8
+            tuned_filename = "/projects/tuned_fp8_8.csv"
         elif gemm_type == "fp8_16":
-            self.gemm_method = Fp8RocmLinearLayer.apply_fp8_16
-            tuned_filename = "/tuned_fp8_16.csv"
+            self.gemm_method = Fp8RocmLinearMethod.apply_fp8_16
+            tuned_filename = "/projects/tuned_fp8_16.csv"
         else:
             raise Exception(f"Unknown fp8 gemm type: {gemm_type}")
         try:
@@ -37,12 +49,12 @@ class Fp8RocmConfig(QuantizationConfig):
             m = shape["M"]
             n = shape["N"]
             k = shape["K"]
-            algo = shape["solidx"]
+            algo = shape["algo"]
             self._tuned[(m, n, k)] = algo
 
-    @staticmethod
-    def get_config_filenames() -> List[str]:
-        return ["serenity_config.json"]
+    @classmethod
+    def get_config_filenames(cls) -> List[str]:
+        return []
 
     @classmethod
     def from_config(cls, config) -> "Fp8RocmConfig":
@@ -55,91 +67,143 @@ class Fp8RocmConfig(QuantizationConfig):
     @classmethod
     # Need to figure it out
     def get_min_capability(cls) -> int:
-        return 80
+        return 94
 
     @classmethod
     def get_name(cls) -> str:
         return "Fp8Rocm"
 
-    def get_linear_method(self) -> "Fp8RocmLinearLayer":
-        return Fp8RocmLinearLayer(self)
+    def get_quant_method(self,
+                         layer: torch.nn.Module) -> Optional["Fp8RocmLinearMethod"]:
+        if isinstance(layer, LinearBase):
+            return Fp8RocmLinearMethod(self)
+        return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
 
 
-def set_weight_attrs(
-    weight: torch.Tensor,
-    weight_attrs: Optional[Dict[str, Any]],
-):
-    """Set attributes on a weight tensor.
-
-    This method is used to set attributes on a weight tensor. This method
-    will not overwrite existing attributes.
-
-    Args:
-        weight: The weight tensor.
-        weight_attrs: A dictionary of attributes to set on the weight tensor.
-    """
-    if weight_attrs is None:
-        return
-    for key, value in weight_attrs.items():
-        assert not hasattr(
-            weight, key
-        ), f"Overwriting existing tensor attribute: {key}"
-        setattr(weight, key, value)
-
-
-class Fp8RocmLinearLayer(LinearMethodBase):
-    def __init__(self, config: Fp8RocmConfig) -> None:
+class Fp8RocmLinearMethod(LinearMethodBase):
+    def __init__(self, config: Fp8RocmConfig):
         self._config = config
 
-    def get_tensor(self) -> Iterator[Tuple[str, torch.Tensor]]:
-        with safe_open(
-            self._config.quantized_weights_path, framework="pt"
-        ) as f:
-            for name in f.keys():  # noqa: SIM118
-                param = f.get_tensor(name)
-                yield name, param
+
+    def _create_scale_param(
+        self,
+        scale_name: str,
+        layer: torch.nn.Module,
+        output_partition_sizes: List[int],
+        **extra_weight_attrs,
+    ) -> None:
+        scale = Parameter(torch.empty(len(output_partition_sizes),
+                                      dtype=torch.float32),
+                          requires_grad=False)
+        layer.register_parameter(scale_name, scale)
+        set_weight_attrs(
+            scale, {
+                **extra_weight_attrs,
+                "fp8_scales_shard_indexer":
+                self.scales_shard_indexer,
+            })
+
 
     def create_weights(
         self,
+        layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_size_per_partition: int,
+        output_partition_sizes: List[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
-        # for a, b in self.get_tensor():
-        #    print(f"{a}: {b.shape}")
-        #    pass
+        **extra_weight_attrs,
+    ):
+        del input_size, output_size
+        output_size_per_partition = sum(output_partition_sizes)
         weight = Parameter(
             torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
-                dtype=params_dtype,
+                dtype=torch.float8_e4m3fnuz,
             ),
             requires_grad=False,
         )
-        # orig_weight = Parameter(torch.empty(output_size_per_partition,
-        #                        input_size_per_partition,
-        #                        dtype=params_dtype),
-        #                        requires_grad=False)
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
-        # set_weight_attrs(orig_weight, {"input_dim": 1, "output_dim": 0})
-        return {
-            "weight": weight,
-            # "orig_weight": orig_weight,
-            "activation_scaling_factor": Parameter(
-                torch.empty(1, dtype=torch.float32, device="cuda")
-            ),
-            "weights_scaling_factor": Parameter(
-                torch.empty(1, dtype=torch.float32, device="cuda")
-            ),
-            "output_scaling_factor": Parameter(
-                torch.empty(1, dtype=torch.float32, device="cuda")
-            )
-        }
+        layer.process_after_load = True
+        layer.logical_widths = output_partition_sizes
+
+        layer.register_parameter("weight", weight)
+        set_weight_attrs(weight, {
+            **extra_weight_attrs, 
+            "input_dim": 1, 
+            "output_dim": 0
+        })
+        
+        self._create_scale_param(
+                scale_name="weights_scaling_factor",
+                layer=layer,
+                output_partition_sizes=output_partition_sizes,
+                **extra_weight_attrs)
+
+        self._create_scale_param(
+                    scale_name="activation_scaling_factor",
+                    layer=layer,
+                    output_partition_sizes=output_partition_sizes,
+                    **extra_weight_attrs)
+        
+        self._create_scale_param(
+                    scale_name="output_scaling_factor",
+                    layer=layer,
+                    output_partition_sizes=output_partition_sizes,
+                    **extra_weight_attrs)
+
+        
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if (not hasattr(layer, "process_after_load")
+                or not layer.process_after_load):
+            return
+
+        layer.activation_scaling_factor = Parameter(layer.activation_scaling_factor.max(),
+                                                    requires_grad=False)
+        layer.output_scaling_factor = Parameter(layer.output_scaling_factor.reciprocal().max(),
+                                                    requires_grad=False)
+
+        max_w_scale = layer.weights_scaling_factor.max()
+        if len(layer.logical_widths) > 1:
+            start = 0
+            for idx, logical_width in enumerate(layer.logical_widths):
+                end = start + logical_width
+                weight_dq = _per_tensor_dequantize(layer.weight[start:end, :],
+                                                  layer.weights_scaling_factor[idx])
+
+                layer.weight[start:end, :] = _per_tensor_quantize(
+                    weight_dq, max_w_scale)
+                start = end
+        layer.weights_scaling_factor = Parameter(max_w_scale, requires_grad=False)
+
+        # WEIGHT
+        #   Transpose weight for passing to torch._scaled_mm
+        weight = layer.weight
+        layer.weight = Parameter(weight, requires_grad=False)
+
+    
+    def scales_shard_indexer(
+            self, param: torch.Tensor, loaded_weight: torch.Tensor,
+            shard_id: Union[str, int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        qkv_idxs = {"q": 0, "k": 1, "v": 2}
+
+        if isinstance(shard_id, int):
+            pass
+        elif isinstance(shard_id, str):
+            if shard_id not in qkv_idxs:
+                raise ValueError(f"Unknown shard_id: {shard_id}")
+            shard_id = qkv_idxs[shard_id]
+        else:
+            ValueError(f"Shard id must be int or str but got {type(shard_id)}")
+        
+        # To handle the scalar loaded tensor
+        if loaded_weight.numel() == 1 and len(loaded_weight.shape) != 0:
+            loaded_weight = torch.scalar_tensor(loaded_weight[0])
+
+        return param[shard_id], loaded_weight
 
     def apply_fp8_16(
         self,
@@ -150,7 +214,7 @@ class Fp8RocmLinearLayer(LinearMethodBase):
         osf: torch.Tensor,
     ) -> torch.Tensor:
         x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        ops.convert_fp8(x, x8, asf)
+        vllm_ops.convert_fp8(x8, x, asf)
         m = weight.shape[0]
         n = x.shape[0]
         k = x.shape[1]
@@ -159,19 +223,17 @@ class Fp8RocmLinearLayer(LinearMethodBase):
         if algo is None:
             import os
 
-            # print(f"Not found: {m} {n} {k}")
             if os.getenv("TUNE_FP8") == "1":
                 try:
-                    df = pd.read_csv("/fp8_shapes.csv")
+                    df = pd.read_csv("/projects/fp8_shapes.csv")
                 except:
                     df = pd.DataFrame(columns=["M", "N", "K"])
                 df = pd.concat(
                     [df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]
                 ).drop_duplicates()
-                df.to_csv("/fp8_shapes.csv", index=False)
-                # print(f"{m},{n},{k}")
+                df.to_csv("/projects/fp8_shapes.csv", index=False)
             algo = 0
-        res = ops.fp8_gemm_16(x8, weight.t(), asf, wsf, int(algo))
+        res = vllm_ops.fp8_gemm_16(x8, weight.t(), asf, wsf, int(algo))
         return res
 
     def apply_fp8_8(
@@ -185,7 +247,7 @@ class Fp8RocmLinearLayer(LinearMethodBase):
     ) -> torch.Tensor:
         assert not bias
         x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        ops.convert_fp8(x, x8, asf)
+        vllm_ops.convert_fp8(x8, x, asf)
         m = weight.shape[0]
         n = x.shape[0]
         k = x.shape[1]
@@ -194,39 +256,48 @@ class Fp8RocmLinearLayer(LinearMethodBase):
         if algo is None:
             import os
 
-            # print(f"Not found: {m} {n} {k}")
             if os.getenv("TUNE_FP8") == "1":
                 try:
-                    df = pd.read_csv("/fp8_shapes.csv")
+                    df = pd.read_csv("/projects/fp8_shapes.csv")
                 except:
                     df = pd.DataFrame(columns=["M", "N", "K"])
                 df = pd.concat(
                     [df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]
                 ).drop_duplicates()
-                df.to_csv("/fp8_shapes.csv", index=False)
-                # print(f"{m},{n},{k}")
+                df.to_csv("/projects/fp8_shapese.csv", index=False)
             algo = 0
 
-        res = ops.fp8_gemm(x8, weight.t(), asf, wsf, osf, int(algo))
+        res = vllm_ops.fp8_gemm(x8, weight.t(), asf, wsf, osf, int(algo))
         res16 = torch.empty_like(res, dtype=torch.float16)
-        ops.convert_fp8(res, res16, 1/osf)
+        vllm_ops.convert_fp8(res16, res, 1/osf)
         return res16
 
-    def apply_weights(
+    def apply(
         self,
-        weights: Dict[str, Any],
+        layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        weight: torch.Tensor = weights["weight"]
+        weight: torch.Tensor = layer.weight
         if weight.dtype == torch.float8_e4m3fnuz:
-            asf: torch.Tensor = weights["activation_scaling_factor"] * 2
-            wsf: torch.Tensor = weights["weights_scaling_factor"] * 2
-            osf: torch.Tensor = weights["output_scaling_factor"] / 2
-            #my_osf: torch.Tensor = self._config.factor / weights["my_osf"]
-            #with open("ratio.txt", "a") as f:
-            #    f.write(f'{weights["output_scaling_factor"].item()},{weights["my_osf"].item()}\n')
-            #return self.test(weight, asf, wsf, osf, x, weights["my_osf"], bias)
+            asf: torch.Tensor = layer.activation_scaling_factor * 2
+            wsf: torch.Tensor = layer.weights_scaling_factor * 2
+            osf: torch.Tensor = layer.output_scaling_factor / 2
+
             return self._config.gemm_method(self, x, weight, asf, wsf, osf)
 
         return F.linear(x, weight, bias)
+    
+
+def _per_tensor_quantize(tensor: torch.Tensor,
+                        inv_scale: float) -> torch.Tensor:
+    finfo = torch.finfo(torch.float8_e4m3fnuz)
+    qweight = (tensor / inv_scale).clamp(min=finfo.min, max=finfo.max)
+    return qweight.to(torch.float8_e4m3fnuz)
+
+
+def _per_tensor_dequantize(tensor: torch.Tensor,
+                          inv_scale: float) -> torch.Tensor:
+    fake_qweight = tensor.to(torch.float16)
+    dq_weight = fake_qweight * inv_scale
+    return dq_weight

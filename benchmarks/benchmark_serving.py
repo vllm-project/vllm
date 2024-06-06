@@ -17,6 +17,10 @@ On the client side, run:
         --dataset-path <path to dataset> \
         --request-rate <request_rate> \ # By default <request_rate> is inf
         --num-prompts <num_prompts> # By default <num_prompts> is 1000
+        
+    when using tgi backend, add
+        --endpoint /generate_stream
+    to the end of the command above.
 """
 import argparse
 import asyncio
@@ -27,7 +31,7 @@ import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncGenerator, List, Tuple
+from typing import AsyncGenerator, List, Optional, Tuple
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
@@ -58,7 +62,11 @@ def sample_sharegpt_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
+    fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int]]:
+    if fixed_output_len is not None and fixed_output_len < 4:
+        raise ValueError("output_len too small")
+
     # Load the dataset.
     with open(dataset_path) as f:
         dataset = json.load(f)
@@ -68,38 +76,32 @@ def sample_sharegpt_requests(
     dataset = [(data["conversations"][0]["value"],
                 data["conversations"][1]["value"]) for data in dataset]
 
-    # some of these will be filtered out, so sample more than we need
-    sampled_indices = random.sample(range(len(dataset)),
-                                    int(num_requests * 1.2))
-    dataset = [dataset[i] for i in sampled_indices]
+    # Shuffle the dataset.
+    random.shuffle(dataset)
 
-    # Tokenize the prompts and completions.
-    prompts = [prompt for prompt, _ in dataset]
-    prompt_token_ids = tokenizer(prompts).input_ids
-    completions = [completion for _, completion in dataset]
-    completion_token_ids = tokenizer(completions).input_ids
-    tokenized_dataset = []
-    for i in range(len(dataset)):
-        output_len = len(completion_token_ids[i])
-        tokenized_dataset.append((prompts[i], prompt_token_ids[i], output_len))
-
-    # Filter out too long sequences.
+    # Filter out sequences that are too long or too short
     filtered_dataset: List[Tuple[str, int, int]] = []
-    for prompt, prompt_token_ids, output_len in tokenized_dataset:
+    for i in range(len(dataset)):
+        if len(filtered_dataset) == num_requests:
+            break
+
+        # Tokenize the prompts and completions.
+        prompt = dataset[i][0]
+        prompt_token_ids = tokenizer(prompt).input_ids
+        completion = dataset[i][1]
+        completion_token_ids = tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
+        output_len = len(completion_token_ids
+                         ) if fixed_output_len is None else fixed_output_len
         if prompt_len < 4 or output_len < 4:
             # Prune too short sequences.
-            # This is because TGI causes errors when the input or output length
-            # is too short.
             continue
         if prompt_len > 1024 or prompt_len + output_len > 2048:
             # Prune too long sequences.
             continue
         filtered_dataset.append((prompt, prompt_len, output_len))
 
-    # Sample the requests.
-    sampled_requests = random.sample(filtered_dataset, num_requests)
-    return sampled_requests
+    return filtered_dataset
 
 
 def sample_sonnet_requests(
@@ -213,6 +215,11 @@ def calculate_metrics(
         else:
             actual_output_lens.append(0)
 
+    if completed == 0:
+        warnings.warn(
+            "All requests failed. This is likely due to a misconfiguration "
+            "on the benchmark arguments.",
+            stacklevel=2)
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
@@ -224,9 +231,9 @@ def calculate_metrics(
         1000,  # ttfts is empty if streaming is not supported by backend
         median_ttft_ms=np.median(ttfts or 0) * 1000,
         p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
-        mean_tpot_ms=np.mean(tpots) * 1000,
-        median_tpot_ms=np.median(tpots) * 1000,
-        p99_tpot_ms=np.percentile(tpots, 99) * 1000,
+        mean_tpot_ms=np.mean(tpots or 0) * 1000,
+        median_tpot_ms=np.median(tpots or 0) * 1000,
+        p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
     )
 
     return metrics, actual_output_lens
@@ -248,6 +255,24 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
+    print("Starting initial single prompt test run...")
+    test_prompt, test_prompt_len, test_output_len = input_requests[0]
+    test_input = RequestFuncInput(
+        model=model_id,
+        prompt=test_prompt,
+        api_url=api_url,
+        prompt_len=test_prompt_len,
+        output_len=test_output_len,
+        best_of=best_of,
+        use_beam_search=use_beam_search,
+    )
+    test_output = await request_func(request_func_input=test_input)
+    if not test_output.success:
+        raise ValueError(
+            "Initial test run failed - Please make sure benchmark arguments "
+            f"are correctly specified. Error: {test_output.error}")
+    else:
+        print("Initial test run completed. Starting main benchmark run...")
     print(f"Traffic request rate: {request_rate}")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
@@ -361,6 +386,7 @@ def main(args: argparse.Namespace):
             dataset_path=args.dataset,
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
+            fixed_output_len=args.sharegpt_output_len,
         )
 
     elif args.dataset_name == "sharegpt":
@@ -368,6 +394,7 @@ def main(args: argparse.Namespace):
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
+            fixed_output_len=args.sharegpt_output_len,
         )
 
     elif args.dataset_name == "sonnet":
@@ -524,6 +551,12 @@ if __name__ == "__main__":
         default=1000,
         help="Number of prompts to process.",
     )
+    parser.add_argument(
+        "--sharegpt-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output length "
+        "from the ShareGPT dataset.")
     parser.add_argument(
         "--sonnet-input-len",
         type=int,

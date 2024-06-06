@@ -2,30 +2,29 @@
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
-from typing import List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import ChatGLMConfig
 
@@ -35,7 +34,8 @@ class GLMAttention(nn.Module):
     def __init__(
         self,
         config,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -67,13 +67,13 @@ class GLMAttention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=config.add_bias_linear or config.add_qkv_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=config.add_bias_linear,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
@@ -86,12 +86,12 @@ class GLMAttention(nn.Module):
             base=10000 * rope_ratio,
             is_neox_style=False,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -125,7 +125,7 @@ class GLMMLP(nn.Module):
     def __init__(
         self,
         config,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
 
@@ -136,7 +136,7 @@ class GLMMLP(nn.Module):
             config.hidden_size,
             [config.ffn_hidden_size] * 2,
             bias=config.add_bias_linear,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         self.activation_func = SiluAndMul()
@@ -146,7 +146,7 @@ class GLMMLP(nn.Module):
             config.ffn_hidden_size,
             config.hidden_size,
             bias=config.add_bias_linear,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
     def forward(self, hidden_states):
@@ -168,7 +168,8 @@ class GLMBlock(nn.Module):
     def __init__(
         self,
         config,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.apply_residual_connection_post_layernorm = (
@@ -182,7 +183,7 @@ class GLMBlock(nn.Module):
                                                eps=config.layernorm_epsilon)
 
         # Self attention.
-        self.self_attention = GLMAttention(config, linear_method)
+        self.self_attention = GLMAttention(config, cache_config, quant_config)
         self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
@@ -190,7 +191,7 @@ class GLMBlock(nn.Module):
             config.hidden_size, eps=config.layernorm_epsilon)
 
         # MLP
-        self.mlp = GLMMLP(config, linear_method)
+        self.mlp = GLMMLP(config, quant_config)
 
     def forward(
         self,
@@ -238,7 +239,8 @@ class GLMTransformer(nn.Module):
     def __init__(
         self,
         config,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.post_layer_norm = config.post_layer_norm
@@ -247,8 +249,10 @@ class GLMTransformer(nn.Module):
         self.num_layers = config.num_layers
 
         # Transformer layers.
-        self.layers = nn.ModuleList(
-            [GLMBlock(config, linear_method) for i in range(self.num_layers)])
+        self.layers = nn.ModuleList([
+            GLMBlock(config, cache_config, quant_config)
+            for i in range(self.num_layers)
+        ])
 
         if self.post_layer_norm:
             layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm
@@ -283,7 +287,8 @@ class ChatGLMModel(nn.Module):
     def __init__(
         self,
         config,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
 
@@ -293,7 +298,7 @@ class ChatGLMModel(nn.Module):
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
-        self.encoder = GLMTransformer(config, linear_method)
+        self.encoder = GLMTransformer(config, cache_config, quant_config)
 
         self.output_layer = ParallelLMHead(config.padded_vocab_size,
                                            config.hidden_size)
@@ -335,13 +340,16 @@ class ChatGLMForCausalLM(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config: ChatGLMConfig = config
-        self.linear_method = linear_method
-        self.transformer = ChatGLMModel(config, linear_method)
+        self.quant_config = quant_config
+        self.max_position_embeddings = getattr(config, "max_sequence_length",
+                                               8192)
+        self.transformer = ChatGLMModel(config, cache_config, quant_config)
         self.lm_head_weight = self.transformer.output_layer.weight
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
         self.sampler = Sampler()
@@ -371,14 +379,9 @@ class ChatGLMForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             if "rotary_pos_emb.inv_freq" in name:
                 continue
             if "word_embeddings" in name:
