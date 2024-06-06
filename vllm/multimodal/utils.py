@@ -1,3 +1,4 @@
+import asyncio
 import base64
 from io import BytesIO
 from typing import Optional, Union
@@ -36,17 +37,19 @@ class ImageFetchAiohttp:
         # Avoid circular import
         from vllm import __version__ as VLLM_VERSION
 
-        client = cls.get_aiohttp_client()
-        headers = {"User-Agent": f"vLLM/{VLLM_VERSION}"}
-
         if image_url.startswith('http'):
+            client = cls.get_aiohttp_client()
+            headers = {"User-Agent": f"vLLM/{VLLM_VERSION}"}
+
             async with client.get(url=image_url, headers=headers) as response:
                 response.raise_for_status()
                 image_raw = await response.read()
             image = Image.open(BytesIO(image_raw))
 
         elif image_url.startswith('data:image'):
-            image = load_image_from_base64(image_url.split(',')[1])
+            loop = asyncio.get_event_loop()
+            image = await loop.run_in_executor(None, load_image_from_base64,
+                                               image_url.split(',')[1])
 
         else:
             raise ValueError("Invalid image url: A valid image url must start "

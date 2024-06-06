@@ -121,7 +121,6 @@ async def test_single_chat_session_image(server, client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded(
         server, client: openai.AsyncOpenAI, model_name: str,
         base64_encoded_image: str):
