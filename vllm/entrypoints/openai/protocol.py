@@ -462,8 +462,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
-        if ("logprobs" in data and
-            ((not isinstance(data["logprobs"], int)) or data["logprobs"] < 0)):
+        if "logprobs" in data and data[
+                "logprobs"] is not None and not data["logprobs"] >= 0:
             raise ValueError("if passed, `logprobs` must be a positive value.")
         return data
 
