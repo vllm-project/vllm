@@ -8,7 +8,6 @@ from PIL import Image
 from vllm.config import ModelConfig
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.image import ImagePixelData
-from vllm.utils import make_async
 
 
 class ImageFetchAiohttp:
@@ -47,7 +46,7 @@ class ImageFetchAiohttp:
                 image = Image.open(BytesIO(response.content))
 
         elif image_url.startswith('data:image'):
-            image = async_load_image_from_base64(image_url.split(',')[1])
+            image = load_image_from_base64(image_url.split(',')[1])
 
         else:
             raise ValueError("Invalid image url: A valid image url must start "
@@ -69,9 +68,6 @@ def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:
 def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     """Load image from base64 format."""
     return Image.open(BytesIO(base64.b64decode(image)))
-
-
-async_load_image_from_base64 = make_async(load_image_from_base64)
 
 
 def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
