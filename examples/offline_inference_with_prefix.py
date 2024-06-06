@@ -1,8 +1,6 @@
 from time import time
 
 from vllm import LLM, SamplingParams
-from vllm.distributed.parallel_state import (destroy_distributed_environment,
-                                             destroy_model_parallel)
 
 # Common prefix.
 prefix = (
@@ -32,6 +30,9 @@ sampling_params = SamplingParams(temperature=0.0)
 # Create an LLM.
 regular_llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.4)
 
+prefix_cached_llm = LLM(model="facebook/opt-125m",
+                        enable_prefix_caching=True,
+                        gpu_memory_utilization=0.4)
 print("Results without `enable_prefix_caching`")
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
@@ -48,14 +49,7 @@ for output in outputs:
     regular_generated_texts.append(generated_text)
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
-destroy_model_parallel()
-destroy_distributed_environment()
-
 print("-" * 80)
-
-prefix_cached_llm = LLM(model="facebook/opt-125m",
-                        enable_prefix_caching=True,
-                        gpu_memory_utilization=0.4)
 
 # Warmup so that the shared prompt's KV cache is computed.
 prefix_cached_llm.generate(generating_prompts[0], sampling_params)
