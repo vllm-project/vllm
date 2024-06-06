@@ -218,6 +218,7 @@ class FlashInferImpl(AttentionImpl):
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
+            # Prompt run.
             assert prefill_meta.block_tables is not None
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 output = flash_attn_varlen_func(

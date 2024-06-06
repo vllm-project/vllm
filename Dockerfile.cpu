@@ -1,13 +1,15 @@
 # This vLLM Dockerfile is used to construct image that can build and run vLLM on x86 CPU platform.
 
-FROM ubuntu:22.04
+FROM ubuntu:22.04 AS cpu-test-1
 
 RUN apt-get update  -y \
     && apt-get install -y git wget vim numactl gcc-12 g++-12 python3 python3-pip \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
 RUN pip install --upgrade pip \
-    && pip install wheel packaging ninja setuptools>=49.4.0 numpy
+    && pip install wheel packaging ninja "setuptools>=49.4.0" numpy
+
+FROM cpu-test-1 AS build
 
 COPY ./ /workspace/vllm
 
@@ -16,5 +18,9 @@ WORKDIR /workspace/vllm
 RUN pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install
+
+WORKDIR /workspace/
+
+RUN ln -s /workspace/vllm/tests  && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
 
 CMD ["/bin/bash"]
