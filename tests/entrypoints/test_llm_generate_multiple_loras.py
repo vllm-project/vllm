@@ -29,6 +29,7 @@ def llm():
     # enable garbage collection
     llm = LLM(model=MODEL_NAME,
               tensor_parallel_size=1,
+              max_model_len=8192,
               enable_lora=True,
               enforce_eager=True)
 
