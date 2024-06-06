@@ -596,6 +596,7 @@ def make_block_tables_slot_mapping(block_size: int,
 def make_test_metadata(
     attn_backend: AttentionBackend,
     is_prompt: bool,
+    seq_lens: List[int],
     decoder_test_params: PhaseTestParameters,
     default_attn_type: AttentionType,
     device: Union[torch.device, str],
@@ -638,7 +639,7 @@ def make_test_metadata(
     # Extract
     # * Decoder input sequence lengths (seq_lens)
     # * Decoder self-attention slot mapping & block tables (kv_mmap)
-    seq_lens = decoder_test_params.packed_qkvo.packed_qkv.seq_lens
+    #seq_lens = decoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
     kv_mmap = decoder_test_params.kv_mmap
 
     # is_prompt determines whether input tokens are treated
@@ -648,12 +649,16 @@ def make_test_metadata(
     num_prefills_or_decodes = len(seq_lens)
     num_prefill_or_decode_tokens = sum(seq_lens)
 
+    # Seems for non-prefix-caching scenarios context_lens
+    # is never needed
+    context_lens = None
+
     if encoder_test_params is None:
         encoder_seq_lens = None
     else:
         # Encoder/decoder models only:
         # * Extract encoder input sequence lengths
-        encoder_seq_lens = encoder_test_params.q_seq_lens
+        encoder_seq_lens = encoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
 
     if cross_test_params is None:
         cross_kv_mmap = None

@@ -707,6 +707,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     prephase_attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
         True,
+        prephase_dec_test_params.packed_qkvo.packed_qkv.q_seq_lens,
         decoder_test_params=prephase_dec_test_params,
         encoder_test_params=enc_test_params,
         cross_test_params=prephase_cross_test_params,
@@ -759,19 +760,16 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 
     # - Cross-attention KV context is equal in length to
     #   encoder input
-    context_lens = copy.deepcopy(enc_pckd_qkvo.packed_qkv.q_seq_lens)
+    # context_lens = copy.deepcopy(enc_pckd_qkvo.packed_qkv.q_seq_lens)
 
     decphase_attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
         False,
         dec_qkv.q_seq_lens,
-        decphase_dec_kv_mmap,
+        decoder_test_params=decphase_dec_test_params,
+        encoder_test_params=enc_test_params,
+        cross_test_params=decphase_cross_test_params,
         default_attn_type=AttentionType.DECODER,
-        context_lens=context_lens,
-        num_prefills_or_decodes=len(dec_qkv.q_seq_lens),
-        num_prefill_or_decode_tokens=len(dec_qkv.q_seq_lens),
-        encoder_seq_lens=enc_pckd_qkvo.packed_qkv.q_seq_lens,
-        cross_kv_mmap=decphase_cross_kv_mmap,
         device=CUDA_DEVICE)
 
     # DECODE: self-attention test
@@ -779,7 +777,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     decphase_dec_pckd_act_out: torch.Tensor = \
       _run_decoder_self_attention_test(
         attn,
-        decphase_dec_pckd_qkv,
+        decphase_dec_test_params,
         kv_cache,
         decphase_attn_metadata,
         attn_type=AttentionType.DECODER)
@@ -793,7 +791,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     decphase_cross_pckd_act_out: torch.Tensor = \
       _run_encoder_decoder_cross_attention_test(
         attn,
-        decphase_dec_pckd_qkv,
+        decphase_dec_test_params,
         None,
         kv_cache,
         decphase_attn_metadata)
@@ -819,7 +817,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     # of prefill and decode tokens.
     decphase_attn_metadata.num_prefill_tokens = 1
     with pytest.raises(NotImplementedError) as exc_info:
-        _run_encoder_decoder_cross_attention_test(attn, decphase_dec_pckd_qkv,
+        _run_encoder_decoder_cross_attention_test(attn, decphase_dec_test_params,
                                                   None, kv_cache,
                                                   decphase_attn_metadata)
 
