@@ -51,6 +51,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("gptq_marlin_repack", &gptq_marlin_repack,
           "gptq_marlin repack from GPTQ");
   ops.def("awq_dequantize", &awq_dequantize, "Dequantization for AWQ");
+  ops.def("cutlass_gemm", &cutlass_gemm,
+          "CUTLASS w8a8 GEMM sans epilogue");
   ops.def("cutlass_scaled_mm", &cutlass_scaled_mm,
           "CUTLASS w8a8 GEMM, supporting symmetric per-tensor or "
           "per-row/column quantization.");
