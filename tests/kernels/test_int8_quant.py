@@ -4,7 +4,7 @@ import torch
 from vllm._C import ops
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 8192]  # Arbitrary values for testing
+HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192, 8193]  # Arbitrary values for testing
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SEEDS = [0]
 SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]

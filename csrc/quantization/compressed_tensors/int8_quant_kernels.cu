@@ -28,46 +28,45 @@ namespace vllm {
 
 template <typename scalar_t, typename scale_type>
 __global__ void static_scaled_int8_quant_kernel(
-    const scalar_t* __restrict__ input, int8_t* __restrict__ out,
-    const scale_type* scale_ptr, const int hidden_size) {
-  const int tid = threadIdx.x;
-  const int token_idx = blockIdx.x;
-  scale_type scale = *scale_ptr;
+    scalar_t const* __restrict__ input, int8_t* __restrict__ out,
+    scale_type const* scale_ptr, const int hidden_size) {
+  int const tid = threadIdx.x;
+  int const token_idx = blockIdx.x;
+  scale_type const scale = *scale_ptr;
 
   for (int i = tid; i < hidden_size; i += blockDim.x) {
     out[token_idx * hidden_size + i] =
-        float_to_int8_rn(((float)input[token_idx * hidden_size + i]) / scale);
+        float_to_int8_rn(static_cast<float>(input[token_idx * hidden_size + i]) / scale);
   }
 }
 
 template <typename scalar_t, typename scale_type>
 __global__ void dynamic_scaled_int8_quant_kernel(
-    const scalar_t* __restrict__ input, int8_t* __restrict__ out,
-    scale_type scale, const int hidden_size) {
-  const int tid = threadIdx.x;
-  const int token_idx = blockIdx.x;
-
-  float amax_val = 0.0f;
-  const float zero = 0.0f;
+    scalar_t const*  __restrict__ input, int8_t* __restrict__ out,
+    scale_type* scale, const int hidden_size) {
+  int const tid = threadIdx.x;
+  int const token_idx = blockIdx.x;
+  float absmax_val = 0.0f;
+  float const zero = 0.0f;
 
   for (int i = tid; i < hidden_size; i += blockDim.x) {
-    float val = (float)input[token_idx * hidden_size + i];
+    float val = static_cast<float>(input[token_idx * hidden_size + i]);
     val = val > zero ? val : -val;
-    if (val > amax_val) amax_val = val;
+    absmax_val = val > absmax_val ? val : absmax_val;
   }
 
-  __shared__ float s_amax;
-  const float block_amax_val = blockReduceMax(amax_val);
+  float const block_absmax_val_maybe = blockReduceMax(absmax_val);
+  __shared__ float block_absmax_val;
   if (tid == 0) {
-    s_amax = block_amax_val;
-    scale[token_idx] = block_amax_val / 127.0f;
+    block_absmax_val = block_absmax_val_maybe;
+    scale[token_idx] = block_absmax_val / 127.0f;
   }
   __syncthreads();
 
-  float tmp_scale = 127.0f / s_amax;
+  float const tmp_scale = 127.0f / block_absmax_val;
   for (int i = tid; i < hidden_size; i += blockDim.x) {
-    out[token_idx * hidden_size + i] = float_to_int8_rn(
-        ((float)input[token_idx * hidden_size + i]) * tmp_scale);
+    out[token_idx * hidden_size + i] =
+      float_to_int8_rn(static_cast<float>(input[token_idx * hidden_size + i]) * tmp_scale);
   }
 }
 
@@ -80,10 +79,10 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
   TORCH_CHECK(out.is_contiguous());
   TORCH_CHECK(scale.numel() == 1);
 
-  int hidden_size = input.size(-1);
-  int num_tokens = input.numel() / hidden_size;
-  dim3 grid(num_tokens);
-  dim3 block(std::min(hidden_size, 1024));
+  int const hidden_size = input.size(-1);
+  int const  num_tokens = input.numel() / hidden_size;
+  dim3 const grid(num_tokens);
+  dim3 const block(std::min(hidden_size, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "static_scaled_int8_quant_kernel", [&] {
@@ -95,18 +94,19 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
 }
 
 void dynamic_scaled_int8_quant(torch::Tensor& out,    // [..., hidden_size]
-                               torch::Tensor& input,  // [..., hidden_size]
+                               torch::Tensor const& input,  // [..., hidden_size]
                                torch::Tensor& scales) {
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
-  int hidden_size = input.size(-1);
-  int num_tokens = input.numel() / hidden_size;
-  dim3 grid(num_tokens);
-  dim3 block(std::min(hidden_size, 1024));
+
+  int const hidden_size = input.size(-1);
+  int const num_tokens = input.numel() / hidden_size;
+  dim3 const grid(num_tokens);
+  dim3 const block(std::min(hidden_size, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "dynamic_scaled_int8_quant_kernel", [&] {
-        vllm::dynamic_scaled_int8_quant_kernel<scalar_t, float*>
+        vllm::dynamic_scaled_int8_quant_kernel<scalar_t, float>
             <<<grid, block, 0, stream>>>(input.data_ptr<scalar_t>(),
                                          out.data_ptr<int8_t>(),
                                          scales.data_ptr<float>(), hidden_size);
