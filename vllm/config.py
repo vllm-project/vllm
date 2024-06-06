@@ -651,19 +651,24 @@ class SchedulerConfig:
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
         embedding_mode: Whether the running model is for embedding.
+        preemption_mode: Whether to perform preemption by swapping or 
+            recomputation. If not specified, we determine the mode as follows:
+            We use recomputation by default since it incurs lower overhead than
+            swapping. However, when the sequence group has multiple sequences
+            (e.g., beam search), recomputation is not currently supported. In
+            such a case, we use swapping instead.
     """
 
-    def __init__(
-        self,
-        max_num_batched_tokens: Optional[int],
-        max_num_seqs: int,
-        max_model_len: int,
-        use_v2_block_manager: bool = False,
-        num_lookahead_slots: int = 0,
-        delay_factor: float = 0.0,
-        enable_chunked_prefill: bool = False,
-        embedding_mode: Optional[bool] = False,
-    ) -> None:
+    def __init__(self,
+                 max_num_batched_tokens: Optional[int],
+                 max_num_seqs: int,
+                 max_model_len: int,
+                 use_v2_block_manager: bool = False,
+                 num_lookahead_slots: int = 0,
+                 delay_factor: float = 0.0,
+                 enable_chunked_prefill: bool = False,
+                 embedding_mode: Optional[bool] = False,
+                 preemption_mode: Optional[str] = None) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -689,6 +694,7 @@ class SchedulerConfig:
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
+        self.preemption_mode = preemption_mode
 
         self._verify_args()
 
@@ -1094,10 +1100,12 @@ class VisionLanguageConfig:
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
+    # The image processor to load from HuggingFace
+    image_processor: Optional[str]
+    image_processor_revision: Optional[str]
 
     @classmethod
-    def get_image_input_enum_type(
-            cls, value: str) -> "VisionLanguageConfig.ImageInputType":
+    def get_image_input_enum_type(cls, value: str) -> ImageInputType:
         """Get the image input type from a string."""
         try:
             return cls.ImageInputType[value.upper()]
@@ -1215,7 +1223,7 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            "%d. Assuming the model's maximum length is %d.", possible_keys,
+            "%s. Assuming the model's maximum length is %d.", possible_keys,
             default_max_len)
         derived_max_model_len = default_max_len
 
