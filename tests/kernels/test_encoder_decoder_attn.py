@@ -625,22 +625,6 @@ def _run_encoder_decoder_cross_attention_test(
                         value, kv_cache, attn_metadata)
 
 
-def _assert_actual_match_ideal(test_params: PhaseTestParameters,
-                               output_under_test: torch.Tensor) -> None:
-    '''
-    Assert that observed output matches the ideal output
-    contained in the test parameters data structure.
-
-    Arguments:
-
-    * test_params: Test parameters including packed ideal output
-    * output_under_test: actually observed output value
-    '''
-    ideal_output = test_params.packed_qkvo.ideal_output
-    assert torch.allclose(ideal_output,
-                          output_under_test.view_as(ideal_output))
-
-
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -741,7 +725,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         attn_type=AttentionType.ENCODER)
 
     # - Is encoder attention result correct?
-    _assert_actual_match_ideal(enc_test_params, enc_packed_actual_output)
+    assert_actual_matches_ideal(enc_test_params, enc_packed_actual_output)
 
     # PREFILL: self-attention test
 
@@ -753,8 +737,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         attn_type=AttentionType.DECODER)
 
     # - Prefill self-attention correct?
-    _assert_actual_match_ideal(prephase_dec_test_params,
-                               self_prefill_packed_actual_output)
+    assert_actual_matches_ideal(prephase_dec_test_params,
+                                self_prefill_packed_actual_output)
 
     # PREFILL: cross-attention test
 
@@ -766,8 +750,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         prephase_attn_metadata)
 
     # - Prefill cross-attention correct?
-    _assert_actual_match_ideal(prephase_cross_test_params,
-                               prephase_cross_pckd_act_out)
+    assert_actual_matches_ideal(prephase_cross_test_params,
+                                prephase_cross_pckd_act_out)
 
     # DECODE: build decode-phase attention metadata
 
@@ -795,8 +779,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         attn_type=AttentionType.DECODER)
 
     # - Decode self-attention correct?
-    _assert_actual_match_ideal(decphase_dec_test_params,
-                               decphase_dec_pckd_act_out)
+    assert_actual_matches_ideal(decphase_dec_test_params,
+                                decphase_dec_pckd_act_out)
 
     # DECODE: cross-attention test
 
@@ -808,8 +792,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         decphase_attn_metadata)
 
     # - Decode cross-attention correct?
-    _assert_actual_match_ideal(decphase_cross_test_params,
-                               decphase_cross_pckd_act_out)
+    assert_actual_matches_ideal(decphase_cross_test_params,
+                                decphase_cross_pckd_act_out)
 
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
@@ -916,7 +900,7 @@ def test_backend_fails_for_chunked_prefill_enc_dec(num_heads: int,
         attn_type=AttentionType.ENCODER)
 
     # - Is encoder attention result correct?
-    _assert_actual_match_ideal(enc_test_params, enc_packed_actual_output)
+    assert_actual_matches_ideal(enc_test_params, enc_packed_actual_output)
 
     # PREFILL: self-attention test
 
@@ -1044,7 +1028,7 @@ def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
         attn_type=AttentionType.ENCODER)
 
     # - Is encoder attention result correct?
-    _assert_actual_match_ideal(enc_test_params, enc_packed_actual_output)
+    assert_actual_matches_ideal(enc_test_params, enc_packed_actual_output)
 
     # PREFILL: self-attention test
 

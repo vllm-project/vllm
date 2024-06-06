@@ -757,3 +757,19 @@ def make_test_metadata(
                                 cross_kv_mmap.slot_mapping,
             cross_block_tables=None if cross_kv_mmap is None else \
                                 cross_kv_mmap.block_tables)
+
+
+def assert_actual_matches_ideal(test_params: PhaseTestParameters,
+                                output_under_test: torch.Tensor) -> None:
+    '''
+    Assert that observed output matches the ideal output
+    contained in the test parameters data structure.
+
+    Arguments:
+
+    * test_params: Test parameters including packed ideal output
+    * output_under_test: actually observed output value
+    '''
+    ideal_output = test_params.packed_qkvo.ideal_output
+    assert torch.allclose(ideal_output,
+                          output_under_test.view_as(ideal_output))
