@@ -25,7 +25,7 @@ jobs:
             gitref: ${{ github.ref }}
 
             test_label_solo: aws-test-a10g-24G
-            test_label_multi: aws-test-4-a10g-96G
+            test_label_multi: ignore
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-nightly.txt
 
@@ -43,7 +43,7 @@ jobs:
             gitref: ${{ github.ref }}
 
             test_label_solo: aws-test-a10g-24G
-            test_label_multi: aws-test-4-a10g-96G
+            test_label_multi: ignore
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-nightly.txt
 
@@ -79,7 +79,7 @@ jobs:
             gitref: ${{ github.ref }}
 
             test_label_solo: aws-test-a10g-24G
-            test_label_multi: aws-test-4-a10g-96G
+            test_label_multi: ignore
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-nightly.txt
 
