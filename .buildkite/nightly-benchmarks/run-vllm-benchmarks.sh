@@ -10,119 +10,132 @@
 set -xe
 set -o pipefail
 
-# get the number of GPUs
-gpu_count=$(nvidia-smi --list-gpus | wc -l)
-export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
-if [[ $gpu_count -gt 0 ]]; then
-  echo "GPU found."
-else
-  echo "Need at least 1 GPU to run benchmarking."
-  exit 1
-fi
+check_gpus() {
+  declare -g gpu_count=$(nvidia-smi --list-gpus | wc -l)
 
-gpu_type=$(echo $(nvidia-smi --query-gpu=name --format=csv,noheader) | awk '{print $2}')
-echo "GPU type is $gpu_type"
+  if [[ $gpu_count -gt 0 ]]; then
+    echo "GPU found."
+  else
+    echo "Need at least 1 GPU to run benchmarking."
+    exit 1
+  fi
+
+  declare -g gpu_type=$(echo $(nvidia-smi --query-gpu=name --format=csv,noheader) | awk '{print $2}')
+  echo "GPU type is $gpu_type"
+}
 
 
-# check if HF_TOKEN exists and starts with "hf_"
-if [[ -z "$HF_TOKEN" ]]; then
-  echo "Error: HF_TOKEN is not set."
-  exit 1
-elif [[ ! "$HF_TOKEN" =~ ^hf_ ]]; then
-  echo "Error: HF_TOKEN does not start with 'hf_'."
-  exit 1
-else
-  echo "HF_TOKEN is set and valid."
-fi
+check_hf_token() {
+  if [[ -z "$HF_TOKEN" ]]; then
+    echo "Error: HF_TOKEN is not set."
+    exit 1
+  elif [[ ! "$HF_TOKEN" =~ ^hf_ ]]; then
+    echo "Error: HF_TOKEN does not start with 'hf_'."
+    exit 1
+  else
+    echo "HF_TOKEN is set and valid."
+  fi
+}
 
-# install wget and curl
+json2args() {
+  # transforms the JSON string to command line args, and '_' is replaced to '-'
+  # example:
+  # input: { "model": "meta-llama/Llama-2-7b-chat-hf", "tensor_parallel_size": 1 }
+  # output: --model meta-llama/Llama-2-7b-chat-hf --tensor-parallel-size 1
+  local json_string=$1
+  local args=$(
+    echo "$json_string" | jq -r '
+      to_entries |
+      map("--" + (.key | gsub("_"; "-")) + " " + (.value | tostring)) |
+      join(" ")
+    '
+  )
+  echo "$args"
+}
+
+
+check_gpus
+check_hf_token
+
+
 (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
-# cd /
-# git clone https://github.com/vllm-project/vllm.git
-# cd vllm
-# cd benchmarks
-# mkdir results
+# jq is the JSON parser to parse the parameter files
+(which jq) || (apt-get update && apt-get -y install jq)
 
-pushd benchmarks
+# download ShareGPT dataset
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+
+
+# prepare for benchmarking
+export VLLM_HOST_IP=$(hostname -I | awk '{print $1}') # used by benchmark_serving.py
 RESULTS_FOLDER=results/
-PARAMS_FILE=../.buildkite/nightly-benchmarks/benchmark-parameters.json
+SERVING_TESTS=../.buildkite/nightly-benchmarks/serving-tests.json
+POSTPROCESS_SCRIPT=../.buildkite/nightly-benchmarks/results2md.py
 mkdir -p $RESULTS_FOLDER
 
-(which jq) || (apt-get update && apt-get -y install jq)
-# iterate over the test cases
-jq -c '.[]' $PARAMS_FILE | while read -r params; do
-    # extract keys
-    keys=$(echo $params | jq -r 'keys_unsorted[]')
 
-    # extract some parameters
-    testname=$(echo $params | jq -r '.testname')
-    testname="${testname}_${gpu_type}"
-    model=$(echo $params | jq -r '.model')
-    tp=$(echo $params | jq -r '.["tensor-parallel-size"]')
+# Iterate over serving tests
+jq -c '.[]' $SERVING_TESTS | while read -r params; do
 
-    if [[ $gpu_count -lt $tp ]]; then
-      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
-      continue
-    fi
+  # get the test name, and append the GPU type back to it.
+  test_name=$(echo $params | jq -r '.test_name')_${gpu_type}
+  if [[ ! "$test_name" =~ ^serving_ ]]; then
+    echo "In serving-test.json, test_name must start with \"serving_\"."
+    exit 1
+  fi
 
-    # initialize the benchmarking command
-    offline_command="python3 benchmark_throughput.py --output-json $RESULTS_FOLDER/offline_$testname.json "
-    online_client_command="python3 benchmark_serving.py --backend vllm --save-result --result-dir $RESULTS_FOLDER "
-
-    # iteratre over each key in `benchmark-parameters.json`
-    for key in $keys; do
-        echo $key
-        value=$(echo $params | jq -r ".[\"$key\"]")
-
-        if [[ $key == "testname" ]]; then
-          continue
-        fi
-        offline_command="$offline_command --$key $value"
-
-        if [[ $key == "tensor-parallel-size" ]]; then
-          # tensor-parallel-size is the server argument not the client.
-          continue
-        fi
-        online_client_command="$online_client_command --$key $value"
-
-        echo $online_client_command
-    done
-
-    # offline inference
-    echo "Testing offline inference throughput ($testname)"
-    eval $offline_command 2>&1 | tee $RESULTS_FOLDER/offline_$testname.txt
-
-    echo "### vllm offline inference throughput ($testname)" >> $RESULTS_FOLDER/benchmark_results.md
-    sed -n '1p' $RESULTS_FOLDER/offline_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # first line
-    echo "" >> $RESULTS_FOLDER/benchmark_results.md
-    grep 'Throughput: ' $RESULTS_FOLDER/offline_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # last line
-
-    # online serving
-    echo "Testing online serving throughput ($testname)"
-    # launch the server
-    python3 -m vllm.entrypoints.openai.api_server --model $model --swap-space 16 --disable-log-requests -tp $tp &
-    server_pid=$!
-    # wait until server finishes initialization
-    timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
-    eval "$online_client_command" 2>&1 | tee $RESULTS_FOLDER/online_$testname.txt
-    kill $server_pid
-    # get the output json file and rename it
-    serving_json_output=$(find "$RESULTS_FOLDER" -type f -name "vllm*")
-    mv "$serving_json_output" $RESULTS_FOLDER/online_$testname.json
+  # get client and server arguments
+  server_params=$(echo $params | jq -r '.server_parameters')
+  client_params=$(echo $params | jq -r '.client_parameters')
+  server_args=$(json2args "$server_params")
+  client_args=$(json2args "$client_params")
 
 
-    # document the results
-    echo "### vllm online serving throughput ($testname)" >> $RESULTS_FOLDER/benchmark_results.md
-    sed -n '1p' $RESULTS_FOLDER/online_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # first line
-    echo "" >> $RESULTS_FOLDER/benchmark_results.md
-    echo '```' >> $RESULTS_FOLDER/benchmark_results.md
-    tail -n 17 $RESULTS_FOLDER/online_$testname.txt >> $RESULTS_FOLDER/benchmark_results.md # last 20 lines
-    echo '```' >> $RESULTS_FOLDER/benchmark_results.md
+  # check if there is enough GPU to run the test
+  tp=$(echo $server_params | jq -r '.tensor_parallel_size')
+  if [[ $gpu_count -lt $tp ]]; then
+    echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
+    continue
+  fi
 
-    # wait for the OS to collect GPU memory
-    sleep 10
+  server_command="python3 \
+    -m vllm.entrypoints.openai.api_server \
+    $server_args"
+
+  client_command="python3 benchmark_serving.py \
+    --backend vllm \
+    --save-result \
+    --result-dir $RESULTS_FOLDER \
+    --result-filename ${test_name}.json \
+    $client_args"
+
+  echo "Running test case $test_name"
+  echo "Server command: $server_command"
+  echo "Client command: $client_command"
+  echo $(
+    jq -n \
+      --arg server "$server_command" \
+      --arg client "$client_command" \
+      '{
+        server_command: $server,
+        client_command: $client
+      }'
+  ) > tee $RESULTS_FOLDER/$test_name.commands
+  
+  # run the server
+  eval $server_command &
+  server_pid=$!
+
+  # wait until the server is alive
+  timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
+
+  # run the client
+  eval $client_command
+
+  # clean up
+  kill $server_pid
+  sleep 10
 
 done
 
@@ -131,11 +144,12 @@ if [ ! -f /workspace/buildkite-agent ]; then
     exit 0
 fi
 
+# postprocess benchmarking results
+pip install tabulate
+python3 ../.buildkite/nightly-benchmarks/results2md.py
+
 # upload the results to buildkite
 /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
 
 # upload artifacts
 /workspace/buildkite-agent artifact upload $RESULTS_FOLDER/*
-
-used_memory=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '{sum+=$1} END {print sum}')
-echo $used_memory
