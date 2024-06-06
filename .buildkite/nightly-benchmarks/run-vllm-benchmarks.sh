@@ -63,14 +63,12 @@ check_hf_token
 # jq is the JSON parser to parse the parameter files
 (which jq) || (apt-get update && apt-get -y install jq)
 
-# download ShareGPT dataset
-wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-
 # get the current IP address, required by benchmark_serving.py
 export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
 # prepare for benchmarking
 pushd benchmarks
+wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 RESULTS_FOLDER=results/
 SERVING_TESTS=../.buildkite/nightly-benchmarks/serving-tests.json
 POSTPROCESS_SCRIPT=../.buildkite/nightly-benchmarks/results2md.py
