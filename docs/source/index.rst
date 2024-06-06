@@ -106,6 +106,13 @@ Documentation
    quantization/fp8_e4m3_kvcache
 
 .. toctree::
+   :maxdepth: 1
+   :caption: Automatic prefix caching
+
+   automatic_prefix_caching/apc
+   automatic_prefix_caching/details
+
+.. toctree::
    :maxdepth: 2
    :caption: Developer Documentation
 
