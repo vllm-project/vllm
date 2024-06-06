@@ -12,6 +12,7 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from vllm.inputs import PromptStrictInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.engine.arg_utils import EngineArgs
 
 
 def main(args: argparse.Namespace):
@@ -36,7 +37,8 @@ def main(args: argparse.Namespace):
               enable_chunked_prefill=args.enable_chunked_prefill,
               download_dir=args.download_dir,
               block_size=args.block_size,
-              gpu_memory_utilization=args.gpu_memory_utilization)
+              gpu_memory_utilization=args.gpu_memory_utilization,
+              load_format=args.load_format)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -221,5 +223,28 @@ if __name__ == '__main__':
                         help='the fraction of GPU memory to be used for '
                         'the model executor, which can range from 0 to 1.'
                         'If unspecified, will use the default value of 0.9.')
+    parser.add_argument(
+            '--load-format',
+            type=str,
+            default=EngineArgs.load_format,
+            choices=[
+                'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer',
+                'bitsandbytes'
+            ],
+            help='The format of the model weights to load.\n\n'
+            '* "auto" will try to load the weights in the safetensors format '
+            'and fall back to the pytorch bin format if safetensors format '
+            'is not available.\n'
+            '* "pt" will load the weights in the pytorch bin format.\n'
+            '* "safetensors" will load the weights in the safetensors format.\n'
+            '* "npcache" will load the weights in pytorch format and store '
+            'a numpy cache to speed up the loading.\n'
+            '* "dummy" will initialize the weights with random values, '
+            'which is mainly for profiling.\n'
+            '* "tensorizer" will load the weights using tensorizer from '
+            'CoreWeave. See the Tensorize vLLM Model script in the Examples'
+            'section for more information.\n'
+            '* "bitsandbytes" will load the weights using bitsandbytes '
+            'quantization.\n')
     args = parser.parse_args()
     main(args)
