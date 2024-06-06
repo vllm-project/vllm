@@ -47,21 +47,17 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         is_tensor_partitioned = len(output_partition_sizes) != 1
         weight_scale_dim = sum(
             output_partition_sizes) if is_tensor_partitioned else 1
-        weight_scale_device = "cpu" if weight_scale_dim == 1 else "cuda"
 
         weight_zero_point = Parameter(torch.empty(1,
-                                                  device="cuda",
                                                   dtype=torch.int8),
                                       requires_grad=False)
 
         weight_scale = Parameter(torch.empty(weight_scale_dim,
-                                             device=weight_scale_device,
                                              dtype=torch.float32),
                                  requires_grad=False)
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
-                                       device="cuda",
                                        dtype=torch.int8),
                            requires_grad=False)
 

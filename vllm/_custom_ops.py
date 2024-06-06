@@ -264,8 +264,8 @@ def scaled_fp8_quant(
 
 
 # int8
-def static_scaled_int8_quant(input: torch.Tensor,
-                             scale: torch.Tensor) -> torch.Tensor:
+def scaled_int8_quant(input: torch.Tensor,
+                      scale: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize the input tensor to int8 and return the quantized tensor and scale.
 
@@ -275,7 +275,7 @@ def static_scaled_int8_quant(input: torch.Tensor,
             When not provided, we invoke dynamic-per-token quantization.
 
     Returns:
-      Tuple[Torch.Tensor, Torch.Tensor | float] : Output int8 tensor and scales.
+      Tuple[Torch.Tensor, Torch.Tensor] : Output int8 tensor and scales.
     """
     q = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
