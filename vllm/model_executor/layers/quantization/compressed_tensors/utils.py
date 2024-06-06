@@ -72,9 +72,18 @@ def find_first_name_or_class_match(
         module: Module,
         targets: Iterable[str],
         check_contains: bool = False) -> Optional[str]:
-    # first element of targets that matches the given name
-    # if no name matches returns first target that matches the class name
-    # returns None otherwise
+    """
+    Helper function to map the quantization details listed in the config 
+    for a given list of targets against each model layer. First uses the
+    layer name to try and find a match. If no name match is found, uses
+    the layer class name. Returns None otherwise.
+
+    :param name: layer name
+    :param module: torch.nn.Module
+    :param targets: list of targets to match the layer against
+    :param check_contains: whether or not to do a substring match
+    """
+
     return _find_first_match(name, targets) or _find_first_match(
         module.__class__.__name__, targets, check_contains)
 
@@ -82,9 +91,15 @@ def find_first_name_or_class_match(
 def _find_first_match(value: str,
                       targets: Iterable[str],
                       check_contains: bool = False) -> Optional[str]:
-    # returns first element of target that matches value either
-    # exactly or as a regex after 're:'. if check_contains is set to True,
-    # additionally checks if the target string is contained with value.
+    """
+    Returns first element of target that matches value either
+    exactly or as a regex after 're:'. If check_contains is set to True,
+    additionally checks if the target string is contained within the value.
+
+    :param value: string to compare the list of targets against
+    :param targets: list of targets to match the layer against
+    :param check_contains: whether or not to do a substring match
+    """
 
     for target in targets:
         if target.startswith("re:"):

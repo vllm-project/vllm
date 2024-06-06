@@ -19,21 +19,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.ignore = ignore
         self.layer_quant_details = layer_quant_details
 
-        llama_mapping = {
-            "q_proj": "qkv_proj",
-            "k_proj": "qkv_proj",
-            "v_proj": "qkv_proj",
-            "gate_proj": "gate_up_proj",
-            "up_proj": "gate_up_proj"
-        }
-
-        # Update the ignore list: e.g layers with q_proj are replaced
-        # to be qkv_proj to be compatible with vllm
-        for layer in self.ignore:
-            for k in llama_mapping:
-                if k in layer:
-                    layer.replace(k, llama_mapping.get(k, k))
-
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
 
@@ -59,7 +44,6 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
-
         layer_quant_details: Dict[str, Any] = dict()
         ignore: List[str] = config.get("ignore", None)
 
@@ -118,8 +102,6 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def get_scheme(self, layer: torch.nn.Module) -> "CompressedTensorsScheme":
 
-        # TODO: update/map layer_name for llama models before
-        # using find_first_name_or_class_match?
         layer_type_name = find_first_name_or_class_match(
             name="",
             module=layer,
@@ -131,7 +113,6 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         layer_quant_details: Dict[str, Any] = self.layer_quant_details.get(
             layer_type_name, None)
-
         if layer_quant_details is None:
             raise ValueError(
                 f"Could not find quantization details for {layer}.")
