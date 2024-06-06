@@ -44,7 +44,8 @@ class ConversationMessage(TypedDict):
 @dataclass(frozen=True)
 class ChatMessageParseResult:
     messages: List[ConversationMessage]
-    image_futures: List[Awaitable[ImagePixelData]] = field(default_factory=list)
+    image_futures: List[Awaitable[ImagePixelData]] = field(
+        default_factory=list)
 
 
 class OpenAIServingChat(OpenAIServing):
