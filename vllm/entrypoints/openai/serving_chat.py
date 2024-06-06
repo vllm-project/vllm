@@ -27,8 +27,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.multimodal.image import ImagePixelData
-from vllm.multimodal.utils import (async_get_and_parse_image,
-                                   get_full_image_text_prompt)
+from vllm.multimodal.utils import ImageFetchAiohttp, get_full_image_text_prompt
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
@@ -129,7 +128,8 @@ class OpenAIServingChat(OpenAIServing):
                             "'image_url.detail' is currently not supported and "
                             "will be ignored.")
 
-                    image_future = async_get_and_parse_image(image_url["url"])
+                    image_future = ImageFetchAiohttp.fetch_image(
+                        image_url["url"])
                     image_futures.append(image_future)
 
                 else:
