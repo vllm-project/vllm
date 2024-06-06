@@ -42,6 +42,51 @@ MNK_FACTORS = [
 def rand_data(shape):
     return torch.randn(shape, dtype=torch.half, device="cuda")
 
+def inject_24(w, size_k, size_n):
+    from vllm.model_executor.layers.quantization.utils.format_24 import mask_creator
+    assert w.shape == (size_k, size_n)
+
+    mask = mask_creator(w.t()).t().cuda().bool()
+
+    return (mask * w).contiguous(), mask.contiguous()
+
+def compressed_tensors_check(w, num_bits, group_size):
+    size_k, size_n = w.shape
+    original_shape = w.shape
+
+    if group_size == -1:
+        group_size = size_k
+    assert group_size <= size_k
+
+    # Inject 2:4 sparsity 
+    w_24, mask_24 = inject_24(w, size_k, size_n)
+
+    # Quantize
+    w_24_ref, q_w_24, s, g_idx, rand_perm = quantize_weights(w_24,
+                                                             num_bits,
+                                                             group_size,
+                                                             act_order=False)
+    
+    from compressed_tensors.compressors.marlin_24 import pack_scales_24, pack_weight_24, compress_weight_24
+    from compressed_tensors.quantization import QuantizationArgs,QuantizationStrategy
+    if group_size == -1 or group_size == size_k:
+        strategy = QuantizationStrategy.CHANNEL
+        args_size=None
+    else:
+        strategy=QuantizationStrategy.GROUP
+        args_size=group_size
+    quant_args = QuantizationArgs(num_bits=num_bits, strategy=strategy, group_size=args_size)
+
+    max_q_val = (1 << num_bits) - 1
+    zp = (max_q_val + 1) // 2
+    value, meta = compress_weight_24(q_w_24 - zp)
+    value += zp
+    value = pack_weight_24(value, quant_args, original_shape)
+    packed_scale = pack_scales_24(s, quant_args, original_shape)
+    meta = meta.resize_(meta.shape[1] // 2, meta.shape[0] * 2)
+
+    return value, packed_scale, meta
+
 
 @pytest.mark.skipif(not is_marlin_supported(),
                     reason="Marlin is not supported on this GPU type.")
@@ -193,6 +238,13 @@ def test_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size, mnk_factors):
 
     (w_24_ref, marlin_24_q_w_comp, marlin_24_meta,
      marlin_24_s) = marlin_24_quantize(b_weight, num_bits, group_size)
+    
+    w_check, scale_check, meta_check = compressed_tensors_check(b_weight, num_bits, group_size)
+
+    assert torch.equal(w_check, marlin_24_q_w_comp)
+    assert torch.equal(scale_check, marlin_24_s)
+    assert torch.equal(meta_check, marlin_24_meta)
+
 
     workspace_24 = MarlinWorkspace(size_n, GPTQ_MARLIN_24_MIN_THREAD_N,
                                    GPTQ_MARLIN_24_MAX_PARALLEL)
@@ -201,9 +253,9 @@ def test_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size, mnk_factors):
 
     output = ops.gptq_marlin_24_gemm(
         a_input,
-        marlin_24_q_w_comp,
-        marlin_24_meta,
-        marlin_24_s,
+        w_check,
+        meta_check,
+        scale_check,
         workspace_24.scratch,
         num_bits,
         a_input.shape[0],
