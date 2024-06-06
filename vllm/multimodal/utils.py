@@ -52,6 +52,11 @@ class ImageFetchAiohttp:
             raise ValueError("Invalid image url: A valid image url must start "
                              "with either 'data:image' or 'http'.")
 
+        return image
+
+
+async def async_get_and_parse_image(image_url: str) -> ImagePixelData:
+    with await ImageFetchAiohttp.fetch_image(image_url) as image:
         return ImagePixelData(image)
 
 
