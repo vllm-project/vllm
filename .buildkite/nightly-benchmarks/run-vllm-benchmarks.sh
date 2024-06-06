@@ -3,6 +3,8 @@
 # This script should be run inside the vllm container. Enter the latest vllm container by
 # docker run -it --runtime nvidia --gpus all --env "HF_TOKEN=<your HF TOKEN>"  --entrypoint /bin/bash  vllm/vllm-openai:latest
 # (please modify `<your HF TOKEN>` to your own huggingface token in the above command
+# Then, run the following command:
+# 
 # Then, copy-paste this file into the docker (any path in the docker works) and execute it using bash.
 # Benchmarking results will be at /vllm/benchmarks/results/benchmark_results.md
 
@@ -55,7 +57,14 @@ json2args() {
 }
 
 wait_for_server() {
+  # wait for vllm server to terminate
   timeout 600 bash -c 'until curl localhost:8000/v1/completions; do sleep 1; done' || exit 1
+}
+
+kill_vllm() {
+  # kill vllm instances
+  pkill -f python3
+  sleep 20
 }
 
 
@@ -77,6 +86,10 @@ RESULTS_FOLDER=results/
 SERVING_TESTS=../.buildkite/nightly-benchmarks/serving-tests.json
 POSTPROCESS_SCRIPT=../.buildkite/nightly-benchmarks/results2md.py
 mkdir -p $RESULTS_FOLDER
+
+
+# test if benchmark_latency.py is working on the server
+timeout 120 python3 benchmark_latency.py || exit 1
 
 # Iterate over serving tests
 jq -c '.[]' $SERVING_TESTS | while read -r params; do
@@ -138,8 +151,7 @@ jq -c '.[]' $SERVING_TESTS | while read -r params; do
   eval $client_command
 
   # clean up
-  kill $server_pid
-  sleep 10
+  kill_vllm
 
 done
 
