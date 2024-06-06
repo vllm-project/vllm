@@ -154,7 +154,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 key = key.repeat_interleave(self.num_queries_per_kv, dim=-2)
                 key = key.view(batch_size, seq_len, self.num_heads,
                                self.head_size)
-                value = value.repeat_interleave(self.num_queries_per_kv, dim=-2)
+                value = value.repeat_interleave(self.num_queries_per_kv,
+                                                dim=-2)
                 value = value.view(batch_size, seq_len, self.num_heads,
                                    self.head_size)
             output = torch.ops.xla.flash_attention(
