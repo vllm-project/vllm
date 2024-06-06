@@ -454,7 +454,7 @@ class ModelWrapper(nn.Module):
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         logits = logits.div_(t.unsqueeze(dim=1))
-        # TODO(woosuk): Support top-p sampling.
+        logits = _apply_top_p(logits, p)
         probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
         # FIXME(woosuk): best_of > 1 is not supported.
         next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(dim=1)
@@ -479,3 +479,22 @@ def _get_padded_batch_size(batch_size: int) -> int:
         return 8
     else:
         return ((batch_size + 15) // 16) * 16
+
+
+def _apply_top_p(logits: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+
+    # Apply top-p.
+    probs_sort = logits_sort.softmax(dim=-1)
+    probs_sum = probs_sort.cumsum(dim=-1)
+    top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+    # at least one
+    top_p_mask[:, -1] = False
+    logits_sort.masked_fill_(top_p_mask, -float("inf"))
+
+    # Re-sort the probabilities.
+    src = torch.arange(logits_idx.shape[-1],
+                       device=logits_idx.device).expand_as(logits_idx)
+    logits_idx_inv = src.scatter(dim=-1, index=logits_idx, src=src)
+    logits = torch.gather(logits_sort, dim=-1, index=logits_idx_inv)
+    return logits
