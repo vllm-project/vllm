@@ -1342,7 +1342,8 @@ async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert embeddings.usage.prompt_tokens == 17
     assert embeddings.usage.total_tokens == 17
 
-async def test_completion_stream_options(server, client: openai.AsyncOpenAI, 
+
+async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
                                          model_name: str):
     prompt = "What is the capital of France?"
 
@@ -1400,9 +1401,9 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
     assert last_message.usage is not None
     assert last_message.usage.prompt_tokens > 0
     assert last_message.usage.completion_tokens > 0
-    assert (last_message.usage.total_tokens == 
-            last_message.usage.prompt_tokens + 
-            last_message.usage.completion_tokens)
+    assert (
+        last_message.usage.total_tokens == last_message.usage.prompt_tokens +
+        last_message.usage.completion_tokens)
     assert last_message.choices == []
 
     # Test stream=False, stream_options=None
@@ -1417,8 +1418,8 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
     assert response.usage is not None
     assert response.usage.prompt_tokens > 0
     assert response.usage.completion_tokens > 0
-    assert (response.usage.total_tokens == 
-            response.usage.prompt_tokens + response.usage.completion_tokens)
+    assert (response.usage.total_tokens == response.usage.prompt_tokens +
+            response.usage.completion_tokens)
 
     # Test stream=False, stream_options={"include_usage": False}
     response = await client.completions.create(
@@ -1443,7 +1444,7 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
     assert response.usage is not None
     assert response.usage.prompt_tokens > 0
     assert response.usage.completion_tokens > 0
-    assert (response.usage.total_tokens == response.usage.prompt_tokens + 
+    assert (response.usage.total_tokens == response.usage.prompt_tokens +
             response.usage.completion_tokens)
 
 

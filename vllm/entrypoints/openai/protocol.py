@@ -96,8 +96,10 @@ class UsageInfo(OpenAIBaseModel):
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
 
+
 class StreamOptions(OpenAIBaseModel):
     include_usage: Optional[bool]
+
 
 class ResponseFormat(OpenAIBaseModel):
     # type must be "json_object" or "text"
@@ -315,6 +317,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     "`top_logprobs` must be a value in the interval [0, 20].")
         return data
 
+
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
@@ -474,7 +477,8 @@ class CompletionRequest(OpenAIBaseModel):
     @classmethod
     def validate_stream_options(cls, data):
         if data.get("stream_options") and not data.get("stream"):
-            raise ValueError("Stream options can only be defined when stream is True.")
+            raise ValueError(
+                "Stream options can only be defined when stream is True.")
         return data
 
 
