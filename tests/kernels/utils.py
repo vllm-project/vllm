@@ -246,8 +246,9 @@ def make_qkv(
                      decode_kv_seq_lens)
 
 
-def pack_tensor(unpacked_tensor: torch.Tensor, seq_lens: List[int],
-                device: Union[torch.device, str]) -> tuple:
+def pack_tensor(
+        unpacked_tensor: torch.Tensor, seq_lens: List[int],
+        device: Union[torch.device, str]) -> tuple[torch.Tensor, List[int]]:
     '''
     Pack a batch_size x padded_seq_len x num_heads x head_size tensor into an
     unpadded number_of_tokens x num_heads x head_size tensor, where
@@ -355,9 +356,11 @@ def make_backend(backend_name: str) -> AttentionBackend:
         f"Unrecognized backend_name {backend_name} for unit test")
 
 
-def _make_metadata_tensors(seq_lens: List[int], context_lens: List[int],
-                           encoder_seq_lens: List[int],
-                           device: Union[torch.device, str]) -> tuple:
+def _make_metadata_tensors(
+    seq_lens: List[int], context_lens: List[int], encoder_seq_lens: List[int],
+    device: Union[torch.device, str]
+) -> tuple[torch.Tensor, torch.Tensor, int, int, Optional[List[int]],
+           torch.Tensor, int]:
     '''
     Build scalar & tensor values required to build attention metadata structure.
 
@@ -500,10 +503,11 @@ def split_slot_mapping(slot_mapping_list: torch.Tensor, seq_lens: List[int],
            maybe_make_long_tensor(decode_slot_mapping, device)
 
 
-def make_block_tables_slot_mapping(block_size: int,
-                                   seq_lens: List[int],
-                                   device: Union[torch.device, str],
-                                   block_base_addr: int = 0) -> tuple:
+def make_block_tables_slot_mapping(
+        block_size: int,
+        seq_lens: List[int],
+        device: Union[torch.device, str],
+        block_base_addr: int = 0) -> tuple[torch.Tensor, List[int], int]:
     '''
     Construct fake block tables & slot mappings.
 

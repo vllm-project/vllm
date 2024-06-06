@@ -1,9 +1,11 @@
 """
-Test
+Tests:
 
-* Encoder attention
-* Decoder self-attention
-* Encoder/decoder cross-attention
+* E2E Encoder attention + Decoder self-attention +
+      Encoder/decoder cross-attention
+* Confirm enc/dec models will fail for chunked prefill
+* Confirm enc/dec models will fail for prefix caching
+
 """
 
 from collections import namedtuple
@@ -346,7 +348,8 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
                                            test_pt: TestPoint,
                                            test_rsrcs: TestResources,
                                            block_base_addr: Optional[int]=0) \
-                                            -> tuple:
+                                            -> tuple[PhaseTestParameters,
+                                                     PhaseTestParameters]:
     '''
     Set up test vectors & data structures for cross-attention test.
 
@@ -866,13 +869,13 @@ def test_backend_fails_for_chunked_prefill_enc_dec(num_heads: int,
 
     dec_qkv, \
     prephase_dec_test_params, \
-    decphase_dec_test_params, \
+    _, \
     cross_block_base_addr = _decoder_attn_setup(test_pt,test_rsrcs)
 
     # Cross-attention setup
 
     prephase_cross_test_params, \
-    decphase_cross_test_params, \
+    _, \
     = _enc_dec_cross_attn_setup_reuses_query(dec_qkv,
                                              enc_test_params,
                                              prephase_dec_test_params,
@@ -908,13 +911,6 @@ def test_backend_fails_for_chunked_prefill_enc_dec(num_heads: int,
 
     # PREFILL: self-attention test
 
-    # The following test conditions could in principle be a
-    # standalone test, however the test setup is
-    # so involved that it is easier
-    # to piggyback off of the test vectors & other data structures
-    # created for testing decode-phase encoder/decoder cross-
-    # attention above.
-    # ----
     # Set up a contrived scenario where the attention metadata
     # is configured for chunked prefill & encoder/decoder cross-
     # attention. Required that this triggers a NotImplementedError.
@@ -1001,7 +997,7 @@ def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
 
     dec_qkv, \
     prephase_dec_test_params, \
-    decphase_dec_test_params, \
+    _, \
     cross_block_base_addr = _decoder_attn_setup(test_pt,test_rsrcs)
 
     # Cross-attention setup
@@ -1043,13 +1039,6 @@ def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
 
     # PREFILL: self-attention test
 
-    # The following test conditions could in principle be a
-    # standalone test, however the test setup is
-    # so involved that it is easier
-    # to piggyback off of the test vectors & other data structures
-    # created for testing decode-phase encoder/decoder cross-
-    # attention above.
-    # ----
     # Set up a contrived scenario where the attention metadata
     # is configured for chunked prefill & encoder/decoder cross-
     # attention. Required that this triggers a NotImplementedError.
@@ -1060,18 +1049,6 @@ def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
     # of prefill and decode tokens.
     with pytest.raises(NotImplementedError) as exc_info:
         # Fake a non-empty block_tables
-        # prephase_dec_test_params.kv_mmap.block_tables = \
-        #   decphase_dec_test_params.kv_mmap.block_tables
-
-        # prefix_block_tables = decphase_dec_test_params.kv_mmap.block_tables
-
-        # prefix_kv_mmap = KVMemoryMap(prefix_block_tables,
-        #             prephase_dec_test_params.kv_mmap.slot_mapping)
-
-        # prefix_test_params = PhaseTestParameters(
-        #     prephase_dec_test_params.packed_qkvo,
-        #     prefix_kv_mmap
-        # )
 
         num_seqs = len(
             prephase_dec_test_params.packed_qkvo.packed_qkv.q_seq_lens)

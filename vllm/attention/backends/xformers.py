@@ -281,8 +281,6 @@ def _get_attn_bias(attn_metadata: XFormersMetadata) -> \
     Extract appropriate attention bias from attention metadata
     according to attention type.
 
-    Depends on attn_metadata having a valid attention_type.
-
     Arguments:
 
     * attn_metadata: Attention metadata structure associated with attention

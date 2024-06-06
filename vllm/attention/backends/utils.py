@@ -1,7 +1,6 @@
 """Attention utils"""
 
-# from vllm.attention import AttentionMetadata
-# from vllm.attention.backends.xformers import XFormersMetadata
+from vllm.attention import AttentionMetadata
 from vllm.utils import is_hip
 
 # Error string(s) for encoder/decoder
@@ -34,7 +33,8 @@ def fail_encoder_decoder_prefix_caching() -> None:
     raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING)
 
 
-def check_hip_or_chunked_prefill_attention_encdec(attn_metadata) -> None:
+def check_hip_or_chunked_prefill_attention_encdec(
+        attn_metadata: AttentionMetadata) -> None:
     '''
     Check for unsupported encoder/decoder scenarios when invoking
     attention.
@@ -47,13 +47,6 @@ def check_hip_or_chunked_prefill_attention_encdec(attn_metadata) -> None:
         # AMD ROCm/HIP support currently not implemented for
         # encoder/decoder models
         raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
-
-    # if not isinstance(attn_metadata, XFormersMetadata):
-    #     # Right now encoder/decoder support is only implemented
-    #     # for the XFormers backend. Pretty unlikely to encounter
-    #     # this case currently given this function will be invoked inside
-    #     # xFormers backend.
-    #     raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_NON_XFORMERS_BACKEND)
 
     if attn_metadata.num_prefill_tokens > 0 and \
             attn_metadata.num_decode_tokens > 0:
