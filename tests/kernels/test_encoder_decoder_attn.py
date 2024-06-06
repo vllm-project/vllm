@@ -6,11 +6,12 @@ Test
 * Encoder/decoder cross-attention
 """
 
+from collections import namedtuple
 from typing import Optional
 
 import pytest
 import torch
-from collections import namedtuple
+
 from tests.kernels.utils import *
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionType
@@ -30,24 +31,14 @@ CUDA_DEVICE = "cuda:0"
 MAX_DEC_SEQ_LENS = [128]
 MAX_ENC_SEQ_LENS = [128]
 
-
-TestPoint = namedtuple("TestPoint",[
-    "num_heads",
-    "head_size",
-    "backend_name",
-    "batch_size",
-    "block_size",
-    "max_dec_seq_len",
-    "max_enc_seq_len",
-    "num_blocks"
+TestPoint = namedtuple("TestPoint", [
+    "num_heads", "head_size", "backend_name", "batch_size", "block_size",
+    "max_dec_seq_len", "max_enc_seq_len", "num_blocks"
 ])
 
-TestResources = namedtuple("TestResources",[
-    "scale",
-    "attn_backend",
-    "attn",
-    "kv_cache"
-])
+TestResources = namedtuple("TestResources",
+                           ["scale", "attn_backend", "attn", "kv_cache"])
+
 
 def _make_test_resources(test_pt: TestPoint) -> TestResources:
     '''
@@ -81,10 +72,7 @@ def _make_test_resources(test_pt: TestPoint) -> TestResources:
     )
     if test_pt.num_blocks is None or test_pt.num_heads is None:
         # Caller does not require a KV cache
-        return TestResources(scale, 
-                            attn_backend, 
-                            attn, 
-                            None)
+        return TestResources(scale, attn_backend, attn, None)
 
     # Construct KV cache
     kv_cache = make_kv_cache(test_pt.num_blocks,
@@ -92,25 +80,14 @@ def _make_test_resources(test_pt: TestPoint) -> TestResources:
                              test_pt.head_size,
                              test_pt.block_size,
                              device=CUDA_DEVICE)
-    return TestResources(scale, 
-                         attn_backend, 
-                         attn, 
-                         kv_cache)
+    return TestResources(scale, attn_backend, attn, kv_cache)
 
 
 def _encoder_attn_setup(test_pt: TestPoint, test_rsrcs: TestResources) \
                           -> PhaseTestParameters:
-    (num_heads,
-    head_size,
-    _,
-    batch_size,
-    _,
-    _,
-    max_q_seq_len,
-    _) = test_pt
+    (num_heads, head_size, _, batch_size, _, _, max_q_seq_len, _) = test_pt
 
-    scale=test_rsrcs.scale
-
+    scale = test_rsrcs.scale
     '''
     Set up test vectors & data structures for encoder attention test.
 
@@ -184,7 +161,6 @@ def _decoder_attn_setup(
     test_rsrcs: TestResources,
     block_base_addr: int = 0,
 ) -> tuple[QKVInputs, PhaseTestParameters, PhaseTestParameters, int]:
-
     '''
     Set up test vectors & data structures for self-attention test.
 
@@ -262,13 +238,7 @@ def _decoder_attn_setup(
     * max_block_idx: highest block address in the self-attention block-table
     '''
 
-    (num_heads,
-     head_size,
-     _,
-     batch_size,
-     block_size,
-     max_q_seq_len,
-     _,
+    (num_heads, head_size, _, batch_size, block_size, max_q_seq_len, _,
      _) = test_pt
 
     scale = test_rsrcs.scale
@@ -372,7 +342,6 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
                                            test_rsrcs: TestResources,
                                            block_base_addr: Optional[int]=0) \
                                             -> tuple:
-
     '''
     Set up test vectors & data structures for cross-attention test.
 
@@ -434,14 +403,8 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
     * max_block_idx: highest block address in the cross-attention block-table
     '''
 
-    (num_heads,
-     head_size,
-     _,
-     batch_size,
-     block_size,
-     max_decoder_seq_len,
-     max_encoder_seq_len,
-     _) = test_pt
+    (num_heads, head_size, _, batch_size, block_size, max_decoder_seq_len,
+     max_encoder_seq_len, _) = test_pt
 
     scale = test_rsrcs.scale
 
@@ -578,7 +541,6 @@ def _run_decoder_self_attention_test(test_rsrcs: TestResources,
                                      decoder_test_params: PhaseTestParameters,
                                      attn_metadata: AttentionMetadata,
                                      attn_type: AttentionType) -> torch.Tensor:
-
     '''
     Run decoder self-attention test.
 
@@ -601,7 +563,7 @@ def _run_decoder_self_attention_test(test_rsrcs: TestResources,
     '''
     assert attn_type == AttentionType.DECODER
     attn = test_rsrcs.attn
-    kv_cache = test_rsrcs.kv_cache    
+    kv_cache = test_rsrcs.kv_cache
     attn_metadata.attention_type = attn_type
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
     return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value,
@@ -609,11 +571,9 @@ def _run_decoder_self_attention_test(test_rsrcs: TestResources,
 
 
 def _run_encoder_decoder_cross_attention_test(
-        test_rsrcs: TestResources,
-        decoder_test_params: PhaseTestParameters,
+        test_rsrcs: TestResources, decoder_test_params: PhaseTestParameters,
         cross_test_params: PhaseTestParameters,
         attn_metadata: AttentionMetadata) -> torch.Tensor:
-
     '''
     Run encoder/decoder cross-attention test.
 
@@ -663,6 +623,7 @@ def _assert_actual_match_ideal(test_params: PhaseTestParameters,
     assert torch.allclose(ideal_output,
                           output_under_test.view_as(ideal_output))
 
+
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -675,7 +636,6 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         num_heads: int, head_size: int, backend_name: str, batch_size: int,
         block_size: int, max_dec_seq_len: int, max_enc_seq_len: int,
         monkeypatch) -> None:
-
     '''
     Encoder/decoder attention test:
 
@@ -705,14 +665,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     # Force Attention wrapper backend
     override_backend_env_variable(monkeypatch, backend_name)
 
-    test_pt = TestPoint(num_heads,
-                        head_size,
-                        backend_name,
-                        batch_size,
-                        block_size,
-                        max_dec_seq_len,
-                        max_dec_seq_len,
-                        4096)
+    test_pt = TestPoint(num_heads, head_size, backend_name, batch_size,
+                        block_size, max_dec_seq_len, max_dec_seq_len, 4096)
 
     # Attention scale factor, attention backend instance, attention wrapper
     # instance, KV cache init
@@ -726,7 +680,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     # anyway but are required to be present & valid by the
     # backend.
 
-    enc_test_params = _encoder_attn_setup(test_pt,test_rsrcs)
+    enc_test_params = _encoder_attn_setup(test_pt, test_rsrcs)
 
     # Decoder self-attention setup
 
@@ -859,8 +813,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     with pytest.raises(NotImplementedError) as exc_info:
         _run_encoder_decoder_cross_attention_test(test_rsrcs,
                                                   decphase_dec_test_params,
-                                                  None,
-                                                  decphase_attn_metadata)
+                                                  None, decphase_attn_metadata)
 
     # "Encoder decoder models do not currently support chunked prefill"
     assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL
