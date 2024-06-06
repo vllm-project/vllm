@@ -257,7 +257,7 @@ def broadcast_tensor_dict(
         # all happening on CPU. Therefore, we can use the CPU group.
         torch.distributed.broadcast_object_list([metadata_list],
                                                 src=src,
-                                                group=metadata_group)
+                                                group=group)
         async_handles = []
         for tensor in tensor_list:
             if tensor.numel() == 0:
@@ -267,7 +267,7 @@ def broadcast_tensor_dict(
                 # use metadata_group for CPU tensors
                 handle = torch.distributed.broadcast(tensor,
                                                      src=src,
-                                                     group=metadata_group,
+                                                     group=group,
                                                      async_op=True)
             else:
                 # use group for GPU tensors
@@ -283,7 +283,7 @@ def broadcast_tensor_dict(
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,
                                                 src=src,
-                                                group=metadata_group)
+                                                group=group)
         assert recv_metadata_list[0] is not None
         tensor_dict = {}
         async_handles = []
@@ -300,7 +300,7 @@ def broadcast_tensor_dict(
                     # use metadata_group for CPU tensors
                     handle = torch.distributed.broadcast(tensor,
                                                          src=src,
-                                                         group=metadata_group,
+                                                         group=group,
                                                          async_op=True)
                 else:
                     # use group for GPU tensors
