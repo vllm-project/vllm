@@ -1,10 +1,6 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-from compressed_tensors.quantization.lifecycle.apply import (
-    find_first_name_or_class_match)
-from compressed_tensors.quantization.quant_args import (QuantizationArgs,
-                                                        QuantizationStrategy)
 from pydantic import BaseModel
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
@@ -13,6 +9,8 @@ from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme, CompressedTensorsW8A8DynamicToken,
     CompressedTensorsW8A8StaticTensor)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    QuantizationArgs, QuantizationStrategy, find_first_name_or_class_match)
 
 
 class CompressedTensorsConfig(QuantizationConfig):
