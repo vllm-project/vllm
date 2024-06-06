@@ -1,7 +1,6 @@
 from typing import Optional
 
 import torch
-import torch.jit
 
 
 class SpecDecodeBaseSampler():

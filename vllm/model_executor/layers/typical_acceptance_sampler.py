@@ -35,14 +35,13 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
             threshold in typical acceptance sampling. Typically defaults to
             sqrt of posterior_threshold and is set to 0.3.
         """
-        self._posterior_threshold = posterior_threshold
-        self._posterior_alpha = posterior_alpha
-        super().__init__()
         SpecDecodeBaseSampler.__init__(
             self,
             disable_bonus_tokens=disable_bonus_tokens,
             strict_mode=strict_mode)
         nn.Module.__init__(self)
+        self._posterior_threshold = posterior_threshold
+        self._posterior_alpha = posterior_alpha
 
     def forward(
         self,
@@ -140,7 +139,7 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         device = target_probs.device
         candidates_prob = torch.gather(
             target_probs, dim=-1,
-            index=draft_token_ids.unsqueeze(-1).to(device)).squeeze(-1)
+            index=draft_token_ids.unsqueeze(-1)).squeeze(-1)
         posterior_entropy = -torch.sum(
             target_probs * torch.log(target_probs + 1e-5), dim=-1)
         threshold = torch.minimum(
@@ -178,7 +177,7 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         """
         max_indices = torch.argmax(target_probs[:, 0, :], dim=1)
         output = -torch.ones((target_probs.shape[0], target_probs.shape[1]),
-                             dtype=self.token_id_dtype).to(
-                                target_probs.device)
+                             dtype=self.token_id_dtype,
+                             device=target_probs.device)
         output[:, 0] = max_indices
         return output
