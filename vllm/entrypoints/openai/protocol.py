@@ -660,9 +660,7 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameteters of the request.
-    body: Union[
-        ChatCompletionRequest,
-    ]
+    body: Union[ChatCompletionRequest, ]
 
 
 class BatchRequestOutput(OpenAIBaseModel):
