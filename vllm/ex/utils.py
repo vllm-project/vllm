@@ -449,4 +449,4 @@ def tag_side_effects(g: torch.fx.Graph):
             _, s = matched_schemas[0]
             if s.is_mutable:
                 torch.fx.node.has_side_effect(n.target)
-                print(f"MUTABLE SIG {n} {s}")
+                print(f"MUTABLE SIG {n.target} {s}")

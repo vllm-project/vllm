@@ -164,9 +164,9 @@ class backend_class:
 
     def __call__(self, gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]) -> Callable:
 
-        from torch.fx.experimental.proxy_tensor import make_fx
-        from torch._functorch.eager_transforms import functionalize
-        from torch.fx import symbolic_trace
+        #from torch.fx.experimental.proxy_tensor import make_fx
+        #from torch._functorch.eager_transforms import functionalize
+        #from torch.fx import symbolic_trace
 
         # Must make a copy so that inductor backend doesn't choke.
         gm = copy.copy(gm)
@@ -199,7 +199,9 @@ class backend_class:
 
         ShapeProp(gm).propagate(*example_inputs)
 
-        part_gm, parts = partition_graph(gm, example_inputs)
+        #part_gm, parts = partition_graph(gm, example_inputs)
+        part_gm = gm
+        parts = [Partition(nodes=part_gm.graph.nodes)]
 
         logger.debug(f"Partitioned module: {part_gm.print_readable(False)}")
         logger.debug(f"parts: {parts}")
@@ -220,8 +222,13 @@ class backend_class:
             mig = ModuleInputGenerator(part_gm, fake_mode)
             mig.propagate(*example_inputs)
 
+
+            part_gm = optimize(backend_class.cc, fgen, part_gm, example_inputs)
+
+            # TODO: the partioner cannot handle side effect nodes?
+
             for name, m in part_gm.named_modules():
-                if module_in_partitions(parts, m):
+                if False and module_in_partitions(parts, m):
                     assert name in mig.module_args
                     module_inputs = mig.module_args[name][0]
 
