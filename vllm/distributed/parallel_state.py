@@ -546,15 +546,6 @@ def init_distributed_environment(
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
 
-    # A small all_reduce for warmup.
-    data = torch.zeros(1)
-    if torch.cuda.is_available():
-        data = data.to(device=f"cuda:{local_rank}")
-    _WORLD.all_reduce(data)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    del data
-
 
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
