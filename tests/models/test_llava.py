@@ -65,13 +65,12 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     return hf_input_ids, hf_output_str
 
 
-@pytest.mark.parametrize("worker_use_ray", [False])
+# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
-                model_and_config, dtype: str, max_tokens: int,
-                worker_use_ray: bool) -> None:
+                model_and_config, dtype: str, max_tokens: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -96,7 +95,6 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
 
     vllm_model = vllm_runner(model_id,
                              dtype=dtype,
-                             worker_use_ray=worker_use_ray,
                              enforce_eager=True,
                              **vlm_config.as_cli_args_dict())
     vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
@@ -112,7 +110,3 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
-
-
-# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
-# (Requires multiple GPUs)
