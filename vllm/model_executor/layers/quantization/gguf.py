@@ -1,8 +1,11 @@
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
+from gguf.constants import GGML_QUANT_SIZES
+from torch.nn.parameter import Parameter, UninitializedParameter
+from transformers.integrations.ggml import load_dequant_gguf_tensor
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -55,7 +58,6 @@ class GGUFLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: GGUFConfig):
         self.quant_config = quant_config
-        self.block_size = 32
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
@@ -63,36 +65,41 @@ class GGUFLinearMethod(LinearMethodBase):
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         output_size_per_partition = sum(output_partition_sizes)
-        qweight = Parameter(torch.empty(output_size_per_partition,
-                                       input_size_per_partition,
-                                       dtype=torch.int8),
-                           requires_grad=False)
+
+        qweight = UninitializedParameter(requires_grad=False)
         set_weight_attrs(qweight, {"input_dim": 1, "output_dim": 0})
+        set_weight_attrs(qweight, {"use_gguf": True})
+        set_weight_attrs(qweight, {"tensor_shape": (output_size_per_partition, input_size_per_partition)})
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qweight", qweight)
 
-        scales = Parameter(
-            torch.empty(
-                output_size_per_partition,
-                input_size_per_partition // self.block_size,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(scales, {
-            "input_dim": 1,
-            "output_dim": 0,
-        })
-        set_weight_attrs(scales, extra_weight_attrs)
-        layer.register_parameter("scales", scales)
+        qweight_type = Parameter(torch.empty(1, dtype=torch.uint8), requires_grad=False)
+        set_weight_attrs(qweight_type, {"ignore_warning": True})
+        set_weight_attrs(qweight_type, extra_weight_attrs)
+        layer.register_parameter("qweight_type", qweight_type)
 
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # dequantized for Q4_0 and Q8_0
-        shape = layer.qweight.shape
-        out = layer.qweight.reshape(-1, self.block_size) * layer.scales.reshape(
-            -1, 1)
-        out = F.linear(x, out.reshape(shape), bias)
+        shard_id = getattr(layer.qweight, "shard_id", None)
+        shard_size = getattr(layer.qweight, "shard_size", None)
+        # we need to slice merged weight to pass right data
+        if shard_id and shard_size:
+            out = []
+            block_size, type_size = GGML_QUANT_SIZES[layer.qweight_type.data.item()]
+            offset = 0
+            # dequantize shard weights respectively
+            for id in shard_id:
+                shard_weight = layer.qweight[offset:offset+shard_size[id], :]
+                # the shape of dequantized shard weight
+                shard_shape = (shard_weight.shape[0], shard_weight.shape[1]//type_size*block_size)
+                out.append(load_dequant_gguf_tensor(shard_shape[::-1], layer.qweight_type, shard_weight.data.cpu().numpy().flatten()))
+                offset += shard_size[id]
+            out = np.concatenate(out, axis=0)
+        else:
+            shape = layer.qweight.tensor_shape
+            out = load_dequant_gguf_tensor(shape[::-1], layer.qweight_type, layer.qweight.data.cpu().numpy().flatten())
+        out = torch.tensor(out.copy(), dtype=x.dtype, device=x.device)
+        out = F.linear(x, out, bias)
         return out

@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
+from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -357,6 +357,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
+        # initilize GGUF param after we know the quantize type
+        use_gguf = getattr(param, "use_gguf", False)
+        if isinstance(param, UninitializedParameter) and use_gguf:
+            from gguf.constants import GGML_QUANT_SIZES
+
+            ori_shape = param.tensor_shape
+            weight_type = self.qweight_type.data.item()
+            block_size, type_size = GGML_QUANT_SIZES[weight_type]
+            q_shape = (ori_shape[0], ori_shape[1]//block_size*type_size)
+            param.materialize(q_shape, dtype=loaded_weight.dtype)
+            set_weight_attrs(param, {"shard_id": []})
+            set_weight_attrs(param, {"shard_size": {}})
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
@@ -436,6 +448,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size = loaded_weight.shape[output_dim]
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
+            
+            if use_gguf:
+                shard_size = loaded_weight.shape[output_dim]
+                shard_offset = loaded_weight.shape[output_dim] * \
+                    loaded_shard_id
+                param.shard_id.append(loaded_shard_id)
+                param.shard_size[loaded_shard_id] = loaded_weight.shape[output_dim]
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
@@ -549,6 +568,20 @@ class QKVParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[str] = None):
+        # initilize GGUF param after we know the quantize type
+        use_gguf = getattr(param, "use_gguf", False)
+        if isinstance(param, UninitializedParameter):
+            from gguf.constants import GGML_QUANT_SIZES
+
+            ori_shape = param.tensor_shape
+            weight_type = self.qweight_type.data.item()
+            block_size, type_size = GGML_QUANT_SIZES[weight_type]
+            q_shape = (ori_shape[0], ori_shape[1]//block_size*type_size)
+            param.materialize(q_shape, dtype=loaded_weight.dtype)
+            # Use for gguf runtime dequantize
+            set_weight_attrs(param, {"shard_id": []})
+            set_weight_attrs(param, {"shard_size": {}})
+
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         # Special case for AQLM codebooks.
@@ -651,6 +684,10 @@ class QKVParallelLinear(ColumnParallelLinear):
                 }
                 shard_size, shard_offset = adjust_bitsandbytes_shard(
                     param, orig_qkv_offsets, loaded_shard_id)
+            
+            if use_gguf:
+                param.shard_id.append(loaded_shard_id)
+                param.shard_size[loaded_shard_id] = loaded_weight.shape[output_dim]
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
@@ -770,6 +807,12 @@ class RowParallelLinear(LinearBase):
 
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
+
+        # materialize GGUF UninitializedParameter
+        if isinstance(param, UninitializedParameter):
+            param.materialize(loaded_weight.shape,
+                                  dtype=loaded_weight.dtype)
+
         param_data = param.data
         if input_dim is not None:
             shard_size = param_data.shape[input_dim]

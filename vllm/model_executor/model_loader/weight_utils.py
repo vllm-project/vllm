@@ -23,7 +23,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
-from vllm.model_executor.model_loader.gguf import load_gguf_tensor
 
 logger = init_logger(__name__)
 
@@ -381,20 +380,6 @@ def pt_weights_iterator(
         torch.cuda.empty_cache()
 
 
-def gguf_dequant_weights_iterator(
-        gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
-    """Iterate over the dequant weights in the model gguf files."""
-    from gguf import GGUFReader
-
-    reader = GGUFReader(gguf_file)
-    for tensor in reader.tensors:
-        name = tensor.name
-        weights = load_dequant_gguf_tensor(tensor.shape, tensor.tensor_type,
-                                           tensor.data)
-        weights = torch.from_numpy(weights.copy())
-        yield name, weights
-
-
 def gguf_quant_weights_iterator(
         gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the quant weights in the model gguf files."""
@@ -403,16 +388,20 @@ def gguf_quant_weights_iterator(
     reader = GGUFReader(gguf_file)
     for tensor in reader.tensors:
         name = tensor.name
-        scales, quants = load_gguf_tensor(tensor)
-        # for F32, scales is None
-        if scales is not None and "weight" in name:
-            scales_name = name.replace("weight", "scales")
-            quants_name = name.replace("weight", "qweight")
-            for new_name, param in zip([scales_name, quants_name],
-                                       [scales, quants]):
+        shape = tensor.shape
+        weight = tensor.data
+        weight_type = tensor.tensor_type
+        # for F32, no need to rename
+        if weight_type.name != "F32" and "blk" in name:
+            weight_name = name.replace("weight", "qweight")
+            weight_type_name = name.replace("weight", "qweight_type")
+            for i, (new_name, param) in enumerate(zip([weight_type_name, weight_name],
+                                        [weight_type, weight])):
+                param = torch.tensor(param).view(shape[-1], -1) if i==1 else torch.tensor(param)
                 yield new_name, param
         else:
-            yield name, quants
+            weight = load_dequant_gguf_tensor(shape, weight_type, weight)
+            yield name, torch.from_numpy(weight.copy())
 
 
 def kv_cache_scales_loader(
