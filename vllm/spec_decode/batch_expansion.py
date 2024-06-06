@@ -98,6 +98,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             probs=all_probs,
             token_ids=all_tokens,
             logprobs=spec_logprobs,
+            hidden_states=target_sampler_output.hidden_states,
         )
 
     def _expand_batch(

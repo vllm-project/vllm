@@ -35,11 +35,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     speculative_config = kwargs.get("speculative_config")
     assert speculative_config is not None
 
-    if (speculative_config.draft_model_config.hf_config.model_type ==
-            "mlp_speculator"):
-        target_worker = HiddenStatesWorker(*args, **kwargs)
-    else:
-        target_worker = Worker(*args, **kwargs)
+    target_worker = Worker(*args, **kwargs)
 
     draft_worker_kwargs = kwargs.copy()
     # Override draft-model specific worker args.
@@ -163,6 +159,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # Lazy initiazliation.
         self.scorer: SpeculativeScorer
+
+        # Hidden states from target model to pass to proposer
+        # in the subsequent step.
+        self.previous_hidden_states: Optional[torch.Tensor] = None
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -348,6 +348,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
+        self.previous_hidden_states = sampler_output.hidden_states
 
         # Clear device tensors from sampler output. This reduces communication
         # overhead when the engine runs in a different process than the workers.
@@ -378,7 +379,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         for _ in range(max(num_lookahead_slots, 1)):
             self.proposer_worker.execute_model()
 
-        self.scorer_worker.execute_model()
+        self.scorer_worker.execute_model()  #TODO hidden states tbd
         return True
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
@@ -395,6 +396,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
+        # Pass last hidden states from target model to proposer
+        execute_model_req.previous_hidden_states = self.previous_hidden_states
+        self.previous_hidden_states = None
+
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(execute_model_req)
 
@@ -402,6 +407,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             execute_model_req,
             proposals,
         )
+
+        # Store hidden states from target model for subsequent decode step
+        self.previous_hidden_states = proposal_scores.hidden_states
 
         accepted_token_ids, target_logprobs = self._verify_tokens(
             execute_model_req.seq_group_metadata_list, proposal_scores,

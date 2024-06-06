@@ -68,6 +68,8 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=nonzero_proposal_len_seqs,
                 num_lookahead_slots=proposal_len,
+                previous_hidden_states=execute_model_req.
+                previous_hidden_states,  ##TODO splitting here TBD
             )
             maybe_sampler_output, transposed = self._worker.sampler_output(
                 execute_model_req=nonzero_execute_model_req,

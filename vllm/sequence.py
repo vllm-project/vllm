@@ -791,6 +791,9 @@ class SamplerOutput:
     # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
+    # Optional last hidden states from the model.
+    hidden_states: Optional[torch.Tensor] = None
+
     def __getitem__(self, idx: int):
         return self.outputs[idx]
 
@@ -854,6 +857,8 @@ class ExecuteModelRequest:
     num_lookahead_slots: int = 0
     # The number of requests in the running queue.
     running_queue_size: int = 0
+    # Optional hidden states from prior step.
+    previous_hidden_states: Optional[torch.Tensor] = None
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -866,4 +871,5 @@ class ExecuteModelRequest:
             blocks_to_copy=self.blocks_to_copy.copy(),
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
+            previous_hidden_states=self.previous_hidden_states,
         )

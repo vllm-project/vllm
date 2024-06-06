@@ -86,13 +86,11 @@ class MLPSpeculator(nn.Module):
                                                 config.vocab_size, 1.0)
         self.sampler = Sampler()
 
-        self.previous_hidden_state: Optional[torch.Tensor] = None
-        self.accepted_token_lengths: Optional[torch.Tensor] = None
-        self.first_decode_step: bool = False
-
     def generate_proposals(
         self,
         input_ids: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        accepted_token_lengths: Optional[torch.Tensor],
         sample_len: int,
         sampling_metadata: SamplingMetadata,
     ) -> List[SamplerOutput]:
@@ -101,21 +99,18 @@ class MLPSpeculator(nn.Module):
                              f"{self.n_predict} future tokens, {sample_len} "
                              "were requested")
 
-        previous_hidden_state = self.previous_hidden_state
-        self.previous_hidden_state = None
         num_predict_tokens = min(sample_len, self.n_predict)
 
-        if self.first_decode_step:
-            self.first_decode_step = False
-        else:
-            previous_hidden_state = previous_hidden_state.reshape(
-                -1, num_predict_tokens + 1, previous_hidden_state.size(1))
-            previous_hidden_state = previous_hidden_state.gather(
-                1, (self.accepted_token_lengths - 1)[:, None, None].expand(
-                    -1, 1, previous_hidden_state.size(2))).squeeze(1)  # b x d
+        if accepted_token_lengths is not None:
+            # This is skipped for the first decode step
+            previous_hidden_states = previous_hidden_states.reshape(
+                -1, num_predict_tokens + 1, previous_hidden_states.size(1))
+            previous_hidden_states = previous_hidden_states.gather(
+                1, (accepted_token_lengths - 1)[:, None, None].expand(
+                    -1, 1, previous_hidden_states.size(2))).squeeze(1)  # b x d
 
         # b x 1 x d
-        previous_hidden_state = previous_hidden_state.unsqueeze(1)
+        previous_hidden_states = previous_hidden_states.unsqueeze(1)
 
         # b x 1
         last_tokens = input_ids.unsqueeze(1)
@@ -126,19 +121,19 @@ class MLPSpeculator(nn.Module):
 
             # Project and predict
             z = self.emb[head_index](last_tokens)  # b k d
-            state = self.proj[head_index](previous_hidden_state)
+            states = self.proj[head_index](previous_hidden_states)
 
             # Weighted add of state_weight*state and emb_weight*z
             # Let subsequent LN take care of denominator
             # state_weight is close to 1, so shouldn't be any precision issues
-            state.add_(z, alpha=self.emb_weight / self.state_weight)
+            states.add_(z, alpha=self.emb_weight / self.state_weight)
 
-            state = self.activation(self.ln[head_index](state))  # b k d
+            states = self.activation(self.ln[head_index](states))  # b k d
             # TODO: not yet supporting top_k_tokens_per_head
-            previous_hidden_state = state
+            previous_hidden_states = states
 
-            logits = self.logits_processor(self.head[head_index].weight, state,
-                                           sampling_metadata)
+            logits = self.logits_processor(self.head[head_index].weight,
+                                           states, sampling_metadata)
 
             output = self.sampler(logits.flatten(0, 1), sampling_metadata)
             last_tokens = output.sampled_token_ids
