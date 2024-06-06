@@ -16,7 +16,9 @@ from tests.kernels.utils import *
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.utils import (
-    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL, STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
+    STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING, 
+    STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 from vllm.utils import is_hip, make_causal_mask, maybe_make_long_tensor
 
 HEAD_SIZES = [64, 256]
@@ -1006,7 +1008,7 @@ def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
     # Cross-attention setup
 
     prephase_cross_test_params, \
-    decphase_cross_test_params, \
+    _, \
     = _enc_dec_cross_attn_setup_reuses_query(dec_qkv,
                                              enc_test_params,
                                              prephase_dec_test_params,
@@ -1057,8 +1059,22 @@ def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
     # already; the line below sets up a chunked prefill
     # metadata configuration where there is nominally a mix
     # of prefill and decode tokens.
-    prephase_attn_metadata.num_decode_tokens = 1
     with pytest.raises(NotImplementedError) as exc_info:
+        # Fake a non-empty block_tables
+        # prephase_dec_test_params.kv_mmap.block_tables = \
+        #   decphase_dec_test_params.kv_mmap.block_tables
+        
+        # prefix_block_tables = decphase_dec_test_params.kv_mmap.block_tables
+
+        # prefix_kv_mmap = KVMemoryMap(prefix_block_tables,
+        #             prephase_dec_test_params.kv_mmap.slot_mapping)
+
+        # prefix_test_params = PhaseTestParameters(
+        #     prephase_dec_test_params.packed_qkvo,
+        #     prefix_kv_mmap
+        # )            
+
+        prephase_attn_metadata.block_tables = decphase_dec_test_params.kv_mmap.block_tables
 
         _run_decoder_self_attention_test(test_rsrcs,
                                          prephase_dec_test_params,
@@ -1066,4 +1082,4 @@ def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
                                          attn_type=AttentionType.DECODER)
 
     # "Encoder decoder models do not currently support chunked prefill"
-    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL
+    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING

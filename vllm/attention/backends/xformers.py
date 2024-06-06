@@ -15,6 +15,11 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
 
+from vllm.attention.backends.utils import (
+    check_hip_or_chunked_prefill_attention_encdec,
+    is_encoder_decoder_metadata,
+    fail_encoder_decoder_prefix_caching)
+
 logger = init_logger(__name__)
 
 
@@ -480,11 +485,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # seqlen datastructures we utilize
         attn_type = attn_metadata.attention_type
 
-        if attn_metadata.is_all_encoder_attn_metadata_set:
+        if is_encoder_decoder_metadata(attn_metadata):
             # Raise NotImplementedError for unsupported encoder/decoder
             # scenarios
-            from vllm.attention.backends.utils import (
-                check_hip_or_chunked_prefill_attention_encdec)
             check_hip_or_chunked_prefill_attention_encdec(attn_metadata)
 
         if (kv_cache is not None):
@@ -562,12 +565,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
 
+                if is_encoder_decoder_metadata(attn_metadata):
+                    fail_encoder_decoder_prefix_caching()
+
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to
                 # deal with different data types between KV and FP8 KV cache,
                 # to be addressed separately.
-                #
-                # TODO(afeldman-nm): support cross-attention
                 out = PagedAttention.forward_prefix(
                     query,
                     key,

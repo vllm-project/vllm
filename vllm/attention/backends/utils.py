@@ -1,28 +1,39 @@
 """Attention utils"""
 
-from vllm.attention import AttentionMetadata
-from vllm.attention.backends.xformers import XFormersMetadata
+# from vllm.attention import AttentionMetadata
+# from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.utils import is_hip
 
 # Error string(s) for encoder/decoder
 # unsupported attention scenarios
 
 STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
-"Encoder/decoder models " + \
-"currently do not support chunked prefill."
+"Chunked prefill is not currently " + \
+"supported with encoder/decoder models."
 
 STR_NOT_IMPL_ENC_DEC_ROCM_HIP = \
-"Encoder/decoder models currently" + \
-"do not support ROCm/HIP."
+"ROCm/HIP is not currently supported" + \
+"with encoder/decoder models."
 
 STR_NOT_IMPL_ENC_DEC_NON_XFORMERS_BACKEND = \
-"Encoder/decoder models currently support only the XFormers backend."
+"Currently only the XFormers backend " + \
+    "supports encoder/decoder models."
+
+STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING = \
+"Prefix caching is not currently supported " + \
+"with encoder/decoder models"
 
 # Check for unsupported encoder/decoder scenarios
 
 
+def is_encoder_decoder_metadata(attn_metadata) -> bool:
+    return attn_metadata.is_all_encoder_attn_metadata_set
+
+def fail_encoder_decoder_prefix_caching() -> None:
+    raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING)
+
 def check_hip_or_chunked_prefill_attention_encdec(
-        attn_metadata: AttentionMetadata):
+        attn_metadata) -> None:
     '''
     Check for unsupported encoder/decoder scenarios when invoking
     attention.
@@ -36,12 +47,12 @@ def check_hip_or_chunked_prefill_attention_encdec(
         # encoder/decoder models
         raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 
-    if not isinstance(attn_metadata, XFormersMetadata):
-        # Right now encoder/decoder support is only implemented
-        # for the XFormers backend. Pretty unlikely to encounter
-        # this case currently given this function will be invoked inside
-        # xFormers backend.
-        raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_NON_XFORMERS_BACKEND)
+    # if not isinstance(attn_metadata, XFormersMetadata):
+    #     # Right now encoder/decoder support is only implemented
+    #     # for the XFormers backend. Pretty unlikely to encounter
+    #     # this case currently given this function will be invoked inside
+    #     # xFormers backend.
+    #     raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_NON_XFORMERS_BACKEND)
 
     if attn_metadata.num_prefill_tokens > 0 and \
             attn_metadata.num_decode_tokens > 0:
