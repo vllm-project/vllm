@@ -44,8 +44,7 @@ def check_hip_or_chunked_prefill_attention_encdec(
         # xFormers backend.
         raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_NON_XFORMERS_BACKEND)
 
-    if attn_metadata.attention_type != AttentionType.DECODER \
-        and attn_metadata.num_prefill_tokens > 0 and \
+    if attn_metadata.num_prefill_tokens > 0 and \
             attn_metadata.num_decode_tokens > 0:
         # Encoder/decoder models are currently incompatible
         # with chunked prefill.

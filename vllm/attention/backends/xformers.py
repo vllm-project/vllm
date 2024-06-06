@@ -480,7 +480,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # seqlen datastructures we utilize
         attn_type = attn_metadata.attention_type
 
-        if attn_type != AttentionType.DECODER:
+        if attn_metadata.is_all_encoder_attn_metadata_set:
             # Raise NotImplementedError for unsupported encoder/decoder
             # scenarios
             from vllm.attention.backends.utils import (
@@ -528,7 +528,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             num_prefill_tokens = query.shape[0]
             num_decode_tokens = 0
 
-        if attn_type != AttentionType.ENCODER_DECODER:
+        if attn_type == AttentionType.DECODER:
             # Only enforce this shape-constraint for decoder
             # self-attention
             assert key.shape[0] == num_prefill_tokens + num_decode_tokens
