@@ -7,6 +7,8 @@ from vllm.config import VisionLanguageConfig
 
 from ..conftest import IMAGE_FILES
 
+pytestmark = pytest.mark.llava
+
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = [
     "<image>\nUSER: What's the content of the image?\nASSISTANT:",
