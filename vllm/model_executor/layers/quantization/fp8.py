@@ -16,6 +16,23 @@ ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
 
+def cutlass_fp8_supported() -> bool:
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    version = torch.version.cuda
+    version = version[0] * 10 + version[1]
+
+    # CUTLASS FP8 kernels need at least
+    #   CUDA 12.0 on SM90 systems (Hopper)
+    #   CUDA 12.4 on SM89 systems (Lovelace)
+    gpu_is_supported = False
+    if capability >= 900:
+        gpu_is_supported = version > 120
+    elif capability >= 890:
+        gpu_is_supported = version > 124
+
+    return gpu_is_supported
+
 
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
@@ -89,27 +106,10 @@ class Fp8LinearMethod(LinearMethodBase):
     Args:
         quant_config: The quantization config.
     """
-    def cutlass_fp8_supported(self) -> bool:
-        capability = torch.cuda.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        version = torch.version.cuda
-        version = version[0] * 10 + version[1]
-
-        # CUTLASS FP8 kernels need at least
-        #   CUDA 12.0 on SM90 systems (Hopper)
-        #   CUDA 12.4 on SM89 systems (Lovelace)
-        gpu_is_supported = False
-        if capability >= 900:
-            gpu_is_supported = version > 120
-        elif capability >= 890:
-            gpu_is_supported = version > 124
-
-        return gpu_is_supported
-
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
-        self.cutlass_fp8_supported = self.cutlass_fp8_supported()
+        self.cutlass_fp8_supported = cutlass_fp8_supported()
 
     def _create_scale_param(
         self,
