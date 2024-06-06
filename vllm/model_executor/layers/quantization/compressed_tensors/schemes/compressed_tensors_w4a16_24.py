@@ -99,7 +99,7 @@ class CompressedTensors24(CompressedTensorsScheme):
             meta,
             {
                 "input_dim": 0,
-                "packed_dim": 0,
+                "packed_dim": 1,
                 "pack_factor": 1,
                 "output_dim": 1,
                 "marlin_tile_size": 2,
