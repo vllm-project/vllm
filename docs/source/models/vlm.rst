@@ -82,13 +82,6 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
         --chat-template template_llava.jinja
 
 To consume the server, you can use the OpenAI client like in the example below:
-.. note::
-
-    By default, the timeout for fetching images through http url is ``5`` seconds. You can override this by setting the environment variable:
-
-    .. code-block:: shell
-
-        export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 .. code-block:: python
 
@@ -115,6 +108,14 @@ To consume the server, you can use the OpenAI client like in the example below:
         }],
     )
     print("Chat response:", chat_response)
+
+.. note::
+
+    By default, the timeout for fetching images through http url is ``5`` seconds. You can override this by setting the environment variable:
+
+    .. code-block:: shell
+
+        export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 .. note::
     The prompt formatting with the image token ``<image>`` is not needed when serving VLMs with the API server since the prompt will be 
