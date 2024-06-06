@@ -68,8 +68,8 @@ async def test_fetch_image_base64(url_images: Dict[str, Image.Image],
         base64_image = base64.b64encode(f.read()).decode("utf-8")
         data_url = f"data:{mime_type};base64,{base64_image}"
 
-        async with ImageFetchAiohttp.fetch_image(data_url) as data_image:
-            if _image_equals(url_image, Image.open(f)):
-                assert _image_equals(url_image, await data_image)
-            else:
-                pass  # Lossy format; only check that image can be opened
+        data_image = await ImageFetchAiohttp.fetch_image(data_url)
+        if _image_equals(url_image, Image.open(f)):
+            assert _image_equals(url_image, data_image)
+        else:
+            pass  # Lossy format; only check that image can be opened

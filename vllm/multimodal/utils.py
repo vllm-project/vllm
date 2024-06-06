@@ -34,10 +34,10 @@ class ImageFetchAiohttp:
     async def fetch_image(cls, image_url: str) -> Image.Image:
         """Load image from a url or base64 encoded openai GPT4V format"""
 
-        # Avoid circular import
-        from vllm import __version__ as VLLM_VERSION
-
         if image_url.startswith('http'):
+            # Avoid circular import
+            from vllm import __version__ as VLLM_VERSION
+
             client = cls.get_aiohttp_client()
             headers = {"User-Agent": f"vLLM/{VLLM_VERSION}"}
 
