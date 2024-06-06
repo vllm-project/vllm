@@ -35,14 +35,14 @@ __global__ void static_scaled_int8_quant_kernel(
   scale_type const scale = *scale_ptr;
 
   for (int i = tid; i < hidden_size; i += blockDim.x) {
-    out[token_idx * hidden_size + i] =
-        float_to_int8_rn(static_cast<float>(input[token_idx * hidden_size + i]) / scale);
+    out[token_idx * hidden_size + i] = float_to_int8_rn(
+        static_cast<float>(input[token_idx * hidden_size + i]) / scale);
   }
 }
 
 template <typename scalar_t, typename scale_type>
 __global__ void dynamic_scaled_int8_quant_kernel(
-    scalar_t const*  __restrict__ input, int8_t* __restrict__ out,
+    scalar_t const* __restrict__ input, int8_t* __restrict__ out,
     scale_type* scale, const int hidden_size) {
   int const tid = threadIdx.x;
   int const token_idx = blockIdx.x;
@@ -65,8 +65,8 @@ __global__ void dynamic_scaled_int8_quant_kernel(
 
   float const tmp_scale = 127.0f / block_absmax_val;
   for (int i = tid; i < hidden_size; i += blockDim.x) {
-    out[token_idx * hidden_size + i] =
-      float_to_int8_rn(static_cast<float>(input[token_idx * hidden_size + i]) * tmp_scale);
+    out[token_idx * hidden_size + i] = float_to_int8_rn(
+        static_cast<float>(input[token_idx * hidden_size + i]) * tmp_scale);
   }
 }
 
@@ -80,7 +80,7 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
   TORCH_CHECK(scale.numel() == 1);
 
   int const hidden_size = input.size(-1);
-  int const  num_tokens = input.numel() / hidden_size;
+  int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
   dim3 const block(std::min(hidden_size, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -93,9 +93,10 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
       });
 }
 
-void dynamic_scaled_int8_quant(torch::Tensor& out,    // [..., hidden_size]
-                               torch::Tensor const& input,  // [..., hidden_size]
-                               torch::Tensor& scales) {
+void dynamic_scaled_int8_quant(
+    torch::Tensor& out,          // [..., hidden_size]
+    torch::Tensor const& input,  // [..., hidden_size]
+    torch::Tensor& scales) {
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
 
