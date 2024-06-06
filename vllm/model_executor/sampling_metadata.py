@@ -450,13 +450,13 @@ class SamplingTensors:
 
         if do_penalties:
             prompt_max_len = max([len(tokens) for tokens in prompt_tokens],
-                                default=0)
+                                 default=0)
             prompt_padded_tokens = [
                 tokens + [vocab_size] * (prompt_max_len - len(tokens))
                 for tokens in prompt_tokens
             ]
             output_max_len = max([len(tokens) for tokens in output_tokens],
-                                default=0)
+                                 default=0)
             output_padded_tokens = [
                 tokens + [vocab_size] * (output_max_len - len(tokens))
                 for tokens in output_tokens
@@ -549,8 +549,10 @@ class SamplingTensors:
         sampling_seeds_gpu = sampling_seeds_gpu[:num_base_seeds]
 
         if do_penalties:
-            prompt_tokens_gpu = prompt_tensor.to(device=device, non_blocking=True)
-            output_tokens_gpu = output_tensor.to(device=device, non_blocking=True)
+            prompt_tokens_gpu = prompt_tensor.to(device=device,
+                                                 non_blocking=True)
+            output_tokens_gpu = output_tensor.to(device=device,
+                                                 non_blocking=True)
         else:
             empty_tensor = torch.empty(0, device=device, dtype=torch.long)
             prompt_tokens_gpu = empty_tensor
