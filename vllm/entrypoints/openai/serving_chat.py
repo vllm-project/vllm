@@ -247,8 +247,8 @@ class OpenAIServingChat(OpenAIServing):
                             created=created_time,
                             choices=[choice_data],
                             model=model_name)
-                        if (request.stream_options and 
-                            request.stream_options.include_usage):
+                        if (request.stream_options
+                                and request.stream_options.include_usage):
                             chunk.usage = None
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
@@ -277,7 +277,7 @@ class OpenAIServingChat(OpenAIServing):
                                     choices=[choice_data],
                                     logprobs=None,
                                     model=model_name)
-                                if (request.stream_options and 
+                                if (request.stream_options and
                                         request.stream_options.include_usage):
                                     chunk.usage = None
                                 data = chunk.model_dump_json(
@@ -333,8 +333,8 @@ class OpenAIServingChat(OpenAIServing):
                             created=created_time,
                             choices=[choice_data],
                             model=model_name)
-                        if (request.stream_options and 
-                                request.stream_options.include_usage):
+                        if (request.stream_options
+                                and request.stream_options.include_usage):
                             chunk.usage = None
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
@@ -353,36 +353,33 @@ class OpenAIServingChat(OpenAIServing):
                             created=created_time,
                             choices=[choice_data],
                             model=model_name)
-                        if (request.stream_options and 
-                                request.stream_options.include_usage):
+                        if (request.stream_options
+                                and request.stream_options.include_usage):
                             chunk.usage = None
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
                         finish_reason_sent[i] = True
 
-                    if (request.stream_options and 
-                            request.stream_options.include_usage):
+                    if (request.stream_options
+                            and request.stream_options.include_usage):
                         final_usage = UsageInfo(
-                                        prompt_tokens=prompt_tokens,
-                                        completion_tokens=previous_num_tokens[i]
-                                        ,
-                                        total_tokens=prompt_tokens +
-                                        previous_num_tokens[i],
-                                    )
-                        
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=previous_num_tokens[i],
+                            total_tokens=prompt_tokens +
+                            previous_num_tokens[i],
+                        )
+
                         final_usage_chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
                             created=created_time,
                             choices=[],
                             model=model_name,
-                            usage=final_usage
-                        )
-                        final_usage_data = (final_usage_chunk.model_dump_json
-                                            (exclude_unset=True, 
-                                             exclude_none=True))
+                            usage=final_usage)
+                        final_usage_data = (final_usage_chunk.model_dump_json(
+                            exclude_unset=True, exclude_none=True))
                         yield f"data: {final_usage_data}\n\n"
-                        
+
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))

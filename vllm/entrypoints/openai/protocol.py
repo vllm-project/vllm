@@ -101,8 +101,10 @@ class ResponseFormat(OpenAIBaseModel):
     # type must be "json_object" or "text"
     type: Literal["text", "json_object"]
 
+
 class StreamOptions(OpenAIBaseModel):
     include_usage: Optional[bool]
+
 
 class FunctionDefinition(OpenAIBaseModel):
     name: str
@@ -275,9 +277,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode='before')
     @classmethod
     def validate_stream_options(cls, values):
-        if (values.get('stream_options') is not None and
-            not values.get('stream')):
-            raise ValueError("stream_options can only be set if stream is true")
+        if (values.get('stream_options') is not None
+                and not values.get('stream')):
+            raise ValueError(
+                "stream_options can only be set if stream is true")
         return values
 
     @model_validator(mode="before")
@@ -636,6 +639,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
 
+
 class BatchRequestInput(OpenAIBaseModel):
     """
     The per-line object of the batch input file.
@@ -656,7 +660,9 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameteters of the request.
-    body: Union[ChatCompletionRequest, ]
+    body: Union[
+        ChatCompletionRequest,
+    ]
 
 
 class BatchRequestOutput(OpenAIBaseModel):
