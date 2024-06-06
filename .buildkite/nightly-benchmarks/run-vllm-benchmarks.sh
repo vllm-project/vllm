@@ -54,6 +54,10 @@ json2args() {
   echo "$args"
 }
 
+wait_for_server() {
+  timeout 600 bash -c 'until curl localhost:8000/v1/completions; do sleep 1; done' || exit 1
+}
+
 
 check_gpus
 check_hf_token
@@ -67,7 +71,7 @@ check_hf_token
 export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
 # prepare for benchmarking
-pushd benchmarks
+cd benchmarks
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 RESULTS_FOLDER=results/
 SERVING_TESTS=../.buildkite/nightly-benchmarks/serving-tests.json
@@ -112,6 +116,7 @@ jq -c '.[]' $SERVING_TESTS | while read -r params; do
   echo "Running test case $test_name"
   echo "Server command: $server_command"
   echo "Client command: $client_command"
+  # record the benchmarking commands
   echo $(
     jq -n \
       --arg server "$server_command" \
@@ -120,14 +125,14 @@ jq -c '.[]' $SERVING_TESTS | while read -r params; do
         server_command: $server,
         client_command: $client
       }'
-  ) > tee $RESULTS_FOLDER/$test_name.commands
-  
+  ) > $RESULTS_FOLDER/$test_name.commands
+
   # run the server
   eval $server_command &
   server_pid=$!
 
   # wait until the server is alive
-  timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
+  wait_for_server
 
   # run the client
   eval $client_command

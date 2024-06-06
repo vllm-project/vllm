@@ -10,8 +10,8 @@ results_folder = Path("results/")
 serving_results = []
 serving_column_mapping = {
     "test_name": "Test name",
-    "completed": "Completed requests",
-    "request_throughput": "Throughput (req/s)",
+    "completed": "# of req.",
+    "request_throughput": "Tput (req/s)",
     "mean_ttft_ms": "Mean TTFT (ms)",
     "median_ttft_ms": "Median (ms)",
     "p99_ttft_ms": "P99 (ms)",
@@ -61,5 +61,6 @@ serving_md_table = tabulate(
 
 # document the result
 with open(results_folder / "benchmark_results.md", "w") as f: 
-    f.write("## Online serving tests")
+    f.write("## Online serving tests\n")
     f.write(serving_md_table)
+    f.write("\n")
