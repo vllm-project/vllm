@@ -1,7 +1,8 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 from transformers import PretrainedConfig, PreTrainedTokenizerBase
@@ -1124,6 +1125,25 @@ class VisionLanguageConfig:
         image_token_str = tokenizer.decode(self.image_token_id)
         return image_token_str * self.image_feature_size, image_token_str
 
+    def as_cli_args_dict(self) -> Dict[str, Any]:
+        """Flatten vision language config to pure args.
+
+        Compatible with what llm entrypoint expects.
+        """
+        result: Dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, enum.Enum):
+                result[f.name] = value.name.lower()
+            elif isinstance(value, tuple):
+                result[f.name] = ",".join([str(item) for item in value])
+            else:
+                result[f.name] = value
+
+        result["disable_image_processor"] = self.image_processor is None
+
+        return result
+
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
@@ -1233,7 +1253,7 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            "%d. Assuming the model's maximum length is %d.", possible_keys,
+            "%s. Assuming the model's maximum length is %d.", possible_keys,
             default_max_len)
         derived_max_model_len = default_max_len
 
