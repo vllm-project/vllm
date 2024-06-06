@@ -1,5 +1,5 @@
 # default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.1.1_ubuntu20.04_py3.9_pytorch_release-2.1.2"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1.1_ubuntu20.04_py3.9_pytorch_staging"
 
 ARG COMMON_WORKDIR=/app
 
@@ -133,6 +133,14 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # vLLM (and gradlib) build stages
 FROM fetch_vllm AS build_vllm
 ARG COMMON_WORKDIR
+# Install hipblaslt
+RUN --mount=type=bind,from=export_hipblaslt,src=/,target=/install \
+if ls /install/*.deb; then \
+    apt-get purge -y hipblaslt \
+    && dpkg -i /install/*.deb \
+    && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
+    && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status; \
+fi
 # Build vLLM
 RUN cd vllm \
     && python3 setup.py clean --all && python3 setup.py bdist_wheel --dist-dir=dist

@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     VLLM_INSTANCE_ID: Optional[str] = None
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
-    VLLM_USE_TRITON_FLASH_ATTN: bool = False
+    VLLM_USE_TRITON_FLASH_ATTN: bool = True
     RANK: int = 0
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
