@@ -222,9 +222,8 @@ class TPUModelRunner:
             block_table = seq_group_metadata.block_tables[seq_id]
             slot_mapping.append([])
             for i in range(prompt_len):
-                block_number = block_table[i //
-                                           self.block_size]  # type: ignore
-                block_offset = i % self.block_size  # type: ignore
+                block_number = block_table[i // self.block_size]
+                block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping[-1].append(slot)
 
