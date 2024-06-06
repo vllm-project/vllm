@@ -115,7 +115,7 @@ void cutlass_gemm(torch::Tensor& c, torch::Tensor const& a,
     // Hopper
 
     // Guard against compilation issues for sm90 kernels
-#if 0 && defined CUDA_VERSION && CUDA_VERSION >= 12000
+#if defined CUDA_VERSION && CUDA_VERSION >= 12000
     cutlass_gemm_sm90(c, a, b);
 #else
     cutlass_gemm_sm80(c, a, b);
