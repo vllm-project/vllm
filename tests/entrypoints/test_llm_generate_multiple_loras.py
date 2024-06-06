@@ -65,5 +65,5 @@ def test_multiple_lora_requests(llm: LLM, zephyr_lora_files):
 
     # Single LoRARequest should be applied to every prompt
     single_lora_request = lora_request[0]
-    outputs = llm.generate(PROMPTS, loras_request=single_lora_request)
+    outputs = llm.generate(PROMPTS, lora_request=single_lora_request)
     assert len(PROMPTS) == len(outputs)
