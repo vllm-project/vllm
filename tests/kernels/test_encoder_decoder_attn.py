@@ -798,32 +798,6 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     _assert_actual_match_ideal(decphase_cross_test_params,
                                decphase_cross_pckd_act_out)
 
-    # The following test conditions could in principle be a
-    # standalone test, however the test setup is
-    # so involved that it is easier
-    # to piggyback off of the test vectors & other data structures
-    # created for testing decode-phase encoder/decoder cross-
-    # attention above.
-    # ----
-    # Set up a contrived scenario where the attention metadata
-    # is configured for chunked prefill & encoder/decoder cross-
-    # attention. Required that this triggers a NotImplementedError.
-    #
-    # We assume that decode_attn_metadata.num_decode_tokens > 1
-    # already; the line below sets up a chunked prefill
-    # metadata configuration where there is nominally a mix
-    # of prefill and decode tokens.
-    decphase_attn_metadata.num_prefill_tokens = 1
-    with pytest.raises(NotImplementedError) as exc_info:
-        _run_encoder_decoder_cross_attention_test(test_rsrcs,
-                                                  decphase_dec_test_params,
-                                                  None, decphase_attn_metadata)
-
-    # "Encoder decoder models do not currently support chunked prefill"
-    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL
-
-
-
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -833,10 +807,14 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("max_dec_seq_len", MAX_DEC_SEQ_LENS)
 @pytest.mark.parametrize("max_enc_seq_len", MAX_ENC_SEQ_LENS)
-def test_backend_fails_for_chunked_prefill_enc_dec(
-        num_heads: int, head_size: int, backend_name: str, batch_size: int,
-        block_size: int, max_dec_seq_len: int, max_enc_seq_len: int,
-        monkeypatch) -> None:
+def test_backend_fails_for_chunked_prefill_enc_dec(num_heads: int,
+                                                   head_size: int,
+                                                   backend_name: str,
+                                                   batch_size: int,
+                                                   block_size: int,
+                                                   max_dec_seq_len: int,
+                                                   max_enc_seq_len: int,
+                                                   monkeypatch) -> None:
     '''
     Encoder/decoder attention test:
 
@@ -927,8 +905,6 @@ def test_backend_fails_for_chunked_prefill_enc_dec(
     # - Is encoder attention result correct?
     _assert_actual_match_ideal(enc_test_params, enc_packed_actual_output)
 
-
-
     # PREFILL: self-attention test
 
     # The following test conditions could in principle be a
@@ -949,8 +925,10 @@ def test_backend_fails_for_chunked_prefill_enc_dec(
     prephase_attn_metadata.num_decode_tokens = 1
     with pytest.raises(NotImplementedError) as exc_info:
 
-        _run_decoder_self_attention_test(
-            test_rsrcs,
-            prephase_dec_test_params,
-            prephase_attn_metadata,
-            attn_type=AttentionType.DECODER)
+        _run_decoder_self_attention_test(test_rsrcs,
+                                         prephase_dec_test_params,
+                                         prephase_attn_metadata,
+                                         attn_type=AttentionType.DECODER)
+
+    # "Encoder decoder models do not currently support chunked prefill"
+    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL

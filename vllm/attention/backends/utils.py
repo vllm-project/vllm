@@ -1,7 +1,6 @@
 """Attention utils"""
 
 from vllm.attention import AttentionMetadata
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.utils import is_hip
 
