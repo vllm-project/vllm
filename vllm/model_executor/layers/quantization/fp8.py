@@ -16,6 +16,7 @@ ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
 
+
 def cutlass_fp8_supported() -> bool:
     capability = torch.cuda.get_device_capability()
     capability = capability[0] * 10 + capability[1]
