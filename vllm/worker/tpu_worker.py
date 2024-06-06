@@ -108,7 +108,8 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         xm.wait_device_ops()
 
         m = xm.get_memory_info(self.device)
-        free_bytes = m["bytes_limit"] - m["bytes_used"]
+        program_size = 1024 * 1024 * 1024  # 1GB
+        free_bytes = max(m["bytes_limit"] - m["bytes_used"] - program_size, 0)
         kv_cache_bytes = int(free_bytes *
                              self.cache_config.gpu_memory_utilization)
         kv_cache_dtype_btyes = get_dtype_size(self.cache_dtype)
