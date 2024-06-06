@@ -2,8 +2,7 @@
 
 import itertools
 import random
-from collections import namedtuple
-from typing import List, Optional, Union
+from typing import List, NamedTuple, Optional, Union
 
 import pytest
 import torch
@@ -17,6 +16,44 @@ from vllm.utils import (make_tensor_with_pad, maybe_make_int_tensor,
 STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
+
+
+class QKVInputs(NamedTuple):
+    query: torch.Tensor
+    key: torch.Tensor
+    value: torch.Tensor
+    q_seq_lens: List[int]
+    kv_seq_lens: List[int]
+
+
+class QKVO(NamedTuple):
+    qkv: QKVInputs
+    ideal_output: torch.Tensor
+
+
+class PackedQKVInputs(NamedTuple):
+    query: torch.Tensor
+    key: torch.Tensor
+    value: torch.Tensor
+    q_start_loc_list: List[int]
+    kv_start_loc_list: List[int]
+    q_seq_lens: List[int]
+    kv_seq_lens: List[int]
+
+
+class PackedQKVO(NamedTuple):
+    packed_qkv: PackedQKVInputs
+    ideal_output: torch.Tensor
+
+
+class KVMemoryMap(NamedTuple):
+    block_tables: torch.Tensor
+    slot_mapping: torch.Tensor
+
+
+class PhaseTestParameters(NamedTuple):
+    packed_qkvo: PackedQKVO
+    kv_mmap: KVMemoryMap
 
 
 def override_backend_env_variable(mpatch: pytest.MonkeyPatch,
@@ -90,26 +127,6 @@ def ref_masked_attention(query: torch.Tensor,
     attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
     out = torch.einsum("bhqk,bkhd->bqhd", attn_weights, value)
     return out
-
-
-# batch_size x max_q_seq_len x num_heads x head_size
-QKVInputs = namedtuple("QKVInputs",
-                       ["query", "key", "value", "q_seq_lens", "kv_seq_lens"])
-
-QKVO = namedtuple("QKVO", ["qkv", "ideal_output"])
-
-# total_num_tokens x (num_heads*head_size)
-PackedQKVInputs = namedtuple("PackedQKVInputs", [
-    "query", "key", "value", "q_start_loc_list", "kv_start_loc_list",
-    "q_seq_lens", "kv_seq_lens"
-])
-
-PackedQKVO = namedtuple("PackedQKVO", ["packed_qkv", "ideal_output"])
-
-KVMemoryMap = namedtuple("KVMemoryMap", ["block_tables", "slot_mapping"])
-
-PhaseTestParameters = namedtuple("PhaseTestParameters",
-                                 ["packed_qkvo", "kv_mmap"])
 
 
 def make_qkv(

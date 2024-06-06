@@ -8,15 +8,14 @@ Tests:
 
 """
 
-from collections import namedtuple
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import pytest
 import torch
 
 from tests.kernels.utils import *
 from vllm.attention import Attention, AttentionMetadata
-from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.utils import (
     STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL, STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING,
     STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
@@ -38,13 +37,23 @@ MAX_ENC_SEQ_LENS = [128]
 # tests
 HEAD_SIZES_FOR_UNSUPP = [HEAD_SIZES[0]]
 
-TestPoint = namedtuple("TestPoint", [
-    "num_heads", "head_size", "backend_name", "batch_size", "block_size",
-    "max_dec_seq_len", "max_enc_seq_len", "num_blocks"
-])
 
-TestResources = namedtuple("TestResources",
-                           ["scale", "attn_backend", "attn", "kv_cache"])
+class TestPoint(NamedTuple):
+    num_heads: int
+    head_size: int
+    backend_name: str
+    batch_size: int
+    block_size: int
+    max_dec_seq_len: int
+    max_enc_seq_len: int
+    num_blocks: int
+
+
+class TestResources(NamedTuple):
+    scale: float
+    attn_backend: AttentionBackend
+    attn: Attention
+    kv_cache: torch.Tensor
 
 
 def _make_test_resources(test_pt: TestPoint) -> TestResources:
