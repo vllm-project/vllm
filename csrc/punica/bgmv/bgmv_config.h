@@ -9,6 +9,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                  int64_t layer_idx, float scale);
 
 // clang-format off
+
 #define FOR_BGMV_WIDE(f, in_T, out_T, W_T, narrow) \
     f(in_T, out_T, W_T, narrow, 128) \
     f(in_T, out_T, W_T, narrow, 256) \
@@ -44,6 +45,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 9216) \
     f(in_T, out_T, W_T, narrow, 10240) \
     f(in_T, out_T, W_T, narrow, 11008) \
+    f(in_T, out_T, W_T, narrow, 11264) \
     f(in_T, out_T, W_T, narrow, 12288) \
     f(in_T, out_T, W_T, narrow, 13696) \
     f(in_T, out_T, W_T, narrow, 13824) \
@@ -65,6 +67,8 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 36864) \
     f(in_T, out_T, W_T, narrow, 43264) \
     f(in_T, out_T, W_T, narrow, 49152) \
+    f(in_T, out_T, W_T, narrow, 60544) \
+    f(in_T, out_T, W_T, narrow, 60672) \
     f(in_T, out_T, W_T, narrow, 64000) \
     f(in_T, out_T, W_T, narrow, 64256) \
     f(in_T, out_T, W_T, narrow, 64512) \
@@ -74,8 +78,8 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 128000) \
     f(in_T, out_T, W_T, narrow, 128256) \
     f(in_T, out_T, W_T, narrow, 128512) \
-    f(in_T, out_T, W_T, narrow, 60544) \
-    f(in_T, out_T, W_T, narrow, 60672) \
+    
+    
 // Keep above in sync with vllm/lora/layers::LogitsProcessorWithLoRA
 // and vllm/tests/lora/test_punica.py
 
@@ -118,6 +122,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 9216, narrow) \
     f(in_T, out_T, W_T, 10240, narrow) \
     f(in_T, out_T, W_T, 11008, narrow) \
+    f(in_T, out_T, W_T, 11264, narrow) \
     f(in_T, out_T, W_T, 12288, narrow) \
     f(in_T, out_T, W_T, 13696, narrow) \
     f(in_T, out_T, W_T, 13824, narrow) \
@@ -139,6 +144,8 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 36864, narrow) \
     f(in_T, out_T, W_T, 43264, narrow) \
     f(in_T, out_T, W_T, 49152, narrow) \
+    f(in_T, out_T, W_T, 60544, narrow) \
+    f(in_T, out_T, W_T, 60672, narrow) \
     f(in_T, out_T, W_T, 64000, narrow) \
     f(in_T, out_T, W_T, 64256, narrow) \
     f(in_T, out_T, W_T, 64512, narrow) \
@@ -148,8 +155,6 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 128000, narrow) \
     f(in_T, out_T, W_T, 128256, narrow) \
     f(in_T, out_T, W_T, 128512, narrow) \
-    f(in_T, out_T, W_T, 60544, narrow) \
-    f(in_T, out_T, W_T, 60672, narrow) \
 // Keep above in sync with vllm/lora/layers::SamplerWithLoRA
 
 
