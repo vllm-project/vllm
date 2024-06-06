@@ -73,8 +73,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup,
-                num_lookahead_slots: int) -> List[Tuple[int, int]]:
+    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
