@@ -580,11 +580,15 @@ def _run_encoder_decoder_cross_attention_test(
       & attn_metadata
     '''
     attn_metadata.attention_type = AttentionType.ENCODER_DECODER
-    cross_pckd_qkv = cross_test_params.packed_qkvo.packed_qkv
-    key = None if cross_pckd_qkv is None else \
-            cross_pckd_qkv.key
-    value = None if cross_pckd_qkv is None else \
-            cross_pckd_qkv.value
+    if cross_test_params is None:
+        key = None
+        value = None
+    else:
+        cross_pckd_qkv = cross_test_params.packed_qkvo.packed_qkv
+        key = None if cross_pckd_qkv is None else \
+                cross_pckd_qkv.key
+        value = None if cross_pckd_qkv is None else \
+                cross_pckd_qkv.value
     return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query, key, value, kv_cache,
                         attn_metadata)
 

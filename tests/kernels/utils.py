@@ -647,7 +647,13 @@ def make_test_metadata(
     # the number of {prefills, decodes} and the number of
     # {prefill, decode} tokens can be inferred from seq_lens
     num_prefills_or_decodes = len(seq_lens)
-    num_prefill_or_decode_tokens = sum(seq_lens)
+    if is_prompt:
+        # Prefill: operate on total num. of prompt
+        # tokens
+        num_prefill_or_decode_tokens = sum(seq_lens)
+    else:
+        # Decode: operate on one token per seq
+        num_prefill_or_decode_tokens = len(seq_lens)
 
     # Seems for non-prefix-caching scenarios context_lens
     # is never needed
