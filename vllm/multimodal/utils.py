@@ -26,7 +26,7 @@ class ImageFetchAiohttp:
 
     @classmethod
     async def fetch_image(cls, image_url: str) -> Image.Image:
-        """Load image from a url or base64 encoded openai GPT4V format"""
+        """Load PIL image from a url or base64 encoded openai GPT4V format"""
 
         if image_url.startswith('http'):
             # Avoid circular import
@@ -72,10 +72,12 @@ def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     return Image.open(BytesIO(base64.b64decode(image)))
 
 
+# TODO(ywang96): move this to a model registry for preprocessing vision
+# language prompts based on the model type.
 def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
                                config: ModelConfig) -> str:
     """Combine image and text prompts for vision language model depending on
-    the  model architecture."""
+    the model architecture."""
 
     if config.hf_config.model_type == "llava":
         full_prompt = f"{image_prompt}\n{text_prompt}"
