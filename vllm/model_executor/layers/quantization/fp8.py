@@ -89,9 +89,27 @@ class Fp8LinearMethod(LinearMethodBase):
     Args:
         quant_config: The quantization config.
     """
+    def cutlass_fp8_supported(self) -> bool:
+        capability = torch.cuda.get_device_capability()
+        capability = capability[0] * 10 + capability[1]
+        version = torch.version.cuda
+        version = version[0] * 10 + version[1]
+
+        # CUTLASS FP8 kernels need at least
+        #   CUDA 12.0 on SM90 systems (Hopper)
+        #   CUDA 12.4 on SM89 systems (Lovelace)
+        gpu_is_supported = False
+        if capability >= 900:
+            gpu_is_supported = version > 120
+        elif capability >= 890:
+            gpu_is_supported = version > 124
+
+        return gpu_is_supported
+
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
+        self.cutlass_fp8_supported = self.cutlass_fp8_supported()
 
     def _create_scale_param(
         self,
@@ -229,23 +247,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 raise ValueError(
                     f"Unknown scheme {self.quant_config.activation_scheme}")
 
-    def cutlass_fp8_supported(self) -> bool:
-        capability = torch.cuda.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        version = torch.version.cuda
-        version = version[0] * 10 + version[1]
-
-        # CUTLASS FP8 kernels need at least
-        #   CUDA 12.0 on SM90 systems (Hopper)
-        #   CUDA 12.4 on SM89 systems (Lovelace)
-        gpu_is_supported = False
-        if capability >= 900:
-            gpu_is_supported = version > 120
-        elif capability >= 890:
-            gpu_is_supported = version > 124
-
-        return gpu_is_supported
-
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
@@ -255,7 +256,7 @@ class Fp8LinearMethod(LinearMethodBase):
         #   If dynamic, layer.act_scale is None and x_scale computed from x.
         #   If static,  layer.act_scale is scalar and x_scale set to act_scale.
 
-        if bias is None and self.cutlass_fp8_supported():
+        if bias is None and self.cutlass_fp8_supported:
             qinput, x_scale = ops.scaled_fp8_quant(x, layer.act_scale)
 
             # Fused GEMM_DQ
