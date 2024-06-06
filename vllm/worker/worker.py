@@ -174,7 +174,7 @@ class Worker(WorkerBase):
         # (to accommodate possible dynamic allocations)
         gb = 1024 * 1024 * 1024
         min_dynamic_memory = int(1.5 * gb)
-        
+
         unused_gpu_memory = total_gpu_memory - available_gpu_memory
         reserve_more = min_dynamic_memory - unused_gpu_memory
 
