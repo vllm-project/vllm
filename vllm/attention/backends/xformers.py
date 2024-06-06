@@ -562,11 +562,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
             else:
-                assert prefill_meta.query_start_loc is not None
-                assert prefill_meta.max_query_len is not None
-
                 if is_encoder_decoder_metadata(attn_metadata):
                     fail_encoder_decoder_prefix_caching()
+
+                assert prefill_meta.query_start_loc is not None
+                assert prefill_meta.max_query_len is not None
 
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to

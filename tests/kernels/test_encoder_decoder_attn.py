@@ -1074,8 +1074,11 @@ def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
         #     prefix_kv_mmap
         # )            
 
-        prephase_attn_metadata.block_tables = decphase_dec_test_params.kv_mmap.block_tables
+        num_seqs = len(prephase_dec_test_params.packed_qkvo.packed_qkv.q_seq_lens)
 
+        prephase_attn_metadata._cached_prefill_metadata.block_tables = torch.randint(0,10,(num_seqs,1))
+
+      
         _run_decoder_self_attention_test(test_rsrcs,
                                          prephase_dec_test_params,
                                          prephase_attn_metadata,
