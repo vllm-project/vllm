@@ -69,6 +69,7 @@ def compressed_tensors_check(w, num_bits, group_size):
     
     from compressed_tensors.compressors.marlin_24 import pack_scales_24, pack_weight_24, compress_weight_24
     from compressed_tensors.quantization import QuantizationArgs,QuantizationStrategy
+    from compressed_tensors.quantization.lifecycle.forward import quantize
     if group_size == -1 or group_size == size_k:
         strategy = QuantizationStrategy.CHANNEL
         args_size=None
@@ -77,12 +78,22 @@ def compressed_tensors_check(w, num_bits, group_size):
         args_size=group_size
     quant_args = QuantizationArgs(num_bits=num_bits, strategy=strategy, group_size=args_size)
 
+    w_24 = w_24.t().contiguous()
+    s = s.t().contiguous()
+
+    q_w_24 = quantize(w_24, s, zero_point=torch.zeros_like(s), args=quant_args, dtype=torch.int32)
+
+    value = q_w_24.t().contiguous()
+    scale = s.t().contiguous()
+    original_shape = value.shape
+
     max_q_val = (1 << num_bits) - 1
     zp = (max_q_val + 1) // 2
-    value, meta = compress_weight_24(q_w_24 - zp)
+    value, meta = compress_weight_24(value)
     value += zp
+
     value = pack_weight_24(value, quant_args, original_shape)
-    packed_scale = pack_scales_24(s, quant_args, original_shape)
+    packed_scale = pack_scales_24(scale, quant_args, original_shape)
     meta = meta.resize_(meta.shape[1] // 2, meta.shape[0] * 2)
 
     return value, packed_scale, meta

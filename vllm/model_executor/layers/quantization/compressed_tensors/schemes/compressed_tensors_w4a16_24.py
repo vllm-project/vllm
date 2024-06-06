@@ -33,8 +33,8 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         qweight = Parameter(
             torch.empty(
-                output_size_per_partition * 16 // pack_factor,
                 input_size_per_partition // 16 // 2,
+                output_size_per_partition * 16 // pack_factor,
                 device="cuda",
                 dtype=torch.int32,
             ),
@@ -43,9 +43,9 @@ class CompressedTensors24(CompressedTensorsScheme):
         set_weight_attrs(
             qweight,
             {
-                "input_dim": 1,
-                "output_dim": 0,
-                "packed_dim": 0,
+                "input_dim": 0,
+                "output_dim": 1,
+                "packed_dim": 1,
                 "pack_factor": pack_factor,
                 "marlin_tile_size": 16,
             },
@@ -60,8 +60,8 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         scales = Parameter(
             torch.empty(
-                output_size_per_partition,
                 input_groups,
+                output_size_per_partition,
                 device="cuda",
                 dtype=params_dtype,
             ),
@@ -70,8 +70,8 @@ class CompressedTensors24(CompressedTensorsScheme):
         set_weight_attrs(
             scales,
             {
-                "output_dim": 0,
-                "input_dim": None if input_groups == 1 else 1,
+                "output_dim": 1,
+                "input_dim": None if input_groups == 1 else 0,
             },
         )
         layer.register_parameter("scale_packed", scales)
@@ -88,8 +88,8 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         meta = Parameter(
             torch.empty(
-                output_size_per_partition * 2,
                 input_size_per_partition // 8 // 2 // 2,
+                output_size_per_partition * 2,
                 device="cuda",
                 dtype=torch.int16,
             ),
@@ -98,10 +98,10 @@ class CompressedTensors24(CompressedTensorsScheme):
         set_weight_attrs(
             meta,
             {
-                "input_dim": 1,
-                "packed_dim": 1,
+                "input_dim": 0,
+                "packed_dim": 0,
                 "pack_factor": 1,
-                "output_dim": 0,
+                "output_dim": 1,
                 "marlin_tile_size": 2,
             },
         )
@@ -117,9 +117,9 @@ class CompressedTensors24(CompressedTensorsScheme):
 
     
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
-        qweight = layer.weight_packed.t().contiguous()
-        meta = layer.meta.t().contiguous()
-        scales = layer.scale_packed.t().contiguous()
+        qweight = layer.weight_packed
+        meta = layer.meta
+        scales = layer.scale_packed
         workspace = layer.workspace
 
         x_2d = x.view(-1, x.shape[-1])
