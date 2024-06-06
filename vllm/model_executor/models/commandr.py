@@ -323,14 +323,12 @@ class CohereForCausalLM(nn.Module):
         "o_proj",
         "gate_up_proj",
         "down_proj",
-        "embed_tokens",
-        "lm_head",
+        "embed_tokens"
     ]
     embedding_modules = {
-        "embed_tokens": "input_embeddings",
-        "lm_head": "output_embeddings",
+        "embed_tokens": "input_embeddings"
     }
-    embedding_padding_modules = ["lm_head"]
+    embedding_padding_modules = []
 
     def __init__(
         self,
@@ -368,10 +366,12 @@ class CohereForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        #TODO not sure, check later
-        embedding_weights = self.model.embed_tokens.weight if hasattr(
-            self.model.embed_tokens,
-            'weight') else self.model.embed_tokens.base_layer.weight
+        is_not_lora=hasattr(self.model.embed_tokens,'weight')
+        if is_not_lora:
+            embedding_weights = self.model.embed_tokens.weight
+        else:
+            embedding_weights = self.model.embed_tokens.base_layer.weight
+            
         logits = self.logits_processor(embedding_weights, hidden_states,
                                        sampling_metadata)
         return logits
