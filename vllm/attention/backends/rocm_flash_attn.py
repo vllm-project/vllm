@@ -102,6 +102,62 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     use_cuda_graph: bool
 
 
+def _make_alibi_bias(
+    alibi_slopes: torch.Tensor,
+    dtype: torch.dtype,
+    seq_lens: List[int],
+) -> List[torch.Tensor]:
+    attn_biases = []
+    for seq_len in seq_lens:
+        bias = torch.arange(seq_len, dtype=dtype)
+        # NOTE(zhuohan): HF uses
+        #     `bias = bias[None, :].repeat(seq_len, 1)`
+        # here. We find that both biases give the same results, but
+        # the bias below more accurately follows the original ALiBi
+        # paper.
+        bias = bias[None, :] - bias[:, None]
+
+        num_heads = alibi_slopes.shape[0]
+        bias = bias[None, :].repeat((num_heads, 1, 1)).to(alibi_slopes.device)
+        bias.mul_(alibi_slopes[:, None, None])
+        inf_mask = torch.empty(
+            (1, seq_len, seq_len),
+            dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1).to(alibi_slopes.device)
+        attn_biases.append((bias + inf_mask).to(dtype))
+
+    return attn_biases
+
+
+def _make_alibi_bias_v2(
+    alibi_slopes: torch.Tensor,
+    dtype: torch.dtype,
+    seq_lens: List[int],
+    make_attn_mask: bool = True
+) -> List[torch.Tensor]:
+    attn_biases = []
+    for seq_len in seq_lens:
+        bias = torch.arange(seq_len, dtype=dtype)
+        # NOTE(zhuohan): HF uses
+        #     `bias = bias[None, :].repeat(seq_len, 1)`
+        # here. We find that both biases give the same results, but
+        # the bias below more accurately follows the original ALiBi
+        # paper.
+        bias = bias[None, :] - bias[:, None]
+
+        num_heads = alibi_slopes.shape[0]
+        bias = bias[None, :].repeat((num_heads, 1, 1)).to(alibi_slopes.device)
+        bias.mul_(alibi_slopes[:, None, None])
+        if make_attn_mask:
+            inf_mask = torch.empty(
+                (1, seq_len, seq_len),
+                dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1).to(alibi_slopes.device)
+            attn_biases.append((bias + inf_mask).to(dtype))
+        else:
+            attn_biases.append(bias.to(dtype))
+
+    return attn_biases
+
+
 class ROCmFlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
@@ -155,7 +211,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             # AMD Radeon 7900 series (gfx1100) currently does not support
             # xFormers nor FlashAttention. As a temporary workaround, we use
             # naive PyTorch implementation of attention.
-            self.attn_fuc = _naive_attention()
+            self.attn_func = _naive_attention()
             logger.debug("Using naive attention in ROCmBackend")
         elif self.use_triton_flash_attn:
             from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
@@ -229,13 +285,19 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         # Interleave for MQA workaround.
                         key = self.repeat_kv(key, self.num_queries_per_kv)
                         value = self.repeat_kv(value, self.num_queries_per_kv)
+                    att_masks = None
+                    if self.alibi_slopes is not None:
+                        att_masks = _make_alibi_bias_v2(
+                            self.alibi_slopes, query.dtype,
+                            attn_metadata.prompt_lens, make_attn_mask=False)  # type: ignore
                     if self.use_naive_attn:
-                        output = self.attn_fuc(
+                        output = self.attn_func(
                             query,
                             key,
                             value,
                             attn_metadata.prompt_lens,
                             self.scale,
+                            att_masks
                         )
                     else:
                         output, _ = self.attn_func(
@@ -249,6 +311,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             attn_metadata.max_prompt_len,
                             True,
                             self.scale,
+                            att_masks[0][None] if att_masks is not None else None,
                         )
                 else:
                     output = self.attn_func(
@@ -304,17 +367,19 @@ def _naive_attention(
     value: torch.Tensor,
     prompt_lens: List[int],
     scale: float,
+    attn_masks: Optional[List[torch.Tensor]],
 ) -> torch.Tensor:
     num_tokens = query.shape[0]
     output = torch.empty_like(query)
     start = 0
-    for _, prompt_len in enumerate(prompt_lens):
+    for i, prompt_len in enumerate(prompt_lens):
         end = start + prompt_len
         out = _naive_masked_attention(
             query[None, start:end],
             key[None, start:end],
             value[None, start:end],
             scale,
+            attn_masks[i],
         )
         # TODO(woosuk): Unnecessary copy. Optimize.
         output[start:end].copy_(out)
@@ -332,14 +397,16 @@ def _naive_masked_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     scale: float,
+    attn_mask: Optional[torch.Tensor],
 ) -> torch.Tensor:
     seq_len, _, _ = query.shape
-    attn_mask = torch.triu(torch.ones(seq_len,
-                                      seq_len,
-                                      dtype=query.dtype,
-                                      device=query.device),
-                           diagonal=1)
-    attn_mask = attn_mask * torch.finfo(query.dtype).min
+    if attn_mask is None:
+        attn_mask = torch.triu(torch.ones(seq_len,
+                                        seq_len,
+                                        dtype=query.dtype,
+                                        device=query.device),
+                            diagonal=1)
+        attn_mask = attn_mask * torch.finfo(query.dtype).min
 
     attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
     attn_weights = attn_weights + attn_mask.float()
