@@ -797,6 +797,7 @@ class ModelRunner:
 
             seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
                 .dummy_data_for_profiling(model_config, seq_len)
+            assert len(seq_data.prompt_token_ids) == seq_len
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
