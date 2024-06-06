@@ -1,15 +1,16 @@
 [
     {
-        "test_name": "Llama7B_ShareGPT",
+        "test_name": "serving_llama7B_sharegpt",
         "server_parameters": {
-            "model": "meta-llama/Llama-2-7b-chat-hf",
+            "model": "meta-llama/Llama-2-70b-chat-hf",
             "tensor_parallel_size": 1,
             "swap_space": 16,
             "disable_log_stats": "",
-            "disable_log_requests": ""
+            "disable_log_requests": "",
+            "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Llama-2-7b-chat-hf",
+            "model": "meta-llama/Llama-2-70b-chat-hf",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
             "num-prompts": 1000
