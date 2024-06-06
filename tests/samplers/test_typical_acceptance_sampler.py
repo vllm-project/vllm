@@ -59,6 +59,10 @@ def get_draft_token_ids(batch_size: int, k: int, vocab_size: int,
 @torch.inference_mode()
 def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
                                     device: str):
+    """
+    Tests that the TypicalAcceptancSampler forward succeeds for
+    different combinations of k, vocab_size, batch_size and num devices.
+    """
     torch.set_default_device(device)
     typical_acceptance_sampler = TypicalAcceptanceSampler()
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
@@ -82,11 +86,16 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
 @torch.inference_mode()
 def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
                                which_token_ids: str, device: str):
+    """
+    Tests that we throw an exception of the token ids fall outside
+    the bound of the provided vocabulary.
+    """
     k = 3
     batch_size = 5
     vocab_size = 30_000
     torch.set_default_device(device)
-    typical_acceptance_sampler = TypicalAcceptanceSampler(strict_mode=True)
+    typical_acceptance_sampler = TypicalAcceptanceSampler(
+        strict_mode=True)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     bonus_token_ids = torch.randint(low=0,
@@ -127,6 +136,17 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
 @torch.inference_mode()
 def test_uniform_target_distribution_accepts_all_tokens(
         seed: int, disable_bonus_tokens: bool, device: str):
+    """
+     Test the TypicalAcceptanceSampler with a uniform target probability 
+     distribution.
+    
+    This test verifies that when provided with a uniform target probability
+    distribution, the TypicalAcceptanceSampler accepts all draft tokens. The
+    entropy of the uniform target distribution being high should lead to all
+    draft tokens being accepted. The test also ensures that the behavior
+    regarding bonus tokens is consistent with the `disable_bonus_tokens`
+    flag.
+    """
     set_random_seed(seed)
     k = 3
     batch_size = 5
@@ -167,6 +187,17 @@ def test_uniform_target_distribution_accepts_all_tokens(
 def test_temperature_zero_target_distribution(seed: int,
                                               disable_bonus_tokens: bool,
                                               device: str):
+    """
+    Test the TypicalAcceptanceSampler with a zero-temperature target
+    probability distribution.
+
+    This test verifies that when using a zero-temperature target probability
+    distribution, where only one token has a probability of 1.0, the
+    TypicalAcceptanceSampler correctly rejects all draft tokens that do not
+    match this probability. Additionally, it ensures that when all draft
+    tokens are rejected, the sampler falls back to greedy sampling to select a
+    single token from the target distribution.
+    """
     set_random_seed(seed)
     k = 3
     batch_size = 5
@@ -210,6 +241,22 @@ def test_temperature_zero_target_distribution(seed: int,
 @torch.inference_mode()
 def test_mixed_target_distribution(seed: int, disable_bonus_tokens: bool,
                                    device: str):
+    """
+    Test the TypicalAcceptanceSampler with a mixed target probability
+    distribution.
+
+    This test ensures that the TypicalAcceptanceSampler handles a mixed
+    target probability distribution correctly. Specifically, it uses a 
+    zero-temperature distribution for some sequences and a uniform
+    distribution for others. The test verifies that:
+    
+    - For sequences with a zero-temperature distribution, only the token
+    with a probability of 1.0 is accepted, and all other tokens are rejected.
+    - For sequences with a uniform distribution, all draft tokens are
+    accepted.
+    - When `disable_bonus_tokens` is False, the bonus tokens are also accepted
+    for sequences with a uniform distribution.
+    """
     set_random_seed(seed)
     k = 3
     batch_size = 4
@@ -261,6 +308,20 @@ def test_mixed_target_distribution(seed: int, disable_bonus_tokens: bool,
 @torch.inference_mode()
 def test_accept_tokens_partially(seed: int, disable_bonus_tokens: bool,
                                  device: str):
+    """
+    Test the TypicalAcceptanceSampler's behavior when only a subset of draft
+    tokens should be accepted.
+
+    This test verifies that the TypicalAcceptanceSampler correctly accepts or
+    rejects draft tokens based on a zero-temperature target probability
+    distribution. Specifically, it ensures that:
+    
+    - When all draft tokens match tokens with a probability of 1.0 in the
+    target distribution, all draft tokens are accepted.
+    - When only some draft tokens match tokens with a probability of 1.0 in
+    the target distribution, only those matching tokens are accepted, and the
+    rest are rejected.
+    """
     set_random_seed(seed)
     k = 5
     batch_size = 1
@@ -312,6 +373,16 @@ def test_accept_tokens_partially(seed: int, disable_bonus_tokens: bool,
 @torch.inference_mode()
 def test_replacement_token_ids(
     seed: int, disable_bonus_tokens: bool, device: str):
+    """
+    Test the TypicalAcceptanceSampler's method for generating
+    replacement token IDs.
+
+    This test verifies that the `_replacement_token_ids` method of the 
+    TypicalAcceptanceSampler correctly identifies the token IDs to be used
+    as replacements based on the target probability distribution.
+    Specifically, it ensures that the method correctly identifies the
+    tokens with the highest probability for each sequence in the batch.
+    """
     set_random_seed(seed)
     k = 10
     batch_size = 5
