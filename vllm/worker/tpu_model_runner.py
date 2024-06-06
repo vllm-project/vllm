@@ -454,7 +454,8 @@ class ModelWrapper(nn.Module):
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         logits = logits.div_(t.unsqueeze(dim=1))
-        logits = _apply_top_p(logits, p)
+        # FIXME(woosuk): Disabled top-p sampling because it's too slow.
+        # logits = _apply_top_p(logits, p)
         probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
         # FIXME(woosuk): best_of > 1 is not supported.
         next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(dim=1)
