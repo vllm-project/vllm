@@ -334,6 +334,7 @@ class TPUModelRunner:
     def _prepare_sample(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        padded_batch_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
         t = []
@@ -345,6 +346,9 @@ class TPUModelRunner:
             t.append(sampling_params.temperature
                      if sampling_params.temperature >= 1e-5 else 1e-5)
             p.append(sampling_params.top_p)
+        num_paddings = padded_batch_size - len(seq_group_metadata_list)
+        t += [1.0] * num_paddings
+        p += [1.0] * num_paddings
 
         t = torch.tensor(t, dtype=torch.float32, device=self.device)
         p = torch.tensor(p, dtype=torch.float32, device=self.device)
@@ -358,12 +362,13 @@ class TPUModelRunner:
         assert len(seq_group_metadata_list) > 0
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
-        is_prompt = seq_group_metadata_list[0].is_prompt
-        if is_prompt:
+        if seq_group_metadata_list[0].is_prompt:
             inputs = self._prepare_prompt(seq_group_metadata_list)
         else:
             inputs = self._prepare_decode(seq_group_metadata_list)
-        sample_inputs = self._prepare_sample(seq_group_metadata_list)
+        padded_batch_size = inputs[0].shape[0]
+        sample_inputs = self._prepare_sample(seq_group_metadata_list,
+                                             padded_batch_size)
         return inputs + sample_inputs
 
     def execute_model(
