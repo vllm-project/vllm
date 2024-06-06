@@ -29,7 +29,7 @@ class LoraErrorResponse(ErrorResponse):
     errorLoraName: str
 
 class LoraModel(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100)
+    name: str = Field(..., min_length=1, max_length=120)
     path: str = Field(...)
 
     @field_validator("path")
