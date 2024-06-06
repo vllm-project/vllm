@@ -68,9 +68,10 @@ async def async_request_tgi(
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
-
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
-                                              "data:")
+                        chunk_bytes = chunk_bytes.decode("utf-8")
+                        if chunk_bytes.startswith(":"):
+                            continue
+                        chunk = remove_prefix(chunk_bytes, "data:")
 
                         data = json.loads(chunk)
                         timestamp = time.perf_counter()
