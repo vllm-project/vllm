@@ -31,6 +31,9 @@ def llm():
               tensor_parallel_size=1,
               max_model_len=8192,
               enable_lora=True,
+              max_loras=4,
+              max_lora_rank=64,
+              max_num_seqs=128,
               enforce_eager=True)
 
     with llm.deprecate_legacy_api():
