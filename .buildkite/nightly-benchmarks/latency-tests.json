@@ -1,9 +1,33 @@
 [
     {
-        "test_name": "latency_llama7B",
+        "test_name": "latency_llama8B",
         "parameters": {
-            "model": "meta-llama/Llama-2-7b-chat-hf",
+            "model": "meta-llama/Meta-Llama-3-8B",
             "tensor_parallel_size": 1,
+            "load_format": "dummy"
+        }
+    },
+    {
+        "test_name": "latency_llama70B",
+        "parameters": {
+            "model": "meta-llama/Meta-Llama-3-70B-Instruct",
+            "tensor_parallel_size": 4,
+            "load_format": "dummy"
+        }
+    },
+    {
+        "test_name": "latency_mixtral8x7B",
+        "parameters": {
+            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "tensor_parallel_size": 8,
+            "load_format": "dummy"
+        }
+    },
+    {
+        "test_name": "latency_mixtral8x22B",
+        "parameters": {
+            "model": "mistralai/Mixtral-8x22B-Instruct-v0.1",
+            "tensor_parallel_size": 8,
             "load_format": "dummy"
         }
     }
