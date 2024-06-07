@@ -3,38 +3,11 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-  - label: ":docker: build image"
-    agents:
-      queue: small_cpu_queue
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker pull {{ ecr_repo }}:latest || true"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
-      - "docker push {{ docker_image }}"
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 5
-        - exit_status: -10  # Agent was lost
-          limit: 5
-  - wait
-
-  - label: ":docker: tag image as latest"
-    agents:
-      queue: small_cpu_queue
-    if: build.branch == 'main'
-    commands:
-      - "docker tag {{ docker_image }} {{ ecr_repo }}:latest"
-      - "docker push {{ ecr_repo }}:latest"
-
-
   {% for step in steps %}
   - label: "{{ step.label }}"
     agents:
       {% if step.no_gpu %}
-      queue: cpu_queue
+      queue: small_cpu_queue
       {% elif step.num_gpus == 2 or step.num_gpus == 4 %}
       queue: gpu_4_queue
       {% else %}
@@ -52,7 +25,7 @@ steps:
           limit: 5
     plugins:
       - docker#v5.2.0:
-          image: {{ docker_image }}
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:a149368b7ab8de4525058245c9ac25ec225fc2b1"
           always-pull: true
           propagate-environment: true
           {% if not step.no_gpu %}
