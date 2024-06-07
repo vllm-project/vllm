@@ -21,6 +21,17 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
 
+LONG_LORA_INFOS = [{
+    "lora_id": 1,
+    "context_length": "16k",
+}, {
+    "lora_id": 2,
+    "context_length": "16k",
+}, {
+    "lora_id": 3,
+    "context_length": "32k",
+}]
+
 
 def cleanup():
     destroy_model_parallel()
@@ -31,10 +42,24 @@ def cleanup():
     ray.shutdown()
 
 
+@pytest.fixture()
+def should_do_global_cleanup_after_test(request) -> bool:
+    """Allow subdirectories to skip global cleanup by overriding this fixture.
+    This can provide a ~10x speedup for non-GPU unit tests since they don't need
+    to initialize torch.
+    """
+
+    if request.node.get_closest_marker("skip_global_cleanup"):
+        return False
+
+    return True
+
+
 @pytest.fixture(autouse=True)
-def cleanup_fixture():
+def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
-    cleanup()
+    if should_do_global_cleanup_after_test:
+        cleanup()
 
 
 @pytest.fixture
@@ -152,6 +177,49 @@ def baichuan_zero_lora_files():
 @pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
+
+
+@pytest.fixture(scope="session")
+def phi2_lora_files():
+    return snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora")
+
+
+@pytest.fixture(scope="session")
+def long_context_lora_files_16k_1():
+    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1")
+
+
+@pytest.fixture(scope="session")
+def long_context_lora_files_16k_2():
+    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_2")
+
+
+@pytest.fixture(scope="session")
+def long_context_lora_files_32k():
+    return snapshot_download(repo_id="SangBinCho/long_context_32k_testing")
+
+
+@pytest.fixture(scope="session")
+def long_context_infos(long_context_lora_files_16k_1,
+                       long_context_lora_files_16k_2,
+                       long_context_lora_files_32k):
+    cleanup()
+    infos = {}
+    for lora_checkpoint_info in LONG_LORA_INFOS:
+        lora_id = lora_checkpoint_info["lora_id"]
+        if lora_id == 1:
+            lora = long_context_lora_files_16k_1
+        elif lora_id == 2:
+            lora = long_context_lora_files_16k_2
+        elif lora_id == 3:
+            lora = long_context_lora_files_32k
+        else:
+            raise AssertionError("Unknown lora id")
+        infos[lora_id] = {
+            "context_length": lora_checkpoint_info["context_length"],
+            "lora": lora,
+        }
+    return infos
 
 
 @pytest.fixture

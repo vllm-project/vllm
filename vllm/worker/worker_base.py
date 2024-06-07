@@ -1,15 +1,13 @@
-import datetime
 import importlib
 import os
-import tempfile
-import threading
 from abc import ABC, abstractmethod
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
-from vllm.logger import enable_trace_function_call, init_logger
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import get_vllm_instance_id, update_environment_variables
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.utils import (enable_trace_function_call_for_thread,
+                        update_environment_variables)
 
 logger = init_logger(__name__)
 
@@ -50,10 +48,9 @@ class WorkerBase(ABC):
 
     @abstractmethod
     def execute_model(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            blocks_to_swap_in: Dict[int, int], blocks_to_swap_out: Dict[int,
-                                                                        int],
-            blocks_to_copy: Dict[int, List[int]]) -> List[SamplerOutput]:
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         raise NotImplementedError
@@ -103,12 +100,18 @@ class WorkerWrapperBase:
 
     def __init__(self,
                  worker_module_name=None,
-                 worker_class_name=None) -> None:
+                 worker_class_name=None,
+                 trust_remote_code: bool = False) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
         self.worker = None
+        if trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils import init_cached_hf_modules
+            init_cached_hf_modules()
 
-    def update_environment_variables(self, envs: Dict[str, str]) -> None:
+    @staticmethod
+    def update_environment_variables(envs: Dict[str, str]) -> None:
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
@@ -118,19 +121,13 @@ class WorkerWrapperBase:
 
     def init_worker(self, *args, **kwargs):
         """
-        Actual initialization of the worker class, and set up
-       function tracing if required.
+        Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
-        if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
-            tmp_dir = tempfile.gettempdir()
-            filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
-                        f"_thread_{threading.get_ident()}_"
-                        f"at_{datetime.datetime.now()}.log").replace(" ", "_")
-            log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
-                                    filename)
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            enable_trace_function_call(log_path)
+        enable_trace_function_call_for_thread()
+
+        # see https://github.com/NVIDIA/nccl/issues/1234
+        os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
@@ -138,10 +135,8 @@ class WorkerWrapperBase:
 
     def execute_method(self, method, *args, **kwargs):
         try:
-            if hasattr(self, method):
-                executor = getattr(self, method)
-            else:
-                executor = getattr(self.worker, method)
+            target = self if self.worker is None else self.worker
+            executor = getattr(target, method)
             return executor(*args, **kwargs)
         except Exception as e:
             # if the driver worker also execute methods,

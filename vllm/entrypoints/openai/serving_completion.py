@@ -1,21 +1,29 @@
 import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
-                    Optional, Tuple)
+                    Optional)
+from typing import Sequence as GenericSequence
+from typing import Tuple
 
 from fastapi import Request
 
+from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
+# yapf: disable
+from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
+                                              CompletionRequest,
                                               CompletionResponse,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              LogProbs, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+                                              UsageInfo)
+# yapf: enable
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    OpenAIServing)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
+from vllm.sequence import Logprob
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -23,7 +31,7 @@ logger = init_logger(__name__)
 TypeTokenIDs = List[int]
 TypeTopLogProbs = List[Optional[Dict[int, float]]]
 TypeCreateLogProbsFn = Callable[
-    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
+    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], CompletionLogProbs]
 
 
 def parse_prompt_format(prompt) -> Tuple[bool, list]:
@@ -51,11 +59,11 @@ def parse_prompt_format(prompt) -> Tuple[bool, list]:
 
 class OpenAIServingCompletion(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
+    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
                  served_model_names: List[str],
-                 lora_modules: Optional[List[LoRA]] = None):
+                 lora_modules: Optional[List[LoRAModulePath]]):
         super().__init__(engine=engine,
+                         model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules)
 
@@ -84,11 +92,11 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time = int(time.time())
 
         # Schedule the request and get the result generator.
-        generators = []
+        generators: List[AsyncIterator[RequestOutput]] = []
         try:
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
-            decoding_config = self.engine.engine.decoding_config
+            decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
             guided_decode_logit_processor = (
@@ -117,12 +125,17 @@ class OpenAIServingCompletion(OpenAIServing):
                         truncate_prompt_tokens)
                 prompt_ids, prompt_text = prompt_formats
 
-                generators.append(
-                    self.engine.generate(prompt_text,
-                                         sampling_params,
-                                         f"{request_id}-{i}",
-                                         prompt_token_ids=prompt_ids,
-                                         lora_request=lora_request))
+                generator = self.engine.generate(
+                    {
+                        "prompt": prompt_text,
+                        "prompt_token_ids": prompt_ids
+                    },
+                    sampling_params,
+                    f"{request_id}-{i}",
+                    lora_request=lora_request,
+                )
+
+                generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -148,7 +161,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                                     num_prompts=len(prompts))
 
         # Non-streaming response
-        final_res_batch: RequestOutput = [None] * len(prompts)
+        final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
         try:
             async for i, res in result_generator:
                 if await raw_request.is_disconnected():
@@ -228,7 +241,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             i]:] if output.logprobs else None
 
                     if request.logprobs is not None:
-                        logprobs = self._create_logprobs(
+                        logprobs = self._create_completion_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
                             num_output_top_logprobs=request.logprobs,
@@ -299,7 +312,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 elif request.echo and request.max_tokens > 0:
                     token_ids = prompt_token_ids + output.token_ids
                     top_logprobs = (prompt_logprobs + output.logprobs
-                                    if request.logprobs else None)
+                                    if request.logprobs is not None else None)
                     output_text = prompt_text + output.text
                 else:
                     token_ids = output.token_ids
@@ -310,7 +323,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     assert top_logprobs is not None, (
                         "top_logprobs must be provided when logprobs "
                         "is requested")
-                    logprobs = self._create_logprobs(
+                    logprobs = self._create_completion_logprobs(
                         token_ids=token_ids,
                         top_logprobs=top_logprobs,
                         num_output_top_logprobs=request.logprobs,
@@ -343,4 +356,60 @@ class OpenAIServingCompletion(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
+        )
+
+    def _create_completion_logprobs(
+        self,
+        token_ids: GenericSequence[int],
+        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
+        num_output_top_logprobs: int,
+        initial_text_offset: int = 0,
+    ) -> CompletionLogProbs:
+        """Create logprobs for OpenAI Completion API."""
+        out_text_offset: List[int] = []
+        out_token_logprobs: List[Optional[float]] = []
+        out_tokens: List[str] = []
+        out_top_logprobs: List[Optional[Dict[str, float]]] = []
+
+        last_token_len = 0
+
+        for i, token_id in enumerate(token_ids):
+            step_top_logprobs = top_logprobs[i]
+            if step_top_logprobs is None:
+                token = self.tokenizer.decode(token_id)
+                out_tokens.append(token)
+                out_token_logprobs.append(None)
+                out_top_logprobs.append(None)
+            else:
+                token = self._get_decoded_token(step_top_logprobs[token_id],
+                                                token_id)
+                token_logprob = max(step_top_logprobs[token_id].logprob,
+                                    -9999.0)
+                out_tokens.append(token)
+                out_token_logprobs.append(token_logprob)
+
+                # makes sure to add the top num_output_top_logprobs + 1
+                # logprobs, as defined in the openai API
+                # (cf. https://github.com/openai/openai-openapi/blob/
+                # 893ba52242dbd5387a97b96444ee1c742cfce9bd/openapi.yaml#L7153)
+                out_top_logprobs.append({
+                    # Convert float("-inf") to the
+                    # JSON-serializable float that OpenAI uses
+                    self._get_decoded_token(top_lp[1], top_lp[0]):
+                    max(top_lp[1].logprob, -9999.0)
+                    for i, top_lp in enumerate(step_top_logprobs.items())
+                    if num_output_top_logprobs >= i
+                })
+
+            if len(out_text_offset) == 0:
+                out_text_offset.append(initial_text_offset)
+            else:
+                out_text_offset.append(out_text_offset[-1] + last_token_len)
+            last_token_len = len(token)
+
+        return CompletionLogProbs(
+            text_offset=out_text_offset,
+            token_logprobs=out_token_logprobs,
+            tokens=out_tokens,
+            top_logprobs=out_top_logprobs,
         )

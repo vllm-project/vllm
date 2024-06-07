@@ -55,17 +55,23 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 ), f"{type(self)} does not support multiple outputs per step"
         return self._process_sequence_group_outputs(sequence_group, outputs[0])
 
+    def process_prompt_logprob(self, seq_group: SequenceGroup,
+                               outputs: List[SequenceGroupOutput]) -> None:
+        assert len(outputs) == 1, ("Single step should only has 1 output.")
+        output = outputs[0]
+        prompt_logprobs = output.prompt_logprobs
+        if prompt_logprobs is not None:
+            if seq_group.sampling_params.detokenize and self.detokenizer:
+                self.detokenizer.decode_prompt_logprobs_inplace(
+                    seq_group, prompt_logprobs)
+            if not seq_group.prompt_logprobs:
+                # The first prompt token's logprob is None because it doesn't
+                # have tokens that are precedent.
+                seq_group.prompt_logprobs = [None]
+            seq_group.prompt_logprobs.extend(prompt_logprobs)
+
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
-
-        # Process prompt logprobs
-        prompt_logprobs = outputs.prompt_logprobs
-        if prompt_logprobs is not None and \
-            seq_group.sampling_params.detokenize and self.detokenizer:
-            self.detokenizer.decode_prompt_logprobs_inplace(
-                seq_group, prompt_logprobs)
-            seq_group.prompt_logprobs = prompt_logprobs
-
         # Process samples
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
@@ -112,8 +118,12 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     seq, seq_group.sampling_params)
             else:
                 new_char_count = 0
-            self.stop_checker.maybe_stop_sequence(seq, new_char_count,
-                                                  seq_group.sampling_params)
+            self.stop_checker.maybe_stop_sequence(
+                seq,
+                new_char_count,
+                seq_group.sampling_params,
+                lora_req=seq_group.lora_request,
+            )
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:

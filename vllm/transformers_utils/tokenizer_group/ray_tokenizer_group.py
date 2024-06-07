@@ -6,7 +6,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizer
 
 from vllm.config import TokenizerPoolConfig
-from vllm.engine.ray_utils import ray
+from vllm.executor.ray_utils import ray
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
