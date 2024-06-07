@@ -22,7 +22,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
 
 for name, cls in _CONFIG_REGISTRY.items():
     with contextlib.suppress(ValueError):
-        AutoConfig.register(name, cls)  # type: ignore[name-defined]
+        AutoConfig.register(name, cls)  # noqa: F821
 
 
 def get_config(model: str,
