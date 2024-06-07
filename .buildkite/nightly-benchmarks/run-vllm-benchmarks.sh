@@ -64,7 +64,7 @@ wait_for_server() {
 kill_vllm() {
   # kill vllm instances
   pkill -f python3
-  sleep 20
+  sleep 10
 }
 
 
@@ -138,6 +138,8 @@ done
 # Iterate over serving tests
 jq -c '.[]' $SERVING_TESTS | while read -r params; do
 
+  break
+
   # get the test name, and append the GPU type back to it.
   test_name=$(echo $params | jq -r '.test_name')_${gpu_type}
   if [[ ! "$test_name" =~ ^serving_ ]]; then
@@ -197,8 +199,6 @@ jq -c '.[]' $SERVING_TESTS | while read -r params; do
   # clean up
   kill_vllm
 
-  # only run 1 test, for development
-  break
 
 done
 

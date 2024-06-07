@@ -35,6 +35,7 @@ for test_file in results_folder.glob(f"*.json"):
     
     with open(test_file, "r") as f:
         raw_result = json.loads(f.read())
+    print(raw_result["percentiles"])
         
     if "serving" in str(test_file):
         # this result is generated via `benchmark_serving.py`
