@@ -128,9 +128,6 @@ jq -c '.[]' $LATENCY_TESTS | while read -r params; do
   # run the benchmark
   eval $latency_command
 
-  # clean up
-  kill_vllm
-
 done
 
 
@@ -199,6 +196,9 @@ jq -c '.[]' $SERVING_TESTS | while read -r params; do
 
   # clean up
   kill_vllm
+
+  # only run 1 test, for development
+  break
 
 done
 
