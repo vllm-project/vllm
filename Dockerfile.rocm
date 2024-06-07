@@ -178,6 +178,8 @@ RUN --mount=type=bind,from=export_hipblaslt,src=/,target=/install \
 RUN --mount=type=bind,from=export_rccl,src=/,target=/install \
     if ls /install/*.deb; then \
         dpkg -i /install/*.deb \
+        # RCCL needs to be installed twice
+        && dpkg -i /install/*.deb \
         && sed -i 's/, rccl-dev \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
         && sed -i 's/, rccl \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status; \
     fi
