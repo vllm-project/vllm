@@ -686,7 +686,6 @@ class ModelRunner:
 
     def convert_tensor_dict_to_model_input(self, metadata_dict: Dict[str,
                                                                      Any]):
-        metadata_dict = broadcast_tensor_dict(src=0)
         input_tokens = metadata_dict.pop("input_tokens")
         input_positions = metadata_dict.pop("input_positions")
         selected_token_indices = metadata_dict.pop("selected_token_indices")
