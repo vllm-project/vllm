@@ -49,22 +49,5 @@
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
             "num_prompts": 1000
         }
-    },
-    {
-        "test_name": "serving_mixtral8x22B_tp8_sharegpt",
-        "server_parameters": {
-            "model": "mistralai/Mixtral-8x22B-Instruct-v0.1",
-            "tensor_parallel_size": 8,
-            "swap_space": 16,
-            "disable_log_stats": "",
-            "disable_log_requests": "",
-            "load_format": "dummy"
-        },
-        "client_parameters": {
-            "model": "mistralai/Mixtral-8x22B-Instruct-v0.1",
-            "dataset_name": "sharegpt",
-            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 1000
-        }
     }
 ]
