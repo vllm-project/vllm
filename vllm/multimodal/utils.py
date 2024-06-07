@@ -1,4 +1,3 @@
-import asyncio
 import base64
 from io import BytesIO
 from typing import Optional, Union
@@ -40,10 +39,9 @@ class ImageFetchAiohttp:
                 image_raw = await response.read()
             image = Image.open(BytesIO(image_raw))
 
+        # Only split once and assume the second part is the base64 encoded image
         elif image_url.startswith('data:image'):
-            loop = asyncio.get_event_loop()
-            image = await loop.run_in_executor(None, load_image_from_base64,
-                                               image_url.split(',')[1])
+            image = load_image_from_base64(image_url.split(',', 1)[1])
 
         else:
             raise ValueError("Invalid image url: A valid image url must start "
