@@ -84,12 +84,59 @@ cd benchmarks
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 RESULTS_FOLDER=results/
 SERVING_TESTS=../.buildkite/nightly-benchmarks/serving-tests.json
+LATENCY_TESTS=../.buildkite/nightly-benchmarks/latency-tests.json
 POSTPROCESS_SCRIPT=../.buildkite/nightly-benchmarks/results2md.py
 mkdir -p $RESULTS_FOLDER
 
 
-# test if benchmark_latency.py is working on the server
-timeout 120 python3 benchmark_latency.py || exit 1
+
+# Iterate over latency tests
+jq -c '.[]' $LATENCY_TESTS | while read -r params; do
+
+  # get the test name, and append the GPU type back to it.
+  test_name=$(echo $params | jq -r '.test_name')_${gpu_type}
+  if [[ ! "$test_name" =~ ^latency_ ]]; then
+    echo "In latency-test.json, test_name must start with \"latency_\"."
+    exit 1
+  fi
+
+  # get client and server arguments
+  latency_params=$(echo $params | jq -r '.parameters')
+  latency_args=$(json2args "$latency_params")
+
+  # check if there is enough GPU to run the test
+  tp=$(echo $latency_params | jq -r '.tensor_parallel_size')
+  if [[ $gpu_count -lt $tp ]]; then
+    echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
+    continue
+  fi
+
+  latency_command="python3 benchmark_latency.py \
+    --output-json $RESULTS_FOLDER/${test_name}.json $latency_args"
+
+  echo "Running test case $test_name"
+  echo "Latency command: $latency_command"
+  # record the benchmarking commands
+  echo $(
+    jq -n \
+      --arg latency "$latency_command" \
+      '{
+        latency_command: $latency,
+      }'
+  ) > $RESULTS_FOLDER/$test_name.commands
+
+  # run the benchmark
+  eval $latency_command
+
+  # clean up
+  kill_vllm
+
+done
+
+
+
+
+
 
 # Iterate over serving tests
 jq -c '.[]' $SERVING_TESTS | while read -r params; do
@@ -156,7 +203,7 @@ jq -c '.[]' $SERVING_TESTS | while read -r params; do
 done
 
 # postprocess benchmarking results
-pip install tabulate
+pip install tabulate pandas
 python3 ../.buildkite/nightly-benchmarks/results2md.py
 
 # if the agent binary is not found, skip uploading the results, exit 0
