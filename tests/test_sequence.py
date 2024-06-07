@@ -71,6 +71,7 @@ def test_sequence_data_prefill():
     seq_data.append_token_id(1, logprob=0.0)
     seq_data.reset_state_for_recompute()
     assert seq_data.get_num_uncomputed_tokens() == 5
+    assert seq_data.get_prompt_len() == 5
     assert seq_data.get_num_computed_tokens() == 0
 
 
