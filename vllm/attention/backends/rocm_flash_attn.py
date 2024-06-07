@@ -348,7 +348,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         key,
                         value,
                         prefill_meta.seq_lens,
-                        attn_metadata,
                         num_tokens,
                         self.num_heads,
                         self.head_size,
@@ -412,21 +411,17 @@ def _sdpa_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     seq_lens: List[int],
-    attn_metadata: ROCmFlashAttentionMetadata,
     num_tokens: int,
     num_heads: int,
     head_size: int,
     scale: float,
 ) -> torch.Tensor:
-    att_masks = [None] * len(seq_lens)
-    attn_metadata.attn_bias = att_masks
-
     start = 0
     output = torch.empty((num_tokens, num_heads, head_size),
                          dtype=query.dtype,
                          device=query.device)
 
-    for seq_len, mask in zip(seq_lens, attn_metadata.attn_bias):
+    for seq_len in seq_lens:
         end = start + seq_len
         with torch.backends.cuda.sdp_kernel(enable_math=True,
                                             enable_flash=False,
@@ -435,7 +430,6 @@ def _sdpa_attention(
                 query[:, start:end, :],
                 key[:, start:end, :],
                 value[:, start:end, :],
-                attn_mask=mask,
                 dropout_p=0.0,
                 is_causal=True,
                 scale=scale).movedim(query.dim() - 2, 0)
