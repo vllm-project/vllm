@@ -47,6 +47,7 @@ class PatchEmbedding(nn.Module):
         self.position_embedding = nn.Embedding(config.num_positions, config.hidden_size)
 
     def forward(self, images: "tensor(B, C, H, W)") -> "tensor(B, L, D)":
+        images = images.to(self.proj.weight.device)
         x = self.proj(images)
         x = x.flatten(2).transpose(1, 2)
         cls_token = self.cls_embedding.expand(x.shape[0], -1, -1)
