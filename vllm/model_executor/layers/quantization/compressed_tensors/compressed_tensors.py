@@ -72,9 +72,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_symmetric = weight_quant.symmetric and input_quant.symmetric
         is_static = not weight_quant.dynamic and not input_quant.dynamic
 
-        if is_8_bits and is_tensor and is_symmetric and is_static:
-            return True
-        return False
+        return is_8_bits and is_tensor and is_symmetric and is_static
 
     def _is_dynamic_token_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
@@ -86,16 +84,14 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_symmetric = weight_quant.symmetric and input_quant.symmetric
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
 
-        if is_8_bits and is_token_tensor and is_symmetric and is_dynamic:
-            return True
-        return False
+        return is_8_bits and is_token_tensor and is_symmetric and is_dynamic
 
     def _get_schema(self, weight_quant: BaseModel,
                     input_quant: BaseModel) -> "CompressedTensorsScheme":
         if self._is_static_tensor_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8StaticTensor()
 
-        elif self._is_dynamic_token_w8a8(weight_quant, input_quant):
+        if self._is_dynamic_token_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8DynamicToken()
 
         raise NotImplementedError("Scheme not supported.")
