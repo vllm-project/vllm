@@ -11,7 +11,6 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.communication_op import graph_capture
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -682,6 +681,8 @@ class ModelRunner:
         if attn_metadata:
             metadata_dict.update(attn_metadata.asdict_zerocopy())
 
+        self.sampling_metadata = sampling_metadata
+
         return metadata_dict
 
     def convert_tensor_dict_to_model_input(self, metadata_dict: Dict[str,
@@ -696,12 +697,16 @@ class ModelRunner:
             attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
         else:
             attn_metadata = None
-        sampling_metadata = SamplingMetadata(
-            seq_groups=None,
-            selected_token_indices=selected_token_indices,
-            categorized_sample_indices=None,
-            num_prompts=0,
-        )
+
+        if hasattr(self, "sampling_metadata"):
+            sampling_metadata = self.sampling_metadata
+        else:
+            sampling_metadata = SamplingMetadata(
+                seq_groups=None,
+                selected_token_indices=selected_token_indices,
+                categorized_sample_indices=None,
+                num_prompts=0,
+            )
         return (input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
                 multi_modal_kwargs)
