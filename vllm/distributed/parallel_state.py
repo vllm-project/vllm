@@ -337,8 +337,7 @@ class GroupCoordinator:
         NOTE: `src` is the local rank of the source rank.
         """
         # Bypass the function if we are using only 1 GPU.
-        if (not torch.distributed.is_initialized()
-                or torch.distributed.get_world_size(group=group) == 1):
+        if (not torch.distributed.is_initialized() or self.world_size == 1):
             return tensor_dict
 
         group = self.device_group
