@@ -57,6 +57,11 @@ from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
 
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -309,6 +314,7 @@ class LlamaModel(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    #@torch.compile(backend='cudagraphs')
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
@@ -423,6 +429,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         else:
             self.lm_head = PPMissingLayer()
 
+    #@torch.compile(backend='cudagraphs')
     def forward(
         self,
         input_ids: torch.Tensor,

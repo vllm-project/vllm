@@ -20,6 +20,10 @@ from torch._subclasses.fake_tensor import FakeTensorMode, FakeTensor
 
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 """
 Similar to torch.fx.Graph.print_tabular except it returns a string and
 allows the addition of extra columns.
@@ -413,23 +417,10 @@ def add_uses_for_mutable_inputs(g: torch.fx.Graph):
 
 
 def tag_side_effects(g: torch.fx.Graph):
-    uses = dict()
     for n in g.nodes:
-        for a in n.args:
-            if isinstance(a, torch.fx.Node) and a in uses:
-                defs = uses[a]
-                for d in defs:
-                    print(f"ADD USE {d}, {n}")
-                    d.users[n] = None
-            elif isinstance(a, tuple) and any([isinstance(aa, torch.fx.Node) and aa in uses for aa in a]):
-                for aa in a:
-                    defs = uses[aa]
-                    for d in defs:
-                        print(f"ADD USE {d}, {n}")
-                        d.users[n] = None
-
         if n.op != 'call_function':
             continue
+
         sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(n.target, return_schemas=True)
         if schemas is None or not any([s.is_mutable for s in schemas]):
             continue
@@ -449,4 +440,4 @@ def tag_side_effects(g: torch.fx.Graph):
             _, s = matched_schemas[0]
             if s.is_mutable:
                 torch.fx.node.has_side_effect(n.target)
-                print(f"MUTABLE SIG {n.target} {s}")
+                logger.debug(f"Found mutable or inplace signature {n.target}: {s}")

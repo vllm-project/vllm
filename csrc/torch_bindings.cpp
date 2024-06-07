@@ -3,6 +3,7 @@
 #include "ops.h"
 #include "core/registration.h"
 
+#include <ATen/FunctionalTensorWrapper.h>
 #include <torch/library.h>
 
 // Note on op signatures:
@@ -203,6 +204,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("cutlass_scaled_mm_supports_fp8", torch::kCUDA,
            &cutlass_scaled_mm_supports_fp8);
 #endif
+#endif
 
   // Quantized GEMM for GPTQ.
   ops.def("gptq_gemm", &gptq_gemm);
@@ -247,15 +249,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
 
   // Compute int8 quantized tensor for given scaling factor.
+#ifdef FUNCTIONALIZE
+  ops.def(
+      "static_scaled_int8_quant(Tensor out, Tensor input, Tensor scale) -> "
+      "Tensor");
+  ops.def(
+      "static_scaled_int8_quant_(Tensor! out, Tensor input, Tensor scale) -> "
+      "()");
+  ops.impl("static_scaled_int8_quant", torch::kCUDA,
+           inplace_func(0, &static_scaled_int8_quant));
+  ops.impl("static_scaled_int8_quant_", torch::kCUDA,
+           &static_scaled_int8_quant);
+  ops.impl("static_scaled_int8_quant", torch::kMeta,
+           meta_fn<0, decltype(static_scaled_int8_quant)>);
+#else
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale) -> "
       "()");
   ops.impl("static_scaled_int8_quant", torch::kCUDA, &static_scaled_int8_quant);
-  //ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
-#if 0
-  ops.impl("static_scaled_int8_quant",
-           torch::kMeta,
-           &meta_fn<0, decltype(static_scaled_int8_quant)>::fn);
 #endif
 
   // Compute int8 quantized tensor and scaling factor
@@ -265,6 +276,92 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
 }
+
+namespace {
+
+torch::Tensor maybe_from_functional_tensor(torch::Tensor t) {
+  if (at::functionalization::impl::isFunctionalTensor(t)) {
+    at::functionalization::impl::sync(t);
+    return at::functionalization::impl::from_functional_tensor(t);
+  } else {
+    return t;
+  }
+}
+
+void static_scaled_int8_quant_func(torch::Tensor& out,
+                                   torch::Tensor const& input,
+                                   torch::Tensor const& scale) {
+  TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(out));
+  TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(input));
+  // TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(scale));
+
+  static auto op_handle =
+      c10::Dispatcher::singleton()
+          .findSchemaOrThrow("_C::static_scaled_int8_quant", "")
+          .typed<at::Tensor(at::Tensor&, at::Tensor const&,
+                            at::Tensor const&)>();
+
+  auto out_0 = maybe_from_functional_tensor(out);
+  auto input_0 = maybe_from_functional_tensor(input);
+  auto scale_0 = maybe_from_functional_tensor(scale);
+
+  at::Tensor tmp_out;
+  {
+    at::AutoDispatchSkipFunctionalize guard;
+    tmp_out = op_handle.call(out_0, input_0, scale_0);
+  }
+
+  // Finally, tell functionalization about this mutation.
+  at::functionalization::impl::replace_(out, tmp_out);
+  at::functionalization::impl::commit_update(out);
+  at::functionalization::impl::sync(out);
+
+  // return out;
+}
+
+void cutlass_scaled_mm_dq_func(torch::Tensor& out, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales) {
+  TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(out));
+  TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(a));
+  // TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(b));
+  // TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(a_scales));
+  // TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(b_scales));
+
+  static auto op_handle =
+      c10::Dispatcher::singleton()
+          .findSchemaOrThrow("_C::cutlass_scaled_mm_dq", "")
+          .typed<at::Tensor(at::Tensor&, at::Tensor const&, at::Tensor const&,
+                            at::Tensor const&, at::Tensor const&)>();
+
+  auto out_0 = maybe_from_functional_tensor(out);
+  auto a_0 = maybe_from_functional_tensor(a);
+  auto b_0 = maybe_from_functional_tensor(b);
+  auto a_scales_0 = maybe_from_functional_tensor(a_scales);
+  auto b_scales_0 = maybe_from_functional_tensor(b_scales);
+
+
+  at::Tensor tmp_out;
+  {
+    at::AutoDispatchSkipFunctionalize guard;
+    tmp_out = op_handle.call(out_0, a_0, b_0, a_scales_0, b_scales_0);
+  }
+
+  // Finally, tell functionalization about this mutation.
+  at::functionalization::impl::replace_(out, tmp_out);
+  at::functionalization::impl::commit_update(out);
+  at::functionalization::impl::sync(out);
+}
+
+}  // namespace
+
+#ifdef FUNCTIONALIZE
+TORCH_LIBRARY_IMPL(_C, Functionalize, ops) {
+  ops.impl("static_scaled_int8_quant_", &static_scaled_int8_quant_func);
+  ops.impl("cutlass_scaled_mm_dq_", &cutlass_scaled_mm_dq_func);
+}
+#endif
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   // Cache ops

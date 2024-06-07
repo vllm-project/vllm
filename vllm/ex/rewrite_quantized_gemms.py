@@ -88,7 +88,7 @@ class replacement_class(torch.nn.Module):
         self.x_scale = torch.empty((1,1), dtype=torch.float32, device='cuda')  # temp hack
 
     def forward(self, x, w, w_scale, x_type):
-        x_q = custom_ops.static_scaled_int8_quant(x, self.x_scale[0].item())
+        x_q = custom_ops.static_scaled_int8_quant(x, self.x_scale)
         return _cutlass_scaled_mm_dq(x_q, w, self.x_scale, w_scale, x_type)
 
 

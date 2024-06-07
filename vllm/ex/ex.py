@@ -163,13 +163,22 @@ class backend_class:
         self.backend = backend
 
     def __call__(self, gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]) -> Callable:
+        # Nop for baseline testing
+        #return gm.forward
 
-        #from torch.fx.experimental.proxy_tensor import make_fx
-        #from torch._functorch.eager_transforms import functionalize
-        #from torch.fx import symbolic_trace
+        #logger.info("BACKEND")
+
+        from torch.fx.experimental.proxy_tensor import make_fx
+        from torch._functorch.eager_transforms import functionalize
+        from torch.fx import symbolic_trace
 
         # Must make a copy so that inductor backend doesn't choke.
         gm = copy.copy(gm)
+
+        #print(f"Original module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}")
+
+        logger.debug(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
+        logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")
 
         # See torch/_subclasses/function_tensor.py FunctionalTensor, FunctionalTensorMode
         # trace with FunctionTensor args???
@@ -180,18 +189,14 @@ class backend_class:
         # post_grad.py: decompose_auto_functionalized(graph):
         # from torch._higher_order_ops.auto_functionalize import auto_functionalized_dense
 
-        #gm = make_fx(functionalize(gm, remove='mutations'))(*example_inputs)
-        #gm = make_fx(functionalize(gm, remove='mutations_and_views'))(*example_inputs)
-
         tag_side_effects(gm.graph)
 
-        # TODO: this is eliminating functions that write to an input
         gm.graph.eliminate_dead_code()
 
-        print(f"Original module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}")
-
-        logger.debug(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
-        logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")
+        if False:  # functionalize
+            gm = make_fx(functionalize(gm, remove='mutations'))(*example_inputs)
+            print(f"Functionalized module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}")
+            logger.debug(f"Functionalized module {gm}:\n{graph_print_tabular(gm.graph)}")
 
         # TODO: store these in the root module state dictionary so that code for
         # all sub-modules is shared?  Or should these be globals?
@@ -250,7 +255,9 @@ class backend_class:
                     if self.backend != None:
                         m.forward = backend_compile(m, module_inputs, backend=self.backend)
 
-        #part_gm = torch.fx.passes.reinplace.reinplace(part_gm, *example_inputs)
+        if False: # functionalize
+            with unittest.mock.patch.object(fake_mode, "allow_non_fake_inputs", True):
+                part_gm = torch.fx.passes.reinplace.reinplace(part_gm, *example_inputs)
 
         part_gm.recompile()
 
