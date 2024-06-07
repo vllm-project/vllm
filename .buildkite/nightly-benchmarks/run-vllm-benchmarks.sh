@@ -9,7 +9,7 @@
 # Benchmarking results will be at /vllm/benchmarks/results/benchmark_results.md
 
 
-set -xe
+set -e
 set -o pipefail
 
 
