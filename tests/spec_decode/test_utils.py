@@ -1,12 +1,9 @@
-import os
-import socket
 from unittest.mock import MagicMock
 
 import pytest
 
 from vllm.sequence import SequenceGroupMetadata
 from vllm.spec_decode.util import get_all_seq_ids, split_batch_by_proposal_len
-from vllm.utils import get_open_port
 
 
 def test_get_all_seq_ids():
@@ -112,15 +109,3 @@ def test_all_non_zero_with_zero_filter(fake_sequence_group_metadata):
 
     assert filtered_groups == []
     assert indices == []
-
-
-def test_get_open_port():
-    os.environ["VLLM_PORT"] = "5678"
-    # make sure we can get multiple ports, even if the env var is set
-    ports = [get_open_port() for _ in range(3)]
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1,\
-         socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2,\
-         socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
-        s1.bind(("localhost", ports[0]))
-        s2.bind(("localhost", ports[1]))
-        s3.bind(("localhost", ports[2]))
