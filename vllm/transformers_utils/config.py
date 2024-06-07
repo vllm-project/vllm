@@ -1,7 +1,8 @@
 from typing import Dict, Optional
 
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
+from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MPTConfig, RWConfig)
@@ -25,6 +26,10 @@ def get_config(model: str,
                rope_scaling: Optional[dict] = None,
                rope_theta: Optional[float] = None) -> PretrainedConfig:
     try:
+        if VLLM_USE_MODELSCOPE:
+            from modelscope import AutoConfig
+        else:
+            from transformers import AutoConfig
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
