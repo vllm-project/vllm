@@ -344,13 +344,13 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     value = value.movedim(0, value.dim() - 2)
                     # sdpa math backend attention
                     out = self.attn_func(
-                        query, 
-                        key, 
-                        value, 
+                        query,
+                        key,
+                        value,
                         prefill_meta.seq_lens,
-                        attn_metadata, 
+                        attn_metadata,
                         num_tokens,
-                        self.num_heads, 
+                        self.num_heads,
                         self.head_size,
                         self.scale,
                     )
@@ -408,14 +408,14 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
 
 def _sdpa_attention(
-    query: torch.Tensor, 
-    key: torch.Tensor, 
-    value: torch.Tensor, 
-    seq_lens: List[int], 
-    attn_metadata: ROCmFlashAttentionMetadata, 
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    seq_lens: List[int],
+    attn_metadata: ROCmFlashAttentionMetadata,
     num_tokens: int,
-    num_heads: int, 
-    head_size: int, 
+    num_heads: int,
+    head_size: int,
     scale: float,
 ) -> torch.Tensor:
     att_masks = [None] * len(prefill_meta.seq_lens)
