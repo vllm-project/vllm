@@ -1,4 +1,4 @@
-name: benchmark
+name: nm benchmark
 on:
   # makes workflow reusable
   workflow_call:
@@ -67,6 +67,9 @@ on:
           - 'false'
         default: 'false'
 
+env:
+    BENCHMARK_RESULTS: /model-cache/benchmark_results
+
 jobs:
 
   BENCHMARK:
@@ -84,6 +87,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
             python-version: ${{ inputs.python }}
+
+      - name: install automation components
+        run: |
+            sudo apt-get update --fix-missing
+            sudo apt-get install -y git-all
+            sudo apt-get install -y curl wget
 
       - name: checkout repository code
         uses: actions/checkout@v4
@@ -138,18 +147,22 @@ jobs:
 
       - name: mount EFS
         run: |
-            sudo mkdir -m 777 -p /EFS
-            sudo mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport ${{ secrets.HF_FS_CACHE }}:/ /EFS
-            sudo chown -R $(whoami):$(whoami) /EFS
+            if [[ ${{ inputs.label }} == *aws* ]]; then
+                sudo mkdir -m 777 -p /EFS
+                sudo mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport ${{ secrets.HF_FS_CACHE }}:/ /EFS
+                sudo chown -R $(whoami):$(whoami) /EFS
+                # update results target
+                echo "BENCHMARK_RESULTS=/EFS/benchmark_results" >> $GITHUB_ENV
+            fi
 
-      - name: copy benchmark results to EFS store
+      - name: copy benchmark results to Filestore
         if: success()
-        uses: ./.github/actions/nm-copy-benchmark-data-to-efs
+        uses: ./.github/actions/nm-copy-benchmark-data-to-fs
         with:
           label: ${{ inputs.label }}
           python: ${{ inputs.python }}
           src: benchmark-results
-          efs_dst: /EFS/benchmark_results
+          fs_dst: ${{ env.BENCHMARK_RESULTS }}
 
       # Produce GHA benchmark JSONs
       - name: make github-action-benchmark JSONs
@@ -179,14 +192,14 @@ jobs:
           path: gh-action-benchmark-jsons
           retention-days: 1
 
-      - name: copy gh action benchmark JSONs to EFS store
+      - name: copy gh action benchmark JSONs to Filestore
         if: success()
-        uses: ./.github/actions/nm-copy-benchmark-data-to-efs
+        uses: ./.github/actions/nm-copy-benchmark-data-to-fs
         with:
           label: ${{ inputs.label }}
           python: ${{ inputs.python }}
           src: gh-action-benchmark-jsons
-          efs_dst: /EFS/benchmark_results
+          fs_dst: ${{ env.BENCHMARK_RESULTS }}
 
   BENCHMARK_REPORT:
 

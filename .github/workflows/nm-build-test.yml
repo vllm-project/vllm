@@ -1,4 +1,4 @@
-name: build-test
+name: nm build-test
 on:
   # makes workflow reusable
   workflow_call:
@@ -70,7 +70,7 @@ on:
 jobs:
 
     BUILD:
-        uses: ./.github/workflows/build.yml
+        uses: ./.github/workflows/nm-build.yml
         with:
             wf_category: ${{ inputs.wf_category }}
             build_label: ${{ inputs.build_label }}
@@ -84,7 +84,7 @@ jobs:
     TEST-SOLO:
         needs: [BUILD]
         if: success()
-        uses: ./.github/workflows/test.yml
+        uses: ./.github/workflows/nm-test.yml
         with:
             test_label: ${{ inputs.test_label_solo }}
             timeout: ${{ inputs.test_timeout }}
@@ -98,7 +98,7 @@ jobs:
     # TEST-MULTI:
     #     needs: [BUILD]
     #     if: success() && contains(fromJSON('["NIGHTLY", "WEEKLY", "RELEASE"]'), inputs.wf_category)
-    #     uses: ./.github/workflows/test.yml
+    #     uses: ./.github/workflows/nm-test.yml
     #     with:
     #         test_label: ${{ inputs.test_label_multi }}
     #         timeout: ${{ inputs.test_timeout }}
@@ -124,7 +124,7 @@ jobs:
         if: success()
         uses: ./.github/workflows/nm-benchmark.yml
         with:
-            label: ${{ inputs.test_label_solo }}
+            label: ${{ inputs.benchmark_label }}
             benchmark_config_list_file: ${{ inputs.benchmark_config_list_file }}
             timeout: ${{ inputs.benchmark_timeout }}
             gitref: ${{ github.ref }}
@@ -133,20 +133,6 @@ jobs:
             # Always push if it is a scheduled job
             push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
         secrets: inherit
-
-    TEST-ACCURACY-SMOKE:
-      needs: [BUILD]
-      if: inputs.wf_category == 'NIGHTLY'
-      uses: ./.github/workflows/nm-test-accuracy-smoke.yml
-      with:
-        label: ${{ inputs.test_label_solo }}
-        timeout: ${{ inputs.benchmark_timeout }}
-        gitref: ${{ inputs.gitref }}
-        Gi_per_thread: ${{ inputs.Gi_per_thread }}
-        nvcc_threads: ${{ inputs.nvcc_threads }}
-        python: ${{ inputs.python }}
-        whl: ${{ needs.BUILD.outputs.whl }}
-      secrets: inherit
 
     TEST-ACCURACY-FULL:
       needs: [BUILD]

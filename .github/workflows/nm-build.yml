@@ -1,4 +1,4 @@
-name: build
+name: nm build
 on:
   # makes workflow reusable
   workflow_call:

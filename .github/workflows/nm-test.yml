@@ -1,4 +1,4 @@
-name: test
+name: nm test
 on:
   # makes workflow reusable
   workflow_call:
@@ -71,6 +71,12 @@ jobs:
               with:
                 python-version: ${{ inputs.python }}
 
+            - name: install automation components
+              run: |
+                sudo apt-get update --fix-missing
+                sudo apt-get install -y git-all
+                sudo apt-get install -y curl
+
             - name: checkout
               id: checkout
               uses: actions/checkout@v4
@@ -87,11 +93,8 @@ jobs:
                 Gi_per_thread: 1
                 nvcc_threads: 0
 
-            - name: hf cache
-              id: hf_cache
-              uses: ./.github/actions/nm-hf-cache/
-              with:
-                fs_cache: ${{ secrets.HF_FS_CACHE }}
+            - name: install testmo
+              uses: ./.github/actions/nm-install-testmo/
 
             - name: create testmo run
               id: create_testmo_run
@@ -102,6 +105,16 @@ jobs:
                 testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
                 source: 'build-test'
 
+            - name: verify python
+              id: verify_python
+              uses: ./.github/actions/nm-verify-python/
+
+            - name: hf cache
+              id: hf_cache
+              uses: ./.github/actions/nm-hf-cache/
+              with:
+                fs_cache: ${{ secrets.HF_FS_CACHE }}
+
             - name: download whl
               id: download
               uses: actions/download-artifact@v4
@@ -109,13 +122,20 @@ jobs:
                 name: ${{ inputs.whl }}
                 path: ${{ inputs.whl }}
 
-            - name: install and test whl
-              id: test
-              uses: ./.github/actions/nm-install-test-whl/
+            - name: install whl
+              uses: ./.github/actions/nm-install-whl/
               with:
-                pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
                 python: ${{ inputs.python }}
                 venv:
+
+            - name: run buildkite script
+              run: |
+                cd tests && sudo bash ../.buildkite/download-images.sh
+
+            - name: run tests
+              id: test
+              uses: ./.github/actions/nm-test-whl/
+              with:
                 test_skip_list: ${{ inputs.test_skip_list }}
                 test_directory: tests
                 test_results: test-results
@@ -146,7 +166,7 @@ jobs:
                 test_label: ${{ inputs.test_label }}
                 gitref: ${{ inputs.gitref }}
                 testmo_run_url: https://neuralmagic.testmo.net/automation/runs/view/${{ steps.create_testmo_run.outputs.id }}
-                python: ${{ steps.set_python.outputs.version }}
+                python: ${{ steps.verify_python.outputs.version }}
                 whl: ${{ steps.test.outputs.whl }}
                 magic_wand: ${{ steps.test.outputs.magic_wand }}
                 test_status: ${{ steps.test.outputs.status }}

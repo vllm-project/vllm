@@ -99,7 +99,7 @@ done
 echo "..."
 
 # download required artifacts for testing
-(cd ${TEST_DIR} && bash ../.buildkite/download-images.sh)
+# (cd ${TEST_DIR} && sudo bash ../.buildkite/download-images.sh)
 
 # run selected tests
 SUCCESS=0

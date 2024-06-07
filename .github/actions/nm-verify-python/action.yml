@@ -1,0 +1,14 @@
+name: verify python
+description: 'sets python version and creates venv for neuralmagic'
+outputs:
+  version:
+    description: "result from 'python --version'"
+    value: ${{ steps.set_python.outputs.version }}
+runs:
+  using: composite
+  steps:
+    - id: set_python
+      run: |
+        VERSION=$(python --version)
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      shell: bash

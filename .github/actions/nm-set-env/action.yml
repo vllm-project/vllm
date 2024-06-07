@@ -23,8 +23,8 @@ runs:
       fi
       # CUDA
       echo "TORCH_CUDA_ARCH_LIST=7.0 7.5 8.0 8.6 8.9 9.0+PTX" >> $GITHUB_ENV
-      echo "PATH=${PATH}:/usr/local/apps/pyenv/plugins/pyenv-virtualenv/shims:/usr/local/apps/pyenv/shims:/usr/local/apps/pyenv/bin:/usr/local/apps/nvm/versions/node/v19.9.0/bin:/usr/local/apps/nvm/versions/node/v16.20.2/bin:/usr/local/cuda-12.1/bin:/usr/local/cuda-12.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/${WHOAMI}/.local/bin:" >> $GITHUB_ENV
-      echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/local/cuda-12.1/lib64::/usr/local/cuda-12.1/lib64:" >> $GITHUB_ENV
+      echo "PATH=${PATH}:/usr/local/nvidia/bin:/usr/local/apps/pyenv/plugins/pyenv-virtualenv/shims:/usr/local/apps/pyenv/shims:/usr/local/apps/pyenv/bin:/usr/local/apps/nvm/versions/node/v19.9.0/bin:/usr/local/apps/nvm/versions/node/v16.20.2/bin:/usr/local/cuda-12.1/bin:/usr/local/cuda-12.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/${WHOAMI}/.local/bin:" >> $GITHUB_ENV
+      echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/local/cuda-12.1/lib64::/usr/local/cuda-12.1/lib64:/usr/local/nvidia/lib64:/usr/local/nvidia/bin:" >> $GITHUB_ENV
       # HF Cache
       echo "HF_TOKEN=${HF_TOKEN_SECRET}" >> $GITHUB_ENV
       echo "HF_HOME=/model-cache" >> $GITHUB_ENV

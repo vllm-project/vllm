@@ -1,0 +1,32 @@
+name: test whl
+description: 'run tests on installed whl'
+inputs:
+  test_skip_list:
+    description: 'file containing tests to skip'
+    required: true
+  test_directory:
+    description: 'directory to test files'
+    required: true
+  test_results:
+    description: 'desired directory for test results'
+    required: true
+outputs:
+  status:
+    description: 'return test result'
+    value: ${{ steps.test_whl.outputs.status }}
+runs:
+  using: composite
+  steps:
+    - id: test_whl
+      run: |
+        pip install coverage
+        pip install pytest-cov
+        pip install pytest-xdist
+        pip install -r requirements-dev.txt
+        SUCCESS=0
+        VLLM_SRC=$(python3 -c "import vllm; print(vllm.__path__[0])")
+        ./.github/scripts/run-tests -s ${VLLM_SRC} -t ${{ inputs.test_directory }} -r ${{ inputs.test_results }} -f ${{ inputs.test_skip_list }}|| SUCCESS=$?
+        pytest ./neuralmagic/tests/test_nm-vllm_licenses.py --junitxml=${{ inputs.test_results }}/test_nm-vllm_licenses.xml
+        echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
+        exit ${SUCCESS}
+      shell: bash

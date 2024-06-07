@@ -1,4 +1,4 @@
-name: nm-test-accuracy-full
+name: nm test accuracy full
 on:
   # makes workflow reusable
   workflow_call:

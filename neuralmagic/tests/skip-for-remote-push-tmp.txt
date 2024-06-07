@@ -10,6 +10,7 @@ tests/kernels/test_attention.py
 tests/kernels/test_rand.py
 tests/kernels/test_cache.py
 tests/kernels/test_sampler.py
+tests/kernels/test_cutlass.py
 tests/core/test_block_manager.py
 tests/core/test_chunked_prefill_scheduler.py
 tests/core/test_scheduler.py
