@@ -97,10 +97,6 @@ class UsageInfo(OpenAIBaseModel):
     completion_tokens: Optional[int] = 0
 
 
-class StreamOptions(OpenAIBaseModel):
-    include_usage: Optional[bool]
-
-
 class ResponseFormat(OpenAIBaseModel):
     # type must be "json_object" or "text"
     type: Literal["text", "json_object"]

@@ -1342,12 +1342,14 @@ async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert embeddings.usage.prompt_tokens == 17
     assert embeddings.usage.total_tokens == 17
 
+
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_chat_completion_stream_options(server, client: openai.AsyncOpenAI,
-                              model_name: str):
+async def test_chat_completion_stream_options(server,
+                                              client: openai.AsyncOpenAI,
+                                              model_name: str):
     prompt = "What is the capital of France?"
 
     # Test stream=True, stream_options=None
@@ -1441,6 +1443,7 @@ async def test_chat_completion_stream_options(server, client: openai.AsyncOpenAI
             stream=False,
             stream_options={"include_usage": True},
         )
+
 
 @pytest.mark.asyncio
 async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
@@ -1546,6 +1549,7 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
     assert response.usage.completion_tokens > 0
     assert (response.usage.total_tokens == response.usage.prompt_tokens +
             response.usage.completion_tokens)
-    
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
