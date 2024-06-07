@@ -289,7 +289,15 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 def get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
-        return port
+        while True:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("", port))
+                    return port
+            except OSError:
+                port += 1  # Increment port number if already in use
+                logger.info("Port %d is already in use, trying port %d",
+                            port - 1, port)
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

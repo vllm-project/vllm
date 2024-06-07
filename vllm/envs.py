@@ -99,6 +99,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
 
     # used in distributed environment to manually set the communication port
+    # Note: if VLLM_PORT is set, and some code asks for multiple ports, the
+    # VLLM_PORT will be used as the first port, and the rest will be generated
+    # by incrementing the VLLM_PORT value.
     # '0' is used to make mypy happy
     'VLLM_PORT':
     lambda: int(os.getenv('VLLM_PORT', '0'))
