@@ -1,16 +1,10 @@
 [
     {
-        "dataset": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-        "model": "meta-llama/Llama-2-7b-chat-hf",
-        "tensor-parallel-size": 1,
-        "num-prompts": 1000,
-        "testname": "Llama7B_ShareGPT"
-    },
-    {
-        "dataset": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-        "model": "meta-llama/Llama-2-70b-chat-hf",
-        "tensor-parallel-size": 4,
-        "num-prompts": 1000,
-        "testname": "Llama70B_ShareGPT"
+        "test_name": "latency_llama7B",
+        "parameters": {
+            "model": "meta-llama/Llama-2-7b-chat-hf",
+            "tensor_parallel_size": 1,
+            "load_format": "dummy"
+        }
     }
 ]

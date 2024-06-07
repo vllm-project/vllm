@@ -13,7 +13,7 @@
             "model": "meta-llama/Llama-2-7b-chat-hf",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num-prompts": 1000
+            "num_prompts": 100
         }
     },
     {
@@ -30,7 +30,7 @@
             "model": "meta-llama/Llama-2-70b-chat-hf",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num-prompts": 1000
+            "num_prompts": 100
         }
     }
 ]
