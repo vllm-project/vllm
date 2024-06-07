@@ -266,21 +266,33 @@ def scaled_fp8_quant(
 
 
 # int8
-def static_scaled_int8_quant(input: torch.Tensor,
-                             scale: torch.Tensor) -> torch.Tensor:
+def scaled_int8_quant(
+        input: torch.Tensor,
+        scale: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Quantize the input tensor to int8 and return the quantized tensor.
+    Quantize the input tensor to int8 and return the quantized tensor and scale.
 
     Args:
         input: The input tensor to be quantized to int8.
-        scale: Scaling factor for the int8 quantization.
+        scale: Optional scaling factor for the int8 quantization.
+            When not provided, we invoke dynamic-per-token quantization.
 
     Returns:
-        torch.Tensor: Output tensor in int8.
+      Tuple[Torch.Tensor, Torch.Tensor] : Output int8 tensor and scales.
     """
-    q = torch.empty_like(input, dtype=torch.int8)
-    vllm_ops.static_scaled_int8_quant(q, input, scale)
-    return q
+    output = torch.empty_like(input, dtype=torch.int8)
+    if scale is not None:
+        # static-per-tensor quantization.
+        vllm_ops.static_scaled_int8_quant(output, input, scale)
+        return output, scale
+
+    # dynamic-per-token quantization.
+    input_scales = torch.empty((input.numel() // input.shape[-1], 1),
+                               device=input.device,
+                               dtype=torch.float32)
+    vllm_ops.dynamic_scaled_int8_quant(output, input, input_scales)
+    return output, input_scales
 
 
 # moe

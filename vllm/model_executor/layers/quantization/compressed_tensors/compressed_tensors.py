@@ -1,12 +1,16 @@
 from typing import Any, Dict, List, Optional
 
 import torch
+from pydantic import BaseModel
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme, CompressedTensorsW8A8StaticTensor)
+    CompressedTensorsScheme, CompressedTensorsW8A8DynamicToken,
+    CompressedTensorsW8A8StaticTensor)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    QuantizationArgs, QuantizationStrategy, find_first_name_or_class_match)
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -47,10 +51,12 @@ class CompressedTensorsConfig(QuantizationConfig):
             targets = quant_config.get("targets")
             for target in targets:
                 layer_quant_details[target] = {}
-                layer_quant_details[target]["weight"] = quant_config.get(
-                    "weights")
-                layer_quant_details[target]["input"] = quant_config.get(
-                    "input_activations")
+                layer_quant_details[target][
+                    "weight"] = QuantizationArgs.parse_obj(
+                        quant_config.get("weights"))
+                layer_quant_details[target][
+                    "input"] = QuantizationArgs.parse_obj(
+                        quant_config.get("input_activations"))
 
         return cls(layer_quant_details=layer_quant_details, ignore=ignore)
 
@@ -58,40 +64,46 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_config_filenames(cls) -> List[str]:
         return []
 
-    def _get_schema(self, weight_quant: Dict, input_quant: Dict):
-        # TODO: Refactor as additional cases are supported
+    def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
+                               input_quant: BaseModel) -> bool:
+        is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
+        is_tensor = (weight_quant.strategy == input_quant.strategy ==
+                     QuantizationStrategy.TENSOR.value)
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+        is_static = not weight_quant.dynamic and not input_quant.dynamic
 
-        weight_bit = weight_quant.get("num_bits")
-        input_bit = input_quant.get("num_bits")
+        return is_8_bits and is_tensor and is_symmetric and is_static
 
-        weight_strategy = weight_quant.get("strategy")
-        input_strategy = input_quant.get("strategy")
+    def _is_dynamic_token_w8a8(self, weight_quant: BaseModel,
+                               input_quant: BaseModel) -> bool:
+        is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
+        is_token_tensor = (weight_quant.strategy
+                           == QuantizationStrategy.TENSOR.value) and (
+                               input_quant.strategy
+                               == QuantizationStrategy.TOKEN.value)
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+        is_dynamic = not weight_quant.dynamic and input_quant.dynamic
 
-        weight_symmetric = weight_quant.get("symmetric")
-        input_symmetric = input_quant.get("symmetric")
+        return is_8_bits and is_token_tensor and is_symmetric and is_dynamic
 
-        is_8_bits = weight_bit == input_bit == 8
-        is_tensor = weight_strategy == input_strategy == "tensor"
-        is_symmetric = weight_symmetric and input_symmetric
-
-        if is_8_bits and is_tensor and is_symmetric and \
-                torch.cuda.is_available():
-            # CompressedTensorsW8A8StaticTensor only supports CUDA path for
-            # now.
+    def _get_schema(self, weight_quant: BaseModel,
+                    input_quant: BaseModel) -> "CompressedTensorsScheme":
+        if self._is_static_tensor_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8StaticTensor()
-        raise NotImplementedError(
-            "Scheme not supported. Only CUDA, 8-bit static symmtetric "
-            "per tensor quantization is currently supported")
+
+        if self._is_dynamic_token_w8a8(weight_quant, input_quant):
+            return CompressedTensorsW8A8DynamicToken()
+
+        raise NotImplementedError("Scheme not supported.")
 
     def get_scheme(self, layer: torch.nn.Module) -> "CompressedTensorsScheme":
 
-        # TODO: update with matching function from `compressed_tensors`
-        layer_type_name = None
-        layer_name_class = type(layer).__name__.lower()
-        for target in self.layer_quant_details:
-            if target.lower() in layer_name_class:
-                layer_type_name = target
-                break
+        layer_type_name = find_first_name_or_class_match(
+            name="",
+            module=layer,
+            targets=self.layer_quant_details.keys(),
+            check_contains=True)
+
         if layer_type_name is None:
             raise ValueError(f"Could not matching target for layer {layer}")
 
@@ -117,7 +129,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
                        **extra_weight_attrs):
         """
         Use the CompressedTensorsScheme associated with each layer to create 
-        the necessary parameters for the layer.
+        the necessary parameters for the layer. See LinearMethodBase for param
+        details
+
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
 
@@ -139,7 +153,8 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         """
         Use the output of create_weights and the CompressedTensorsScheme 
         associated with the layer to apply the forward pass with the 
-        layer input.
+        layer input.  See LinearMethodBase for param details
+
         """
 
         if bias is not None:

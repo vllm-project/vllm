@@ -6,7 +6,8 @@ Run `pytest tests/quantization/test_compressed_tensors.py`.
 import torch
 
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod, CompressedTensorsW8A8StaticTensor)
+    CompressedTensorsLinearMethod, CompressedTensorsW8A8DynamicToken,
+    CompressedTensorsW8A8StaticTensor)
 
 
 def test_compressed_tensors_w8a8_static_setup(vllm_runner):
@@ -34,3 +35,19 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner):
     assert qkv_proj.weight_scale.shard_splitter is not None
     assert qkv_proj.weight_scale.logical_widths is not None
     assert qkv_proj.input_scale.dtype is torch.float32
+
+
+def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner):
+    model_path = "nm-testing/tinyllama-one-shot-dynamic-test"
+    llm = vllm_runner(model_path,
+                      quantization="sparseml",
+                      enforce_eager=True,
+                      dtype=torch.float16)
+    model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model
+    layer = model.model.layers[0]
+
+    qkv_proj = layer.self_attn.qkv_proj
+
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8DynamicToken)
+    assert qkv_proj.weight.dtype is torch.int8
