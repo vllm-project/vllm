@@ -12,9 +12,9 @@ CUDA_DEVICES = [f"cuda:{i}" for i in range(1)]
 
 def get_zero_temperature_prob_dist(batch_size, k, vocab_size):
     """
-    Generates a fake temperature zero probablity distribution.
+    Generates a fake temperature zero probability distribution.
     Returns:
-        1. A fake temperature zero probablity distribution of shape
+        1. A fake temperature zero probability distribution of shape
            [batch_size, k, vocab_size]
         2. Tensor of shape [batch_size, k] containing the token ids 
            of the probability 1.0 tokens at each position.
