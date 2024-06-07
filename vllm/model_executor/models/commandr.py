@@ -366,7 +366,7 @@ class CohereForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        is_not_lora=hasattr(self.model.embed_tokens,'weight')
+        is_not_lora = hasattr(self.model.embed_tokens, 'weight')
         if is_not_lora:
             embedding_weights = self.model.embed_tokens.weight
         else:
