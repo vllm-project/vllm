@@ -94,8 +94,7 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
     batch_size = 5
     vocab_size = 30_000
     torch.set_default_device(device)
-    typical_acceptance_sampler = TypicalAcceptanceSampler(
-        strict_mode=True)
+    typical_acceptance_sampler = TypicalAcceptanceSampler(strict_mode=True)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     bonus_token_ids = torch.randint(low=0,
@@ -371,8 +370,9 @@ def test_accept_tokens_partially(seed: int, disable_bonus_tokens: bool,
 @pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_accept_tokens_set_non_default_posteriors(
-    seed: int, disable_bonus_tokens: bool, device: str):
+def test_accept_tokens_set_non_default_posteriors(seed: int,
+                                                  disable_bonus_tokens: bool,
+                                                  device: str):
     """
     Test the TypicalAcceptanceSampler with custom posterior thresholds and 
     alpha values. This test verifies that by modifying the posterior
@@ -391,13 +391,13 @@ def test_accept_tokens_set_non_default_posteriors(
     # probabilities and create target probabilities such that only 1 token
     # id has probability 1.0 and others have a very low probability of
     # 0.00001. Populate draft_token_ids such that they exclude the token_ids
-    # with probability = 1.0. Without any changes to the posterior thresholds 
+    # with probability = 1.0. Without any changes to the posterior thresholds
     # none of the draft tokens are accepted.
     target_probs, zero_temperature_token_ids = (get_zero_temperature_prob_dist(
         batch_size, k, vocab_size))
     target_probs[target_probs == 0] = 0.00001
-    draft_token_ids = get_draft_token_ids(
-        batch_size, k, vocab_size, zero_temperature_token_ids)
+    draft_token_ids = get_draft_token_ids(batch_size, k, vocab_size,
+                                          zero_temperature_token_ids)
     bonus_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, 1),
@@ -413,8 +413,10 @@ def test_accept_tokens_set_non_default_posteriors(
     # now accept even draft tokens with very low probability in the
     # target distribution. Simulate and verify the same.
     typical_acceptance_sampler = TypicalAcceptanceSampler(
-        strict_mode=True, disable_bonus_tokens=disable_bonus_tokens,
-        posterior_threshold=0.0, posterior_alpha=0.0)
+        strict_mode=True,
+        disable_bonus_tokens=disable_bonus_tokens,
+        posterior_threshold=0.0,
+        posterior_alpha=0.0)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     output_token_ids = typical_acceptance_sampler(target_probs,
                                                   bonus_token_ids,
@@ -432,8 +434,8 @@ def test_accept_tokens_set_non_default_posteriors(
 @pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_replacement_token_ids(
-    seed: int, disable_bonus_tokens: bool, device: str):
+def test_replacement_token_ids(seed: int, disable_bonus_tokens: bool,
+                               device: str):
     """
     Test the TypicalAcceptanceSampler's method for generating
     replacement token IDs.
@@ -455,8 +457,8 @@ def test_replacement_token_ids(
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     expected_replacement_tokens = -torch.ones(
         (batch_size, k), dtype=torch.long)
-    expected_replacement_tokens[:, 0] = torch.argmax(
-        target_probs[:, 0, :], dim=1)
+    expected_replacement_tokens[:, 0] = torch.argmax(target_probs[:, 0, :],
+                                                     dim=1)
     actual_replacement_tokens = (
-        typical_acceptance_sampler._replacement_token_ids(target_probs)) 
+        typical_acceptance_sampler._replacement_token_ids(target_probs))
     assert torch.all(expected_replacement_tokens == actual_replacement_tokens)

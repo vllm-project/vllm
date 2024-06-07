@@ -5,12 +5,14 @@ import torch.nn as nn
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
 
+
 class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
     """Apply typical acceptance sampling as described in section 3.3.1 in 
         "MEDUSA: Simple LLM Inference Acceleration Framework with 
         Multiple Decoding Heads"
         https://arxiv.org/pdf/2401.10774
     """
+
     def __init__(
         self,
         disable_bonus_tokens: bool = False,
@@ -145,9 +147,8 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         posterior_entropy = -torch.sum(
             target_probs * torch.log(target_probs + epsilon), dim=-1)
         threshold = torch.minimum(
-            torch.ones_like(
-                posterior_entropy,
-                device=device) * self._posterior_threshold,
+            torch.ones_like(posterior_entropy, device=device) *
+            self._posterior_threshold,
             torch.exp(-posterior_entropy) * self._posterior_alpha,
         )
         accepted_mask = candidates_prob > threshold
