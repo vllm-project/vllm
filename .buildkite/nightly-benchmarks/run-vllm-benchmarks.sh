@@ -215,4 +215,4 @@ fi
 /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
 
 # upload artifacts
-/workspace/buildkite-agent artifact upload $RESULTS_FOLDER/*
+/workspace/buildkite-agent artifact upload "$RESULTS_FOLDER/*"
