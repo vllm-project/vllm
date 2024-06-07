@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -11,12 +11,6 @@ from vllm.worker.model_runner import ModelInput
 
 
 class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # TODO avoid needing this; also right now it grows unbounded
-        self.prev_seq_context_lengths: Dict[int, int] = {}
 
     @torch.inference_mode()
     def sampler_output(
@@ -35,8 +29,8 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
 
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
-        (input_tokens, seq_lens, query_lens, accepted_token_lengths
-         ) = self._prepare_input_tensors(seq_group_metadata_list)
+        (input_tokens, seq_lens,
+         query_lens) = self._prepare_input_tensors(seq_group_metadata_list)
 
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list, seq_lens, query_lens, self.device,
@@ -45,7 +39,6 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
         model_outputs = self.model_runner.model.generate_proposals(
             input_ids=input_tokens,
             previous_hidden_states=execute_model_req.previous_hidden_states,
-            accepted_token_lengths=accepted_token_lengths,
             num_predict_tokens=sample_len,
             sampling_metadata=sampling_metadata)
 
@@ -56,16 +49,14 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
     def _prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, List[int], List[int], Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, List[int], List[int]]:
         if not seq_group_metadata_list:
             return ModelInput.empty(self.device)
 
         input_tokens: List[int] = []
 
         seq_lens: List[int] = []
-        context_lens: List[int] = []
         query_lens: List[int] = []
-        accepted_lengths_list: List[int] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -92,24 +83,10 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
                     tokens = [seq_data.get_last_token_id()]
 
                 seq_lens.append(seq_len)
-                context_lens.append(context_len)
-                query_len = seq_len - context_len
-                query_lens.append(query_len)
+                query_lens.append(seq_len - context_len)
                 input_tokens.extend(tokens)
-
-                if seq_id in self.prev_seq_context_lengths:
-                    prev_context_length = self.prev_seq_context_lengths[seq_id]
-                    accepted_length = context_len - prev_context_length
-                    accepted_lengths_list.append(accepted_length)
-                self.prev_seq_context_lengths[seq_id] = context_len
-
-        # No sequence ids found => post-prefill
-        accepted_token_lengths = torch.tensor(
-            accepted_lengths_list, device=self.device,
-            dtype=torch.long) if accepted_lengths_list else None
 
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
                                            device=self.device)
-        return (input_tokens_tensor, seq_lens, query_lens,
-                accepted_token_lengths)
+        return input_tokens_tensor, seq_lens, query_lens

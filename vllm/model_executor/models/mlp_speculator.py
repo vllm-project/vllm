@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -90,7 +90,6 @@ class MLPSpeculator(nn.Module):
         self,
         input_ids: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        accepted_token_lengths: Optional[torch.Tensor],
         num_predict_tokens: int,
         sampling_metadata: SamplingMetadata,
     ) -> List[SamplerOutput]:
@@ -99,17 +98,8 @@ class MLPSpeculator(nn.Module):
                              f"{self.n_predict} future tokens, "
                              f"{num_predict_tokens} were requested")
 
-        if accepted_token_lengths is not None:
-            # This is skipped for the first decode step
-            hs_size = previous_hidden_states.shape[1]
-            previous_hidden_states = previous_hidden_states.reshape(
-                -1, num_predict_tokens + 1, hs_size)
-            previous_hidden_states = previous_hidden_states.gather(
-                1, (accepted_token_lengths - 1)[:, None, None].expand(
-                    -1, 1, hs_size))  # b x 1 x d
-        else:
-            # b x 1 x d
-            previous_hidden_states = previous_hidden_states.unsqueeze(1)
+        # b x 1 x d
+        previous_hidden_states = previous_hidden_states.unsqueeze(1)
 
         # b x 1
         last_tokens = input_ids.unsqueeze(1)

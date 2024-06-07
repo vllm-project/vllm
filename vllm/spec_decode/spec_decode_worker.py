@@ -162,6 +162,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Hidden states from target model to pass to proposer
         # in the subsequent step.
         self.previous_hidden_states: Optional[torch.Tensor] = None
+        self.previous_seq_ids: Optional[List[int]] = None
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -239,6 +240,47 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                             num_cpu_blocks=num_cpu_blocks)
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
+
+    def _store_previous_hidden_states(
+            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            hidden_states: Optional[torch.Tensor]) -> None:
+        """Store hidden states from target model invocations."""
+        if hidden_states is not None:
+            seq_ids = get_all_seq_ids(seq_group_metadata_list)
+            if self.previous_hidden_states is None:
+                self.previous_hidden_states = hidden_states
+                self.previous_seq_ids = seq_ids
+            else:
+                # Add to existing batch of hidden states.
+                assert self.previous_seq_ids is not None
+                self.previous_hidden_states = torch.cat(
+                    [self.previous_hidden_states, hidden_states])
+                self.previous_seq_ids.extend(seq_ids)
+
+    def _get_previous_hidden_states(
+        self, seq_group_metadata_list: List[SequenceGroupMetadata]
+    ) -> Tuple[Optional[torch.Tensor], Optional[List[int]]]:
+        """Get seq_ids and previous hidden states for current batch."""
+        prev_hidden_states = self.previous_hidden_states
+        seq_ids = self.previous_seq_ids
+        if prev_hidden_states is not None:
+            self.previous_hidden_states = None
+            self.previous_seq_ids = None
+            assert seq_ids is not None
+            cur_seq_ids = get_all_seq_ids(seq_group_metadata_list)
+            if cur_seq_ids != seq_ids:
+                # Batch contents changed - prune removed sequences.
+                index = [seq_ids.index(seq_id) for seq_id in cur_seq_ids]
+                prev_hidden_states = prev_hidden_states[index]
+                seq_ids = cur_seq_ids
+
+        return seq_ids, prev_hidden_states
+
+    def _set_previous_hidden_states(self, seq_ids: Optional[List[int]],
+                                    hidden_states: Optional[torch.Tensor]):
+        """Set previous hidden states for the current batch."""
+        self.previous_hidden_states = hidden_states
+        self.previous_seq_ids = seq_ids
 
     @torch.inference_mode()
     def execute_model(
@@ -344,7 +386,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
-        self.previous_hidden_states = sampler_output.hidden_states
+
+        # Store hidden states from target model execution.
+        self._store_previous_hidden_states(
+            execute_model_req.seq_group_metadata_list,
+            sampler_output.hidden_states)
 
         # Clear device tensors from sampler output. This reduces communication
         # overhead when the engine runs in a different process than the workers.
@@ -393,8 +439,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
         # Pass last hidden states from target model to proposer
-        execute_model_req.previous_hidden_states = self.previous_hidden_states
-        self.previous_hidden_states = None
+        cur_seq_ids, execute_model_req.previous_hidden_states = (
+            self._get_previous_hidden_states(
+                execute_model_req.seq_group_metadata_list))
 
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(execute_model_req)
@@ -404,12 +451,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposals,
         )
 
-        # Store hidden states from target model for subsequent decode step
-        self.previous_hidden_states = proposal_scores.hidden_states
+        (accepted_token_ids, target_logprobs,
+         hidden_states) = self._verify_tokens(
+             execute_model_req.seq_group_metadata_list, proposal_scores,
+             proposals, execute_model_req.num_lookahead_slots)
 
-        accepted_token_ids, target_logprobs = self._verify_tokens(
-            execute_model_req.seq_group_metadata_list, proposal_scores,
-            proposals, execute_model_req.num_lookahead_slots)
+        # Store hidden states from target model for subsequent decode step
+        self._set_previous_hidden_states(cur_seq_ids, hidden_states)
 
         return self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
@@ -424,7 +472,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposal_scores: SpeculativeScores,
         proposals: SpeculativeProposals,
         max_proposal_len: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Determine which speculative tokens are accepted using the
         probabilities of each token according to the proposer and scorer models.
 
@@ -482,7 +530,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # metadata.
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
-        return accepted_token_ids, logprobs
+        hidden_states = proposal_scores.hidden_states
+        if hidden_states is not None:
+            # Prune rejected tokens from hidden states if present
+            hs_size = hidden_states.shape[1]
+            hidden_states = hidden_states.reshape(-1, max_proposal_len + 1,
+                                                  hs_size)
+            accepted_index = accepted_token_ids + 1  # Convert -1 to 0
+            accepted_index = accepted_index.count_nonzero(dim=1).add_(-1)
+            index = accepted_index[:, None, None].expand(-1, 1, hs_size)
+            hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
+
+        return accepted_token_ids, logprobs, hidden_states
 
     def _create_output_sampler_list(
         self,
