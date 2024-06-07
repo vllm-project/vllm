@@ -102,11 +102,11 @@ serving_md_table = tabulate(
 
 # document the result
 with open(results_folder / "benchmark_results.md", "w") as f: 
-    if not latency_results.empty():
+    if not latency_results.empty:
         f.write("## Latency tests\n")
         f.write(latency_md_table)
         f.write("\n")
-    if not serving_results.empty():
+    if not serving_results.empty:
         f.write("## Online serving tests\n")
         f.write(serving_md_table)
         f.write("\n")
