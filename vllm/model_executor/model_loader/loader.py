@@ -97,7 +97,6 @@ def _get_model_initialization_kwargs(
         if model_class.__name__ not in ATTENTION_SINKS_MODELS:
             raise NotImplementedError("Currently attention sinks is only supported "
                                       f"for {ATTENTION_SINKS_MODELS}.")
-        extra_kwargs["use_attention_sinks"] = True
     
     return extra_kwargs
 

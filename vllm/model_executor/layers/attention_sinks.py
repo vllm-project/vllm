@@ -83,7 +83,7 @@ class StreamingAttentionSink(nn.Module):
         if attn_metadata.prefill_metadata is not None:
             k_original = k.clone()
             q, k = self.rotary_emb(positions, q, k)
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata, self.kv_scale)
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
             
             if kv_cache is not None:
                 k_original = k_original.view(-1, self.num_kv_heads, self.head_dim)
@@ -214,7 +214,7 @@ class StreamingAttentionSink(nn.Module):
 
             # compute attention in kernel
             q, k = self.rotary_emb(positions, q, k)
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata, self.kv_scale)
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
                         
             # put original pre-rotated keys back in cache
             for i in range(batch_size):
@@ -271,7 +271,7 @@ class StreamingAttentionSink(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         if attn_metadata.prefill_metadata is not None:
-            return self.attn(q, k, v, kv_cache, attn_metadata, self.kv_scale)
+            return self.attn(q, k, v, kv_cache, attn_metadata)
         elif attn_metadata.decode_metadata is not None:
             device = q.device
             block_size = self.block_size
@@ -297,7 +297,7 @@ class StreamingAttentionSink(nn.Module):
                 attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
 
             # compute attention in kernel
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata, self.kv_scale)
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
             
             # revert seq_lens inside metadata
             # so that next attn layer starts with same seq lens
@@ -338,7 +338,7 @@ def get_attention_sink(
         attn_backend,
         num_kv_heads,
         model_attn.head_dim,
-        getattr(model_attn, "kv_scale", 1.0),
+        getattr(model_attn.attn, "kv_scale", 1.0),
         getattr(model_attn, "rotary_emb", None),
         model_attn.attn
     )
