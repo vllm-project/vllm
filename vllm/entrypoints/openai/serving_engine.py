@@ -62,6 +62,7 @@ class OpenAIServing:
         """Show available models. Right now we only have one model."""
         model_cards = [
             ModelCard(id=served_model_name,
+                      max_model_len=self.max_model_len,
                       root=self.served_model_names[0],
                       permission=[ModelPermission()])
             for served_model_name in self.served_model_names
@@ -130,7 +131,8 @@ class OpenAIServing:
             prompt_ids: Optional[List[int]] = None,
             truncate_prompt_tokens: Optional[Annotated[int,
                                                        Field(ge=1)]] = None,
-            add_special_tokens: bool = True) -> Tuple[List[int], str]:
+            add_special_tokens: Optional[bool] = True
+    ) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
@@ -138,11 +140,12 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
-            # When using OpenAIServingChat for chat completions, the
-            # special tokens (e.g., BOS) have already been added by the
-            # chat template. Therefore, we do not need to add them again.
-            # Set add_special_tokens to False to avoid adding the BOS tokens
-            # again.
+            # When using OpenAIServingChat for chat completions, for
+            # most models the special tokens (e.g., BOS) have already
+            # been added by the chat template. Therefore, we do not
+            # need to add them again.
+            # Set add_special_tokens to False (by default) to avoid
+            # adding the BOS tokens again.
             tokenizer_kwargs: Dict[str, Any] = {
                 "add_special_tokens": add_special_tokens
             }
