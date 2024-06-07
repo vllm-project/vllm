@@ -1,9 +1,13 @@
 from typing import Dict, Optional
 
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
+from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MPTConfig, RWConfig)
+
+logger = init_logger(__name__)
 
 _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
     "chatglm": ChatGLMConfig,
@@ -18,8 +22,13 @@ _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
 def get_config(model: str,
                trust_remote_code: bool,
                revision: Optional[str] = None,
-               code_revision: Optional[str] = None) -> PretrainedConfig:
+               code_revision: Optional[str] = None,
+               rope_scaling: Optional[dict] = None) -> PretrainedConfig:
     try:
+        if VLLM_USE_MODELSCOPE:
+            from modelscope import AutoConfig
+        else:
+            from transformers import AutoConfig
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
@@ -41,6 +50,10 @@ def get_config(model: str,
         config = config_class.from_pretrained(model,
                                               revision=revision,
                                               code_revision=code_revision)
+    if rope_scaling is not None:
+        logger.info("Updating rope_scaling from %r to %r",
+                    getattr(config, "rope_scaling", None), rope_scaling)
+        config.update({"rope_scaling": rope_scaling})
     return config
 
 

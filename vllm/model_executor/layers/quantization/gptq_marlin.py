@@ -6,10 +6,13 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+
+logger = init_logger(__name__)
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -99,7 +102,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.half]
+        return [torch.half, torch.bfloat16]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -116,6 +119,26 @@ class GPTQMarlinConfig(QuantizationConfig):
         desc_act = cls.get_from_keys(config, ["desc_act"])
         is_sym = cls.get_from_keys(config, ["sym"])
         return cls(weight_bits, group_size, desc_act, is_sym)
+
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        can_convert = cls.is_marlin_compatible(hf_quant_cfg)
+
+        is_valid_user_quant = (user_quant is None or user_quant == "marlin")
+
+        if can_convert and is_valid_user_quant:
+            msg = ("The model is convertible to {} during runtime."
+                   " Using {} kernel.".format(cls.get_name(), cls.get_name()))
+            logger.info(msg)
+            return cls.get_name()
+
+        if can_convert and user_quant == "gptq":
+            logger.info("Detected that the model can run with gptq_marlin"
+                        ", however you specified quantization=gptq explicitly,"
+                        " so forcing gptq. Use quantization=gptq_marlin for"
+                        " faster inference")
+        return None
 
     def get_quant_method(
             self,
@@ -186,9 +209,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             group_size = input_size
 
         # Validate dtype
-        if params_dtype != torch.float16:
-            raise ValueError(
-                f"The params dtype must be float16, but got {params_dtype}")
+        if params_dtype not in [torch.float16, torch.bfloat16]:
+            raise ValueError(f"The params dtype must be float16 "
+                             f"or bfloat16, but got {params_dtype}")
 
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
@@ -275,14 +298,10 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             },
         )
 
-        g_idx_sort_indices = Parameter(
-            torch.empty(
-                g_idx.shape,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
+        g_idx_sort_indices = torch.empty(
+            g_idx.shape,
+            dtype=torch.int32,
         )
-        set_weight_attrs(g_idx_sort_indices, extra_weight_attrs)
 
         # Scales
         scales = Parameter(
@@ -333,9 +352,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("g_idx", g_idx)
-        layer.register_parameter("g_idx_sort_indices", g_idx_sort_indices)
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
+        layer.g_idx_sort_indices = g_idx_sort_indices
         layer.workspace = workspace
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition

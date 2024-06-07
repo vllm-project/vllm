@@ -60,10 +60,10 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         assert len(outputs) == 1, ("Single step should only has 1 output.")
         output = outputs[0]
         prompt_logprobs = output.prompt_logprobs
-        if (prompt_logprobs is not None
-                and seq_group.sampling_params.detokenize and self.detokenizer):
-            self.detokenizer.decode_prompt_logprobs_inplace(
-                seq_group, prompt_logprobs)
+        if prompt_logprobs is not None:
+            if seq_group.sampling_params.detokenize and self.detokenizer:
+                self.detokenizer.decode_prompt_logprobs_inplace(
+                    seq_group, prompt_logprobs)
             if not seq_group.prompt_logprobs:
                 # The first prompt token's logprob is None because it doesn't
                 # have tokens that are precedent.
@@ -118,8 +118,12 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                     seq, seq_group.sampling_params)
             else:
                 new_char_count = 0
-            self.stop_checker.maybe_stop_sequence(seq, new_char_count,
-                                                  seq_group.sampling_params)
+            self.stop_checker.maybe_stop_sequence(
+                seq,
+                new_char_count,
+                seq_group.sampling_params,
+                lora_req=seq_group.lora_request,
+            )
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:

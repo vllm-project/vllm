@@ -6,20 +6,26 @@ from typing import Dict, List, Optional, Tuple, Union
 import pytest
 import ray
 import torch
-from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
-                    nvmlInit)
 
-from tests.conftest import cleanup
+from vllm.utils import is_hip
+
+if (not is_hip()):
+    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
+                        nvmlInit)
+
 from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.utils import set_random_seed
+from vllm.multimodal import MultiModalData
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import Logprob, MultiModalData
+from vllm.sequence import Logprob
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, random_uuid
+
+from ...conftest import cleanup
 
 
 class AsyncLLM:

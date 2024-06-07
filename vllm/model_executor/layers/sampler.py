@@ -10,8 +10,9 @@ from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
 from vllm.sampling_params import SamplingType
-from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
-                           SamplerOutput, SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
+                           PromptLogprobs, SampleLogprobs, SamplerOutput,
+                           SequenceOutput)
 
 # (num_token_ids, num_parent_ids) per sequence group.
 SampleResultType = List[Tuple[List[int], List[int]]]
@@ -680,7 +681,9 @@ def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     """
     vals = x[torch.arange(0, len(x), device=x.device, dtype=indices.dtype),
              indices]
-    return (x > vals[:, None]).long().sum(1).add_(1)
+    result = (x > vals[:, None])
+    del vals
+    return result.sum(1).add_(1)
 
 
 def _get_logprobs(
@@ -1019,7 +1022,7 @@ def _build_sampler_output(
             seq_outputs.append(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
-            SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
+            CompletionSequenceGroupOutput(seq_outputs, group_prompt_logprobs))
 
     # If not specified, store None values in SamplerOutput.
     if on_device_tensors is not None:

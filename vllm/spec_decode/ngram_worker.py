@@ -1,18 +1,20 @@
+import weakref
 from typing import List, Optional, Tuple
 
 import torch
 
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
+from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 
-class NGramWorker(LoraNotSupportedWorkerBase):
+class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
     """NGramWorker provides a light drafter without need for model.
 
     Current NGramWorker only implement prompt lookup decoding,
-    and in future we may also do RAG type drafter and other scenerios
+    and in future we may also do RAG type drafter and other scenarios
     which don't rely on LLM model to give proposals.
     """
 
@@ -37,31 +39,10 @@ class NGramWorker(LoraNotSupportedWorkerBase):
 
         # Current only support Top1Proposer
         self._proposer = Top1Proposer(
-            self,
+            weakref.proxy(self),  # type: ignore[arg-type]
             device=self.device,
             vocab_size=self.vocab_size,
         )
-
-    def set_include_gpu_probs_tensor(self):
-        # NGram don't need gpu sampler
-        pass
-
-    def execute_model(self, execute_model_req: ExecuteModelRequest) -> None:
-        """NGram doesn't depend on model execution, just pass this function"""
-        pass
-
-    def determine_num_available_blocks(self) -> None:
-        """NGram doesn't depend on model execution, no need to check blocks"""
-        pass
-
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        """As there is no cache need to handle, just pass this function"""
-        pass
-
-    def get_cache_block_size_bytes(self):
-        """Return the size of a cache block in bytes."""
-        return 0
 
     def sampler_output(
         self,
@@ -76,9 +57,11 @@ class NGramWorker(LoraNotSupportedWorkerBase):
         """
         self._raise_if_unsupported(execute_model_req)
 
-        arr = []
         has_spec_out = False
-        for seq_group_metadata in execute_model_req.seq_group_metadata_list:
+        token_id_list = []
+        token_prob_list = []
+        for idx, seq_group_metadata in enumerate(
+                execute_model_req.seq_group_metadata_list):
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
 
             input_ids = torch.as_tensor(seq_data.get_token_ids(),
@@ -88,59 +71,63 @@ class NGramWorker(LoraNotSupportedWorkerBase):
 
             for ngram_size in range(
                     min(self.ngram_prompt_lookup_max, input_length - 1),
-                    self.ngram_prompt_lookup_min,
+                    self.ngram_prompt_lookup_min - 1,
                     -1,
             ):
-                ngram_tensor = input_ids[-1 * ngram_size:]
-                windows = input_ids.unfold(dimension=0,
-                                           size=ngram_size,
-                                           step=1)
-                matches = (windows == ngram_tensor).all(dim=1)
-                match_indices = matches.nonzero(as_tuple=True)[0]
-                if match_indices.size()[0] > 1:
-                    has_spec_out = True
-                    res = seq_data.get_token_ids()
-                    res = res[match_indices[0] + ngram_size:match_indices[0] +
-                              ngram_size + sample_len]
-                    res_len = len(res)
-                    # pad 0 towards output as sample_len tokens required
-                    res += [0] * (sample_len - res_len)
+                ngram_tensor = input_ids[-ngram_size:]
+                if ngram_size == 1:
+                    # Do not match itself and do not use unfold and all
+                    matches = (input_ids[:-1] == ngram_tensor)
+                else:
+                    windows = input_ids.unfold(dimension=0,
+                                               size=ngram_size,
+                                               step=1)
+                    # Do not match itself
+                    matches = (windows[:-1] == ngram_tensor).all(dim=-1)
 
+                # first_match includes "values" (bool), indicating whether
+                # the match is found, and "indices", indicating the index
+                # of the first match.
+                # Note that "first_match.values.item()" triggers GPU-CPU
+                # sync so it is a bit inefficient, but we have not found
+                # a better way to do this.
+                first_match = matches.max(dim=-1)
+                if first_match.values.item():
+                    proposal_start_idx = first_match.indices.add_(ngram_size)
+                    spec_indices = (
+                        proposal_start_idx).repeat(sample_len) + torch.arange(
+                            sample_len, device=self.device)
+                    spec_indices.clamp_(max=input_ids.shape[-1] - 1)
+                    res = input_ids.gather(dim=-1, index=spec_indices)
+                    token_id_list.append(res)
+                    token_prob_list.append(
+                        torch.nn.functional.one_hot(
+                            res,
+                            num_classes=self.vocab_size).to(torch.float32))
+                    has_spec_out = True
                     break
             else:
-                # if no candidate found, fill with 0
-                res = [0] * sample_len
-
-            arr.append(res)
+                token_id_list.append(None)
+                token_prob_list.append(None)
 
         if not has_spec_out:
             return None, False
 
-        outputs = []
-        token_ids = torch.as_tensor(arr, dtype=torch.long, device=self.device)
-        indices = token_ids.unsqueeze(2)
+        outputs: List[Optional[SamplerOutput]] = []
+        for idx in range(len(execute_model_req.seq_group_metadata_list)):
+            if token_id_list[idx] is None:
+                outputs.append(None)
+            else:
+                outputs.append(
+                    SamplerOutput(
+                        outputs=None,
+                        sampled_token_probs=token_prob_list[idx],
+                        logprobs=torch.zeros((sample_len, self.vocab_size),
+                                             dtype=torch.float32,
+                                             device=self.device),
+                        sampled_token_ids=token_id_list[idx],
+                    ))
 
-        token_probs = torch.zeros(
-            (len(execute_model_req.seq_group_metadata_list), sample_len,
-             self.vocab_size),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        token_probs.scatter_(2, indices, 1)
-        token_logprobs = torch.zeros(
-            (len(execute_model_req.seq_group_metadata_list), sample_len,
-             self.vocab_size),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        for i in range(len(execute_model_req.seq_group_metadata_list)):
-            outputs.append(
-                SamplerOutput(
-                    outputs=None,
-                    sampled_token_probs=token_probs[i],
-                    logprobs=token_logprobs,
-                    sampled_token_ids=token_ids[i],
-                ))
         return outputs, False
 
     def get_spec_proposals(
@@ -151,7 +138,7 @@ class NGramWorker(LoraNotSupportedWorkerBase):
         speculative tokens per sequence is determined by max_proposal_len.
         """
 
-        return self._proposer.get_proposals(execute_model_req)
+        return self._proposer.get_spec_proposals(execute_model_req)
 
     def _raise_if_unsupported(
         self,
