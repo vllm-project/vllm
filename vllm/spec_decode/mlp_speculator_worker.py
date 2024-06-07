@@ -24,12 +24,12 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
     ) -> Tuple[List[SamplerOutput], bool]:
-        """Run the model forward pass sample_len times. Returns the list of
-        sampler output, one per model forward pass, along with indicator of
-        whether torch tensor in sampler output need to be transposed in latter
-        sampler_output_to_torch logic.
+        """Run the model forward pass to generate sample_len future tokens.
+        Returns the list of sampler output, one per layer, along with indicator
+        of whether torch tensor in sampler output need to be transposed in
+        latter sampler_output_to_torch logic.
 
-        For multi step worker, this indicator shall be True.
+        For mlp spec worker, this indicator shall be True.
         """
         self._raise_if_unsupported(execute_model_req)
 

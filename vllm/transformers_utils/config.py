@@ -9,6 +9,11 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MLPSpeculatorConfig,
                                              MPTConfig, RWConfig)
 
+if VLLM_USE_MODELSCOPE:
+    from modelscope import AutoConfig
+else:
+    from transformers import AutoConfig
+
 logger = init_logger(__name__)
 
 _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
@@ -23,8 +28,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
 
 for name, cls in _CONFIG_REGISTRY.items():
     with contextlib.suppress(ValueError):
-        AutoConfig.register(  # type: ignore[name-defined] # noqa: F821
-            name, cls)
+        AutoConfig.register(name, cls)
 
 
 def get_config(model: str,
@@ -33,10 +37,6 @@ def get_config(model: str,
                code_revision: Optional[str] = None,
                rope_scaling: Optional[dict] = None) -> PretrainedConfig:
     try:
-        if VLLM_USE_MODELSCOPE:
-            from modelscope import AutoConfig
-        else:
-            from transformers import AutoConfig
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
