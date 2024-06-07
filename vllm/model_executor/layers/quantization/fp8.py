@@ -243,7 +243,7 @@ class Fp8LinearMethod(LinearMethodBase):
                         "All the act_scales for the logical weights of a layer "
                         f"must be equal. But got {layer.input_scale}")
                 layer.input_scale = Parameter(layer.input_scale.max(),
-                                            requires_grad=False)
+                                              requires_grad=False)
             else:
                 raise ValueError(
                     f"Unknown scheme {self.quant_config.activation_scheme}")
@@ -255,7 +255,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.input_scale is None and x_scale computed from x.
-        #   If static,  layer.input_scale is scalar and x_scale set to input_scale.
+        #   If static, layer.input_scale is scalar and x_scale is input_scale.
 
         if bias is None and self.cutlass_fp8_supported:
             qinput, x_scale = ops.scaled_fp8_quant(x, layer.input_scale)
