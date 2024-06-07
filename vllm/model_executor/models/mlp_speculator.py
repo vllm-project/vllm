@@ -91,26 +91,25 @@ class MLPSpeculator(nn.Module):
         input_ids: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         accepted_token_lengths: Optional[torch.Tensor],
-        sample_len: int,
+        num_predict_tokens: int,
         sampling_metadata: SamplingMetadata,
     ) -> List[SamplerOutput]:
-        if sample_len > self.n_predict:
+        if num_predict_tokens > self.n_predict:
             raise ValueError(f"Speculator model can predict at most "
-                             f"{self.n_predict} future tokens, {sample_len} "
-                             "were requested")
-
-        num_predict_tokens = min(sample_len, self.n_predict)
+                             f"{self.n_predict} future tokens, "
+                             f"{num_predict_tokens} were requested")
 
         if accepted_token_lengths is not None:
             # This is skipped for the first decode step
+            hs_size = previous_hidden_states.shape[1]
             previous_hidden_states = previous_hidden_states.reshape(
-                -1, num_predict_tokens + 1, previous_hidden_states.size(1))
+                -1, num_predict_tokens + 1, hs_size)
             previous_hidden_states = previous_hidden_states.gather(
                 1, (accepted_token_lengths - 1)[:, None, None].expand(
-                    -1, 1, previous_hidden_states.size(2))).squeeze(1)  # b x d
-
-        # b x 1 x d
-        previous_hidden_states = previous_hidden_states.unsqueeze(1)
+                    -1, 1, hs_size))  # b x 1 x d
+        else:
+            # b x 1 x d
+            previous_hidden_states = previous_hidden_states.unsqueeze(1)
 
         # b x 1
         last_tokens = input_ids.unsqueeze(1)

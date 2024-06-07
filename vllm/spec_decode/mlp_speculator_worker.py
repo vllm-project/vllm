@@ -35,8 +35,7 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
 
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
-        (input_tokens, input_positions, seq_lens, query_lens,
-         accepted_token_lengths
+        (input_tokens, seq_lens, query_lens, accepted_token_lengths
          ) = self._prepare_input_tensors(seq_group_metadata_list)
 
         sampling_metadata = SamplingMetadata.prepare(
@@ -47,7 +46,7 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
             input_ids=input_tokens,
             previous_hidden_states=execute_model_req.previous_hidden_states,
             accepted_token_lengths=accepted_token_lengths,
-            sample_len=sample_len,
+            num_predict_tokens=sample_len,
             sampling_metadata=sampling_metadata)
 
         assert len(model_outputs) == sample_len
@@ -57,13 +56,11 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
     def _prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, List[int], List[int],
-               Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, List[int], List[int], Optional[torch.Tensor]]:
         if not seq_group_metadata_list:
             return ModelInput.empty(self.device)
 
         input_tokens: List[int] = []
-        input_positions: List[int] = []
 
         seq_lens: List[int] = []
         context_lens: List[int] = []
@@ -99,7 +96,6 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
                 query_len = seq_len - context_len
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
-                input_positions.extend(list(range(context_len, seq_len)))
 
                 if seq_id in self.prev_seq_context_lengths:
                     prev_context_length = self.prev_seq_context_lengths[seq_id]
@@ -115,8 +111,5 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
                                            device=self.device)
-        input_positions_tensor = torch.tensor(input_positions,
-                                              dtype=torch.long,
-                                              device=self.device)
-        return (input_tokens_tensor, input_positions_tensor, seq_lens,
-                query_lens, accepted_token_lengths)
+        return (input_tokens_tensor, seq_lens, query_lens,
+                accepted_token_lengths)
