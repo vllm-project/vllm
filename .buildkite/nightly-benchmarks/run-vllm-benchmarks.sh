@@ -107,7 +107,7 @@ mkdir -p $RESULTS_FOLDER
 
 # Iterate over latency tests
 jq -c '.[]' $LATENCY_TESTS | while read -r params; do
-  break
+
   # get the test name, and append the GPU type back to it.
   test_name=$(echo $params | jq -r '.test_name')_${gpu_type}
   if [[ ! "$test_name" =~ ^latency_ ]]; then
@@ -142,6 +142,8 @@ jq -c '.[]' $LATENCY_TESTS | while read -r params; do
 
   # run the benchmark
   eval $latency_command
+
+  kill_vllm
 
 done
 
