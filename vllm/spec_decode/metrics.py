@@ -41,6 +41,9 @@ class SpecDecodeWorkerMetrics:
     # The number of speculative tokens per sequence.
     num_spec_tokens: int
 
+    # The number of speculative verification has been taken.
+    num_specs: int
+
 
 Timer = Callable[[], float]
 
@@ -70,6 +73,7 @@ class AsyncMetricsCollector:
         self._aggregate_num_emitted_tokens = torch.tensor(
             0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
         self._aggregate_num_draft_tokens = 0
+        self._aggregate_num_specs = 0
 
         self._rejsample_metrics_collect_interval_s = collect_interval_s
         self._last_metrics_collect_time = self._timer()
@@ -124,6 +128,8 @@ class AsyncMetricsCollector:
             # required.
             self._aggregate_num_draft_tokens = (
                 self._rejection_sampler.num_draft_tokens)
+            # Number of spec infer has been taken
+            self._aggregate_num_specs = (self._rejection_sampler.num_specs)
 
         aggregate_metrics_ready = torch.cuda.Event()
         aggregate_metrics_ready.record(self._copy_stream)
@@ -162,6 +168,7 @@ class AsyncMetricsCollector:
 
         return SpecDecodeWorkerMetrics(
             num_spec_tokens=k,
+            num_specs=self._aggregate_num_specs,
             draft_acceptance_rate=draft_acceptance_rate,
             system_efficiency=system_efficiency,
             accepted_tokens=accepted_tokens,

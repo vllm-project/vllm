@@ -60,6 +60,29 @@ class Metrics:
             documentation="CPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames)
 
+        #   Speculative infer Status in %
+        self.counter_draft_tokens = Counter(
+            name="vllm:draft_tokens",
+            documentation=
+            "Number of speculative tokens produced by the proposal method.",
+            labelnames=labelnames)
+        self.counter_emitted_tokens = Counter(
+            name="vllm:emitted_tokens",
+            documentation="Number of tokens emitted by the entire system.",
+            labelnames=labelnames)
+        self.counter_accepted_tokens = Counter(
+            name="vllm:accepted_tokens",
+            documentation=
+            "Number of token accepted by the verification routine",
+            labelnames=labelnames)
+        self.counter_num_spec_tokens = Counter(
+            name="vllm:num_spec_tokens",
+            documentation="Number of speculative tokens per sequence.",
+            labelnames=labelnames)
+        self.counter_num_specs = Counter(
+            name="vllm:num_specs",
+            documentation="Number of speculative verification has been taken",
+            labelnames=labelnames)
         # Iteration stats
         self.counter_num_preemption = Counter(
             name="vllm:num_preemptions_total",
@@ -215,6 +238,13 @@ class StatLogger:
         self.last_local_log = time.time()
         self.local_interval = local_interval
 
+        # Metadata for saving spec infer related aggregated data
+        self.last_accpted_tokens = 0
+        self.last_emitted_tokens = 0
+        self.last_draft_tokens = 0
+        self.last_spec_tokens = 0
+        self.last_specs = 0
+
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: List[int] = []
         self.num_generation_tokens: List[int] = []
@@ -247,6 +277,30 @@ class StatLogger:
                         stats.gpu_cache_usage_sys)
         self._log_gauge(self.metrics.gauge_cpu_cache_usage,
                         stats.cpu_cache_usage_sys)
+
+        if stats.spec_decode_metrics is not None:
+            # assume we have one bonus token each step
+            self._log_counter(self.metrics.counter_draft_tokens,
+                              (stats.spec_decode_metrics.draft_tokens -
+                               self.last_draft_tokens))
+            self._log_counter(self.metrics.counter_emitted_tokens,
+                              (stats.spec_decode_metrics.emitted_tokens -
+                               self.last_emitted_tokens))
+            self._log_counter(self.metrics.counter_accepted_tokens,
+                              (stats.spec_decode_metrics.accepted_tokens -
+                               self.last_accpted_tokens))
+            self._log_counter(self.metrics.counter_num_spec_tokens,
+                              (stats.spec_decode_metrics.num_spec_tokens -
+                               self.last_spec_tokens))
+            self._log_counter(
+                self.metrics.counter_num_specs,
+                (stats.spec_decode_metrics.num_specs - self.last_specs))
+            self.last_draft_tokens = stats.spec_decode_metrics.draft_tokens
+            self.last_emitted_tokens = stats.spec_decode_metrics.emitted_tokens
+            self.last_accpted_tokens = (
+                stats.spec_decode_metrics.accepted_tokens)
+            self.last_spec_tokens = stats.spec_decode_metrics.num_spec_tokens
+            self.last_specs = stats.spec_decode_metrics.num_specs
 
         # Iteration level data
         self._log_counter(self.metrics.counter_num_preemption,
@@ -366,10 +420,12 @@ class StatLogger:
     def _format_spec_decode_metrics_str(
             self, metrics: "SpecDecodeWorkerMetrics") -> str:
 
-        return ("Speculative metrics: "
-                f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
-                f"System efficiency: {metrics.system_efficiency:.3f}, "
-                f"Number of speculative tokens: {metrics.num_spec_tokens}, "
-                f"Number of accepted tokens: {metrics.accepted_tokens}, "
-                f"Number of draft tokens tokens: {metrics.draft_tokens}, "
-                f"Number of emitted tokens tokens: {metrics.emitted_tokens}.")
+        return (
+            "Speculative metrics: "
+            f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
+            f"System efficiency: {metrics.system_efficiency:.3f}, "
+            f"Number of speculative verification taken: {metrics.num_specs}, "
+            f"Number of speculative tokens: {metrics.num_spec_tokens}, "
+            f"Number of accepted tokens: {metrics.accepted_tokens}, "
+            f"Number of draft tokens tokens: {metrics.draft_tokens}, "
+            f"Number of emitted tokens tokens: {metrics.emitted_tokens}.")
