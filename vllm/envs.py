@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
+    VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -216,6 +217,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
     lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
+
+    # Timeout for fetching images when serving multimodal models
+    # Default is 5 seconds
+    "VLLM_IMAGE_FETCH_TIMEOUT":
+    lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
 }
 
 # end-env-vars-definition
