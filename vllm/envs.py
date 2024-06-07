@@ -133,11 +133,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
 
-    # flag to control whether vllm should use pytorch sdpa for naive attention
-    "VLLM_NAIVE_USE_SDPA":
-    lambda: (os.environ.get("VLLM_NAIVE_USE_SDPA", "True").lower() in
-             ("true", "1")),
-
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":

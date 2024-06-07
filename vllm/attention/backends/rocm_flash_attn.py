@@ -244,12 +244,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.use_naive_attn = True
 
             if self.use_naive_attn:
-                self.naive_use_sdpa = envs.VLLM_NAIVE_USE_SDPA
-                if self.naive_use_sdpa:
-                    self.attn_func = _sdpa_attention
-                else:
-                    self.attn_func = _naive_attention
-
+                self.attn_func = _sdpa_attention
                 logger.debug("Using naive attention in ROCmBackend")
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -344,23 +339,14 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         # Interleave for MQA workaround.
                         key = self.repeat_kv(key, self.num_queries_per_kv)
                         value = self.repeat_kv(value, self.num_queries_per_kv)
-                    if self.naive_use_sdpa:
-                        query = query.movedim(0, query.dim() - 2)
-                        key = key.movedim(0, key.dim() - 2)
-                        value = value.movedim(0, value.dim() - 2)
-                        # sdpa math backend attention
-                        out = self.attn_func(query, key, value, prefill_meta,
-                                             attn_metadata, num_tokens,
-                                             self.num_heads, self.head_size,
-                                             self.scale)
-                    else:
-                        out = self.attn_func(
-                            query,
-                            key,
-                            value,
-                            prefill_meta.seq_lens,
-                            self.scale,
-                        )
+                    query = query.movedim(0, query.dim() - 2)
+                    key = key.movedim(0, key.dim() - 2)
+                    value = value.movedim(0, value.dim() - 2)
+                    # sdpa math backend attention
+                    out = self.attn_func(query, key, value, prefill_meta,
+                                            attn_metadata, num_tokens,
+                                            self.num_heads, self.head_size,
+                                            self.scale)
                 else:
                     out = self.attn_func(
                         q=query,
@@ -458,8 +444,17 @@ def _naive_masked_attention(
     return out
 
 
-def _sdpa_attention(query, key, value, prefill_meta, attn_metadata, num_tokens,
-                    num_heads, head_size, scale):
+def _sdpa_attention(
+    query: torch.Tensor, 
+    key: torch.Tensor, 
+    value: torch.Tensor, 
+    prefill_meta: Optional["ROCmFlashAttentionMetadata"], 
+    attn_metadata: ROCmFlashAttentionMetadata, 
+    num_tokens: int,
+    num_heads: int, 
+    head_size: int, 
+    scale: float,
+) -> torch.Tensor:
     att_masks = [None] * len(prefill_meta.seq_lens)
     attn_metadata.attn_bias = att_masks
 
