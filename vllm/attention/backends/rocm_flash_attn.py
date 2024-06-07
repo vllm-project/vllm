@@ -418,7 +418,7 @@ def _sdpa_attention(
     head_size: int,
     scale: float,
 ) -> torch.Tensor:
-    att_masks = [None] * len(prefill_meta.seq_lens)
+    att_masks = [None] * len(seq_lens)
     attn_metadata.attn_bias = att_masks
 
     start = 0
