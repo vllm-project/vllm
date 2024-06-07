@@ -721,11 +721,12 @@ class ModelRunner:
     @torch.inference_mode()
     def execute_model(
         self,
-        args: Tuple,
+        tensor_dict: Dict[str, Any],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_kwargs) = args
+         lora_requests, lora_mapping, multi_modal_kwargs
+         ) = self.convert_tensor_dict_to_model_input(tensor_dict)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
