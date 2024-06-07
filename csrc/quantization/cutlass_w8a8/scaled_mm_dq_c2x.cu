@@ -22,7 +22,7 @@
 #include "cutlass/epilogue/threadblock/fusion/visitors.hpp"
 #include "cutlass/gemm/kernel/default_gemm_universal_with_visitor.h"
 
-#include "cutlass_visitor_2x_broadcast_epilogue.hpp"
+#include "broadcast_load_epilogue_c2x.hpp"
 #include "common.hpp"
 // clang-format on
 
@@ -48,9 +48,44 @@ using namespace cute;
 
 namespace {
 
-template <typename Arch, typename ElementAB_, typename ElementD_,
-          typename TileShape, typename WarpShape, typename InstructionShape,
-          int32_t MainLoopStages>
+// Wrappers for the GEMM kernel that is used to guard against compilation on
+// architectures that will never use the kernel. The purpose of this is to
+// reduce the size of the compiled binary.
+// __CUDA_ARCH__ is not defined in host code, so this lets us smuggle the ifdef
+// into code that will be executed on the device where it is defined.
+template <typename Kernel>
+struct enable_sm75_to_sm80 : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE static void invoke(Args&&... args) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 750 && __CUDA_ARCH__ < 800
+    Kernel::invoke(std::forward<Args>(args)...);
+#endif
+  }
+};
+
+template <typename Kernel>
+struct enable_sm80_to_sm89 : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE static void invoke(Args&&... args) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 890
+    Kernel::invoke(std::forward<Args>(args)...);
+#endif
+  }
+};
+
+template <typename Kernel>
+struct enable_sm89_to_sm90 : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE static void invoke(Args&&... args) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 890 && __CUDA_ARCH__ < 900
+    Kernel::invoke(std::forward<Args>(args)...);
+#endif
+  }
+};
+
+template <typename Arch, template <typename> typename ArchGuard,
+          typename ElementAB_, typename ElementD_, typename TileShape,
+          typename WarpShape, typename InstructionShape, int32_t MainLoopStages>
 struct cutlass_2x_gemm {
   using ElementAB = ElementAB_;
   using ElementD = ElementD_;
@@ -101,7 +136,7 @@ struct cutlass_2x_gemm {
   using RowMajor = typename cutlass::layout::RowMajor;
   using ColumnMajor = typename cutlass::layout::ColumnMajor;
   using KernelType = 
-    typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
+    ArchGuard<typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
       ElementAB, RowMajor, cutlass::ComplexTransform::kNone, 16, 
       ElementAB, ColumnMajor, cutlass::ComplexTransform::kNone, 16, 
       float, cutlass::layout::RowMajor, 4,
@@ -112,7 +147,7 @@ struct cutlass_2x_gemm {
       cutlass::gemm::threadblock::ThreadblockSwizzleStreamK,
       MainLoopStages, Operator,
       1 /* epilogue stages */
-      >::GemmKernel;
+      >::GemmKernel>;
   // clang-format on
 
   using Op = cutlass::gemm::device::GemmUniversalAdapter<KernelType>;
@@ -145,17 +180,11 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor& out, torch::Tensor const& a,
   auto a_scales_ptr = a_scales.data_ptr<float>();
   auto b_scales_ptr = b_scales.data_ptr<float>();
 
-  // If A and B are quantized per-tensor, then these scale tensors are scalars,
-  // and they are passed in via the second argument.
   using ScaleAArgs = typename Gemm::ScaleA::Arguments;
-  ScaleAArgs a_args = a_scales.numel() == 1
-                          ? ScaleAArgs{nullptr, a_scales.item<float>(), {}}
-                          : ScaleAArgs{a_scales.data_ptr<float>(), {}, {}};
-
   using ScaleBArgs = typename Gemm::ScaleB::Arguments;
-  ScaleBArgs b_args = b_scales.numel() == 1
-                          ? ScaleBArgs{nullptr, b_scales.item<float>(), {}}
-                          : ScaleBArgs{b_scales.data_ptr<float>(), {}, {}};
+
+  ScaleBArgs b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
+  ScaleAArgs a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
 
   typename Gemm::EVTCompute0::Arguments evt0_compute_args{b_args};
 
@@ -214,16 +243,16 @@ void cutlass_scaled_mm_dq_sm75(torch::Tensor& out, torch::Tensor const& a,
   using InstructionShape = typename cutlass::gemm::GemmShape<8, 8, 16>;
 
   if (out.dtype() == torch::kBFloat16) {
-    return cutlass_scaled_mm_dq_dispatcher<
-        cutlass_2x_gemm<cutlass::arch::Sm75, int8_t, cutlass::bfloat16_t,
-                        TileShape, WarpShape, InstructionShape, 2>>(
-        out, a, b, a_scales, b_scales);
+    return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
+        cutlass::arch::Sm75, enable_sm75_to_sm80, int8_t, cutlass::bfloat16_t,
+        TileShape, WarpShape, InstructionShape, 2>>(out, a, b, a_scales,
+                                                    b_scales);
   } else {
     TORCH_CHECK(out.dtype() == torch::kFloat16);
-    return cutlass_scaled_mm_dq_dispatcher<
-        cutlass_2x_gemm<cutlass::arch::Sm75, int8_t, cutlass::half_t, TileShape,
-                        WarpShape, InstructionShape, 2>>(out, a, b, a_scales,
-                                                         b_scales);
+    return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
+        cutlass::arch::Sm75, enable_sm75_to_sm80, int8_t, cutlass::half_t,
+        TileShape, WarpShape, InstructionShape, 2>>(out, a, b, a_scales,
+                                                    b_scales);
   }
 }
 
@@ -241,16 +270,16 @@ void cutlass_scaled_mm_dq_sm80(torch::Tensor& out, torch::Tensor const& a,
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
 
   if (out.dtype() == torch::kBFloat16) {
-    return cutlass_scaled_mm_dq_dispatcher<
-        cutlass_2x_gemm<cutlass::arch::Sm80, int8_t, cutlass::bfloat16_t,
-                        TileShape, WarpShape, InstructionShape, 5>>(
-        out, a, b, a_scales, b_scales);
+    return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
+        cutlass::arch::Sm80, enable_sm80_to_sm89, int8_t, cutlass::bfloat16_t,
+        TileShape, WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
+                                                    b_scales);
   } else {
     TORCH_CHECK(out.dtype() == torch::kFloat16);
-    return cutlass_scaled_mm_dq_dispatcher<
-        cutlass_2x_gemm<cutlass::arch::Sm80, int8_t, cutlass::half_t, TileShape,
-                        WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
-                                                         b_scales);
+    return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
+        cutlass::arch::Sm80, enable_sm80_to_sm89, int8_t, cutlass::half_t,
+        TileShape, WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
+                                                    b_scales);
   }
 }
 
@@ -269,16 +298,16 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor& out, torch::Tensor const& a,
     TORCH_CHECK(b.dtype() == torch::kInt8);
 
     if (out.dtype() == torch::kBFloat16) {
-      return cutlass_scaled_mm_dq_dispatcher<
-          cutlass_2x_gemm<cutlass::arch::Sm89, int8_t, cutlass::bfloat16_t,
-                          TileShape, WarpShape, InstructionShape, 5>>(
-          out, a, b, a_scales, b_scales);
+      return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
+          cutlass::arch::Sm89, enable_sm89_to_sm90, int8_t, cutlass::bfloat16_t,
+          TileShape, WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
+                                                      b_scales);
     } else {
       assert(out.dtype() == torch::kFloat16);
-      return cutlass_scaled_mm_dq_dispatcher<
-          cutlass_2x_gemm<cutlass::arch::Sm89, int8_t, cutlass::half_t,
-                          TileShape, WarpShape, InstructionShape, 5>>(
-          out, a, b, a_scales, b_scales);
+      return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
+          cutlass::arch::Sm89, enable_sm89_to_sm90, int8_t, cutlass::half_t,
+          TileShape, WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
+                                                      b_scales);
     }
   } else {
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
@@ -286,15 +315,15 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor& out, torch::Tensor const& a,
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
-          cutlass::arch::Sm89, cutlass::float_e4m3_t, cutlass::bfloat16_t,
-          TileShape, WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
-                                                      b_scales);
+          cutlass::arch::Sm89, enable_sm89_to_sm90, cutlass::float_e4m3_t,
+          cutlass::bfloat16_t, TileShape, WarpShape, InstructionShape, 5>>(
+          out, a, b, a_scales, b_scales);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
-          cutlass::arch::Sm89, cutlass::float_e4m3_t, cutlass::half_t,
-          TileShape, WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
-                                                      b_scales);
+          cutlass::arch::Sm89, enable_sm89_to_sm90, cutlass::float_e4m3_t,
+          cutlass::half_t, TileShape, WarpShape, InstructionShape, 5>>(
+          out, a, b, a_scales, b_scales);
     }
   }
 }
