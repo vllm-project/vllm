@@ -35,6 +35,7 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
+_NUM_WARMUP_ITERS = 2
 
 
 class ModelInput(NamedTuple):
@@ -975,16 +976,18 @@ class CUDAGraphRunner:
         **kwargs,
     ) -> None:
         assert self._graph is None
-        # Run the model once without capturing the graph.
+        # Run the model a few times without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        self.model(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-            **kwargs,
-        )
+        # Note one iteration is not enough for torch.jit.script
+        for _ in range(_NUM_WARMUP_ITERS):
+            self.model(
+                input_ids,
+                positions,
+                kv_caches,
+                attn_metadata,
+                **kwargs,
+            )
         torch.cuda.synchronize()
 
         # Capture the graph.
