@@ -312,7 +312,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 elif request.echo and request.max_tokens > 0:
                     token_ids = prompt_token_ids + output.token_ids
                     top_logprobs = (prompt_logprobs + output.logprobs
-                                    if request.logprobs else None)
+                                    if request.logprobs is not None else None)
                     output_text = prompt_text + output.text
                 else:
                     token_ids = output.token_ids

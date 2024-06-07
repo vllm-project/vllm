@@ -382,7 +382,7 @@ def get_requirements() -> List[str]:
 
 ext_modules = []
 
-if _is_cuda():
+if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
 if not _is_neuron():
