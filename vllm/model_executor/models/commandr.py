@@ -371,7 +371,7 @@ class CohereForCausalLM(nn.Module):
             embedding_weights = self.model.embed_tokens.weight
         else:
             embedding_weights = self.model.embed_tokens.base_layer.weight
-            
+
         logits = self.logits_processor(embedding_weights, hidden_states,
                                        sampling_metadata)
         return logits
