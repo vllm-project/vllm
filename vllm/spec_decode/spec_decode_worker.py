@@ -9,7 +9,6 @@ from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
-from vllm.spec_decode.hidden_states_worker import HiddenStatesWorker
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
@@ -175,9 +174,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # NOTE(cade): load_model is not part of the WorkerBase interface.
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
-        if isinstance(self.scorer_worker, HiddenStatesWorker):
-            self.scorer_worker.speculator = (
-                self.proposer_worker.model_runner.model)
 
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
