@@ -66,7 +66,7 @@ for test_file in results_folder.glob(f"*.json"):
         # get different percentiles
         for perc in [10, 25, 50, 75, 90]:
             raw_result.update({
-                f"P{perc}": raw_result["percentiles"][perc]
+                f"P{perc}": raw_result["percentiles"][str(perc)]
             })
         
         # add the result to raw_result
