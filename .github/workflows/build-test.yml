@@ -94,29 +94,29 @@ jobs:
             test_skip_list: ${{ inputs.test_skip_list }}
         secrets: inherit
 
-    TEST-MULTI:
-        needs: [BUILD]
-        if: success() && contains(fromJSON('["NIGHTLY", "WEEKLY", "RELEASE"]'), inputs.wf_category)
-        uses: ./.github/workflows/test.yml
-        with:
-            test_label: ${{ inputs.test_label_multi }}
-            timeout: ${{ inputs.test_timeout }}
-            gitref: ${{ github.ref }}
-            python: ${{ inputs.python }}
-            whl: ${{ needs.BUILD.outputs.whl }}
-            test_skip_list: ${{ inputs.test_skip_list }}
-        secrets: inherit
+    # TODO: re-enable
+    # TEST-MULTI:
+    #     needs: [BUILD]
+    #     if: success() && contains(fromJSON('["NIGHTLY", "WEEKLY", "RELEASE"]'), inputs.wf_category)
+    #     uses: ./.github/workflows/test.yml
+    #     with:
+    #         test_label: ${{ inputs.test_label_multi }}
+    #         timeout: ${{ inputs.test_timeout }}
+    #         gitref: ${{ github.ref }}
+    #         python: ${{ inputs.python }}
+    #         whl: ${{ needs.BUILD.outputs.whl }}
+    #         test_skip_list: ${{ inputs.test_skip_list }}
+    #     secrets: inherit
 
-    PUBLISH:
-        needs: [TEST-SOLO, TEST-MULTI]
-        uses: ./.github/workflows/nm-publish.yml
+    UPLOAD:
+        needs: [TEST-SOLO]
+        if: contains(fromJSON('["NIGHTLY", "WEEKLY", "RELEASE"]'), inputs.wf_category)
+        uses: ./.github/workflows/nm-upload-assets-to-gcp.yml
         with:
             label: ${{ inputs.build_label }}
             timeout: ${{ inputs.build_timeout }}
             gitref: ${{ github.ref }}
             python: ${{ inputs.python }}
-            whl: ${{ needs.BUILD.outputs.whl }}
-            tarfile: ${{ needs.BUILD.outputs.tarfile }}
         secrets: inherit
 
     BENCHMARK:

@@ -1,0 +1,23 @@
+name: cp assets
+description: "cp whl and tarfile to Google storage 'neuralmagic-public-pypi/dist'"
+inputs:
+  python:
+    description: 'python version, e.g. 3.10.12'
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: mv_assets
+      run: |
+        VERSION_BASE=$(./.github/scripts/convert-version ${{ inputs.python }})
+        WHL=$(find assets -type f -name "*nm_vllm*${VERSION_BASE}*.whl")
+        WHL_FILE=$(basename ${WHL})
+        echo "whl: ${WHL}"
+        echo "whl_file: ${WHL_FILE}"
+        TAR=$(find assets -path "*${{ inputs.python }}-nm-vllm*.tar.gz" -type f -name "nm-vllm*.tar.gz")
+        TAR_FILE=$(basename ${TAR})
+        echo "tar: ${TAR}"
+        echo "tar_file: ${TAR_FILE}"
+        gcloud storage cp ${WHL} gs://neuralmagic-public-pypi/dist/${WHL_FILE}
+        gcloud storage cp ${TAR} gs://neuralmagic-public-pypi/dist/${TAR_FILE}
+      shell: bash

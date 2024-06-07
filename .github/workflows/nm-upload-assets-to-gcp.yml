@@ -1,0 +1,72 @@
+name: nm upload assets to GCP
+run-name: ${{ github.actor }} publishing whl on branch '${{ github.ref}}'
+on:
+
+    workflow_call:
+        inputs:
+            label:
+                description: "requested runner label (specifies instance)"
+                type: string
+                required: true
+            timeout:
+                description: "time limit for run in minutes "
+                type: string
+                required: true
+            gitref:
+                description: 'git commit hash or branch name'
+                type: string
+                required: true
+            python:
+                description: "python version, e.g. 3.10.12"
+                type: string
+                required: true
+
+jobs:
+
+    PUBLISH:
+        runs-on: ${{ inputs.label }}
+        timeout-minutes: ${{ fromJson(inputs.timeout) }}
+
+        permissions:
+            contents: 'read'
+            id-token: 'write'
+
+        steps:
+
+            - name: checkout
+              id: checkout
+              uses: actions/checkout@v4
+              with:
+                fetch-depth: 0
+                ref: ${{ inputs.gitref }}
+                submodules: recursive
+
+            - name: setenv
+              id: setenv
+              uses: ./.github/actions/nm-set-env/
+
+            - name: download assets
+              id: download_whl
+              uses: actions/download-artifact@v4
+              with:
+                  path: assets
+
+            # GCP
+            - name: 'Authenticate to Google Cloud'
+              id: auth
+              uses: google-github-actions/auth@v2.1.3
+              with:
+                  project_id: ${{ secrets.GCP_PROJECT }}
+                  workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+                  service_account: ${{ secrets.GCP_SA }}
+
+            - name: 'Set up Cloud SDK'
+              uses: 'google-github-actions/setup-gcloud@v2'
+              with:
+                  version: '>= 473.0.0'
+
+            - name: cp assets
+              id: cp-assets
+              uses: ./.github/actions/nm-cp-assets/
+              with:
+                  python: ${{ inputs.python }}
