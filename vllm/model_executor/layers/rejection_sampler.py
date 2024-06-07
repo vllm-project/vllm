@@ -4,9 +4,10 @@ from typing import Tuple
 import torch
 import torch.jit
 import torch.nn as nn
+
 from vllm.model_executor.layers.spec_decode_base_sampler import (
-    SpecDecodeBaseSampler
-)
+    SpecDecodeBaseSampler)
+
 
 class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
     """Apply modified rejection sampling as described in "Accelerating Large
