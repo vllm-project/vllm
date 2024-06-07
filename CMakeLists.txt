@@ -158,7 +158,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/fp8/common.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
-  "csrc/pybind.cpp")
+  "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   include(FetchContent)
@@ -213,7 +213,7 @@ define_gpu_extension_target(
 #
 
 set(VLLM_MOE_EXT_SRC
-  "csrc/moe/moe_ops.cpp"
+  "csrc/moe/torch_bindings.cpp"
   "csrc/moe/topk_softmax_kernels.cu")
 
 define_gpu_extension_target(
@@ -238,7 +238,7 @@ set(VLLM_PUNICA_EXT_SRC
   "csrc/punica/bgmv/bgmv_fp32_bf16_bf16.cu"
   "csrc/punica/bgmv/bgmv_fp32_fp16_fp16.cu"
   "csrc/punica/punica_ops.cu"
-  "csrc/punica/punica_pybind.cpp")
+  "csrc/punica/torch_bindings.cpp")
 
 #
 # Copy GPU compilation flags+update for punica
