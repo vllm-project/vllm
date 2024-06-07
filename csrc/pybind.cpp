@@ -163,7 +163,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Compute FP8 quantized tensor and scaling factor.
   ops.def(
-      "dynamic_scaled_fp8_quant(Tensor! out, Tensor input, Tensor scale) -> "
+      "dynamic_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
       "()");
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
 
@@ -183,16 +183,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("static_scaled_int8_quant", torch::kCUDA, &static_scaled_int8_quant);
 
   // Compute int8 quantized tensor and scaling factor
-  ops.def("dynamic_scaled_int8_quant", &dynamic_scaled_int8_quant,
-          "Compute int8 quantized tensor and scaling factor");
-  ops.impl("dynamic_scaled_int8_quant", torch::kCUDA, &dynamic_scaled_int8_quant);
+  ops.def(
+      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
+      "()");
+  ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
+           &dynamic_scaled_int8_quant);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   // Cache ops
   // Swap in (out) the cache blocks from src to dst.
   cache_ops.def(
-      "swap_blocks(Tensor! src, Tensor! dst, Tensor block_mapping) -> ()");
+      "swap_blocks(Tensor src, Tensor! dst, Tensor block_mapping) -> ()");
   cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
 
   // Copy the cache blocks from src to dst.

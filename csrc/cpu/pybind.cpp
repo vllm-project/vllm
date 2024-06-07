@@ -84,7 +84,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   // Cache ops
   // Swap in (out) the cache blocks from src to dst.
   cache_ops.def(
-      "swap_blocks(Tensor! src, Tensor! dst, Tensor block_mapping) -> ()");
+      "swap_blocks(Tensor src, Tensor! dst, Tensor block_mapping) -> ()");
   cache_ops.impl("swap_blocks", torch::kCPU, &swap_blocks);
 
   // Copy the cache blocks from src to dst.
