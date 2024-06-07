@@ -84,11 +84,10 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     """
     model_id, vlm_config = model_and_config
 
-    hf_model = hf_runner(model_id, dtype=dtype, is_vision_model=True)
-    hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
-                                          max_tokens,
-                                          images=hf_images)
-    del hf_model
+    with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
+        hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
+                                              max_tokens,
+                                              images=hf_images)
 
     vllm_image_prompts = [
         p.replace("<image>", "<image>" * vlm_config.image_feature_size)

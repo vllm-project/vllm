@@ -116,16 +116,14 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
 
 def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
                                                 tmp_path):
-    hf_model = hf_runner(model_ref)
-    model_path = tmp_path / (model_ref + ".tensors")
-    max_tokens = 50
-    outputs = hf_model.generate_greedy(prompts, max_tokens=max_tokens)
-    with open_stream(model_path, "wb+") as stream:
-        serializer = TensorSerializer(stream)
-        serializer.write_module(hf_model.model)
-    del hf_model
-    gc.collect()
-    torch.cuda.empty_cache()
+    with hf_runner(model_ref) as hf_model:
+        model_path = tmp_path / (model_ref + ".tensors")
+        max_tokens = 50
+        outputs = hf_model.generate_greedy(prompts, max_tokens=max_tokens)
+        with open_stream(model_path, "wb+") as stream:
+            serializer = TensorSerializer(stream)
+            serializer.write_module(hf_model.model)
+
     loaded_hf_model = vllm_runner(model_ref,
                                   load_format="tensorizer",
                                   model_loader_extra_config=TensorizerConfig(
