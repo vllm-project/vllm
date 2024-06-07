@@ -1,21 +1,28 @@
-from typing import Dict, Optional
+import contextlib
+from typing import Dict, Optional, Type
 
 from transformers import AutoConfig, PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             JAISConfig, MPTConfig, RWConfig)
+                                             JAISConfig, MLPSpeculatorConfig,
+                                             MPTConfig, RWConfig)
 
 logger = init_logger(__name__)
 
-_CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
+_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "dbrx": DbrxConfig,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
+    "mlp_speculator": MLPSpeculatorConfig,
 }
+
+for name, cls in _CONFIG_REGISTRY.items():
+    with contextlib.suppress(ValueError):
+        AutoConfig.register(name, cls)
 
 
 def get_config(model: str,
