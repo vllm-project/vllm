@@ -1,7 +1,7 @@
 import time
 import warnings
 from collections import defaultdict
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union, Any
 
 import numpy as np
 import torch
@@ -645,72 +645,79 @@ class ModelRunner:
             num_prefills=num_prefills,
         )
 
+    def prepare_input_tensor_dict(self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+        # Prepare input tensors.
+        (
+            input_tokens,
+            input_positions,
+            attn_metadata,
+            seq_lens,
+            query_lens,
+            lora_mapping,
+            lora_requests,
+            multi_modal_kwargs,
+            slot_mapping,
+            num_prefill_tokens,
+            num_decode_tokens,
+            num_prefills,
+        ) = self._prepare_model_input(seq_group_metadata_list)
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list, seq_lens, query_lens, self.device,
+            self.pin_memory)
+
+        metadata_dict = {
+            "input_tokens": input_tokens,
+            "input_positions": input_positions,
+            "selected_token_indices":
+            sampling_metadata.selected_token_indices,
+            "lora_requests": lora_requests,
+            "lora_mapping": lora_mapping,
+            "multi_modal_kwargs": multi_modal_kwargs,
+            "num_prefill_tokens": num_prefill_tokens,
+            "num_decode_tokens": num_decode_tokens,
+            "slot_mapping": slot_mapping,
+            "num_prefills": num_prefills,
+        }
+        if attn_metadata:
+            metadata_dict.update(attn_metadata.asdict_zerocopy())
+        
+        return metadata_dict
+
+    def convert_tensor_dict_to_model_input(self, metadata_dict: Dict[str, Any]):
+        metadata_dict = broadcast_tensor_dict(src=0)
+        input_tokens = metadata_dict.pop("input_tokens")
+        input_positions = metadata_dict.pop("input_positions")
+        selected_token_indices = metadata_dict.pop(
+            "selected_token_indices")
+        lora_mapping = metadata_dict.pop("lora_mapping")
+        lora_requests = metadata_dict.pop("lora_requests")
+        multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
+        if metadata_dict:
+            attn_metadata = self.attn_backend.make_metadata(
+                **metadata_dict)
+        else:
+            attn_metadata = None
+        sampling_metadata = SamplingMetadata(
+            seq_groups=None,
+            selected_token_indices=selected_token_indices,
+            categorized_sample_indices=None,
+            num_prompts=0,
+        )
+        return (input_tokens, input_positions, attn_metadata,
+                sampling_metadata, lora_requests, lora_mapping,
+                multi_modal_kwargs)
+
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            # Prepare input tensors.
-            (
-                input_tokens,
-                input_positions,
-                attn_metadata,
-                seq_lens,
-                query_lens,
-                lora_mapping,
-                lora_requests,
-                multi_modal_kwargs,
-                slot_mapping,
-                num_prefill_tokens,
-                num_decode_tokens,
-                num_prefills,
-            ) = self._prepare_model_input(seq_group_metadata_list)
-            sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list, seq_lens, query_lens, self.device,
-                self.pin_memory)
+        # TODO: deprecate this function.
+        assert self.is_driver_worker
+        assert seq_group_metadata_list is not None
+        return self.convert_tensor_dict_to_model_input(
+            self.prepare_input_tensor_dict(seq_group_metadata_list))
 
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-                "lora_requests": lora_requests,
-                "lora_mapping": lora_mapping,
-                "multi_modal_kwargs": multi_modal_kwargs,
-                "num_prefill_tokens": num_prefill_tokens,
-                "num_decode_tokens": num_decode_tokens,
-                "slot_mapping": slot_mapping,
-                "num_prefills": num_prefills,
-            }
-            if attn_metadata:
-                metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
-        else:
-            metadata_dict = broadcast_tensor_dict(src=0)
-            input_tokens = metadata_dict.pop("input_tokens")
-            input_positions = metadata_dict.pop("input_positions")
-            selected_token_indices = metadata_dict.pop(
-                "selected_token_indices")
-            lora_mapping = metadata_dict.pop("lora_mapping")
-            lora_requests = metadata_dict.pop("lora_requests")
-            multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
-            if metadata_dict:
-                attn_metadata = self.attn_backend.make_metadata(
-                    **metadata_dict)
-            else:
-                attn_metadata = None
-            sampling_metadata = SamplingMetadata(
-                seq_groups=None,
-                selected_token_indices=selected_token_indices,
-                categorized_sample_indices=None,
-                num_prompts=0,
-            )
-
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_kwargs)
 
     @torch.inference_mode()
     def execute_model(
