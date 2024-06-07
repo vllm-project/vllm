@@ -91,7 +91,7 @@ def _get_guide_and_mode(
         json = request.guided_json
         if isinstance(json, dict):
             # turn dict into hashable string
-            json = json_dumps(json, sort_keys=True)
+            json = json_dumps(json)
         elif isinstance(json, BaseModel):
             # use pydantic signature so that different model classes
             # with the same fields will get hashed the same
