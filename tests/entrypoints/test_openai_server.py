@@ -1342,6 +1342,7 @@ async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert embeddings.usage.prompt_tokens == 17
     assert embeddings.usage.total_tokens == 17
 
+
 @pytest.mark.asyncio
 async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
                                          model_name: str):
