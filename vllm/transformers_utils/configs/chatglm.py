@@ -37,6 +37,7 @@ class ChatGLMConfig(PretrainedConfig):
                  quantization_bit=0,
                  pre_seq_len=None,
                  prefix_projection=False,
+                 vision_config=None,
                  **kwargs):
         self.num_layers = num_layers
         self.vocab_size = padded_vocab_size
@@ -67,4 +68,5 @@ class ChatGLMConfig(PretrainedConfig):
         self.pre_seq_len = pre_seq_len
         self.prefix_projection = prefix_projection
         self.interleaved_qkv = interleaved_qkv
+        self.vision_config = vision_config
         super().__init__(**kwargs)
