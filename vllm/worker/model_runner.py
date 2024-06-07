@@ -1,7 +1,7 @@
 import time
 import warnings
 from collections import defaultdict
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union, Any
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -645,7 +645,8 @@ class ModelRunner:
             num_prefills=num_prefills,
         )
 
-    def prepare_input_tensor_dict(self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+    def prepare_input_tensor_dict(
+            self, seq_group_metadata_list: List[SequenceGroupMetadata]):
         # Prepare input tensors.
         (
             input_tokens,
@@ -661,15 +662,15 @@ class ModelRunner:
             num_decode_tokens,
             num_prefills,
         ) = self._prepare_model_input(seq_group_metadata_list)
-        sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list, seq_lens, query_lens, self.device,
-            self.pin_memory)
+        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                     seq_lens, query_lens,
+                                                     self.device,
+                                                     self.pin_memory)
 
         metadata_dict = {
             "input_tokens": input_tokens,
             "input_positions": input_positions,
-            "selected_token_indices":
-            sampling_metadata.selected_token_indices,
+            "selected_token_indices": sampling_metadata.selected_token_indices,
             "lora_requests": lora_requests,
             "lora_mapping": lora_mapping,
             "multi_modal_kwargs": multi_modal_kwargs,
@@ -680,21 +681,20 @@ class ModelRunner:
         }
         if attn_metadata:
             metadata_dict.update(attn_metadata.asdict_zerocopy())
-        
+
         return metadata_dict
 
-    def convert_tensor_dict_to_model_input(self, metadata_dict: Dict[str, Any]):
+    def convert_tensor_dict_to_model_input(self, metadata_dict: Dict[str,
+                                                                     Any]):
         metadata_dict = broadcast_tensor_dict(src=0)
         input_tokens = metadata_dict.pop("input_tokens")
         input_positions = metadata_dict.pop("input_positions")
-        selected_token_indices = metadata_dict.pop(
-            "selected_token_indices")
+        selected_token_indices = metadata_dict.pop("selected_token_indices")
         lora_mapping = metadata_dict.pop("lora_mapping")
         lora_requests = metadata_dict.pop("lora_requests")
         multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
         if metadata_dict:
-            attn_metadata = self.attn_backend.make_metadata(
-                **metadata_dict)
+            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
         else:
             attn_metadata = None
         sampling_metadata = SamplingMetadata(
@@ -712,22 +712,20 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
-        # TODO: deprecate this function.
+        # TODO: deprecate this function. It is only used in tests.
         assert self.is_driver_worker
         assert seq_group_metadata_list is not None
         return self.convert_tensor_dict_to_model_input(
             self.prepare_input_tensor_dict(seq_group_metadata_list))
 
-
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        args: Tuple,
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_kwargs
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+         lora_requests, lora_mapping, multi_modal_kwargs) = args
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
