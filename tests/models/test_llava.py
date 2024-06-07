@@ -8,6 +8,7 @@ import torch
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+from vllm.utils import is_hpu
 
 model_and_vl_config = [
     ("llava-hf/llava-1.5-7b-hf",
@@ -62,6 +63,7 @@ def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
     return sanitized_input_ids, sanitzied_output_str
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("worker_use_ray", [False])
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])

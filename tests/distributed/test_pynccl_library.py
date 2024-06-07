@@ -1,6 +1,8 @@
 import multiprocessing
 import tempfile
 
+import pytest
+from vllm.utils import is_hpu
 
 def target_fn(env, filepath):
     from vllm.utils import update_environment_variables
@@ -9,6 +11,7 @@ def target_fn(env, filepath):
     nccl_integrity_check(filepath)
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_library_file():
     # note: don't import vllm.distributed.device_communicators.pynccl
     # before running this test, otherwise the library file will be loaded

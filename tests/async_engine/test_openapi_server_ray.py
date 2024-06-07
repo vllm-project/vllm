@@ -10,6 +10,7 @@ import pytest
 # and debugging.
 import ray
 import requests
+from vllm.utils import is_hpu
 
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 # any model with a chat template should work here
@@ -57,6 +58,8 @@ class ServerRunner:
 
 @pytest.fixture(scope="session")
 def server():
+    if is_hpu():
+        pytest.skip("Skipping test on HPU")
     ray.init()
     server_runner = ServerRunner.remote([
         "--model",

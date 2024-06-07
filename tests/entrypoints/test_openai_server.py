@@ -19,6 +19,7 @@ from huggingface_hub import snapshot_download
 from openai import BadRequestError
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils import is_hpu
 
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 # any model with a chat template should work here
@@ -123,6 +124,8 @@ def zephyr_lora_files():
 
 @pytest.fixture(scope="session")
 def server(zephyr_lora_files):
+    if is_hpu():
+        pytest.skip("Skipping test on HPU")
     ray.init()
     server_runner = ServerRunner.remote([
         "--model",

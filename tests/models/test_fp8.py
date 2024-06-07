@@ -10,6 +10,7 @@ from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.utils import is_hpu
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -43,12 +44,16 @@ EXPECTED_STRS_MAP = {
     ],
 }
 
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
-fp8_not_supported = (capability <
-                     QUANTIZATION_METHODS["fp8"].get_min_capability())
+if not is_hpu():
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    fp8_not_supported = (capability <
+                        QUANTIZATION_METHODS["fp8"].get_min_capability())
+else:
+    fp8_not_supported = True
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(fp8_not_supported,
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)

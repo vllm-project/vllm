@@ -17,11 +17,15 @@ import torch
 
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.utils import is_hpu
 
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
-marlin_not_supported = (capability <
-                        QUANTIZATION_METHODS["marlin"].get_min_capability())
+if not is_hpu:
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    marlin_not_supported = (capability <
+                            QUANTIZATION_METHODS["marlin"].get_min_capability())
+else:
+    marlin_not_supported = True
 
 
 @dataclass
@@ -40,6 +44,7 @@ model_pairs = [
 ]
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(marlin_not_supported,
                     reason="Marlin is not supported on this GPU type.")

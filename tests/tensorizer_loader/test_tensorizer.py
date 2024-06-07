@@ -14,6 +14,7 @@ from vllm import SamplingParams
 from vllm.model_executor.model_loader.tensorizer import (
     EncryptionParams, TensorizerConfig, TensorSerializer,
     is_vllm_serialized_tensorizer, load_with_tensorizer, open_stream)
+from vllm.utils import is_hpu
 
 prompts = [
     "Hello, my name is",
@@ -74,6 +75,7 @@ def test_is_vllm_model_without_vllm_in_uri(tensorizer_config):
     assert result is False
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
     vllm_model = vllm_runner(model_ref)
     model_path = tmp_path / (model_ref + ".tensors")
@@ -99,6 +101,7 @@ def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
     assert outputs == deserialized_outputs
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_can_deserialize_s3(vllm_runner):
     model_ref = "EleutherAI/pythia-1.4b"
@@ -118,6 +121,7 @@ def test_can_deserialize_s3(vllm_runner):
     assert deserialized_outputs
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_deserialized_encrypted_vllm_model_has_same_outputs(
         vllm_runner, tmp_path):
@@ -151,6 +155,7 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
     assert outputs == deserialized_outputs
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
                                                 tmp_path):
     hf_model = hf_runner(model_ref)
@@ -176,6 +181,7 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
     assert outputs == deserialized_outputs
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     from huggingface_hub import snapshot_download
 
@@ -217,6 +223,7 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     assert loaded_vllm_model
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_load_without_tensorizer_load_format(vllm_runner):
     with pytest.raises(ValueError):
         vllm_runner(model_ref,
@@ -224,6 +231,7 @@ def test_load_without_tensorizer_load_format(vllm_runner):
                         tensorizer_uri="test", vllm_tensorized=False))
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_tensorize_vllm_model(tmp_path):
     # Test serialize command
@@ -251,6 +259,7 @@ def test_tensorize_vllm_model(tmp_path):
                                     f"\n{result.stdout}\n{result.stderr}")
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_openai_apiserver_with_tensorizer(tmp_path):
     ## Serialize model
@@ -301,6 +310,7 @@ def test_openai_apiserver_with_tensorizer(tmp_path):
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_raise_value_error_on_invalid_load_format(vllm_runner):
     with pytest.raises(ValueError):
         vllm_runner(model_ref,

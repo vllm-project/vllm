@@ -1,6 +1,9 @@
+import pytest
 from vllm.config import ModelConfig
+from vllm.utils import is_hpu
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_get_sliding_window():
     TEST_SLIDING_WINDOW = 4096
     # Test that the sliding window is correctly computed.

@@ -6,6 +6,7 @@ test_big_models.py because it could use a larger instance to run tests.
 Run `pytest tests/models/test_models.py`.
 """
 import pytest
+from vllm.utils import is_hpu
 
 MODELS = [
     "facebook/opt-125m",
@@ -20,6 +21,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])
@@ -51,6 +53,7 @@ def test_models(
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 def test_model_print(

@@ -7,11 +7,15 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.utils import is_hpu
 
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
-aqlm_not_supported = (capability <
-                      QUANTIZATION_METHODS["aqlm"].get_min_capability())
+if not is_hpu():
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    aqlm_not_supported = (capability <
+                        QUANTIZATION_METHODS["aqlm"].get_min_capability())
+else:
+    aqlm_not_supported = False
 
 # In this test we hardcode prompts and generations for the model so we don't
 # need to require the AQLM package as a dependency
@@ -63,7 +67,7 @@ ground_truth_generations = [
     'The early bird catches the worm.\nThe early bird catches the'
 ]
 
-
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(aqlm_not_supported,
                     reason="AQLM is not supported on this GPU type.")
 @pytest.mark.parametrize("model", ["ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf"])
@@ -78,7 +82,6 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-
     vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
                                                        max_tokens,

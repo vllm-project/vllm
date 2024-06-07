@@ -3,14 +3,17 @@ import multiprocessing
 import pytest
 import torch
 
-import vllm.distributed.device_communicators.pynccl_utils as pynccl_utils
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
-from vllm.distributed.device_communicators.pynccl import (NCCLCommunicator,
-                                                          ncclGetUniqueId)
-from vllm.distributed.parallel_state import (
-    ensure_model_parallel_initialized, get_tensor_model_parallel_cpu_group,
-    init_distributed_environment, with_pynccl_for_all_reduce)
-from vllm.utils import update_environment_variables
+from vllm.utils import is_hpu, update_environment_variables
+
+if not is_hpu():    
+    import vllm.distributed.device_communicators.pynccl_utils as pynccl_utils
+    from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
+    from vllm.distributed.device_communicators.pynccl import (NCCLCommunicator,
+                                                            ncclGetUniqueId)
+    from vllm.distributed.parallel_state import (
+        ensure_model_parallel_initialized, get_tensor_model_parallel_cpu_group,
+        init_distributed_environment, with_pynccl_for_all_reduce)
+
 
 
 def distributed_run(fn, world_size):
@@ -56,6 +59,7 @@ def worker_fn():
     assert result == comm.world_size
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 def test_pynccl():
@@ -84,6 +88,7 @@ def multiple_tp_worker_fn():
         assert result == 2
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_tp():
@@ -113,6 +118,7 @@ def multiple_tp_with_vllm_worker_fn():
             assert result == 2
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_tp_with_vllm():
@@ -140,12 +146,14 @@ def worker_fn_with_cudagraph():
         assert a.mean().cpu().item() == comm.world_size**1
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 def test_pynccl_with_cudagraph():
     distributed_run(worker_fn_with_cudagraph, 2)
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_ncclGetUniqueId():
     unique_id = ncclGetUniqueId()
     # `list(unique_id.internal)` is something like this:

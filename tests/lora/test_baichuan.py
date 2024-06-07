@@ -2,6 +2,7 @@ import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.utils import is_hpu
 
 from .conftest import cleanup
 
@@ -39,6 +40,7 @@ def do_sample(llm, lora_path: str, lora_id: int) -> str:
     return generated_texts
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_baichuan_lora(baichuan_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
@@ -61,6 +63,7 @@ def test_baichuan_lora(baichuan_lora_files):
         assert output2[i] == expected_lora_output[i]
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skip("Requires multiple GPUs")
 def test_baichuan_tensor_parallel_equality(baichuan_lora_files):
     # Cannot use as it will initialize torch.cuda too early...

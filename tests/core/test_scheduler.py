@@ -11,6 +11,7 @@ from vllm.core.policy import PolicyFactory
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob, SequenceGroup, SequenceStatus
+from vllm.utils import is_hpu
 
 from .utils import create_dummy_prompt
 
@@ -77,6 +78,7 @@ def test_scheduler_abort_seq_group():
     assert scheduler.get_num_unfinished_seq_groups() == 0
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_scheduler_schedule_simple():
     block_size = 4
     num_seq_group = 4
@@ -144,6 +146,7 @@ def test_scheduler_prefill_prioritized():
     assert get_sequence_groups(out) == [seq_group_b]
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_scheduler_schedule_preempt_abort():
     block_size = 4
     max_model_len = 16
@@ -192,6 +195,7 @@ def test_scheduler_schedule_preempt_abort():
     assert scheduler.get_num_unfinished_seq_groups() == 1
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_scheduler_max_seqs():
     block_size = 4
     num_seq_group = 4
@@ -233,6 +237,7 @@ def test_scheduler_max_seqs():
     assert set(get_sequence_groups(out)) == set([all_seq_groups[1]])
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_scheduler_delay_factor():
     block_size = 4
     scheduler_config = SchedulerConfig(100, 64, 16, delay_factor=0.5)
@@ -270,6 +275,7 @@ def test_scheduler_delay_factor():
     append_new_token(out, 1)
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_swapped_out_prioritized():
     scheduler = initialize_scheduler(max_num_seqs=6)
     # best_of=2 * 3 == 6 sequences.
@@ -571,6 +577,7 @@ def test_decode_schedule_preempted():
     assert output.blocks_to_copy == []
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_decode_swap_beam_search():
     """
     Test best_of > 1 swap out blocks
@@ -621,6 +628,7 @@ def test_decode_swap_beam_search():
     assert output.blocks_to_copy == []
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_schedule_decode_blocks_to_copy_update():
     """
     Verify blocks_to_copy is updated.

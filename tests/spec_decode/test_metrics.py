@@ -5,8 +5,10 @@ import pytest
 import torch
 
 from vllm.spec_decode.metrics import AsyncMetricsCollector
+from vllm.utils import is_hpu
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_initial_call_returns_none():
     """Expect first call to get metrics to return None.
     """
@@ -25,6 +27,7 @@ def test_initial_call_returns_none():
     assert maybe_metrics is None
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_second_call_returns_metrics():
     """Expect second call to not return None.
     """
@@ -52,6 +55,7 @@ def test_second_call_returns_metrics():
     assert metrics is not None
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("rank", [1, 2, 3, 4])
 def test_nonzero_rank_noop(rank):
     """Verify nonzero ranks don't collect metrics.
@@ -72,6 +76,7 @@ def test_nonzero_rank_noop(rank):
     assert metrics is None
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_noop_until_time():
     """Verify metrics aren't collected until enough time passes.
     """
@@ -105,6 +110,7 @@ def test_noop_until_time():
     assert metrics is not None
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("has_data", [True, False])
 def test_initial_metrics_has_correct_values(has_data: bool):
     """Test correctness of metrics data.

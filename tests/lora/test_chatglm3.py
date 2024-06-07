@@ -1,5 +1,8 @@
+import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.utils import is_hpu
 
 MODEL_PATH = "THUDM/chatglm3-6b"
 
@@ -35,6 +38,7 @@ def do_sample(llm, lora_path: str, lora_id: int) -> str:
     return generated_texts
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,

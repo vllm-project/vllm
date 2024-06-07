@@ -409,14 +409,18 @@ def create_kv_caches_with_random(
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
     scale = head_size**-0.5
-    x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
-    key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
+    if is_hpu():
+        key_cache_shape = (num_blocks, num_heads, head_size, block_size)
+    else:
+        x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
+        key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
     key_caches = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape,
                                 dtype=torch_dtype,
                                 device=device)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+        cache_dtype = str(cache_dtype)
+        if cache_dtype in ["auto", "half", "float16", "torch.float16", "torch.bfloat16", "torch.float32"]:
             key_cache.uniform_(-scale, scale)
         elif cache_dtype == 'fp8':
             _generate_random_fp8(key_cache, -scale, scale)
@@ -431,7 +435,7 @@ def create_kv_caches_with_random(
         value_cache = torch.empty(size=value_cache_shape,
                                   dtype=torch_dtype,
                                   device=device)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+        if cache_dtype in ["auto", "half", "torch.float16", "torch.bfloat16", "torch.float32"]:
             value_cache.uniform_(-scale, scale)
         elif cache_dtype == 'fp8':
             _generate_random_fp8(value_cache, -scale, scale)

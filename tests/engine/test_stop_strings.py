@@ -3,6 +3,7 @@ from typing import Any, List, Optional
 import pytest
 
 from vllm import CompletionOutput, LLMEngine, SamplingParams
+from vllm.utils import is_hpu
 
 MODEL = "meta-llama/llama-2-7b-hf"
 MAX_TOKENS = 200
@@ -10,6 +11,8 @@ MAX_TOKENS = 200
 
 @pytest.fixture(scope="session")
 def vllm_model(vllm_runner):
+    if is_hpu():
+        pytest.skip("Skipping test on HPU")
     return vllm_runner(MODEL)
 
 

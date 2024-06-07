@@ -2,13 +2,14 @@ import multiprocessing
 import sys
 import time
 
+import pytest
 import torch
 from openai import OpenAI, OpenAIError
 
 from vllm import ModelRegistry
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.utils import get_open_port
+from vllm.utils import get_open_port, is_hpu
 
 
 class MyOPTForCausalLM(OPTForCausalLM):
@@ -32,6 +33,7 @@ def server_function(port):
     runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_oot_registration_for_api_server():
     port = get_open_port()
     server = multiprocessing.Process(target=server_function, args=(port, ))

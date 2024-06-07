@@ -3,8 +3,10 @@ from itertools import cycle
 import pytest
 
 from vllm import SamplingParams
+from vllm.utils import is_hpu
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -77,6 +79,7 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
     assert baseline_token_ids == test_token_ids
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -138,6 +141,7 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
     assert baseline_token_ids == test_token_ids
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -230,6 +234,7 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
     assert baseline_token_ids == test_token_ids
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [
@@ -300,6 +305,7 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
     assert baseline_token_ids == test_token_ids
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -375,6 +381,7 @@ def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
     assert baseline_token_ids == test_token_ids
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{

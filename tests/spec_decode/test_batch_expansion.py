@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
+from vllm.utils import is_hpu
 
 from .utils import create_seq_group_metadata_from_prompts, mock_worker
 
@@ -27,6 +28,7 @@ def test_create_target_seq_id_iterator(num_target_seq_ids: int):
             assert next(iterator) > max_seq_id
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize('k', [1, 2, 6])
 @pytest.mark.skip_global_cleanup
 def test_get_token_ids_to_score(k: int):

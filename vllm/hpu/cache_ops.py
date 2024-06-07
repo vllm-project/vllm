@@ -56,8 +56,8 @@ def reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, dtype, i
 
 
 def swap_blocks(src, dst, block_mapping):
-    index_src = torch.zeros((1,), dtype=torch.int32, device=key_caches[0].device)
-    index_dst = torch.zeros((1,), dtype=torch.int32, device=key_caches[0].device)
+    index_src = torch.zeros((1,), dtype=torch.int32, device=src.device)
+    index_dst = torch.zeros((1,), dtype=torch.int32, device=dst.device)
     for src_idx, dst_idx in block_mapping.items():
         index_src[0] = src_idx
         index_dst[0] = dst_idx

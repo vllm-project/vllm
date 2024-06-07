@@ -1,12 +1,15 @@
 import torch
 
+import pytest
 from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
+from vllm.utils import is_hpu
 
 from .utils import create_seq_group_metadata_from_prompts, create_worker
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_ngram_algo_correctness_for_single_no_match():
     """Verify our ngram algo find the right candidate in the prompt
 
@@ -63,6 +66,7 @@ def test_ngram_algo_correctness_for_single_no_match():
     assert proposals.proposal_lens.tolist() == [0]
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_ngram_algo_correctness_for_batches_not_match_all():
     """Verify our ngram algo find the right candidate in the prompt
 
@@ -139,6 +143,7 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
         assert proposals.proposal_token_ids[4][i] == -1
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_ngram_algo_correctness_for_batches_match_all():
     """Verify our ngram algo find the right candidate in the prompt
 

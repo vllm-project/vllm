@@ -3,12 +3,14 @@
 Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
+from vllm.utils import is_hpu
 
 MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.1",
 ]
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])

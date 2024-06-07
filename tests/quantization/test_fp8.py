@@ -7,11 +7,15 @@ import torch
 
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm.utils import is_hpu
 
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
+if not is_hpu():
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+else:
+    capability = 0
 
-
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(
     capability < QUANTIZATION_METHODS["fp8"].get_min_capability(),
     reason="FP8 is not supported on this GPU type.")

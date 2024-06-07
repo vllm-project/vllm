@@ -11,7 +11,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.utils import Counter
+from vllm.utils import Counter, is_hpu
 from vllm.worker.model_runner import ModelRunner
 
 
@@ -44,9 +44,12 @@ def _prepare_test(
 
 VOCAB_SIZE = 32000
 RANDOM_SEEDS = list(range(128))
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
+if is_hpu():
+    DEVICES = ["hpu"]
+else:
+    DEVICES = [
+        f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+    ]
 
 
 def _do_sample(
@@ -80,7 +83,7 @@ def _do_sample(
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_sampler_all_greedy(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
@@ -100,7 +103,7 @@ def test_sampler_all_greedy(seed: int, device: str):
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_sampler_all_random(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
@@ -125,8 +128,9 @@ def test_sampler_all_random(seed: int, device: str):
     del model_runner
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_sampler_all_random_seed(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
@@ -151,8 +155,9 @@ def test_sampler_all_random_seed(seed: int, device: str):
     del model_runner
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_sampler_all_random_seed_deterministic(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
@@ -176,7 +181,7 @@ def test_sampler_all_random_seed_deterministic(seed: int, device: str):
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_sampler_all_beam(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
@@ -198,7 +203,7 @@ def test_sampler_all_beam(seed: int, device: str):
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_sampler_min_tokens_penalty(seed: int, device: str):
     seq_id_counter = Counter(start=random.randint(0, 100))
     set_random_seed(seed)
@@ -486,8 +491,9 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         run_test_case(**test_case)
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_sampler_mixed(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
@@ -589,7 +595,7 @@ def test_sampler_mixed(seed: int, device: str):
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_sampler_top_k_top_p(seed: int, device: str):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)

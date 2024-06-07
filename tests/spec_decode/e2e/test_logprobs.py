@@ -4,10 +4,12 @@ from itertools import cycle
 import pytest
 
 from vllm import SamplingParams
+from vllm.utils import is_hpu
 
 from .conftest import get_logprobs_from_llm_generator
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -45,6 +47,7 @@ def test_logprobs_equality(baseline_llm_generator, test_llm_generator,
                                          force_output_len=True)
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -86,6 +89,7 @@ def test_diff_num_logprobs(baseline_llm_generator, test_llm_generator,
                                          logprob_rank=num_logprobs)
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -125,6 +129,7 @@ def test_logprobs_different_k(baseline_llm_generator, test_llm_generator,
                                          force_output_len=True)
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -168,6 +173,7 @@ def test_logprobs_when_skip_speculation(baseline_llm_generator,
                                          force_output_len=True)
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{

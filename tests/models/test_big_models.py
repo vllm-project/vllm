@@ -5,6 +5,7 @@ This tests bigger models and use half precision.
 Run `pytest tests/models/test_big_models.py`.
 """
 import pytest
+from vllm.utils import is_hpu
 
 MODELS = [
     "meta-llama/Llama-2-7b-hf",
@@ -17,6 +18,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -44,7 +46,7 @@ def test_models(
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
 
-
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_model_print(

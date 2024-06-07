@@ -7,6 +7,7 @@ from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import Logprob, SequenceGroup
+from vllm.utils import is_hpu
 
 from .utils import create_dummy_prompt
 
@@ -27,6 +28,7 @@ def schedule_and_update_computed_tokens(scheduler):
     return metas, out
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_simple():
     """Verify basic scheduling works."""
     block_size = 4
@@ -69,6 +71,7 @@ def test_simple():
     assert len(seq_group_meta) == num_seq_group
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_chunk():
     """Verify prefills are chunked properly."""
     block_size = 4
@@ -113,6 +116,7 @@ def test_chunk():
     assert out.num_batched_tokens == 57
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_complex():
     block_size = 4
     max_seqs = 60
@@ -176,6 +180,7 @@ def test_complex():
     assert running[2].is_prefill()
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_maximal_decoding():
     """Verify decoding requests are prioritized."""
     block_size = 4
@@ -369,6 +374,7 @@ def test_swap():
     assert out.blocks_to_swap_out == {}
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_running_prefill_prioritized_over_swap():
     block_size = 4
     max_seqs = 30
@@ -517,6 +523,7 @@ def test_chunked_prefill_preempt():
     assert out.num_batched_tokens == max_num_batched_tokens
 
 
+@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_chunked_prefill_max_seqs():
     block_size = 4
     max_seqs = 2
