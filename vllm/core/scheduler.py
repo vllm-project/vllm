@@ -12,7 +12,7 @@ from vllm.core.policy import Policy, PolicyFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceStatus)
+                           SequenceGroupMetadata, SequenceStage, SequenceStatus)
 
 logger = init_logger(__name__)
 
@@ -50,16 +50,20 @@ class SchedulingBudget:
     """
     token_budget: int
     max_num_seqs: int
+    logprob_budget: int # Added to prevent OOM in calculating logprobs
     _requeset_ids_num_batched_tokens: Set[str] = field(default_factory=set)
     _requeset_ids_num_curr_seqs: Set[str] = field(default_factory=set)
+    _requeset_ids_num_batched_logprobs: Set[str] = field(default_factory=set)
     _num_batched_tokens: int = 0
     _num_curr_seqs: int = 0
+    _num_batched_logprobs: int = 0
 
-    def can_schedule(self, *, num_new_tokens: int, num_new_seqs: int):
+    def can_schedule(self, *, num_new_tokens: int, num_new_seqs: int, num_new_logprobs: int = 0) -> bool:
         assert num_new_tokens != 0
-        assert num_new_seqs != 0
+        # We don't assert num_new_seqs != 0 here for decoding.
         return (self.num_batched_tokens + num_new_tokens <= self.token_budget
-                and self.num_curr_seqs + num_new_seqs <= self.max_num_seqs)
+                and self.num_curr_seqs + num_new_seqs <= self.max_num_seqs
+                and self.num_batched_logprobs + num_new_logprobs <= self.logprob_budget)
 
     def remaining_token_budget(self):
         return self.token_budget - self.num_batched_tokens
@@ -89,6 +93,21 @@ class SchedulingBudget:
             self._requeset_ids_num_curr_seqs.remove(req_id)
             self._num_curr_seqs -= num_curr_seqs
 
+    def remaining_logprob_budget(self):
+        return self.logprob_budget - self._num_batched_logprobs
+    
+    def add_num_batched_logprobs(self, req_id: str, num_batched_logprobs: int):
+        if req_id in self._requeset_ids_num_batched_logprobs:
+            return
+
+        self._requeset_ids_num_batched_logprobs.add(req_id)
+        self._num_batched_logprobs += num_batched_logprobs
+    
+    def subtract_num_batched_logprobs(self, req_id: str, num_batched_logprobs: int):
+        if req_id in self._requeset_ids_num_batched_logprobs:
+            self._requeset_ids_num_batched_logprobs.remove(req_id)
+            self._num_batched_logprobs -= num_batched_logprobs
+
     @property
     def num_batched_tokens(self):
         return self._num_batched_tokens
@@ -96,6 +115,10 @@ class SchedulingBudget:
     @property
     def num_curr_seqs(self):
         return self._num_curr_seqs
+
+    @property
+    def num_batched_logprobs(self):
+        return self._num_batched_logprobs
 
 
 @dataclass
@@ -117,6 +140,8 @@ class SchedulerOutputs:
     num_prefill_groups: int
     # Total number of batched tokens.
     num_batched_tokens: int
+    # Total number of batched logprobs.
+    num_batched_logprobs: int
     # Blocks to swap in. List of CPU -> GPU block number.
     blocks_to_swap_in: List[Tuple[int, int]]
     # Blocks to swap out. List of GPU -> CPU block number.
@@ -412,14 +437,27 @@ class Scheduler:
             seq_group = running_queue[0]
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
+            num_running_logprobs = self._get_num_new_logprobs(seq_group,
+                                                                SequenceStatus.RUNNING)
 
             if num_running_tokens == 0:
+                break
+            
+            # Check if token and logprob budget is exceeded.
+            # This check is necessary because we do not guarantee that
+            # max_num_batched_tokens and max_num_batched_logprobs are
+            # less than max_seqs.
+            if not budget.can_schedule(num_new_tokens=num_running_tokens,
+                                       num_new_seqs=0,
+                                       num_new_logprobs=num_running_logprobs):
                 break
 
             running_queue.popleft()
             while not self._can_append_slots(seq_group):
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
+                budget.subtract_num_batched_logprobs(seq_group.request_id,
+                                                     num_running_logprobs)
                 num_running_seqs = seq_group.get_max_num_running_seqs()
                 budget.subtract_num_seqs(seq_group.request_id,
                                          num_running_seqs)
@@ -459,6 +497,8 @@ class Scheduler:
                                                token_chunk_size=1))
                 budget.add_num_batched_tokens(seq_group.request_id,
                                               num_running_tokens)
+                budget.add_num_batched_logprobs(seq_group.request_id,
+                                                num_running_logprobs)
                 # OPTIMIZATION:  Note that get_max_num_running_seqs is
                 # expensive. For the default scheduling chase where
                 # enable_chunking is False, num_seqs are updated before running
@@ -559,10 +599,13 @@ class Scheduler:
             num_new_tokens = self._get_num_new_tokens(seq_group,
                                                       SequenceStatus.SWAPPED,
                                                       enable_chunking, budget)
+            num_new_logprobs = self._get_num_new_logprobs(seq_group,
+                                                          SequenceStatus.SWAPPED)
 
             if (num_new_tokens == 0
                     or not budget.can_schedule(num_new_tokens=num_new_tokens,
-                                               num_new_seqs=num_new_seqs)):
+                                               num_new_seqs=num_new_seqs,
+                                               num_new_logprobs=num_new_logprobs)):
                 break
 
             if lora_int_id > 0 and curr_loras is not None:
@@ -579,6 +622,7 @@ class Scheduler:
                 decode_seq_groups.append(
                     ScheduledSequenceGroup(seq_group, token_chunk_size=1))
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
+            budget.add_num_batched_logprobs(seq_group.request_id, num_new_logprobs)
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
         swapped_queue.extendleft(leftover_swapped)
@@ -661,12 +705,30 @@ class Scheduler:
             if not enable_chunking:
                 num_prompt_tokens = waiting_seqs[0].get_len()
                 assert num_new_tokens == num_prompt_tokens
+                
+            num_new_logprobs = self._get_num_new_logprobs(seq_group,
+                                                            SequenceStatus.WAITING)
 
             prompt_limit = self._get_prompt_limit(seq_group)
             if num_new_tokens > prompt_limit:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
                     " and exceeds limit of %d", num_new_tokens, prompt_limit)
+                for seq in waiting_seqs:
+                    seq.status = SequenceStatus.FINISHED_IGNORED
+                ignored_seq_groups.append(seq_group)
+                waiting_queue.popleft()
+                continue
+
+            # Check if the required logprobs exceed the limit.
+            # Even if the number of original tokens is within the limit,
+            # this case can happen if the sequence is preemted and
+            # recomputed.
+            if num_new_logprobs > self.scheduler_config.max_num_batched_logprobs:
+                logger.warning(
+                    "Input prompt (%d logprobs) is too long"
+                    " and exceeds the limit of max_logprobs (%d)",
+                    num_new_logprobs, self.scheduler_config.max_num_batched_logprobs)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
@@ -705,7 +767,8 @@ class Scheduler:
             num_new_seqs = seq_group.get_max_num_running_seqs()
             if (num_new_tokens == 0
                     or not budget.can_schedule(num_new_tokens=num_new_tokens,
-                                               num_new_seqs=num_new_seqs)):
+                                               num_new_seqs=num_new_seqs,
+                                               num_new_logprobs=num_new_logprobs)):
                 break
 
             # Can schedule this request.
@@ -717,6 +780,7 @@ class Scheduler:
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
+            budget.add_num_batched_logprobs(seq_group.request_id, num_new_logprobs)
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
         # Queue requests that couldn't be scheduled.
@@ -741,12 +805,14 @@ class Scheduler:
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
+            logprob_budget=self.scheduler_config.max_num_batched_logprobs,
         )
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
         for seq_group in self.running:
             budget.add_num_seqs(seq_group.request_id,
                                 seq_group.get_max_num_running_seqs())
+            # budget.add_num_batched_logprobs
         curr_loras = set(
             seq_group.lora_int_id for seq_group in self.running
             if seq_group.lora_int_id > 0) if self.lora_enabled else None
@@ -784,6 +850,7 @@ class Scheduler:
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
+        assert budget.num_batched_logprobs <= self.scheduler_config.max_num_batched_logprobs
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -812,6 +879,7 @@ class Scheduler:
                                   swapped_in.decode_seq_groups),
             num_prefill_groups=len(prefills.seq_groups),
             num_batched_tokens=budget.num_batched_tokens,
+            num_batched_logprobs=budget.num_batched_logprobs,
             blocks_to_swap_in=swapped_in.blocks_to_swap_in,
             blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
             blocks_to_copy=running_scheduled.blocks_to_copy +
@@ -840,6 +908,7 @@ class Scheduler:
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
+            logprob_budget=self.scheduler_config.max_num_batched_logprobs
         )
         curr_loras: Set[int] = set()
 
@@ -872,6 +941,7 @@ class Scheduler:
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
+        assert budget.num_batched_logprobs <= self.scheduler_config.max_num_batched_logprobs
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -901,6 +971,7 @@ class Scheduler:
                                 len(swapped_in.prefill_seq_groups) +
                                 len(running_scheduled.prefill_seq_groups)),
             num_batched_tokens=budget.num_batched_tokens,
+            num_batched_logprobs=budget.num_batched_logprobs,
             blocks_to_swap_in=swapped_in.blocks_to_swap_in,
             blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
             blocks_to_copy=running_scheduled.blocks_to_copy +
@@ -1198,3 +1269,18 @@ class Scheduler:
             num_new_tokens = min(num_new_tokens,
                                  budget.remaining_token_budget())
         return num_new_tokens
+    
+    def _get_num_new_logprobs(self, seq_group: SequenceGroup,
+                              status: SequenceStatus) -> int:
+        if seq_group.sampling_params is None:
+            return 0
+        
+        decode_logprobs = seq_group.sampling_params.logprobs is not None
+        prompt_logprobs = seq_group.sampling_params.prompt_logprobs is not None
+        num_new_logprobs = 0
+        seqs = seq_group.get_seqs(status=status)
+
+        for seq in seqs:
+            if (seq.data.stage == SequenceStage.DECODE and decode_logprobs) or (seq.data.stage == SequenceStage.PREFILL and prompt_logprobs):
+                num_new_logprobs += seq.get_num_new_tokens()
+        return num_new_logprobs

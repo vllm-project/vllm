@@ -49,6 +49,7 @@ class EngineArgs:
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     max_logprobs: int = 5  # OpenAI default value
+    max_num_batched_logprobs: Optional[int] = None
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
@@ -380,6 +381,11 @@ class EngineArgs:
             default=EngineArgs.max_logprobs,
             help=('Max number of log probs to return logprobs is specified in'
                   ' SamplingParams.'))
+        parser.add_argument(
+            "--max-num-batched-logprobs",
+            type=int,
+            default=EngineArgs.max_num_batched_logprobs,
+            help='Maximum number of batched logprobs per iteration.')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
@@ -676,6 +682,7 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
+            max_num_batched_logprobs=self.max_num_batched_logprobs,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

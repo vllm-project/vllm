@@ -760,7 +760,14 @@ class ModelRunner:
     def profile_run(self) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
+        sampling_params_with_logprobs = SamplingParams(
+            top_p=0.99,
+            top_k=self.vocab_size - 1,
+            prompt_logprobs=1,
+            logprobs=1
+        )
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        max_num_batched_logprobs = self.scheduler_config.max_num_batched_logprobs
         max_num_seqs = self.scheduler_config.max_num_seqs
         # This represents the maximum number of different requests
         # that will have unique loras, an therefore the max amount of memory
@@ -802,6 +809,8 @@ class ModelRunner:
             max_num_seqs = min(
                 max_num_seqs,
                 int(max_num_batched_tokens / vlm_config.image_feature_size))
+            
+        num_tokens = 0
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
@@ -812,18 +821,20 @@ class ModelRunner:
             else:
                 seq_data, dummy_multi_modal_data = MULTIMODAL_REGISTRY \
                     .dummy_data_for_profiling(seq_len, model_config, vlm_config)
-
+            
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
                 seq_data={group_id: seq_data},
-                sampling_params=sampling_params,
+                sampling_params=sampling_params_with_logprobs
+                if num_tokens < max_num_batched_logprobs else sampling_params,
                 block_tables=None,
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
                 multi_modal_data=dummy_multi_modal_data,
             )
             seqs.append(seq)
+            num_tokens += seq_len
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)

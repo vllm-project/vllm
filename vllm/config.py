@@ -100,6 +100,7 @@ class ModelConfig:
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
+        max_num_batched_logprobs: int = 256,
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
@@ -123,6 +124,7 @@ class ModelConfig:
         self.max_seq_len_to_capture = (max_seq_len_to_capture
                                        or max_context_len_to_capture)
         self.max_logprobs = max_logprobs
+        self.max_num_batched_logprobs = max_num_batched_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
 
@@ -657,6 +659,8 @@ class SchedulerConfig:
             swapping. However, when the sequence group has multiple sequences
             (e.g., beam search), recomputation is not currently supported. In
             such a case, we use swapping instead.
+        max_num_batched_logprobs: Maximum number of logprobs to be processed in
+            a single iteration. This should be carefully chosen to avoid OOM.
     """
 
     def __init__(self,
@@ -668,7 +672,8 @@ class SchedulerConfig:
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
                  embedding_mode: Optional[bool] = False,
-                 preemption_mode: Optional[str] = None) -> None:
+                 preemption_mode: Optional[str] = None,
+                 max_num_batched_logprobs: Optional[int] = None) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -696,6 +701,12 @@ class SchedulerConfig:
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
 
+        self.max_num_batched_logprobs = (
+            max_num_batched_logprobs is None
+            and self.max_num_seqs # If not specified, default to max_num_seqs for scheduler convenience
+            or max_num_batched_logprobs
+        )
+
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -714,6 +725,13 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
+        
+        if self.max_num_batched_logprobs > self.max_num_batched_tokens:
+            raise ValueError(
+                f"max_num_batched_logprobs ({self.max_num_batched_logprobs}) "
+                f"must be less than or equal to max_num_batched_tokens "
+                f"({self.max_num_batched_tokens})."
+            )
 
         if self.num_lookahead_slots < 0:
             raise ValueError(
