@@ -138,7 +138,6 @@ done
 # Iterate over serving tests
 jq -c '.[]' $SERVING_TESTS | while read -r params; do
 
-  break
 
   # get the test name, and append the GPU type back to it.
   test_name=$(echo $params | jq -r '.test_name')_${gpu_type}
