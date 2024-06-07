@@ -177,6 +177,8 @@ class SequenceData:
         """
         self._num_computed_tokens = 0
         self._stage = SequenceStage.PREFILL
+        self.prompt_token_ids = self.get_token_ids()
+        self.output_token_ids = []
 
     def get_num_uncomputed_tokens(self) -> int:
         """Return the number of prefill tokens that are not computed."""
