@@ -4,7 +4,7 @@ from typing import Callable, Optional
 
 import torch
 
-from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.model_executor.layers.spec_decode_base_sampler import SpecDecodeBaseSampler
 from vllm.utils import is_pin_memory_available
 
 
@@ -41,6 +41,10 @@ class SpecDecodeWorkerMetrics:
     # The number of speculative tokens per sequence.
     num_spec_tokens: int
 
+    total_time: float
+    total_calls: int
+    avg_time: float
+
 
 Timer = Callable[[], float]
 
@@ -51,10 +55,10 @@ class AsyncMetricsCollector:
     """
 
     def __init__(self,
-                 rejection_sampler: RejectionSampler,
+                 spec_decode_base_sampler: SpecDecodeBaseSampler,
                  timer: Optional[Timer] = None,
                  collect_interval_s: float = 5.0):
-        self._rejection_sampler = rejection_sampler
+        self.spec_decode_base_sampler = spec_decode_base_sampler
         self._timer = time.time if timer is None else timer
 
         self._rank: Optional[int] = None
@@ -117,13 +121,13 @@ class AsyncMetricsCollector:
 
         with torch.cuda.stream(self._copy_stream):
             self._aggregate_num_accepted_tokens.copy_(
-                self._rejection_sampler.num_accepted_tokens, non_blocking=True)
+                self.spec_decode_base_sampler.num_accepted_tokens, non_blocking=True)
             self._aggregate_num_emitted_tokens.copy_(
-                self._rejection_sampler.num_emitted_tokens, non_blocking=True)
+                self.spec_decode_base_sampler.num_emitted_tokens, non_blocking=True)
             # Number of draft tokens is calculated on CPU, so no copy is
             # required.
             self._aggregate_num_draft_tokens = (
-                self._rejection_sampler.num_draft_tokens)
+                self.spec_decode_base_sampler.num_draft_tokens)
 
         aggregate_metrics_ready = torch.cuda.Event()
         aggregate_metrics_ready.record(self._copy_stream)
@@ -160,6 +164,10 @@ class AsyncMetricsCollector:
         else:
             system_efficiency = float("nan")
 
+        #print('emitted_tokens ' + str(emitted_tokens))
+        #print('accepted_tokens ' + str(accepted_tokens))
+        #print('draft_tokens ' + str(draft_tokens))
+
         return SpecDecodeWorkerMetrics(
             num_spec_tokens=k,
             draft_acceptance_rate=draft_acceptance_rate,
@@ -167,6 +175,9 @@ class AsyncMetricsCollector:
             accepted_tokens=accepted_tokens,
             draft_tokens=draft_tokens,
             emitted_tokens=emitted_tokens,
+            total_time=self.spec_decode_base_sampler.total_time,
+            total_calls=self.spec_decode_base_sampler.total_calls,
+            avg_time= self.spec_decode_base_sampler.total_time * 1.0 / self.spec_decode_base_sampler.total_calls * 1.0 
         )
 
     @staticmethod

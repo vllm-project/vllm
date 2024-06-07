@@ -372,4 +372,7 @@ class StatLogger:
                 f"Number of speculative tokens: {metrics.num_spec_tokens}, "
                 f"Number of accepted tokens: {metrics.accepted_tokens}, "
                 f"Number of draft tokens tokens: {metrics.draft_tokens}, "
-                f"Number of emitted tokens tokens: {metrics.emitted_tokens}.")
+                f"Number of emitted tokens tokens: {metrics.emitted_tokens}, "
+                f"Total Time: {metrics.total_time}, "
+                f"Total Calls: {metrics.total_calls}, "
+                f"Avg Time: {metrics.avg_time}.")

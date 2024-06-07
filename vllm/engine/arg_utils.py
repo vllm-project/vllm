@@ -96,7 +96,9 @@ class EngineArgs:
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
-
+    speculative_draft_token_sampling_method: str = 'typical_acceptance_sampler'
+    typical_acceptance_sampler_posterior_threshold: float = 0.09
+    typical_acceptance_sampler_posterior_alpha: float = 0.3
     qlora_adapter_name_or_path: Optional[str] = None
 
     def __post_init__(self):
@@ -556,6 +558,30 @@ class EngineArgs:
             help='Min size of window for ngram prompt lookup in speculative '
             'decoding.')
 
+        parser.add_argument(
+            '--speculative-draft-token-sampling-method',
+            type=str,
+            default=EngineArgs.speculative_draft_token_sampling_method,
+            choices=['rejection_sampler', 'typical_acceptance_sampler'],
+            help='The draft token sampler to use for speculative decoding.')
+
+        parser.add_argument(
+            '--typical-acceptance-sampler-posterior-threshold',
+            type=float,
+            default=EngineArgs.typical_acceptance_sampler_posterior_threshold,
+            help='A threshold value that sets a lower bound on the '
+            'posterior probability of a token for it to be accepted. This '
+            'parameter is used by the TypicalAcceptanceSampler for making '
+            'sampling decisions during speculative decoding.')
+
+        parser.add_argument(
+            '--typical-acceptance-sampler-posterior-alpha',
+            type=float,
+            default=EngineArgs.typical_acceptance_sampler_posterior_alpha,
+            help='A scaling factor for the entropy-based threshold for token '
+            'acceptance in the TypicalAcceptanceSampler. Typically defaults ' 
+            'to sqrt of --typical-acceptance-sampler-posterior-threshold.')
+
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
                             default=EngineArgs.model_loader_extra_config,
@@ -654,6 +680,10 @@ class EngineArgs:
             use_v2_block_manager=self.use_v2_block_manager,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
+            draft_token_sampling_method="rejection_sampler",
+            #draft_token_sampling_method="typical_acceptance_sampler",
+            typical_acceptance_sampler_posterior_threshold=0.09,
+            typical_acceptance_sampler_posterior_alpha=0.3, 
         )
 
         scheduler_config = SchedulerConfig(

@@ -6,6 +6,7 @@ import torch
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.model_executor.layers.typical_acceptance_sampler import TypicalAcceptanceSampler
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
@@ -20,6 +21,7 @@ from vllm.spec_decode.util import (create_sequence_group_output,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
+import time
 
 logger = init_logger(__name__)
 
@@ -50,6 +52,12 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         draft_worker_kwargs=draft_worker_kwargs,
         disable_by_batch_size=speculative_config.
         speculative_disable_by_batch_size,
+        draft_token_sampling_method=speculative_config.
+        draft_token_sampling_method,
+        typical_acceptance_sampler_posterior_threshold=speculative_config.
+        typical_acceptance_sampler_posterior_threshold,
+        typical_acceptance_sampler_posterior_alpha=speculative_config.
+        typical_acceptance_sampler_posterior_alpha
     )
 
     return spec_decode_worker
@@ -89,6 +97,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         scorer_worker: WorkerBase,
         draft_worker_kwargs: Dict[str, Any],
         disable_by_batch_size: Optional[int],
+        draft_token_sampling_method: Optional[str] = "rejection_sampler",
+        typical_acceptance_sampler_posterior_threshold: Optional[float] = 0.09, 
+        typical_acceptance_sampler_posterior_alpha: Optional[float] = 0.3, 
     ) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
@@ -107,19 +118,36 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
+        
+        rejection_sampler: RejectionSampler = None
+        typical_acceptance_sampler: TypicalAcceptanceSampler = None
+        print('draft_token_sampling_method ' + str(draft_token_sampling_method))
+
+        if draft_token_sampling_method == "rejection_sampler":
+            rejection_sampler = RejectionSampler(
+                disable_bonus_tokens=disable_bonus_tokens, )
+        elif draft_token_sampling_method == "typical_acceptance_sampler":
+            typical_acceptance_sampler = TypicalAcceptanceSampler(
+                disable_bonus_tokens=disable_bonus_tokens,
+                posterior_threshold=\
+                    typical_acceptance_sampler_posterior_threshold,
+                posterior_alpha=typical_acceptance_sampler_posterior_alpha,
+            )
 
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
             disable_by_batch_size=disable_by_batch_size,
-            rejection_sampler=RejectionSampler(
-                disable_bonus_tokens=disable_bonus_tokens, ))
+            rejection_sampler=rejection_sampler,
+            typical_acceptance_sampler=typical_acceptance_sampler)
+
 
     def __init__(
         self,
         proposer_worker: WorkerBase,
         scorer_worker: WorkerBase,
-        rejection_sampler: RejectionSampler,
+        rejection_sampler: Optional[RejectionSampler] = None,
+        typical_acceptance_sampler: Optional[TypicalAcceptanceSampler] = None,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
     ):
@@ -143,13 +171,21 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker = scorer_worker
         self.disable_by_batch_size = disable_by_batch_size or float("inf")
         self.rejection_sampler = rejection_sampler
-
-        self._metrics = AsyncMetricsCollector(
-            rejection_sampler
-        ) if metrics_collector is None else metrics_collector
-
-        self.probs_dtype = self.rejection_sampler.probs_dtype
-        self.token_id_dtype = self.rejection_sampler.token_id_dtype
+        self.typical_acceptance_sampler = typical_acceptance_sampler
+        if self.rejection_sampler is not None:
+            self._metrics = AsyncMetricsCollector(
+                self.rejection_sampler
+            ) if metrics_collector is None else metrics_collector
+            self.probs_dtype = self.rejection_sampler.probs_dtype
+            self.token_id_dtype = self.rejection_sampler.token_id_dtype
+        elif self.typical_acceptance_sampler is not None:
+            self._metrics = AsyncMetricsCollector(
+                self.typical_acceptance_sampler
+            ) if metrics_collector is None else metrics_collector
+            self.probs_dtype = self.typical_acceptance_sampler.probs_dtype
+            self.token_id_dtype = self.typical_acceptance_sampler.token_id_dtype
+        self._total_time_in_verify = 0
+        self._num_calls = 0
 
         # Lazy initiazliation.
         self.scorer: SpeculativeScorer
@@ -167,7 +203,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.load_model()
 
         self._metrics.init_gpu_tensors(self.rank)
-        self.rejection_sampler.init_gpu_tensors(self.rank)
+        if (self.rejection_sampler is not None):
+            self.rejection_sampler.init_gpu_tensors(self.rank)
+        if (self.typical_acceptance_sampler is not None):
+            self.typical_acceptance_sampler.init_gpu_tensors(self.rank)
+            
         self.scorer = BatchExpansionTop1Scorer(
             scorer_worker=self.scorer_worker,
             device=self.device,
@@ -445,13 +485,30 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
-        accepted_token_ids = self.rejection_sampler(
-            target_probs=proposal_verifier_probs,
-            bonus_token_ids=bonus_token_ids,
-            draft_probs=proposal_probs,
-            draft_token_ids=proposal_token_ids,
-        )
+        if self.rejection_sampler is not None:
+            start_time = time.time()
+            accepted_token_ids = self.rejection_sampler(
+                target_probs=proposal_verifier_probs,
+                bonus_token_ids=bonus_token_ids,
+                draft_probs=proposal_probs,
+                draft_token_ids=proposal_token_ids,
+            )
+            end_time = time.time()
+            self._total_time_in_verify += (end_time - start_time)
+            self._num_calls += 1
+        elif self.typical_acceptance_sampler is not None:
+            start_time = time.time()
+            accepted_token_ids = self.typical_acceptance_sampler(
+                target_probs=proposal_verifier_probs,
+                bonus_token_ids=bonus_token_ids,
+                draft_token_ids=proposal_token_ids,
+            )
+            end_time = time.time()
+            self._total_time_in_verify += (end_time - start_time)
+            self._num_calls += 1
 
+        #print('_total_time_in_verify ' + str(self._total_time_in_verify))
+        #print('_num_calls ' + str(self._num_calls))
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +

@@ -761,6 +761,9 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        draft_token_sampling_method: Optional[str],
+        typical_acceptance_sampler_posterior_threshold: Optional[float],
+        typical_acceptance_sampler_posterior_alpha: Optional[float], 
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -889,6 +892,11 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size,
             ngram_prompt_lookup_max,
             ngram_prompt_lookup_min,
+            draft_token_sampling_method=draft_token_sampling_method,
+            typical_acceptance_sampler_posterior_threshold=\
+                typical_acceptance_sampler_posterior_threshold,
+            typical_acceptance_sampler_posterior_alpha=\
+                typical_acceptance_sampler_posterior_alpha, 
         )
 
     @staticmethod
@@ -960,6 +968,9 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        draft_token_sampling_method: Optional[str],
+        typical_acceptance_sampler_posterior_threshold: Optional[float],
+        typical_acceptance_sampler_posterior_alpha: Optional[float], 
     ):
         """Create a SpeculativeConfig object.
 
@@ -981,6 +992,11 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size
         self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
         self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
+        self.draft_token_sampling_method = draft_token_sampling_method
+        self.typical_acceptance_sampler_posterior_threshold = \
+            typical_acceptance_sampler_posterior_threshold
+        self.typical_acceptance_sampler_posterior_alpha = \
+            typical_acceptance_sampler_posterior_alpha
 
         self._verify_args()
 
