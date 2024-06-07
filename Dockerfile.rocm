@@ -106,6 +106,8 @@ ENV VLLM_NCCL_SO_PATH=/opt/rocm/lib/librccl.so
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
+# TODO: remove cp .so files and refactor for CI purposes
+RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -U -r requirements-rocm.txt \
     && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
        patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch; fi \
@@ -113,7 +115,11 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
        cp build/lib.linux-x86_64-cpython-39/vllm/_C.cpython-39-x86_64-linux-gnu.so vllm/ \
        && cp build/lib.linux-x86_64-cpython-39/vllm/_moe_C.cpython-39-x86_64-linux-gnu.so vllm/ \
-       && cp build/lib.linux-x86_64-cpython-39/vllm/_punica_C.cpython-39-x86_64-linux-gnu.so vllm/; fi \
+       && cp build/lib.linux-x86_64-cpython-39/vllm/_punica_C.cpython-39-x86_64-linux-gnu.so vllm/; \
+       else \
+       cp build/lib.linux-x86_64-cpython-310/vllm/_C.cpython-310-x86_64-linux-gnu.so vllm/ \
+       && cp build/lib.linux-x86_64-cpython-310/vllm/_moe_C.cpython-310-x86_64-linux-gnu.so vllm/ \
+       && cp build/lib.linux-x86_64-cpython-310/vllm/_punica_C.cpython-310-x86_64-linux-gnu.so vllm/; fi \
     && cd ..
 
 
