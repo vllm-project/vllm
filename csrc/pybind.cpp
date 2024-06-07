@@ -67,8 +67,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Aligning the number of tokens to be processed by each expert such "
           "that it is divisible by the block size.");
   ops.def("convert_fp8", &convert_fp8,
-                "Convert the key and value cache to fp8 data type");
-  
+          "Convert the key and value cache to fp8 data type");
+
 #ifdef USE_ROCM
   ops.def("fp8_gemm", &fp8_gemm, "fp8 GEMM with fp8 output");
   ops.def("fp8_gemm_16", &fp8_gemm_16, "fp8 GEMM with fp16 output");

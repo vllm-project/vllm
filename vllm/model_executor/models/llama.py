@@ -438,8 +438,9 @@ class LlamaForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-                
-    def load_quantized_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+
+    def load_quantized_weights(self, weights: Iterable[Tuple[str,
+                                                             torch.Tensor]]):
         params_dict = dict(self.named_parameters())
         #with open("/projects/a.txt", "r") as f:
         #    j = json.load(f)
@@ -457,7 +458,8 @@ class LlamaForCausalLM(nn.Module):
         for name, loaded_weight in weights:
             #print(name)
             name = name.replace('transformer', 'model')
-            name = name.replace('kv_cache_scaling_factor', 'qkv.output_scaling_factor')
+            name = name.replace('kv_cache_scaling_factor',
+                                'qkv.output_scaling_factor')
             loaded_weight = loaded_weight.to("cuda")
             if loaded_weight.dtype == torch.int8:
                 loaded_weight[loaded_weight == -128] = 0
@@ -481,9 +483,9 @@ class LlamaForCausalLM(nn.Module):
                         continue
                     name = name.replace(weight_name, param_name)
                     param = params_dict[name]
-                    if "activation_scaling_factor" in name or "weights_scaling_factor" in name:
-                        param.data.copy_(loaded_weight)
-                    elif "output_scaling_factor" in name:
+                    if ("activation_scaling_factor" in name
+                            or "weights_scaling_factor" in name
+                            or "output_scaling_factor" in name):
                         param.data.copy_(loaded_weight)
                     else:
                         weight_loader = getattr(param, "weight_loader",

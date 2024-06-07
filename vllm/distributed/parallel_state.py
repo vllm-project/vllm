@@ -188,7 +188,8 @@ def initialize_model_parallel(
             _TP_CPU_GROUP = cpu_group
 
     if tensor_model_parallel_size > 1 and not is_hip():
-        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+        from vllm.distributed.device_communicators.pynccl import (
+            PyNcclCommunicator)
         _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
             group=_TP_CPU_GROUP,
             device=_LOCAL_RANK,

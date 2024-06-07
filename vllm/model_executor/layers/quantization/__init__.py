@@ -23,7 +23,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,
     "awq": AWQConfig,
     "deepspeedfp": DeepSpeedFPConfig,
-    "fp8": Fp8Config if not is_hip() else Fp8RocmConfig,
+    "fp8": Fp8Config if not is_hip() else Fp8RocmConfig,  # type: ignore
     # The order of gptq methods is important for config.py iteration over
     # override_quantization_method(..)
     "marlin": MarlinConfig,

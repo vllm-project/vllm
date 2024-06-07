@@ -165,6 +165,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
         )
         return self._cached_decode_metadata
 
+
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     dtype: torch.dtype,
@@ -185,41 +186,42 @@ def _make_alibi_bias(
         bias.mul_(alibi_slopes[:, None, None])
         inf_mask = torch.empty(
             (1, seq_len, seq_len),
-            dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1).to(alibi_slopes.device)
+            dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1).to(
+                alibi_slopes.device)
         attn_biases.append((bias + inf_mask).to(dtype))
 
     return attn_biases
 
 
-def _make_alibi_bias_v2(
-    alibi_slopes: torch.Tensor,
-    dtype: torch.dtype,
-    seq_lens: List[int],
-    make_attn_mask: bool = True
-) -> List[torch.Tensor]:
+def _make_alibi_bias_v2(alibi_slopes: torch.Tensor,
+                        dtype: torch.dtype,
+                        seq_lens: Optional[List[int]],
+                        make_attn_mask: bool = True) -> List[torch.Tensor]:
     attn_biases = []
-    for seq_len in seq_lens:
-        bias = torch.arange(seq_len, dtype=dtype)
-        # NOTE(zhuohan): HF uses
-        #     `bias = bias[None, :].repeat(seq_len, 1)`
-        # here. We find that both biases give the same results, but
-        # the bias below more accurately follows the original ALiBi
-        # paper.
-        bias = bias[None, :] - bias[:, None]
+    if seq_lens:
+        for seq_len in seq_lens:
+            bias = torch.arange(seq_len, dtype=dtype)
+            # NOTE(zhuohan): HF uses
+            #     `bias = bias[None, :].repeat(seq_len, 1)`
+            # here. We find that both biases give the same results, but
+            # the bias below more accurately follows the original ALiBi
+            # paper.
+            bias = bias[None, :] - bias[:, None]
 
-        num_heads = alibi_slopes.shape[0]
-        bias = bias[None, :].repeat((num_heads, 1, 1)).to(alibi_slopes.device)
-        bias.mul_(alibi_slopes[:, None, None])
-        if make_attn_mask:
-            inf_mask = torch.empty(
-                (1, seq_len, seq_len),
-                dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1).to(alibi_slopes.device)
-            attn_biases.append((bias + inf_mask).to(dtype))
-        else:
-            attn_biases.append(bias.to(dtype))
+            num_heads = alibi_slopes.shape[0]
+            bias = bias[None, :].repeat(
+                (num_heads, 1, 1)).to(alibi_slopes.device)
+            bias.mul_(alibi_slopes[:, None, None])
+            if make_attn_mask:
+                inf_mask = torch.empty(
+                    (1, seq_len, seq_len),
+                    dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1).to(
+                        alibi_slopes.device)
+                attn_biases.append((bias + inf_mask).to(dtype))
+            else:
+                attn_biases.append(bias.to(dtype))
 
     return attn_biases
-
 
 
 class ROCmFlashAttentionImpl(AttentionImpl):
@@ -384,8 +386,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 if self.use_triton_flash_attn:
                     if self.alibi_slopes is not None:
                         att_masks = _make_alibi_bias_v2(
-                            self.alibi_slopes, query.dtype,
-                            attn_metadata.seq_lens, make_attn_mask=False)  # type: ignore
+                            self.alibi_slopes,
+                            query.dtype,
+                            attn_metadata.seq_lens,
+                            make_attn_mask=False)  # type: ignore
                     out, _ = self.attn_func(
                         query,
                         key,
@@ -402,20 +406,17 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 elif self.use_naive_attn:
                     if self.alibi_slopes is not None:
                         att_masks = _make_alibi_bias_v2(
-                            self.alibi_slopes, query.dtype,
-                            attn_metadata.seq_lens, make_attn_mask=True)  # type: ignore
+                            self.alibi_slopes,
+                            query.dtype,
+                            attn_metadata.seq_lens,
+                            make_attn_mask=True)  # type: ignore
                     if self.num_kv_heads != self.num_heads:
                         # Interleave for MQA workaround.
                         key = self.repeat_kv(key, self.num_queries_per_kv)
                         value = self.repeat_kv(value, self.num_queries_per_kv)
-                    out = self.attn_func(
-                        query,
-                        key,
-                        value,
-                        prefill_meta.seq_lens,
-                        self.scale,
-                        att_masks
-                    )
+                    out = self.attn_func(query, key, value,
+                                         prefill_meta.seq_lens, self.scale,
+                                         att_masks)
                 else:
                     out = self.attn_func(
                         q=query,
@@ -486,7 +487,7 @@ def _naive_attention(
             key[start:end],
             value[start:end],
             scale,
-            attn_masks[i],
+            attn_masks[i] if attn_masks else None,
         )
         # TODO(woosuk): Unnecessary copy. Optimize.
         output[start:end].copy_(out)
@@ -505,10 +506,10 @@ def _naive_masked_attention(
     seq_len, head_size, head_dim = query.shape
     if attn_mask is None:
         attn_mask = torch.triu(torch.ones(seq_len,
-                                        seq_len,
-                                        dtype=query.dtype,
-                                        device=query.device),
-                            diagonal=1)
+                                          seq_len,
+                                          dtype=query.dtype,
+                                          device=query.device),
+                               diagonal=1)
         attn_mask = attn_mask * torch.finfo(query.dtype).min
     attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
     attn_weights = attn_weights + attn_mask.float()

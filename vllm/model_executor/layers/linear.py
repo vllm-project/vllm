@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm import _custom_C
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -16,7 +15,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.tuned_gemm import tgemm
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
