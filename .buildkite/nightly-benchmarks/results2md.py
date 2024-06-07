@@ -31,7 +31,7 @@ serving_column_mapping = {
     "mean_tpot_ms": "Mean TPOT (ms)",
 }
 
-for test_file in results_folder.glob(f"*.json"):
+for test_file in results_folder.glob("*.json"):
     
     with open(test_file, "r") as f:
         raw_result = json.loads(f.read())
