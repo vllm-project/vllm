@@ -35,7 +35,6 @@ for test_file in results_folder.glob(f"*.json"):
     
     with open(test_file, "r") as f:
         raw_result = json.loads(f.read())
-    print(raw_result["percentiles"])
         
     if "serving" in str(test_file):
         # this result is generated via `benchmark_serving.py`
@@ -80,12 +79,14 @@ latency_results = pd.DataFrame.from_dict(latency_results)
 serving_results = pd.DataFrame.from_dict(serving_results)
 
 # remapping the key, for visualization purpose
-latency_results = latency_results[
-    list(latency_column_mapping.keys())
-].rename(columns=latency_column_mapping)
-serving_results = serving_results[
-    list(serving_column_mapping.keys())
-].rename(columns=serving_column_mapping)
+if not latency_results.empty:
+    latency_results = latency_results[
+        list(latency_column_mapping.keys())
+    ].rename(columns=latency_column_mapping)
+if not serving_results.empty:
+    serving_results = serving_results[
+        list(serving_column_mapping.keys())
+    ].rename(columns=serving_column_mapping)
 
 # get markdown tables
 latency_md_table = tabulate(
@@ -101,9 +102,11 @@ serving_md_table = tabulate(
 
 # document the result
 with open(results_folder / "benchmark_results.md", "w") as f: 
-    f.write("## Latency tests\n")
-    f.write(latency_md_table)
-    f.write("\n")
-    f.write("## Online serving tests\n")
-    f.write(serving_md_table)
-    f.write("\n")
+    if not latency_results.empty():
+        f.write("## Latency tests\n")
+        f.write(latency_md_table)
+        f.write("\n")
+    if not serving_results.empty():
+        f.write("## Online serving tests\n")
+        f.write(serving_md_table)
+        f.write("\n")
