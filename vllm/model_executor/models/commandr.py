@@ -319,15 +319,9 @@ class CohereForCausalLM(nn.Module):
     }
     # LoRA specific attributes
     supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        "embed_tokens"
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens"
     ]
-    embedding_modules = {
-        "embed_tokens": "input_embeddings"
-    }
+    embedding_modules = {"embed_tokens": "input_embeddings"}
     embedding_padding_modules = []
 
     def __init__(
