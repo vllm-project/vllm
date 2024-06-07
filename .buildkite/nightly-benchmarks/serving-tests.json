@@ -1,6 +1,6 @@
 [
     {
-        "test_name": "serving_llama8B_sharegpt_tp1",
+        "test_name": "serving_llama8B_tp1_sharegpt",
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B",
             "tensor_parallel_size": 1,
@@ -17,7 +17,7 @@
         }
     },
     {
-        "test_name": "serving_llama70B_sharegpt_tp4",
+        "test_name": "serving_llama70B_tp4_sharegpt",
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
             "tensor_parallel_size": 4,
@@ -28,6 +28,40 @@
         },
         "client_parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 1000
+        }
+    },
+    {
+        "test_name": "serving_mixtral8x7B_tp8_sharegpt",
+        "server_parameters": {
+            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "tensor_parallel_size": 8,
+            "swap_space": 16,
+            "disable_log_stats": "",
+            "disable_log_requests": "",
+            "load_format": "dummy"
+        },
+        "client_parameters": {
+            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 1000
+        }
+    },
+    {
+        "test_name": "serving_mixtral8x22B_tp8_sharegpt",
+        "server_parameters": {
+            "model": "mistralai/Mixtral-8x22B-Instruct-v0.1",
+            "tensor_parallel_size": 8,
+            "swap_space": 16,
+            "disable_log_stats": "",
+            "disable_log_requests": "",
+            "load_format": "dummy"
+        },
+        "client_parameters": {
+            "model": "mistralai/Mixtral-8x22B-Instruct-v0.1",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
             "num_prompts": 1000
