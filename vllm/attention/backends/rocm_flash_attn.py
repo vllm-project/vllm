@@ -343,10 +343,17 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     key = key.movedim(0, key.dim() - 2)
                     value = value.movedim(0, value.dim() - 2)
                     # sdpa math backend attention
-                    out = self.attn_func(query, key, value, prefill_meta,
-                                            attn_metadata, num_tokens,
-                                            self.num_heads, self.head_size,
-                                            self.scale)
+                    out = self.attn_func(
+                        query, 
+                        key, 
+                        value, 
+                        prefill_meta.seq_lens,
+                        attn_metadata, 
+                        num_tokens,
+                        self.num_heads, 
+                        self.head_size,
+                        self.scale,
+                    )
                 else:
                     out = self.attn_func(
                         q=query,
@@ -400,55 +407,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         return output.view(num_tokens, hidden_size)
 
 
-def _naive_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    seq_lens: List[int],
-    scale: float,
-) -> torch.Tensor:
-    output = torch.empty_like(query)
-    start = 0
-    for _, seq_len in enumerate(seq_lens):
-        end = start + seq_len
-        out = _naive_masked_attention(
-            query[start:end],
-            key[start:end],
-            value[start:end],
-            scale,
-        )
-        # TODO(woosuk): Unnecessary copy. Optimize.
-        output[start:end].copy_(out)
-        start += seq_len
-
-    return output
-
-
-def _naive_masked_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    scale: float,
-) -> torch.Tensor:
-    seq_len, head_size, head_dim = query.shape
-    attn_mask = torch.triu(torch.ones(seq_len,
-                                      seq_len,
-                                      dtype=query.dtype,
-                                      device=query.device),
-                           diagonal=1)
-    attn_mask = attn_mask * torch.finfo(query.dtype).min
-    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
-    attn_weights = attn_weights + attn_mask.float()
-    attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
-    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
-    return out
-
-
 def _sdpa_attention(
     query: torch.Tensor, 
     key: torch.Tensor, 
     value: torch.Tensor, 
-    prefill_meta: Optional["ROCmFlashAttentionMetadata"], 
+    seq_lens: List[int], 
     attn_metadata: ROCmFlashAttentionMetadata, 
     num_tokens: int,
     num_heads: int, 
@@ -463,7 +426,7 @@ def _sdpa_attention(
                          dtype=query.dtype,
                          device=query.device)
 
-    for seq_len, mask in zip(prefill_meta.seq_lens, attn_metadata.attn_bias):
+    for seq_len, mask in zip(seq_lens, attn_metadata.attn_bias):
         end = start + seq_len
         with torch.backends.cuda.sdp_kernel(enable_math=True,
                                             enable_flash=False,
