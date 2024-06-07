@@ -240,8 +240,8 @@ class Fp8LinearMethod(LinearMethodBase):
             elif self.quant_config.activation_scheme == "static":
                 if not all_close_1d(layer.input_scale):
                     raise ValueError(
-                        "All the act_scales for the logical weights of a layer "
-                        f"must be equal. But got {layer.input_scale}")
+                        "All the input_scales for the logical weights of a "
+                        f"layer must be equal. But got {layer.input_scale}")
                 layer.input_scale = Parameter(layer.input_scale.max(),
                                               requires_grad=False)
             else:
