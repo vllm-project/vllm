@@ -2,10 +2,7 @@ from vllm import LLM
 
 # Sample prompts.
 prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
+    "This is an example sentence.",
 ]
 
 # Create an LLM.
@@ -14,4 +11,5 @@ model = LLM(model="bert-base-uncased", enforce_eager=True)
 outputs = model.encode(prompts)
 # Print the outputs.
 for output in outputs:
-    print(output.outputs.embedding)  # list of 4096 floats
+    print(output.outputs.embedding)  # list of 768 floats
+    print(len(output.outputs.embedding))
