@@ -1342,7 +1342,7 @@ async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert embeddings.usage.prompt_tokens == 17
     assert embeddings.usage.total_tokens == 17
 
-
+@pytest.mark.asyncio
 async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
                                          model_name: str):
     prompt = "What is the capital of France?"
@@ -1360,7 +1360,7 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
     assert len(chunks) > 0
-    assert "usage" not in chunk
+    assert all(chunk.usage is None for chunk in chunks)
 
     # Test stream=True, stream_options={"include_usage": False}
     stream = await client.completions.create(
@@ -1375,7 +1375,7 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
     assert len(chunks) > 0
-    assert "usage" not in chunk
+    assert all(chunk.usage is None for chunk in chunks)
 
     # Test stream=True, stream_options={"include_usage": True}
     stream = await client.completions.create(
