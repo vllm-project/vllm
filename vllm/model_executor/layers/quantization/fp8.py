@@ -232,7 +232,7 @@ class Fp8LinearMethod(LinearMethodBase):
             weight = layer.weight
             layer.weight = Parameter(weight.t(), requires_grad=False)
 
-            # INPUT_ACTIVATION_SCALE
+            # INPUT ACTIVATION SCALE
             #   Dynamic: set to None (required input to ops.scaled_fp8_quant).
             #   Static:  set to max of the input_scales (since they are equal).
             if self.quant_config.activation_scheme == "dynamic":
