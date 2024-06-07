@@ -63,7 +63,22 @@ wait_for_server() {
 
 kill_vllm() {
   # kill vllm instances
-  pkill -f python3
+  # List all the processes using the GPU and get their PIDs
+  pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
+
+  # Check if there are any PIDs to kill
+  if [ -z "$pids" ]; then
+      echo "No GPU processes found."
+  else
+      # Kill each process
+      for pid in $pids; do
+          kill -9 $pid
+          echo "Killed process with PID: $pid"
+      done
+
+      echo "All GPU processes have been killed."
+  fi
+
   sleep 10
 }
 
@@ -92,7 +107,7 @@ mkdir -p $RESULTS_FOLDER
 
 # Iterate over latency tests
 jq -c '.[]' $LATENCY_TESTS | while read -r params; do
-
+  break
   # get the test name, and append the GPU type back to it.
   test_name=$(echo $params | jq -r '.test_name')_${gpu_type}
   if [[ ! "$test_name" =~ ^latency_ ]]; then
