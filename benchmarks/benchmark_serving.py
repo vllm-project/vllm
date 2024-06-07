@@ -627,7 +627,7 @@ if __name__ == "__main__":
         help="Specify the filename to save benchmark json results."
         "If not specified, results will be saved in "
         "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
-        " format."
+        " format.",
     )
 
     args = parser.parse_args()
