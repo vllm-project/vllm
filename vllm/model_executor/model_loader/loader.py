@@ -76,7 +76,7 @@ def _get_model_initialization_kwargs(
             "but LoRA is enabled. Support for this model may "
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
-    elif issubclass(model_class, VisionLanguageModelBase):
+    if issubclass(model_class, VisionLanguageModelBase):
         if vision_language_config is None:
             raise ValueError("Provide `image_input_type` and other vision "
                              "related configurations through LLM entrypoint "
