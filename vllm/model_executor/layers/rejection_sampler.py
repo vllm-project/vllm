@@ -333,7 +333,8 @@ class RejectionSampler(nn.Module):
 
         # k might not be constant, if we enable dynamic spec
         # also for ngram case, batch_size might be 0, if not matched
-        self.num_specs += batch_size * k
+        if batch_size > 0:
+            self.num_specs += k
 
         return output_with_bonus_tokens
 
