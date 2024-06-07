@@ -367,6 +367,69 @@ def test_accept_tokens_partially(seed: int, disable_bonus_tokens: bool,
     assert torch.all(output_token_ids[:, -3:] == -1)
 
 
+@pytest.mark.parametrize("seed", list(range(1)))
+@pytest.mark.parametrize("disable_bonus_tokens", [True, False])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_accept_tokens_set_non_default_posteriors(
+    seed: int, disable_bonus_tokens: bool, device: str):
+    """
+    Test the TypicalAcceptanceSampler's behavior when only a subset of draft
+    tokens should be accepted.
+
+    This test verifies that the TypicalAcceptanceSampler correctly accepts or
+    rejects draft tokens based on a zero-temperature target probability
+    distribution. Specifically, it ensures that:
+    
+    - When all draft tokens match tokens with a probability of 1.0 in the
+    target distribution, all draft tokens are accepted.
+    - When only some draft tokens match tokens with a probability of 1.0 in
+    the target distribution, only those matching tokens are accepted, and the
+    rest are rejected.
+    """
+    set_random_seed(seed)
+    k = 5
+    batch_size = 1
+    vocab_size = 30_000
+    torch.set_default_device(device)
+    typical_acceptance_sampler = TypicalAcceptanceSampler(
+        strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
+    typical_acceptance_sampler.init_gpu_tensors(rank=0)
+    # Create a temperature zero target probability distribution and ensure
+    # all draft token ids correspond to the tokens with 1.0 probability.
+    # Verify that all of them are accepted.
+    target_probs, zero_temperature_token_ids = (get_zero_temperature_prob_dist(
+        batch_size, k, vocab_size))
+    target_probs[target_probs == 0] = 0.00001
+    draft_token_ids = get_draft_token_ids(
+        batch_size, k, vocab_size, zero_temperature_token_ids)
+    bonus_token_ids = torch.randint(low=0,
+                                    high=vocab_size,
+                                    size=(batch_size, 1),
+                                    dtype=torch.int64)
+    output_token_ids = typical_acceptance_sampler(target_probs,
+                                                  bonus_token_ids,
+                                                  draft_token_ids)
+    assert output_token_ids.shape[0] == batch_size
+    assert output_token_ids.shape[1] == (k + 1)
+    assert torch.all(output_token_ids[:, 1:-1] == -1)
+
+    typical_acceptance_sampler = TypicalAcceptanceSampler(
+        strict_mode=True, disable_bonus_tokens=disable_bonus_tokens,
+        posterior_threshold=0.0, posterior_alpha=0.0)
+    typical_acceptance_sampler.init_gpu_tensors(rank=0)
+    output_token_ids = typical_acceptance_sampler(target_probs,
+                                                  bonus_token_ids,
+                                                  draft_token_ids)
+    assert output_token_ids.shape[0] == batch_size
+    assert output_token_ids.shape[1] == (k + 1)
+    assert torch.all(output_token_ids[:, 0:-1] == draft_token_ids)
+    if disable_bonus_tokens:
+        assert torch.all(output_token_ids[:, -1] == -1)
+    else:
+        assert torch.all(output_token_ids[:, -1] == bonus_token_ids)
+
+
 @pytest.mark.parametrize("seed", list(range(10)))
 @pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
