@@ -426,7 +426,7 @@ class Scheduler:
                     and seq_group.lora_int_id > 0
                     and seq_group.lora_int_id in curr_loras
                 ):
-                        curr_loras.remove(seq_group.lora_int_id)
+                    curr_loras.remove(seq_group.lora_int_id)
 
                 if running_queue:
                     # Preempt the lowest-priority sequence groups.
