@@ -300,17 +300,17 @@ class Worker(WorkerBase):
         if not data:
             return False
 
-        num_seq_groups = data.get("num_seq_groups", 0)
-        blocks_to_swap_in = data.get("blocks_to_swap_in")
-        blocks_to_swap_out = data.get("blocks_to_swap_out")
-        blocks_to_copy = data.get("blocks_to_copy")
+        num_seq_groups = data.pop("num_seq_groups")
+        blocks_to_swap_in = data.pop("blocks_to_swap_in")
+        blocks_to_swap_out = data.pop("blocks_to_swap_out")
+        blocks_to_copy = data.pop("blocks_to_copy")
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
             return False
 
-        self.model_runner.execute_model(None, self.gpu_cache)
+        self.model_runner.execute_model(data, self.gpu_cache)
         return True
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
