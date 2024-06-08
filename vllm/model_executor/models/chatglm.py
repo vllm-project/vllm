@@ -333,7 +333,8 @@ class ChatGLMModel(nn.Module):
 
         if image_features is not None:
             mask = (input_ids == self.vision_language_config.image_token_id)
-            inputs_embeds[mask] = image_features.view(-1, image_features.shape[-1])
+            inputs_embeds[mask] = image_features.view(-1,
+                                                      image_features.shape[-1])
 
         # Run encoder.
         hidden_states = self.encoder(
@@ -376,7 +377,8 @@ class ChatGLMForCausalLM(VisionLanguageModelBase):
         self.quant_config = quant_config
         self.max_position_embeddings = getattr(config, "max_sequence_length",
                                                8192)
-        self.transformer = ChatGLMModel(config, vision_language_config, cache_config, quant_config)
+        self.transformer = ChatGLMModel(config, vision_language_config,
+                                        cache_config, quant_config)
         self.lm_head_weight = self.transformer.output_layer.weight
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
         self.sampler = Sampler()
@@ -390,14 +392,9 @@ class ChatGLMForCausalLM(VisionLanguageModelBase):
         pixel_values: Optional[torch.Tensor] = None,
         image_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.transformer(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-            pixel_values,
-            image_features
-        )
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         attn_metadata, pixel_values,
+                                         image_features)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
