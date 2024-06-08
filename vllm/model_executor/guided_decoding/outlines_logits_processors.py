@@ -38,7 +38,6 @@ class BaseLogitsProcessor:
 
     def init_state(self):
         """Initialize the FSM states."""
-        self._fsm_state: DefaultDict[int, int] = defaultdict(int)
 
     def __call__(self, input_ids: List[int], scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
@@ -65,6 +64,7 @@ class BaseLogitsProcessor:
         # Retrieve allowed tokens from cache using the current state
         cacheKey = instruction.id
         if cacheKey not in self.cache:
+            print("Cache miss")
             # Cache miss, calculate allowed tokens and cache them
 
             np_allowed_tokens = np.array(allowed_tokens, dtype=np.int32)
@@ -81,6 +81,7 @@ class BaseLogitsProcessor:
 
         else:
             # Cache hit
+            print("Cache hit")
             allowed_tokens_tensor = self.cache[cacheKey]
 
         if self.mask is None:
@@ -91,16 +92,6 @@ class BaseLogitsProcessor:
         self.mask.index_fill_(0, allowed_tokens_tensor, 0)
         scores.add_(self.mask)
         return scores
-
-    def state_reset_required(self) -> bool:
-        """Determine if a state reset is required for this processor.
-
-        Returns
-        -------
-        bool
-            Indicates whether a reset is required. Default is False.
-        """
-        return False
 
 
 class RegexLogitsProcessor(BaseLogitsProcessor):
@@ -186,15 +177,6 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         """
         tokenizer = _adapt_tokenizer(tokenizer)
         super().__init__(CFGGuide(cfg, tokenizer))
-
-    def state_reset_required(self) -> bool:
-        requiresReset = (
-            self._previous_fsm is None
-            or self._guide.regex_fsm is not self._previous_fsm
-        )
-
-        self._previous_fsm = self._guide.regex_fsm
-        return requiresReset
 
 
 @lru_cache
