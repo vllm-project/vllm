@@ -78,17 +78,11 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
-        if not is_tpu():
+        self.use_native2 = is_tpu() and not is_neox_style
+        if not self.use_native2:
             cache = cache.to(dtype)
             self.register_buffer("cos_sin_cache", cache, persistent=False)
         else:
-            if rotary_dim != head_size:
-                raise NotImplementedError(
-                    "The TPU backend requires rotary_dim == head_size.")
-            if not is_neox_style:
-                raise NotImplementedError(
-                    "The TPU backend only supports Neox-style rotary "
-                    "positional embeddings.")
             cos, sin = cache.chunk(2, dim=-1)
             freqs_cis = cos + 1j * sin
             self.register_buffer("freqs_cis", freqs_cis, persistent=False)
@@ -126,7 +120,11 @@ class RotaryEmbedding(CustomOp):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """PyTorch-native implementation equivalent to forward()."""
+        """A PyTorch-native implementation equivalent to forward().
+
+        This method mimics the implementation of the custom CUDA kernel
+        used in `forward_cuda()`.
+        """
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
 
@@ -164,6 +162,42 @@ class RotaryEmbedding(CustomOp):
         key = key.flatten(-2)
         return query, key
 
+    def forward_native2(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Another PyTorch-native implementation of forward().
+
+        This method might perform better than `forward_native()` when compiled.
+        """
+        if positions.dim() == 1:
+            batch_size = 1
+            seq_len = positions.shape[0]
+        else:
+            batch_size, seq_len = positions.shape
+        if offsets is not None:
+            positions = positions + offsets
+        freqs_cis = self.freqs_cis.index_select(0, positions.flatten())
+        freqs_cis = freqs_cis.view(batch_size, 1, seq_len, -1)
+
+        query_shape = query.shape
+        query = query.view(batch_size, seq_len, -1, self.head_size)
+        query_rot = query[..., :self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        query_rot = _apply_rotary_emb(query_rot, freqs_cis)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.view(batch_size, seq_len, -1, self.head_size)
+        key_rot = key[..., :self.rotary_dim]
+        key_pass = key[..., self.rotary_dim:]
+        key_rot = _apply_rotary_emb(key_rot, freqs_cis)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
+
     def forward_cuda(
         self,
         positions: torch.Tensor,
@@ -194,23 +228,9 @@ class RotaryEmbedding(CustomOp):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if positions.dim() == 1:
-            batch_size = 1
-            seq_len = positions.shape[0]
-        else:
-            batch_size, seq_len = positions.shape
-        if offsets is not None:
-            positions += offsets
-        freqs_cis = self.freqs_cis.index_select(0, positions.flatten())
-        freqs_cis = freqs_cis.view(batch_size, 1, seq_len, -1)
-
-        query_shape = query.shape
-        query = query.view(batch_size, seq_len, -1, self.head_size)
-        query = _apply_rotary_emb(query, freqs_cis).reshape(query_shape)
-        key_shape = key.shape
-        key = key.view(batch_size, seq_len, -1, self.head_size)
-        key = _apply_rotary_emb(key, freqs_cis).reshape(key_shape)
-        return query, key
+        forward_fn = (self.forward_native2
+                      if self.use_native2 else self.forward_native)
+        return forward_fn(positions, query, key, offsets)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
