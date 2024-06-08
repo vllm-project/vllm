@@ -8,7 +8,7 @@ from argparse import Namespace
 import torch
 from torch import nn
 from torch.nn import LayerNorm
-from torch.nn.functional import F
+from torch.nn import functional as F
 from transformers.activations import ACT2FN
 
 
