@@ -22,6 +22,7 @@ from typing import Any, Callable, DefaultDict, Dict, List, Optional, Union
 
 import numpy as np
 import torch
+from line_profiler import profile
 from outlines.fsm.guide import CFGGuide, Generate, Guide, Instruction, RegexGuide, Write
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
@@ -39,6 +40,7 @@ class BaseLogitsProcessor:
     def init_state(self):
         """Initialize the FSM states."""
 
+    @profile
     def __call__(self, input_ids: List[int], scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
         seq_id = hash(tuple(input_ids))
@@ -81,7 +83,6 @@ class BaseLogitsProcessor:
 
         else:
             # Cache hit
-            print("Cache hit")
             allowed_tokens_tensor = self.cache[cacheKey]
 
         if self.mask is None:
