@@ -22,7 +22,7 @@ from vllm.model_executor.layers.lora import sgmv_triton as sgmv
         args={},
     ))
 def benchmark_repeats_expand(S, R, repeats_per_lora=1):
-    weights, w_start, ranks, w_locs, indices, repeats, _, R, dtype = setup_(
+    weights, ranks, indices, repeats, _, R, dtype = setup_(
         S, R, 4096, dtype=torch.bfloat16, repeats_per_lora=repeats_per_lora)
 
     buffer = torch.randn((S, R), device='cuda', dtype=torch.float32)
@@ -30,11 +30,10 @@ def benchmark_repeats_expand(S, R, repeats_per_lora=1):
     ms = triton.testing.do_bench(lambda: sgmv.sgmv_expand(buffer,
                                                           weights,
                                                           out,
-                                                          w_start,
                                                           ranks,
-                                                          w_locs,
                                                           indices,
                                                           repeats,
+                                                          repeats_per_lora,
                                                           out_col_offset=0),
                                  warmup=500,
                                  rep=4000)
@@ -58,13 +57,13 @@ def benchmark_repeats_expand(S, R, repeats_per_lora=1):
         args={},
     ))
 def benchmark_repeats_shrink(S, R, repeats_per_lora=1):
-    weights, w_start, ranks, w_locs, indices, repeats, _, R, dtype = setup_(
+    weights, ranks, indices, repeats, _, R, dtype = setup_(
         S, R, 4096, dtype=torch.bfloat16, repeats_per_lora=repeats_per_lora)
 
     x = torch.rand((S, 4096), device='cuda', dtype=dtype)
     out = torch.zeros((S, R), device='cuda', dtype=torch.float32)
     ms = triton.testing.do_bench(lambda: sgmv.sgmv_shrink(
-        x, weights, out, w_start, ranks, w_locs, indices, repeats, R),
+        x, weights, out, ranks, indices, repeats, repeats_per_lora),
                                  warmup=500,
                                  rep=4000)
     return ms
@@ -102,8 +101,8 @@ if __name__ == '__main__':
                                  print_data=True,
                                  repeats_per_lora=8)
 
-    # set repeats >= 16 for plaid mode
-    # (tl.dot is applicable which makes it fast)
+    # # set repeats >= 16 for plaid mode
+    # # (tl.dot is applicable which makes it fast)
     print('-' * 40)
     print('Expand | repeats [16]')
     benchmark_repeats_expand.run(show_plots=False,

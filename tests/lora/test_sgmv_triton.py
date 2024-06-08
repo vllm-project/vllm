@@ -22,21 +22,12 @@ def setup_(S, R, H, dtype, repeats_per_lora=1):
     S = math.ceil(S / repeats_per_lora) * repeats_per_lora
     num_unique = S // repeats_per_lora
     if R is None:
-        ranks = torch.randint(0, MAX_TEST_POWER, (S, ), device='cuda')
-        ranks = 2**ranks  # random powers of 2 between [1, MAX_TEST_POWER]
+        ranks = torch.randint(3, MAX_TEST_POWER, (S, ), device='cuda')
+        ranks = 2**ranks  # random powers of 2 between [8, MAX_TEST_POWER]
         R = 2**(MAX_TEST_POWER - 1)
     else:
         ranks = torch.full((S, ), R, device='cuda', dtype=torch.int32)
-    weights = torch.randn((S * R, H), device='cuda', dtype=dtype)
-    w_locs = torch.randint(0,
-                           weights.shape[0], (ranks.sum().item(), ),
-                           device='cuda')
-    w_start = torch.cat([
-        torch.tensor([
-            0,
-        ], device='cuda', dtype=torch.int32),
-        ranks.cumsum(dim=-1)[:-1]
-    ])
+    weights = torch.randn((num_unique, 1, H, R), device='cuda', dtype=dtype)
     indices = torch.arange(num_unique, device='cuda')
     repeats = torch.full((num_unique, ),
                          repeats_per_lora,
@@ -46,7 +37,7 @@ def setup_(S, R, H, dtype, repeats_per_lora=1):
         torch.zeros((1, ), device='cuda', dtype=torch.int32),
         repeats.cumsum(dim=-1)
     ])
-    return (weights, w_start, ranks, w_locs, indices, repeats, num_unique, R,
+    return (weights, ranks, indices, repeats, num_unique, R,
             dtype)
 
 
@@ -60,7 +51,7 @@ def setup_(S, R, H, dtype, repeats_per_lora=1):
 @torch.inference_mode()
 def test_correct(S, R, H, dtype, repeats_per_lora, seed):
     torch.manual_seed(seed)
-    weights, w_start, ranks, w_locs, indices, repeats, num_unique, R, dtype = (
+    weights, ranks, indices, repeats, num_unique, R, dtype = (
         setup_(S, R, H, dtype, repeats_per_lora))
 
     buffer = torch.randn((S, R), device='cuda', dtype=torch.float32)
@@ -69,8 +60,7 @@ def test_correct(S, R, H, dtype, repeats_per_lora, seed):
     ref_outs = []
     for ui in range(num_unique):
         idx = indices[ui]
-        w_rows = w_locs[w_start[idx]:w_start[idx] + ranks[idx]]
-        w = weights[w_rows].contiguous()
+        w = weights[idx, 0, :, :ranks[idx]].T.contiguous()
         inp = buffer[repeats[ui]:repeats[ui + 1], :ranks[idx]].contiguous()
         ref_out = inp.to(dtype=torch.float32) @ w.to(dtype=torch.float32)
         ref_outs.append(ref_out)
@@ -78,7 +68,9 @@ def test_correct(S, R, H, dtype, repeats_per_lora, seed):
     ref_out = torch.cat(ref_outs, dim=0)
     # doing this apparently leads to incorrect results in the first row
     # + out[:, out_col_offset:]
-    ref_out += out[:, out_col_offset:].to(dtype=torch.float32)
+    ref_out = (
+        ref_out + out[:, out_col_offset:].to(dtype=torch.float32)
+    ).to(dtype=dtype)
     # but this does not (likely depends on torch version)
 
     # run the autotuner, add to a tmp output
@@ -87,42 +79,40 @@ def test_correct(S, R, H, dtype, repeats_per_lora, seed):
                      torch.rand((S, H + out_col_offset),
                                 device='cuda',
                                 dtype=dtype),
-                     w_start,
                      ranks,
-                     w_locs,
                      indices,
                      repeats,
+                     repeats_per_lora,
                      out_col_offset=out_col_offset)
 
     sgmv.sgmv_expand(buffer,
                      weights,
                      out,
-                     w_start,
                      ranks,
-                     w_locs,
                      indices,
                      repeats,
+                     repeats_per_lora,
                      out_col_offset=out_col_offset)
 
-    # diff = (ref_out - out[:, out_col_offset:].to(dtype=torch.float32)).abs()
+    # diff = (ref_out - out[:, out_col_offset:]).abs()
     # print(f'max diff {diff.max():0.5f}, mean {diff.mean():0.5f}')
     # triton.language.dot, which is used for improved speed when
     # rank and repeats are >= 16
     # gives larger differences from torch
     assert_close(ref_out,
-                 out[:, out_col_offset:].to(dtype=torch.float32),
+                 out[:, out_col_offset:],
                  dtype=dtype,
                  tl_dot=repeats_per_lora >= 9)
 
+    weights = weights.permute(0, 1, 3, 2).contiguous()
     x = torch.rand((S, H), device='cuda', dtype=dtype)
     out = torch.zeros((S, R), device='cuda', dtype=torch.float32)
     ref_outs = []
     for ui in range(num_unique):
         idx = indices[ui]
-        w_rows = w_locs[w_start[idx]:w_start[idx] + ranks[idx]]
-        w = weights[w_rows].contiguous()
+        w = weights[idx, 0, :ranks[idx], :].T.contiguous()
         inp = x[repeats[ui]:repeats[ui + 1]].contiguous()
-        ref_out = inp.to(dtype=torch.float32) @ w.to(dtype=torch.float32).T
+        ref_out = inp.to(dtype=torch.float32) @ w.to(dtype=torch.float32)
         ref_out = torch.cat([
             ref_out,
             torch.zeros((ref_out.shape[0], R - ref_out.shape[-1]),
@@ -136,11 +126,11 @@ def test_correct(S, R, H, dtype, repeats_per_lora, seed):
     ref_out += out
 
     # run the autotuner, add to a tmp output
-    sgmv.sgmv_shrink(x, weights, torch.rand_like(out), w_start, ranks, w_locs,
-                     indices, repeats, R)
+    sgmv.sgmv_shrink(x, weights, torch.rand_like(out), ranks,
+                     indices, repeats, repeats_per_lora)
 
-    sgmv.sgmv_shrink(x, weights, out, w_start, ranks, w_locs, indices, repeats,
-                     R)
+    sgmv.sgmv_shrink(x, weights, out, ranks, indices, repeats,
+                     repeats_per_lora)
 
     # diff = (ref_out - out).abs()
     # print(f'max diff {diff.max():0.5f}, mean {diff.mean():0.5f}')
