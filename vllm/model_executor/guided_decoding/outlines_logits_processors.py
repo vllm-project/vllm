@@ -40,7 +40,6 @@ class BaseLogitsProcessor:
     def init_state(self):
         """Initialize the FSM states."""
 
-    @profile
     def __call__(self, input_ids: List[int], scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
         seq_id = hash(tuple(input_ids))
@@ -66,7 +65,6 @@ class BaseLogitsProcessor:
         # Retrieve allowed tokens from cache using the current state
         cacheKey = instruction.id
         if cacheKey not in self.cache:
-            print("Cache miss")
             # Cache miss, calculate allowed tokens and cache them
 
             np_allowed_tokens = np.array(allowed_tokens, dtype=np.int32)
