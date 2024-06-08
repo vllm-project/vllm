@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Any
 
 import torch
 
@@ -6,7 +6,6 @@ from vllm.attention import AttentionMetadata
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -47,12 +46,12 @@ class EmbeddingModelRunner(ModelRunner):
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        tensor_dict: Dict[str, Any],
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         (input_tokens, input_positions, attn_metadata, pooling_metadata,
          lora_requests, lora_mapping, multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+         ) = self.convert_tensor_dict_to_model_input(tensor_dict)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -86,64 +85,74 @@ class EmbeddingModelRunner(ModelRunner):
         return self.model.pooler(hidden_states=hidden_states,
                                  pooling_metadata=pooling_metadata)
 
+    def prepare_input_tensor_dict(
+            self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+        # Prepare input tensors.
+        (
+            input_tokens,
+            input_positions,
+            attn_metadata,
+            seq_lens,
+            _,
+            lora_mapping,
+            lora_requests,
+            multi_modal_kwargs,
+            slot_mapping,
+            num_prefill_tokens,
+            num_decode_tokens,
+            num_prefills,
+        ) = self._prepare_model_input(seq_group_metadata_list)
+        # Prepare PoolingMetadata
+        pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
+                                                 seq_lens)
+
+        metadata_dict = {
+            "input_tokens": input_tokens,
+            "input_positions": input_positions,
+            "lora_requests": lora_requests,
+            "lora_mapping": lora_mapping,
+            "multi_modal_kwargs": multi_modal_kwargs,
+            "num_prefill_tokens": num_prefill_tokens,
+            "num_decode_tokens": num_decode_tokens,
+            "slot_mapping": slot_mapping,
+            "num_prefills": num_prefills,
+        }
+        if attn_metadata:
+            metadata_dict.update(attn_metadata.asdict_zerocopy())
+
+        self.pooling_metadata = pooling_metadata
+        return metadata_dict
+
+    def convert_tensor_dict_to_model_input(self, metadata_dict: Dict[str,
+                                                                     Any]):
+        input_tokens = metadata_dict.pop("input_tokens")
+        input_positions = metadata_dict.pop("input_positions")
+        lora_mapping = metadata_dict.pop("lora_mapping")
+        lora_requests = metadata_dict.pop("lora_requests")
+        multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
+        if metadata_dict:
+            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
+        else:
+            attn_metadata = None
+        if hasattr(self, "pooling_metadata"):
+            pooling_metadata = self.pooling_metadata
+        else:
+            pooling_metadata = PoolingMetadata(seq_groups=None,
+                                               seq_data=None,
+                                               prompt_lens=None)
+        return (input_tokens, input_positions, attn_metadata, pooling_metadata,
+                lora_requests, lora_mapping, multi_modal_kwargs)
+
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
                Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            # Prepare input tensors.
-            (
-                input_tokens,
-                input_positions,
-                attn_metadata,
-                seq_lens,
-                _,
-                lora_mapping,
-                lora_requests,
-                multi_modal_kwargs,
-                slot_mapping,
-                num_prefill_tokens,
-                num_decode_tokens,
-                num_prefills,
-            ) = self._prepare_model_input(seq_group_metadata_list)
-            # Prepare PoolingMetadata
-            pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
-                                                     seq_lens)
-
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "lora_requests": lora_requests,
-                "lora_mapping": lora_mapping,
-                "multi_modal_kwargs": multi_modal_kwargs,
-                "num_prefill_tokens": num_prefill_tokens,
-                "num_decode_tokens": num_decode_tokens,
-                "slot_mapping": slot_mapping,
-                "num_prefills": num_prefills,
-            }
-            if attn_metadata:
-                metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
-        else:
-            metadata_dict = broadcast_tensor_dict(src=0)
-            input_tokens = metadata_dict.pop("input_tokens")
-            input_positions = metadata_dict.pop("input_positions")
-            lora_mapping = metadata_dict.pop("lora_mapping")
-            lora_requests = metadata_dict.pop("lora_requests")
-            multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
-            if metadata_dict:
-                attn_metadata = self.attn_backend.make_metadata(
-                    **metadata_dict)
-            else:
-                attn_metadata = None
-            pooling_metadata = PoolingMetadata(seq_groups=None,
-                                               seq_data=None,
-                                               prompt_lens=None)
-
-        return (input_tokens, input_positions, attn_metadata, pooling_metadata,
-                lora_requests, lora_mapping, multi_modal_kwargs)
+        # TODO: deprecate this function. It is only used in tests.
+        assert self.is_driver_worker
+        assert seq_group_metadata_list is not None
+        return self.convert_tensor_dict_to_model_input(
+            self.prepare_input_tensor_dict(seq_group_metadata_list))
 
     def _prepare_pooling(
         self,
