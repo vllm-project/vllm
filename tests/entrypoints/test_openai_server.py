@@ -478,8 +478,6 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
         temperature=0.0,
     )
     single_output = single_completion.choices[0].text
-    single_usage = single_completion.usage
-
     stream = await client.completions.create(model=model_name,
                                              prompt=prompt,
                                              max_tokens=5,
@@ -1342,6 +1340,7 @@ async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert embeddings.usage.total_tokens == 17
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
