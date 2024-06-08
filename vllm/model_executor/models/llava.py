@@ -51,10 +51,10 @@ class LlavaMultiModalProjector(nn.Module):
         return hidden_states
 
 
-def _merge_vision_embeddings(input_ids: torch.Tensor,
-                             inputs_embeds: torch.Tensor,
-                             vision_embeddings: torch.Tensor,
-                             image_token_id: int) -> torch.Tensor:
+def merge_vision_embeddings(input_ids: torch.Tensor,
+                            inputs_embeds: torch.Tensor,
+                            vision_embeddings: torch.Tensor,
+                            image_token_id: int) -> torch.Tensor:
     """In place merges in vision_embeddings with inputs_embeds."""
     mask = (input_ids == image_token_id)
 
@@ -270,7 +270,7 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = _merge_vision_embeddings(
+            inputs_embeds = merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.vision_language_config.image_token_id)
 
