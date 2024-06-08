@@ -39,6 +39,22 @@ HEAD_SIZES_FOR_UNSUPP = [HEAD_SIZES[0]]
 
 
 class TestPoint(NamedTuple):
+    """
+    Encapsulates the attributes which define the
+    test_enc_dec_self_and_cross_attention_prefill_decode_phases()
+    test
+
+    Attributes:
+        num_heads: The number of heads in the model.
+        head_size: Head dimension
+        backend_name: Name of the backend framework used.
+        batch_size: Number of samples per batch.
+        block_size: Size of each block of data processed.
+        max_dec_seq_len: Maximum sequence length for the decoder.
+        max_enc_seq_len: Maximum sequence length for the encoder.
+        num_blocks: Number of blocks in the model.
+    """
+
     num_heads: int
     head_size: int
     backend_name: str
