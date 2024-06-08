@@ -13,6 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.tokenizer import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
@@ -151,7 +152,14 @@ class LLM:
         self,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     ) -> None:
-        self.llm_engine.tokenizer.tokenizer = tokenizer
+        # While CachedTokenizer is dynamic, have no choice but
+        # compare class name. Misjudgment will arise from
+        # user-defined tokenizer started with 'Cached'
+        if tokenizer.__class__.__name__.startswith("Cached"):
+            self.llm_engine.tokenizer.tokenizer = tokenizer
+        else:
+            self.llm_engine.tokenizer.tokenizer = get_cached_tokenizer(
+                tokenizer)
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def generate(
@@ -161,7 +169,7 @@ class LLM:
                                         List[SamplingParams]]] = None,
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -173,7 +181,7 @@ class LLM:
                                         List[SamplingParams]]] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -186,7 +194,7 @@ class LLM:
         *,
         prompt_token_ids: List[int],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -199,7 +207,7 @@ class LLM:
         *,
         prompt_token_ids: List[List[int]],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -210,7 +218,7 @@ class LLM:
         sampling_params: None,
         prompt_token_ids: Union[List[int], List[List[int]]],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -223,7 +231,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -240,7 +248,7 @@ class LLM:
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -301,7 +309,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -313,7 +321,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -326,7 +334,7 @@ class LLM:
         *,
         prompt_token_ids: List[int],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -339,7 +347,7 @@ class LLM:
         *,
         prompt_token_ids: List[List[int]],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -350,7 +358,7 @@ class LLM:
         pooling_params: None,
         prompt_token_ids: Union[List[int], List[List[int]]],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -363,7 +371,7 @@ class LLM:
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -380,7 +388,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -479,7 +487,7 @@ class LLM:
         inputs: Union[PromptInputs, Sequence[PromptInputs]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
-        lora_request: Optional[LoRARequest],
+        lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
     ) -> None:
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
@@ -490,20 +498,25 @@ class LLM:
         if isinstance(params, list) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")
+        if isinstance(lora_request,
+                      list) and len(lora_request) != num_requests:
+            raise ValueError("The lengths of prompts and lora_request "
+                             "must be the same.")
 
         # Add requests to the engine.
         for i, request_inputs in enumerate(inputs):
             self._add_request(
                 request_inputs,
                 params[i] if isinstance(params, Sequence) else params,
-                lora_request=lora_request,
+                lora_request=lora_request[i] if isinstance(
+                    lora_request, Sequence) else lora_request,
             )
 
     def _add_request(
         self,
         inputs: PromptInputs,
         params: Union[SamplingParams, PoolingParams],
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,

@@ -1,5 +1,4 @@
 #include "cache.h"
-#include "cuda_utils.h"
 #include "ops.h"
 #include <torch/extension.h>
 
