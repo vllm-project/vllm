@@ -82,10 +82,9 @@ def test_models(
     num_logprobs: int,
 ) -> None:
 
-    vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
-                                                       max_tokens,
-                                                       num_logprobs)
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
     # loop through the prompts to compare against the ground truth generations
     for prompt_idx in range(len(example_prompts)):
