@@ -45,14 +45,13 @@ def test_models(
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    vllm_model = vllm_runner(
-        model,
-        dtype=dtype,
-        tensor_parallel_size=2,
-        enforce_eager=enforce_eager,
-        distributed_executor_backend=distributed_executor_backend)
-    vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    del vllm_model
+    with vllm_runner(model,
+                     dtype=dtype,
+                     tensor_parallel_size=2,
+                     enforce_eager=enforce_eager,
+                     distributed_executor_backend=distributed_executor_backend
+                     ) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
