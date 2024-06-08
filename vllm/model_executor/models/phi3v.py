@@ -266,7 +266,6 @@ class Phi3VImagePixelInputs(TypedDict):
     """Shape: (batch_size, num_channels, height, width)"""
 
 
-@MULTIMODAL_REGISTRY.register_image_feature_input()
 @MULTIMODAL_REGISTRY.register_image_pixel_input()
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class Phi3VForCausalLM(VisionLanguageModelBase):
