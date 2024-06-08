@@ -41,8 +41,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner):
 
 def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner):
     model_path = "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2"
-    with vllm_runner(model_path,
-                     enforce_eager=True,
+    with vllm_runner(model_path, enforce_eager=True,
                      dtype=torch.float16) as llm:
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         layer = model.model.layers[0]
