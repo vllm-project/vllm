@@ -135,15 +135,12 @@ class TPUModelRunner:
                 block_tables=block_tables,
                 context_lens=context_lens,
             )
-
         t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
         p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
 
-        xm.mark_step()
         # Dummy run.
         self.model(token_ids, position_ids, kv_caches, attn_metadata,
                    input_lens, t, p)
-        xm.mark_step()
 
     def warmup_model(
         self,
