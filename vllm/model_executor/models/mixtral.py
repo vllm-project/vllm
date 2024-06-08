@@ -147,7 +147,7 @@ class MixtralMoE(nn.Module):
                     "weight_loader": self.weight_loader,
                 })
 
-            # ACT_SCALE (for fp8)
+            # INPUT_SCALE (for fp8)
             if quant_config.activation_scheme == "static":
                 if not quant_config.is_checkpoint_fp8_serialized:
                     raise ValueError(
