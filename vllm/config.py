@@ -702,10 +702,9 @@ class SchedulerConfig:
         self.preemption_mode = preemption_mode
 
         self.max_num_batched_logprobs = (
-            max_num_batched_logprobs is None
-            and self.max_num_seqs # If not specified, default to max_num_seqs for scheduler convenience
-            or max_num_batched_logprobs
-        )
+            max_num_batched_logprobs is not None and max_num_batched_logprobs
+            or self.max_num_seqs
+        )  # If not specified, default to max_num_seqs for scheduler convenience
 
         self._verify_args()
 
@@ -725,13 +724,12 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
-        
+
         if self.max_num_batched_logprobs > self.max_num_batched_tokens:
             raise ValueError(
                 f"max_num_batched_logprobs ({self.max_num_batched_logprobs}) "
                 f"must be less than or equal to max_num_batched_tokens "
-                f"({self.max_num_batched_tokens})."
-            )
+                f"({self.max_num_batched_tokens}).")
 
         if self.num_lookahead_slots < 0:
             raise ValueError(

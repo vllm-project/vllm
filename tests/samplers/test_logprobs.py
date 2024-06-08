@@ -132,3 +132,15 @@ def test_max_logprobs():
     bad_sampling_params = SamplingParams(logprobs=2)
     with pytest.raises(ValueError):
         runner.generate(["Hello world"], sampling_params=bad_sampling_params)
+
+
+@pytest.mark.parametrize("chunked_prefill", [True, False])
+def test_batched_logprobs(chunked_prefill: bool):
+    runner = VllmRunner("facebook/opt-125m",
+                        max_logprobs=1,
+                        max_num_batched_logprobs=16,
+                        enable_chunked_prefill=chunked_prefill)
+    vllm_sampling_params = SamplingParams(logprobs=1, prompt_logprobs=1)
+    num_seqs = 1024
+    runner.generate(["Hello world" for _ in range(num_seqs)],
+                    sampling_params=vllm_sampling_params)
