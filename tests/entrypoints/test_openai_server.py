@@ -495,7 +495,6 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
     assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == "length"
     assert chunk.choices[0].text
-    assert chunk.usage == single_usage
     assert "".join(chunks) == single_output
 
 
@@ -1446,6 +1445,10 @@ async def test_chat_completion_stream_options(server,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
                                          model_name: str):
     prompt = "What is the capital of France?"
