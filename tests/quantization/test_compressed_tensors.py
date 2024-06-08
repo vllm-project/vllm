@@ -12,9 +12,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 
 def test_compressed_tensors_w8a8_static_setup(vllm_runner):
     model_path = "nm-testing/tinyllama-oneshot-w8a8-static-v2"
-    llm = vllm_runner(model_path,
-                      quantization="compressed-tensors",
-                      enforce_eager=True)
+    llm = vllm_runner(model_path, enforce_eager=True)
     model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model
     layer = model.model.layers[0]
 
@@ -41,10 +39,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner):
 
 def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner):
     model_path = "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2"
-    llm = vllm_runner(model_path,
-                      quantization="compressed-tensors",
-                      enforce_eager=True,
-                      dtype=torch.float16)
+    llm = vllm_runner(model_path, enforce_eager=True, dtype=torch.float16)
     model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model
     layer = model.model.layers[0]
 
