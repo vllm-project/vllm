@@ -2,14 +2,14 @@
 # Adapted from
 # https://github.com/THUDM/GLM-4
 """Inference-only GLM-4v model visual encoder compatible with THUDM weights."""
-import torch
-import torch.nn.functional as F
 import math
-
-from torch import nn
-from transformers.activations import ACT2FN
 from argparse import Namespace
+
+import torch
+from torch import nn
 from torch.nn import LayerNorm
+from torch.nn.functional import F
+from transformers.activations import ACT2FN
 
 
 def standard_attention(query_layer,

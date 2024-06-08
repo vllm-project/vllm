@@ -24,13 +24,13 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
+from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs import ChatGLMConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import get_dummy_image_data
-from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
-from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
+from vllm.sequence import SamplerOutput
+from vllm.transformers_utils.configs import ChatGLMConfig
 
 
 class GLMAttention(nn.Module):
