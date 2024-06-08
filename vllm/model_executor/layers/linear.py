@@ -462,7 +462,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             if len(loaded_weight.shape) == 0:
                 loaded_weight = loaded_weight.reshape(1)
 
-
         # UPSTREAM SYNC: needed for LazyCompressedParameter
         self.loaded_shards.add(loaded_shard_id)
         assert param_data.shape == loaded_weight.shape
