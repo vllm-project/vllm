@@ -34,9 +34,8 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-    del hf_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
     vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)

@@ -32,12 +32,11 @@ def test_get_prompt_logprobs(
         max_num_batched_tokens = chunked_prefill_token_size
 
     max_tokens = 5
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_logprobs = hf_model.generate_greedy_logprobs(
-        example_prompts,
-        max_tokens=max_tokens,
-    )
-    del hf_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_logprobs = hf_model.generate_greedy_logprobs(
+            example_prompts,
+            max_tokens=max_tokens,
+        )
 
     vllm_model = vllm_runner(
         model,
