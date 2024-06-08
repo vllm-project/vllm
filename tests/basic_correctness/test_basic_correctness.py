@@ -43,9 +43,8 @@ def test_models(
     if backend_by_env_var == "FLASHINFER" and enforce_eager is False:
         pytest.skip("Skipping non-eager test for FlashInferBackend.")
 
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-    del hf_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
     vllm_model = vllm_runner(model,
                              dtype=dtype,
