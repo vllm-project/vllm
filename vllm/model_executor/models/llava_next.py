@@ -96,6 +96,11 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
                  vision_language_config: VisionLanguageConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
+        expected_input_type = vision_language_config.image_input_type
+        ImageInputType = VisionLanguageConfig.ImageInputType
+        if expected_input_type == ImageInputType.IMAGE_FEATURES:
+            raise TypeError("Image features are not supported by LLaVA-NeXT")
+
         super().__init__(
             config,  # type: ignore
             vision_language_config,
@@ -165,8 +170,8 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
                 image_sizes=self._validate_image_sizes(image_sizes),
             )
 
-        if expected_input_type == ImageInputType.IMAGE_FEATURES:
-            raise TypeError("Image features are not supported by LLaVA-NeXT")
+        assert expected_input_type != ImageInputType.IMAGE_FEATURES, (
+            "Failed to validate this at initialization time")
 
         return None
 
