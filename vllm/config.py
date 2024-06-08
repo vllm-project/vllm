@@ -1,10 +1,11 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, PreTrainedTokenizerBase
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -112,7 +113,11 @@ class ModelConfig:
         self.revision = revision
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
-        self.tokenizer_revision = tokenizer_revision
+        # The tokenizer version is consistent with the model version by default.
+        if tokenizer_revision is None:
+            self.tokenizer_revision = revision
+        else:
+            self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
@@ -1118,6 +1123,35 @@ class VisionLanguageConfig:
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
 
+    #TODO(ywang96): make this a cached property once we refactor the
+    # VisionLanguageConfig class.
+    def get_image_token_text(
+            self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
+        """Get the image token placeholder text to be inserted into the 
+        text prompt and the string representation of the image token id.
+        """
+        image_token_str = tokenizer.decode(self.image_token_id)
+        return image_token_str * self.image_feature_size, image_token_str
+
+    def as_cli_args_dict(self) -> Dict[str, Any]:
+        """Flatten vision language config to pure args.
+
+        Compatible with what llm entrypoint expects.
+        """
+        result: Dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, enum.Enum):
+                result[f.name] = value.name.lower()
+            elif isinstance(value, tuple):
+                result[f.name] = ",".join([str(item) for item in value])
+            else:
+                result[f.name] = value
+
+        result["disable_image_processor"] = self.image_processor is None
+
+        return result
+
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
@@ -1227,7 +1261,7 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            "%d. Assuming the model's maximum length is %d.", possible_keys,
+            "%s. Assuming the model's maximum length is %d.", possible_keys,
             default_max_len)
         derived_max_model_len = default_max_len
 
