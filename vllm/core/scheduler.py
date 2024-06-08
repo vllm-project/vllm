@@ -445,7 +445,7 @@ class Scheduler:
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
             num_running_logprobs = self._get_num_new_logprobs(
-                seq_group, SequenceStatus.RUNNING)
+                seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
 
             if num_running_tokens == 0:
                 break
@@ -607,7 +607,7 @@ class Scheduler:
                                                       SequenceStatus.SWAPPED,
                                                       enable_chunking, budget)
             num_new_logprobs = self._get_num_new_logprobs(
-                seq_group, SequenceStatus.SWAPPED)
+                seq_group, SequenceStatus.SWAPPED, enable_chunking, budget)
 
             if (num_new_tokens == 0 or not budget.can_schedule(
                     num_new_tokens=num_new_tokens,
@@ -651,6 +651,10 @@ class Scheduler:
         else:
             prompt_limit = min(self.scheduler_config.max_model_len,
                                self.scheduler_config.max_num_batched_tokens)
+            if seq_group.sampling_params.prompt_logprobs:
+                prompt_limit = min(
+                    prompt_limit,
+                    self.scheduler_config.max_num_batched_logprobs)
 
         # Model is fine tuned with long context. Return the fine tuned max_len.
         if (seq_group.lora_request
@@ -715,30 +719,14 @@ class Scheduler:
                 assert num_new_tokens == num_prompt_tokens
 
             num_new_logprobs = self._get_num_new_logprobs(
-                seq_group, SequenceStatus.WAITING)
+                seq_group, SequenceStatus.WAITING, enable_chunking, budget)
 
+            # Check of num_tokens and num_logprobs are included
             prompt_limit = self._get_prompt_limit(seq_group)
             if num_new_tokens > prompt_limit:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
                     " and exceeds limit of %d", num_new_tokens, prompt_limit)
-                for seq in waiting_seqs:
-                    seq.status = SequenceStatus.FINISHED_IGNORED
-                ignored_seq_groups.append(seq_group)
-                waiting_queue.popleft()
-                continue
-
-            # Check if the required logprobs exceed the limit.
-            # Even if the number of original tokens is within the limit,
-            # this case can happen if the sequence is preemted and
-            # recomputed.
-            logprobs_limit = self.scheduler_config.max_num_batched_logprobs
-            if num_new_logprobs > logprobs_limit:
-                logger.warning(
-                    "Input prompt (%d logprobs) is too long"
-                    " and exceeds the limit of max_logprobs (%d)",
-                    num_new_logprobs,
-                    self.scheduler_config.max_num_batched_logprobs)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
@@ -1283,7 +1271,8 @@ class Scheduler:
         return num_new_tokens
 
     def _get_num_new_logprobs(self, seq_group: SequenceGroup,
-                              status: SequenceStatus) -> int:
+                              status: SequenceStatus, enable_chunking: bool,
+                              budget: SchedulingBudget) -> int:
         if seq_group.sampling_params is None:
             return 0
 
@@ -1298,4 +1287,9 @@ class Scheduler:
                                              == SequenceStage.PREFILL
                                              and prompt_logprobs):
                 num_new_logprobs += seq.get_num_new_tokens()
+
+        # The same logic as _get_num_new_tokens.
+        if enable_chunking and len(seqs) == 1:
+            num_new_logprobs = min(num_new_logprobs,
+                                   budget.remaining_logprob_budget())
         return num_new_logprobs

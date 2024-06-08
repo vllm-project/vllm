@@ -700,11 +700,9 @@ class SchedulerConfig:
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
-
         self.max_num_batched_logprobs = (
             max_num_batched_logprobs is not None and max_num_batched_logprobs
-            or self.max_num_seqs
-        )  # If not specified, default to max_num_seqs for scheduler convenience
+            or min(self.max_num_batched_tokens, 256))
 
         self._verify_args()
 
