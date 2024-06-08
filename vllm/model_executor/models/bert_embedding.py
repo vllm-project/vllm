@@ -2,11 +2,22 @@ from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
+from torch.nn import LayerNorm
 
 from transformers import BertModel
+from transformers import BertConfig
 
-from vllm.attention import AttentionMetadata
+from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
@@ -58,3 +69,162 @@ class BertEmbeddingModel(nn.Module):
         # TODO: load weights
         for name, ts in weights:
             print("Parameter: ", name)
+
+class BertEmbedding(nn.Module):
+    def __init__(self, config: BertConfig):
+        super().__init__()
+        
+        self.size = config.hidden_size
+
+        self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
+        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
+        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        
+        self.position_embedding_type = config.position_embedding_type
+        if self.position_embedding_type != "absolute":
+            raise ValueError("Only 'absolute' position_embedding_type is supported")
+        
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        token_type_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if input_ids is not None:
+            input_shape = input_ids.size()
+            device = input_ids.device
+        else:
+            input_shape = inputs_embeds.size()[:-1]
+            device = inputs_embeds.device
+        seq_length = input_shape.size(1)
+
+        # input embeddings
+        if inputs_embeds is None:
+            inputs_embeds = self.word_embeddings(input_ids)
+
+        # position embeddings
+        if position_ids is None:
+            position_ids = torch.arange(seq_length, dtype=torch.long, device=device)
+            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
+        position_embeddings = self.position_embeddings(position_ids)
+
+        # token type embeddings
+        if token_type_ids is None:
+            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        embeddings = inputs_embeds + token_type_embeddings + position_embeddings
+        embeddings = self.norm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+        
+
+class BertEncoder(nn.Module):
+    pass
+
+class BertLayer(nn.Module):
+    def __init__(
+        self,
+        config: BertConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super(BertLayer, self).__init__()
+        self.attention = BertAttention(config=config, cache_config=cache_config, quant_config=quant_config)
+        TODO:
+
+class BertAttention(nn.Module):
+
+    def __init__(
+        self,
+        config: BertConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        
+        self.total_num_heads = config.num_attention_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = self.total_num_heads
+        self.head_dim = self.hidden_size // self.total_num_heads
+        assert self.head_dim * self.total_num_heads == self.hidden_size
+        
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        
+        self.postition_embedding = config.position_embedding_type
+        self.max_position_embeddings = config.max_position_embeddings
+        
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+
+        self.scaling = self.head_dim**-0.5
+
+        self.query_key_value = QKVParallelLinear(
+            hidden_size=self.hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
+            bias=False,
+            quant_config=quant_config
+        )
+
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+        )
+        
+        self.attn = Attention(
+            num_heads=self.num_heads,
+            head_size=self.head_dim,
+            scale=self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+        )
+        
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        qkv, bias = self.query_key_value(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        atten_output = self.atten(q, k, v, kv_cache, attn_metadata)
+        output, _ = self.o_proj(atten_output)
+        return output
+
+    
+class BertOutput(nn.Module):
+    def __init__(self, config: BertConfig):
+        super().__init__()
+        self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
+
+class BertModel(nn.Module):
+    def __init__(self, **kwargs) -> None:
+        super(BertModel, self).__init__(**kwargs)
+        
+        self.embedding = BertEmbedding()
+        self.encoder = BertEncoder()
+        self.softmax = 
+        
+    
+    def forward(self, input_ids, attention_mask, token_type_ids, position_ids, head_mask, inputs_embeds, encoder_hidden_states, encoder_attention_mask):
