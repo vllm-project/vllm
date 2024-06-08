@@ -226,7 +226,7 @@ def _is_neuron() -> bool:
 
 
 def _is_tpu() -> bool:
-    return True  # FIXME
+    return VLLM_TARGET_DEVICE == "tpu"
 
 
 def _is_cpu() -> bool:
