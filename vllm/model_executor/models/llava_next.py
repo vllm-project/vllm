@@ -8,6 +8,7 @@ from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 
 from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
@@ -16,6 +17,8 @@ from vllm.sequence import SequenceData
 
 from .llava import (LlavaForConditionalGeneration, LlavaImageFeatureInputs,
                     LlavaImagePixelInputs)
+
+logger = init_logger(__name__)
 
 
 class ImageSizesMixin(TypedDict, total=False):
@@ -72,7 +75,12 @@ def _image_pixel_processor(
 
     # Temporary patch before dynamic number of image tokens is supported
     _, _, h, w = vlm_config.image_input_shape
-    data.image = image.resize((w, h))
+    if (w, h) != (image.width, image.height):
+        logger.warning(
+            "Dynamic image shape is currently not supported. "
+            "Resizing input image to (%d, %d).", w, h)
+
+        data.image = image.resize((w, h))
 
     return MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
         ._default_input_processor(data, model_config, vlm_config)
