@@ -63,8 +63,8 @@ def sgmv_shrink_multi_lora_rank(
     offs_h = h_id * BLOCK_SIZE_H_OUT + tl.arange(0, BLOCK_SIZE_H_OUT)
     offs_os = offs_xs
 
-    w_ptrs = (w_ptr + lora_id * stride_wl + 
-              offs_h[:, None] * stride_wh + rank_range[None, :] * stride_wr)
+    w_ptrs = (w_ptr + lora_id * stride_wl + offs_h[:, None] * stride_wh +
+              rank_range[None, :] * stride_wr)
     w = tl.load(w_ptrs,
                 mask=(offs_h[:, None] < H) & (rank_range[None, :] < rank),
                 other=0.0).to(dtype=tl.float32)  # [H_OUT, R]
@@ -99,10 +99,10 @@ def sgmv_shrink_multi_lora_rank(
 
 @torch.inference_mode()
 def sgmv_shrink(x, weights, out, ranks, indices, repeats, max_repeats):
-    f'''
+    '''
     weights shape: (max_loras, 1, out, in)
     Tokens for a LoRA (repeats) should be split into groups of 
-    {MAX_REPEATS_PER_BLOCK} for load balancing and shared memory constraints.
+    MAX_REPEATS_PER_BLOCK for load balancing and shared memory constraints.
     This should be done at the beginning of the forward pass, so it isn't
     repeated every call.
 
@@ -116,8 +116,8 @@ def sgmv_shrink(x, weights, out, ranks, indices, repeats, max_repeats):
     R = out.shape[-1]
 
     BLOCK_SIZE_INPUT_PER_LORA = max_repeats
-    grid = lambda META: (triton.cdiv(H, META['BLOCK_SIZE_H_OUT']),
-                         len(repeats) - 1)
+    grid = lambda META: (triton.cdiv(H, META['BLOCK_SIZE_H_OUT']), len(repeats)
+                         - 1)
     sgmv_shrink_multi_lora_rank[grid](
         x,
         weights,
@@ -208,8 +208,8 @@ def sgmv_expand_multi_lora_rank(
     offs_wh = h_id * BLOCK_SIZE_H_OUT + tl.arange(0, BLOCK_SIZE_H_OUT)
 
     # compare transpose after vs transpose ptrs
-    w_ptrs = (w_ptr + lora_id * stride_wl + 
-              rank_range[:, None] * stride_wr + offs_wh[None, :] * stride_wh)
+    w_ptrs = (w_ptr + lora_id * stride_wl + rank_range[:, None] * stride_wr +
+              offs_wh[None, :] * stride_wh)
 
     offs_os = offs_bs
     offs_oh = offs_wh
@@ -242,7 +242,8 @@ def sgmv_expand_multi_lora_rank(
                  (offs_oh[None, :] < H))
     else:
         for i in range(n_inputs):
-            b_ptrs = b_ptr + (repeats_0 + i) * stride_bs + rank_range * stride_br
+            b_ptrs = b_ptr + (repeats_0 +
+                              i) * stride_bs + rank_range * stride_br
             o_ptrs = (o_ptr + (repeats_0 + i) * stride_os +
                       (offs_oh + out_col_offset) * stride_oh)
             out = tl.load(o_ptrs, mask=offs_oh < H,
@@ -256,12 +257,19 @@ def sgmv_expand_multi_lora_rank(
 
 
 @torch.inference_mode()
-def sgmv_expand(buffer, weights, out, ranks, indices, repeats, max_repeats, 
-                out_col_offset=0, scale=1.0):
-    f'''
+def sgmv_expand(buffer,
+                weights,
+                out,
+                ranks,
+                indices,
+                repeats,
+                max_repeats,
+                out_col_offset=0,
+                scale=1.0):
+    '''
     weights shape: (max_loras, 1, out, in)
     Tokens for a LoRA (repeats) should be split into groups of 
-    {MAX_REPEATS_PER_BLOCK} for load balancing and shared memory constraints.
+    MAX_REPEATS_PER_BLOCK for load balancing and shared memory constraints.
     This should be done at the beginning of the forward pass, so it isn't
     repeated every call.
 
@@ -278,8 +286,8 @@ def sgmv_expand(buffer, weights, out, ranks, indices, repeats, max_repeats,
     H = weights.shape[-2]
 
     BLOCK_SIZE_INPUT_PER_LORA = max_repeats
-    grid = lambda META: (triton.cdiv(H, META['BLOCK_SIZE_H_OUT']),
-                         len(repeats) - 1)
+    grid = lambda META: (triton.cdiv(H, META['BLOCK_SIZE_H_OUT']), len(repeats)
+                         - 1)
     sgmv_expand_multi_lora_rank[grid](
         buffer,
         weights,
@@ -299,6 +307,5 @@ def sgmv_expand(buffer, weights, out, ranks, indices, repeats, max_repeats,
         weights.stride(3),
         out.stride(0),
         out.stride(1),
-        BLOCK_SIZE_INPUT_PER_LORA=BLOCK_SIZE_INPUT_PER_LORA
-    )
+        BLOCK_SIZE_INPUT_PER_LORA=BLOCK_SIZE_INPUT_PER_LORA)
     return out

@@ -37,8 +37,7 @@ def setup_(S, R, H, dtype, repeats_per_lora=1):
         torch.zeros((1, ), device='cuda', dtype=torch.int32),
         repeats.cumsum(dim=-1)
     ])
-    return (weights, ranks, indices, repeats, num_unique, R,
-            dtype)
+    return (weights, ranks, indices, repeats, num_unique, R, dtype)
 
 
 @pytest.mark.parametrize("S", [16 * 2**i for i in range(3, 4)] + [4096])
@@ -51,8 +50,8 @@ def setup_(S, R, H, dtype, repeats_per_lora=1):
 @torch.inference_mode()
 def test_correct(S, R, H, dtype, repeats_per_lora, seed):
     torch.manual_seed(seed)
-    weights, ranks, indices, repeats, num_unique, R, dtype = (
-        setup_(S, R, H, dtype, repeats_per_lora))
+    weights, ranks, indices, repeats, num_unique, R, dtype = (setup_(
+        S, R, H, dtype, repeats_per_lora))
 
     buffer = torch.randn((S, R), device='cuda', dtype=torch.float32)
     out_col_offset = 128
@@ -68,9 +67,8 @@ def test_correct(S, R, H, dtype, repeats_per_lora, seed):
     ref_out = torch.cat(ref_outs, dim=0)
     # doing this apparently leads to incorrect results in the first row
     # + out[:, out_col_offset:]
-    ref_out = (
-        ref_out + out[:, out_col_offset:].to(dtype=torch.float32)
-    ).to(dtype=dtype)
+    ref_out = (ref_out +
+               out[:, out_col_offset:].to(dtype=torch.float32)).to(dtype=dtype)
     # but this does not (likely depends on torch version)
 
     # run the autotuner, add to a tmp output
@@ -126,8 +124,8 @@ def test_correct(S, R, H, dtype, repeats_per_lora, seed):
     ref_out += out
 
     # run the autotuner, add to a tmp output
-    sgmv.sgmv_shrink(x, weights, torch.rand_like(out), ranks,
-                     indices, repeats, repeats_per_lora)
+    sgmv.sgmv_shrink(x, weights, torch.rand_like(out), ranks, indices, repeats,
+                     repeats_per_lora)
 
     sgmv.sgmv_shrink(x, weights, out, ranks, indices, repeats,
                      repeats_per_lora)
