@@ -1,4 +1,4 @@
-from typing import (Dict, List, Literal, Iterable, Optional, Tuple, TypedDict,
+from typing import (Dict, Iterable, List, Literal, Optional, Tuple, TypedDict,
                     Union)
 
 import torch
@@ -24,7 +24,7 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
 from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
-from vllm.sequence import SequenceData, SamplerOutput
+from vllm.sequence import SamplerOutput, SequenceData
 
 from .llava import LlavaMultiModalProjector, merge_vision_embeddings
 from .vlm_base import VisionLanguageModelBase
