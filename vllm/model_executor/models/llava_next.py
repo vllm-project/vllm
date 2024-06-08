@@ -173,6 +173,7 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
     def _merge_image_patch_embeddings(self, image_size: torch.Tensor,
                                       patch_embeddings: torch.Tensor, *,
                                       strategy: str) -> torch.Tensor:
+        # Based on: https://github.com/haotian-liu/LLaVA/blob/main/llava/model/llava_arch.py
         if strategy == "flat":
             return patch_embeddings.flatten(0, 1)
 
