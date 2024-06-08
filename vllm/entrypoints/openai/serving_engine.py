@@ -228,9 +228,10 @@ class OpenAIServing:
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
-        """A simpler implementation of
-        :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs`
-        that assumes single input."""
+        """
+        A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
+        that assumes single input.
+        """
         return next(
             self._tokenize_prompt_inputs(
                 request,
@@ -247,9 +248,10 @@ class OpenAIServing:
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
-        """A simpler implementation of
-        :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs`
-        that assumes multiple inputs."""
+        """
+        A simpler implementation of :meth:`_tokenize_prompt_input_or_inputs`
+        that assumes multiple inputs.
+        """
         tokenizer = self.tokenizer
 
         for text in prompt_inputs:
@@ -277,7 +279,8 @@ class OpenAIServing:
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
-        """Tokenize/detokenize depending on the input format.
+        """
+        Tokenize/detokenize depending on the input format.
 
         According to `OpenAI API <https://platform.openai.com/docs/api-reference/embeddings/create>`_
         , each input can be a string or array of tokens. Note that each request
