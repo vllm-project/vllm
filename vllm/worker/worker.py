@@ -262,13 +262,13 @@ class Worker(WorkerBase):
             "blocks_to_copy": blocks_to_copy,
         }
 
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
-
         if num_seq_groups != 0:
             tensor_dict = self.model_runner.prepare_input_tensor_dict(
                 seq_group_metadata_list)
             data.update(tensor_dict)
         broadcast_tensor_dict(data, src=0)
+
+        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
