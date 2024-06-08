@@ -31,6 +31,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import get_dummy_image_data
 from vllm.sequence import SamplerOutput
 
 logger = logging.get_logger(__name__)
@@ -184,6 +186,9 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             output_imgs = []
             output_len = []
 
+            if isinstance(img_sizes, torch.Tensor):
+                img_sizes.squeeze_(0)
+
             for _bs in range(bs):
                 h, w = img_sizes
                 h = h // 336
@@ -261,6 +266,9 @@ class Phi3VImagePixelInputs(TypedDict):
     """Shape: (batch_size, num_channels, height, width)"""
 
 
+@MULTIMODAL_REGISTRY.register_image_feature_input()
+@MULTIMODAL_REGISTRY.register_image_pixel_input()
+@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class Phi3VForCausalLM(VisionLanguageModelBase):
 
     def __init__(self,
@@ -285,8 +293,8 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
                 image_input: Phi3VImagePixelInputs = None):
         if image_input is not None:
             inputs_embeds = self.vision_embed_tokens(
-                input_ids, image_input,
-                self.vision_language_config.image_input_shape)
+                input_ids, image_input["pixel_values"],
+                image_input["image_sizes"])
 
             input_ids = None
         else:
