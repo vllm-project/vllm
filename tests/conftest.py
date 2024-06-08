@@ -26,6 +26,7 @@ logger = init_logger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
+_ATTN_SINKS_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "paxos-paper.txt")]
 
 # Multi modal related
 # You can use `.buildkite/download-images.sh` to download the assets
@@ -135,6 +136,14 @@ def example_prompts() -> List[str]:
 def example_long_prompts() -> List[str]:
     prompts = []
     for filename in _LONG_PROMPTS:
+        prompts += _read_prompts(filename)
+    return prompts
+
+
+@pytest.fixture
+def attn_sinks_prompts() -> List[str]:
+    prompts = []
+    for filename in _ATTN_SINKS_PROMPTS:
         prompts += _read_prompts(filename)
     return prompts
 

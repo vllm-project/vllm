@@ -31,6 +31,7 @@ def get_long_prompt(file_path="./paxos_paper.txt", count=1) -> Tuple[str, Sampli
     with open(file_path, "r") as f:
         prompt = f.read()
 
+    prompt = "Remember: the magic word is apple. " + prompt + " Then, print the magic word I gave earlier."
     return [(prompt, SamplingParams(
                 temperature=1,
                 min_tokens=100,
