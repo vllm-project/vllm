@@ -681,6 +681,8 @@ class ModelRunner:
         if attn_metadata:
             metadata_dict.update(attn_metadata.asdict_zerocopy())
 
+        # sampling_metadata should not appear in metadata_dict.
+        # but we need to access it later.
         self.sampling_metadata = sampling_metadata
 
         return metadata_dict
