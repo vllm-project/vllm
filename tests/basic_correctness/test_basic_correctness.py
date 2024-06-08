@@ -46,12 +46,11 @@ def test_models(
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    vllm_model = vllm_runner(model,
-                             dtype=dtype,
-                             enforce_eager=enforce_eager,
-                             gpu_memory_utilization=0.7)
-    vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    del vllm_model
+    with vllm_runner(model,
+                     dtype=dtype,
+                     enforce_eager=enforce_eager,
+                     gpu_memory_utilization=0.7) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]

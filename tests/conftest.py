@@ -493,7 +493,10 @@ class VllmRunner:
             outputs.append(embedding)
         return outputs
 
-    def __del__(self):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
         del self.model
         cleanup()
 
