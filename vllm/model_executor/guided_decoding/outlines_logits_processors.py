@@ -63,7 +63,7 @@ class BaseLogitsProcessor:
             raise TypeError(f"Unsupported instruction type {type(instruction)}")
 
         # Retrieve allowed tokens from cache using the current state
-        cacheKey = instruction
+        cacheKey = instruction.id
         if cacheKey not in self.cache:
             # Cache miss, calculate allowed tokens and cache them
 
