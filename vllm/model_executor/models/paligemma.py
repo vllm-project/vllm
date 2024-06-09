@@ -253,6 +253,9 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
         params_dict = dict(self.named_parameters())
         loaded_params = set()
         for name, loaded_weight in weights:
+            for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
+                if key_to_modify in name:
+                    name = name.replace(key_to_modify, new_key)
             use_default_weight_loading = False
             if "vision" in name:
                 if self.vision_tower is not None:
