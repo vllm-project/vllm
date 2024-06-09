@@ -70,32 +70,29 @@ def test_models(
     model_name, revision = model
 
     # Run marlin.
-    gptq_marlin_model = vllm_runner(model_name=model_name,
-                                    revision=revision,
-                                    dtype=dtype,
-                                    quantization="marlin",
-                                    max_model_len=MAX_MODEL_LEN,
-                                    tensor_parallel_size=1)
+    with vllm_runner(model_name=model_name,
+                     revision=revision,
+                     dtype=dtype,
+                     quantization="marlin",
+                     max_model_len=MAX_MODEL_LEN,
+                     tensor_parallel_size=1) as gptq_marlin_model:
 
-    gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
-        example_prompts[:-1], max_tokens, num_logprobs)
-    del gptq_marlin_model
+        gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
+            example_prompts[:-1], max_tokens, num_logprobs)
     _ROPE_DICT.clear()  # clear rope cache to avoid rope dtype error
 
     # Run gptq.
     # The naive gptq kernel doesn't support bf16 yet.
     # Here we always compare fp16/bf16 gpt marlin kernel
     # to fp16 gptq kernel.
-    gptq_model = vllm_runner(model_name=model_name,
-                             revision=revision,
-                             dtype="half",
-                             quantization="gptq",
-                             max_model_len=MAX_MODEL_LEN,
-                             tensor_parallel_size=1)
-    gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts[:-1],
-                                                       max_tokens,
-                                                       num_logprobs)
-    del gptq_model
+    with vllm_runner(model_name=model_name,
+                     revision=revision,
+                     dtype="half",
+                     quantization="gptq",
+                     max_model_len=MAX_MODEL_LEN,
+                     tensor_parallel_size=1) as gptq_model:
+        gptq_outputs = gptq_model.generate_greedy_logprobs(
+            example_prompts[:-1], max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=gptq_outputs,
