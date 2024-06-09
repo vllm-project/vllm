@@ -215,12 +215,14 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
 
         return hidden_states
 
+    # Copied from vllm/model_executor/models/gemma.py
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logits_processor(self.language_model.embed_tokens.weight,
                                        hidden_states, sampling_metadata)
         return logits
 
+    # Copied from vllm/model_executor/models/gemma.py
     def sample(
         self,
         logits: torch.Tensor,
@@ -229,8 +231,8 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
+    # Adapted from vllm/model_executor/models/gemma.py
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # only doing this for language model part for now.
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -240,12 +242,8 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params = set()
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
-                if key_to_modify in name:
-                    name = name.replace(key_to_modify, new_key)
             use_default_weight_loading = False
             if "vision" in name:
                 if self.vision_tower is not None:
@@ -253,18 +251,44 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
                     # not vision model for now.
                     use_default_weight_loading = True
             else:
-                for (param_name, weight_name,
+                for (param_name, shard_name,
                      shard_id) in stacked_params_mapping:
-                    if weight_name not in name:
+                    if shard_name not in name:
                         continue
-                    param = params_dict[name.replace(weight_name, param_name)]
+                    name = name.replace(shard_name, param_name)
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(param, loaded_weight, shard_id)
                     break
                 else:
+                    # lm_head is not used in vllm as it is tied with
+                    # embed_token. To prevent errors, skip loading
+                    # lm_head.weight.
+                    if "lm_head.weight" in name:
+                        continue
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # GemmaRMSNorm is different from Llama's in that it
+                    # multiplies (1 + weight) to the output, instead of just
+                    # weight.
+                    if "norm.weight" in name:
+                        loaded_weight += 1.0
                     use_default_weight_loading = True
+
             if use_default_weight_loading:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+            loaded_params.add(name)
+
+        unloaded_params = params_dict.keys() - loaded_params
+        if unloaded_params:
+            raise RuntimeError(
+                "Some weights are not initialized from checkpoints: "
+                f"{unloaded_params}")
