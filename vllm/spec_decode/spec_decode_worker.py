@@ -108,18 +108,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         elif draft_worker_kwargs[
                 "model_config"].hf_config.model_type == "mlp_speculator":
             proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
+            disable_bonus_tokens = False
         else:
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
 
-        return SpecDecodeWorker(
-            proposer_worker,
-            scorer_worker,
-            disable_by_batch_size=disable_by_batch_size,
-            rejection_sampler=RejectionSampler(
-                disable_bonus_tokens=disable_bonus_tokens, ))
+        return SpecDecodeWorker(proposer_worker,
+                                scorer_worker,
+                                disable_by_batch_size=disable_by_batch_size,
+                                rejection_sampler=RejectionSampler(
+                                    disable_bonus_tokens=disable_bonus_tokens))
 
     def __init__(
         self,
@@ -533,7 +533,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         hidden_states = proposal_scores.hidden_states
         if hidden_states is not None:
-            # Prune rejected tokens from hidden states if present
+            # Contract hidden states based on accepted tokens
             hs_size = hidden_states.shape[1]
             hidden_states = hidden_states.reshape(-1, max_proposal_len + 1,
                                                   hs_size)
