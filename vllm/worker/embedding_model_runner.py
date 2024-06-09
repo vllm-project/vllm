@@ -46,12 +46,14 @@ class EmbeddingModelRunner(ModelRunner):
     @torch.inference_mode()
     def execute_model(
         self,
-        tensor_dict: Dict[str, Any],
+        broadcast_inputs: Dict[str, Any],
+        aux: Optional[List[Any]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         (input_tokens, input_positions, attn_metadata, pooling_metadata,
-         lora_requests, lora_mapping, multi_modal_input
-         ) = self.convert_broadcast_inputs_to_model_input(tensor_dict)
+         lora_requests, lora_mapping,
+         multi_modal_input) = self.convert_broadcast_inputs_to_model_input(
+             broadcast_inputs, aux)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
