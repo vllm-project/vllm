@@ -30,7 +30,9 @@ from transformers import CohereConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_current_tp_rank_partition_offset,
+                              get_current_tp_rank_partition_size,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -49,7 +51,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 
 
-@torch.compile
+#@torch.compile
 def layer_norm_func(hidden_states, weight, variance_epsilon):
     input_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)
@@ -63,11 +65,15 @@ def layer_norm_func(hidden_states, weight, variance_epsilon):
 
 class LayerNorm(nn.Module):
 
-    def __init__(self, param_shape=None, eps=1e-5):
+    def __init__(self,
+                 param_shape=None,
+                 eps=1e-5,
+                 partition_multiple_of: int = 1):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(param_shape))
         self.variance_epsilon = eps
         set_weight_attrs(self.weight, {"weight_loader": self.weight_loader})
+        self.partition_multiple_of = partition_multiple_of
 
     def forward(self, hidden_states, residuals=None):
         hidden_states = layer_norm_func(hidden_states, self.weight,
@@ -76,11 +82,14 @@ class LayerNorm(nn.Module):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
         shard_dim = 0 if param.dim() != 1 else None
         param_data = param.data
         if shard_dim is not None:
             shard_size = param_data.shape[shard_dim]
-            start_idx = tp_rank * shard_size
+            start_idx = get_current_tp_rank_partition_offset(
+                loaded_weight.shape[shard_dim], tp_rank, tp_size,
+                self.partition_multiple_of)
             loaded_weight = loaded_weight.narrow(shard_dim, start_idx,
                                                  shard_size)
         assert param_data.shape == loaded_weight.shape
@@ -130,22 +139,29 @@ class CohereAttention(nn.Module):
     ):
         super().__init__()
         tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         self.config = config
         self.attention_dropout = config.attention_dropout
         self.hidden_size = config.hidden_size
         self.total_num_heads = config.num_attention_heads
-        self.num_heads = self.total_num_heads // tp_size
-        self.head_dim = self.hidden_size // self.total_num_heads
         self.total_num_kv_heads = config.num_key_value_heads
+        self.num_heads = self.total_num_heads // tp_size
+        self.num_kv_heads = max(
+            1,
+            get_current_tp_rank_partition_size(self.total_num_kv_heads,
+                                               tp_rank, tp_size))
+        num_heads_per_kv_head = self.total_num_heads // self.total_num_kv_heads
+        self.num_heads = self.num_kv_heads * num_heads_per_kv_head
+        self.head_dim = self.hidden_size // self.total_num_heads
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
+            pass
+            #LATER assert self.total_num_kv_heads % tp_size == 0
         else:
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -168,7 +184,7 @@ class CohereAttention(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
-        )
+            partition_multiple_of=num_heads_per_kv_head * self.head_dim)
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -184,9 +200,10 @@ class CohereAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
         if self.use_qk_norm:
-            self.q_norm = LayerNorm(param_shape=(self.num_heads,
-                                                 self.head_dim),
-                                    eps=config.layer_norm_eps)
+            self.q_norm = LayerNorm(
+                param_shape=(self.num_heads, self.head_dim),
+                eps=config.layer_norm_eps,
+                partition_multiple_of=num_heads_per_kv_head)
             self.k_norm = LayerNorm(param_shape=(self.num_kv_heads,
                                                  self.head_dim),
                                     eps=config.layer_norm_eps)
