@@ -65,11 +65,14 @@ class Top1Proposer(SpeculativeProposer):
             # token_ids is like [batch] format in proposal_len size list,
             # while if it is false, the format would be [proposal_len]
             # in batch size list
+            hidden_states = execute_model_req.previous_hidden_states
+            if hidden_states is not None and len(
+                    nonzero_proposal_len_seqs) != len(seq_group_metadata_list):
+                hidden_states = hidden_states[nonzero_proposal_len_indices]
             nonzero_execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=nonzero_proposal_len_seqs,
                 num_lookahead_slots=proposal_len,
-                previous_hidden_states=execute_model_req.
-                previous_hidden_states,  ##TODO splitting here TBD
+                previous_hidden_states=hidden_states,
             )
             maybe_sampler_output, transposed = self._worker.sampler_output(
                 execute_model_req=nonzero_execute_model_req,
