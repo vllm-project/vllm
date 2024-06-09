@@ -376,3 +376,35 @@ def destroy_model_parallel():
     _PP_DEVICE_GROUP = None
     global _PP_GLOBAL_RANKS
     _PP_GLOBAL_RANKS = None
+
+
+def get_current_tp_rank_partition_offset(total_size: int,
+                                         tp_rank: Optional[int] = None,
+                                         tp_size: Optional[int] = None,
+                                         multiple_of: int = 1) -> int:
+    if tp_rank is None:
+        tp_rank = get_tensor_model_parallel_rank()
+
+    if tp_size is None:
+        tp_size = get_tensor_model_parallel_world_size()
+
+    assert total_size % multiple_of == 0
+    total_size = total_size // multiple_of
+    return ((total_size // tp_size) * tp_rank +
+            min(total_size % tp_size, tp_rank)) * multiple_of
+
+
+def get_current_tp_rank_partition_size(total_size: int,
+                                       tp_rank: Optional[int] = None,
+                                       tp_size: Optional[int] = None,
+                                       multiple_of: int = 1) -> int:
+    if tp_rank is None:
+        tp_rank = get_tensor_model_parallel_rank()
+
+    if tp_size is None:
+        tp_size = get_tensor_model_parallel_world_size()
+
+    assert total_size % multiple_of == 0
+    total_size = total_size // multiple_of
+    return ((total_size // tp_size) +
+            (total_size % tp_size > tp_rank)) * multiple_of
