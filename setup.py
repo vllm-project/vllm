@@ -60,7 +60,7 @@ def remove_prefix(text, prefix):
 class CMakeExtension(Extension):
 
     def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
-        super().__init__(name, sources=[], **kwa)
+        super().__init__(name, sources=[], py_limited_api=True, **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 

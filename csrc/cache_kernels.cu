@@ -1,4 +1,4 @@
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
@@ -95,8 +95,11 @@ __global__ void copy_blocks_kernel(int64_t* key_cache_ptrs,
 
 }  // namespace vllm
 
-void copy_blocks(std::vector<torch::Tensor>& key_caches,
-                 std::vector<torch::Tensor>& value_caches,
+// Note: the key_caches and value_caches vectors are constant but
+// not the Tensors they contain. The vectors need to be const refs
+// in order to satisfy pytorch's C++ operator registration code.
+void copy_blocks(std::vector<torch::Tensor> const& key_caches,
+                 std::vector<torch::Tensor> const& value_caches,
                  const torch::Tensor& block_mapping) {
   int num_layers = key_caches.size();
   TORCH_CHECK(num_layers == value_caches.size());
@@ -255,7 +258,7 @@ void reshape_and_cache(
     torch::Tensor&
         value_cache,  // [num_blocks, num_heads, head_size, block_size]
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const std::string& kv_cache_dtype, const float kv_scale) {
+    const std::string& kv_cache_dtype, const double kv_scale) {
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
@@ -334,7 +337,7 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
 
 // Only for testing.
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
-                 const float kv_scale, const std::string& kv_cache_dtype) {
+                 const double kv_scale, const std::string& kv_cache_dtype) {
   torch::Device src_device = src_cache.device();
   torch::Device dst_device = dst_cache.device();
   TORCH_CHECK(src_device.is_cuda(), "src must be on a GPU")
