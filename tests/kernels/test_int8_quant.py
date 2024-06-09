@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+# ruff: noqa: F401
 import vllm._C
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
