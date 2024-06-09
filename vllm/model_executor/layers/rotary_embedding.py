@@ -27,7 +27,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm import _custom_ops as ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
