@@ -721,7 +721,8 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
     assert response.usage.completion_tokens > 0
     assert (response.usage.total_tokens == response.usage.prompt_tokens +
             response.usage.completion_tokens)
-    
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
