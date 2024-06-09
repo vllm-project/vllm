@@ -84,25 +84,23 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     """
     model_id, vlm_config = model_and_config
 
-    hf_model = hf_runner(model_id, dtype=dtype, is_vision_model=True)
-    hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
-                                          max_tokens,
-                                          images=hf_images)
-    del hf_model
+    with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
+        hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
+                                              max_tokens,
+                                              images=hf_images)
 
     vllm_image_prompts = [
         p.replace("<image>", "<image>" * vlm_config.image_feature_size)
         for p in HF_IMAGE_PROMPTS
     ]
 
-    vllm_model = vllm_runner(model_id,
-                             dtype=dtype,
-                             enforce_eager=True,
-                             **vlm_config.as_cli_args_dict())
-    vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
-                                              max_tokens,
-                                              images=vllm_images)
-    del vllm_model
+    with vllm_runner(model_id,
+                     dtype=dtype,
+                     enforce_eager=True,
+                     **vlm_config.as_cli_args_dict()) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+                                                  max_tokens,
+                                                  images=vllm_images)
 
     for i in range(len(HF_IMAGE_PROMPTS)):
         hf_output_ids, hf_output_str = hf_outputs[i]
