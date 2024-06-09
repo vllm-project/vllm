@@ -222,12 +222,6 @@ jq -c '.[]' $SERVING_TESTS | while read -r params; do
   # clean up
   kill_gpu_processes
 
-  # debugging memory leaking
-  used_memory=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
-
-  echo "GPU0 used memory: $used_memory MB"
-
-
 done
 
 # postprocess benchmarking results
