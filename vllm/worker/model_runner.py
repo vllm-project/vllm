@@ -648,6 +648,12 @@ class ModelRunner:
     def prepare_inputs_to_broadcast(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
     ) -> Tuple[Dict, Optional[List]]:
+        """
+        This function prepares the input tensors for the model. The output
+        is a dictionary that will be broadcasted to all workers, and a list
+        of auxiliary data that will be passed to the model execution function
+        for the driver worker.
+        """
         # Prepare input tensors.
         (
             input_tokens,
