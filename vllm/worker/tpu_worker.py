@@ -5,6 +5,7 @@ import torch
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -87,7 +88,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): This does not completely eliminate the recompilation
         # overhead because dynamo does not cache the compiled results.
-        xr.initialize_cache(os.path.expanduser("~/.vllm/torch_xla_cache"),
+        xr.initialize_cache(os.path.expanduser(envs.VLLM_XLA_CACHE_PATH),
                             readonly=False)
 
     def load_model(self):
