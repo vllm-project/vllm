@@ -177,6 +177,14 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": "rejection_sampler" 
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": (
+            "typical_acceptance_sampler"
+        )
     },
 ])
 @pytest.mark.parametrize(
@@ -221,9 +229,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
     [
         # Try two different tiny base models.
         # Note that one is equal to the draft model, another isn't.
-        #{
-        #    "model": "JackFram/llama-68m",
-        #},
+        {
+            "model": "JackFram/llama-68m",
+        },
         {
             "model": "JackFram/llama-160m",
         },
@@ -233,6 +241,14 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 3,
+        "speculative_draft_token_sampling_method": "rejection_sampler"
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": (
+            "typical_acceptance_sampler"
+        )
     },
 ])
 @pytest.mark.parametrize(
@@ -281,6 +297,14 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_1(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": "rejection_sampler"
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": (
+            "typical_acceptance_sampler"
+        )
     },
 ])
 @pytest.mark.parametrize("max_output_len", [
@@ -322,6 +346,14 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": "rejection_sampler"
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": (
+            "typical_acceptance_sampler"
+        )
     },
 ])
 @pytest.mark.parametrize("batch_size", [1])
@@ -366,9 +398,17 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": "rejection_sampler"
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": (
+            "typical_acceptance_sampler"
+        )
     },
 ])
-@pytest.mark.parametrize("batch_size", [32])
+@pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
     "output_len",
     [
@@ -413,6 +453,14 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": "rejection_sampler"
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": (
+            "typical_acceptance_sampler"
+        )
     },
 ])
 @pytest.mark.parametrize(
@@ -467,6 +515,14 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": "rejection_sampler"
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "speculative_draft_token_sampling_method": (
+            "typical_acceptance_sampler"
+        )
     },
 ])
 @pytest.mark.parametrize("batch_size", [2])
@@ -508,10 +564,20 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
-
             # Artificially limit the draft model max model len; this forces vLLM
             # to skip speculation once the sequences grow beyond 32-k tokens.
             "speculative_max_model_len": 32,
+            "speculative_draft_token_sampling_method": "rejection_sampler"
+        },
+        {
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
+            # Artificially limit the draft model max model len; this forces vLLM
+            # to skip speculation once the sequences grow beyond 32-k tokens.
+            "speculative_max_model_len": 32,
+            "speculative_draft_token_sampling_method": (
+                "typical_acceptance_sampler"
+            )
         },
     ])
 @pytest.mark.parametrize("batch_size", [8])
@@ -556,6 +622,15 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
         "speculative_disable_by_batch_size": 2,
+        "speculative_draft_token_sampling_method": "rejection_sampler"
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "speculative_disable_by_batch_size": 2,
+        "speculative_draft_token_sampling_method": (
+                "typical_acceptance_sampler"
+        )
     },
 ])
 @pytest.mark.parametrize("batch_size", [8])
@@ -591,9 +666,12 @@ def test_disable_speculation(baseline_llm_generator, test_llm_generator,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": k,
+            "speculative_draft_token_sampling_method": method,
         }
         # Try a range of common k, as well as large speculation.
         for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, 63]
+        # Try both methods of sampling in the verifier.
+        for method in ["rejection_sampler", "typical_acceptance_sampler"]
     ])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(

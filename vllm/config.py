@@ -689,7 +689,6 @@ class SchedulerConfig:
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
-
         self._verify_args()
 
     def _verify_args(self) -> None:

@@ -96,9 +96,9 @@ class EngineArgs:
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
-    speculative_draft_token_sampling_method: str = 'typical_acceptance_sampler'
-    typical_acceptance_sampler_posterior_threshold: float = 0.09
-    typical_acceptance_sampler_posterior_alpha: float = 0.3
+    speculative_draft_token_sampling_method: str = 'rejection_sampler'
+    typical_acceptance_sampler_posterior_threshold: float = 0.49
+    typical_acceptance_sampler_posterior_alpha: float = 0.7
     qlora_adapter_name_or_path: Optional[str] = None
 
     def __post_init__(self):
@@ -680,10 +680,12 @@ class EngineArgs:
             use_v2_block_manager=self.use_v2_block_manager,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
-            draft_token_sampling_method="rejection_sampler",
-            #draft_token_sampling_method="typical_acceptance_sampler",
-            typical_acceptance_sampler_posterior_threshold=0.09,
-            typical_acceptance_sampler_posterior_alpha=0.3, 
+            draft_token_sampling_method=self.
+            speculative_draft_token_sampling_method,
+            typical_acceptance_sampler_posterior_threshold=self.
+            typical_acceptance_sampler_posterior_threshold,
+            typical_acceptance_sampler_posterior_alpha=self.
+            typical_acceptance_sampler_posterior_alpha, 
         )
 
         scheduler_config = SchedulerConfig(

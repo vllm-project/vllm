@@ -36,6 +36,7 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
             threshold in typical acceptance sampling. Typically defaults to
             sqrt of posterior_threshold and is set to 0.3.
         """
+        print('Hello in tas')
         self._posterior_threshold = posterior_threshold
         self._posterior_alpha = posterior_alpha
         super().__init__()
@@ -148,7 +149,7 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         device = target_probs.device
         candidates_prob = torch.gather(
             target_probs, dim=-1,
-            index=draft_token_ids.unsqueeze(-1).to(device), ).squeeze(-1)
+            index=draft_token_ids.unsqueeze(-1), ).squeeze(-1)
         posterior_entropy = -torch.sum(
             target_probs * torch.log(target_probs + 1e-5), dim=-1)
         #print('posterior_entropy ' + str(posterior_entropy))
