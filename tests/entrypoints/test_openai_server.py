@@ -572,7 +572,7 @@ async def test_chat_completion_stream_options(server,
         stream=True,
         stream_options={"include_usage": False})
     async for chunk in stream:
-        assert "usage" not in chunk.__dict__
+        assert chunk.usage is None
 
     # Test stream=True, stream_options={"include_usage": True}
     stream = await client.chat.completions.create(
@@ -635,7 +635,7 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
         stream=True,
         stream_options={"include_usage": False})
     async for chunk in stream:
-        assert "usage" not in chunk.__dict__
+        assert chunk.usage is None
 
     # Test stream=True, stream_options={"include_usage": True}
     stream = await client.completions.create(
