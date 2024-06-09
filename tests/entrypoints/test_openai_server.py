@@ -1363,8 +1363,7 @@ async def test_chat_completion_stream_options(server,
         max_tokens=10,
         temperature=0.0,
         stream=True,
-        stream_options={"include_usage": False},
-    )
+        stream_options={"include_usage": False})
     chunks = []
     async for chunk in stream:
         chunks.append(chunk.choices[0].delta.get("content", ""))
@@ -1378,8 +1377,7 @@ async def test_chat_completion_stream_options(server,
         max_tokens=10,
         temperature=0.0,
         stream=True,
-        stream_options={"include_usage": True},
-    )
+        stream_options={"include_usage": True})
     chunks = []
     async for chunk in stream:
         if chunk.choices[0].finish_reason is None:
@@ -1406,8 +1404,7 @@ async def test_chat_completion_stream_options(server,
             max_tokens=10,
             temperature=0.0,
             stream=False,
-            stream_options={"include_usage": None},
-        )
+            stream_options={"include_usage": None})
 
     # Test stream=False, stream_options={"include_usage": False}
     with pytest.raises(BadRequestError):
@@ -1417,8 +1414,7 @@ async def test_chat_completion_stream_options(server,
             max_tokens=10,
             temperature=0.0,
             stream=False,
-            stream_options={"include_usage": False},
-        )
+            stream_options={"include_usage": False})
 
     # Test stream=False, stream_options={"include_usage": True}
     with pytest.raises(BadRequestError):
@@ -1428,8 +1424,7 @@ async def test_chat_completion_stream_options(server,
             max_tokens=10,
             temperature=0.0,
             stream=False,
-            stream_options={"include_usage": True},
-        )
+            stream_options={"include_usage": True})
 
 
 @pytest.mark.asyncio
@@ -1448,8 +1443,7 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        stream_options={"include_usage": False},
-    )
+        stream_options={"include_usage": False})
     chunks = []
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
@@ -1463,8 +1457,7 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        stream_options={"include_usage": True},
-    )
+        stream_options={"include_usage": True})
     chunks = []
     finish_reason_count = 0
     async for chunk in stream:
@@ -1486,14 +1479,12 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
     assert last_message.choices == []
 
     # Test stream=False, stream_options=None
-    response = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
-        stream=False,
-        stream_options=None,
-    )
+    response = await client.completions.create(model=model_name,
+                                               prompt=prompt,
+                                               max_tokens=5,
+                                               temperature=0.0,
+                                               stream=False,
+                                               stream_options=None)
     assert response.usage is not None
     assert response.usage.prompt_tokens > 0
     assert response.usage.completion_tokens > 0
@@ -1507,8 +1498,7 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
         stream=False,
-        stream_options={"include_usage": False},
-    )
+        stream_options={"include_usage": False})
     assert response.usage is None
 
     # Test stream=False, stream_options={"include_usage": True}
@@ -1518,8 +1508,7 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
         stream=False,
-        stream_options={"include_usage": True},
-    )
+        stream_options={"include_usage": True})
     assert response.usage is not None
     assert response.usage.prompt_tokens > 0
     assert response.usage.completion_tokens > 0
