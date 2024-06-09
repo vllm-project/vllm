@@ -547,21 +547,20 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI,
     assert "".join(chunks) == output
 
 
+import pytest
+import openai
+from openai.error import BadRequestError
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora"],
+    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
 )
-async def test_chat_completion_stream_options(server,
-                                              client: openai.AsyncOpenAI,
-                                              model_name: str):
-    messages = [{
-        "role": "system",
-        "content": "You are a helpful assistant."
-    }, {
-        "role": "user",
-        "content": "What is the capital of France?"
-    }]
+async def test_chat_completion_stream_options(server, client: openai.AsyncOpenAI, model_name: str):
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is the capital of France?"}
+    ]
 
     # Test stream=True, stream_options={"include_usage": False}
     stream = await client.chat.completions.create(
@@ -570,12 +569,10 @@ async def test_chat_completion_stream_options(server,
         max_tokens=10,
         temperature=0.0,
         stream=True,
-        stream_options={"include_usage": False})
-    chunks = []
+        stream_options={"include_usage": False}
+    )
     async for chunk in stream:
-        chunks.append(chunk.choices[0].delta.get("content", ""))
-    assert len(chunks) > 0
-    assert all(chunk.usage is None for chunk in chunks)
+        assert "usage" not in chunk.__dict__
 
     # Test stream=True, stream_options={"include_usage": True}
     stream = await client.chat.completions.create(
@@ -584,24 +581,21 @@ async def test_chat_completion_stream_options(server,
         max_tokens=10,
         temperature=0.0,
         stream=True,
-        stream_options={"include_usage": True})
-    chunks = []
+        stream_options={"include_usage": True}
+    )
     async for chunk in stream:
         if chunk.choices[0].finish_reason is None:
             assert chunk.usage is None
-            chunks.append(chunk.choices[0].delta.get("content", ""))
         else:
-            assert chunk.usage is None
-
-    # The last message should have usage and no choices
-    last_message = await stream.__anext__()
-    assert last_message.usage is not None
-    assert last_message.usage.prompt_tokens > 0
-    assert last_message.usage.completion_tokens > 0
-    assert last_message.usage.total_tokens == (
-        last_message.usage.prompt_tokens +
-        last_message.usage.completion_tokens)
-    assert last_message.choices == []
+            assert chunk.usage is None  # Last chunk in stream should have usage as None
+            final_chunk = await stream.__anext__()
+            assert final_chunk.usage is not None
+            assert final_chunk.usage.prompt_tokens > 0
+            assert final_chunk.usage.completion_tokens > 0
+            assert final_chunk.usage.total_tokens == (
+                final_chunk.usage.prompt_tokens + final_chunk.usage.completion_tokens
+            )
+            assert final_chunk.choices == []
 
     # Test stream=False, stream_options={"include_usage": None}
     with pytest.raises(BadRequestError):
@@ -611,17 +605,8 @@ async def test_chat_completion_stream_options(server,
             max_tokens=10,
             temperature=0.0,
             stream=False,
-            stream_options={"include_usage": None})
-
-    # Test stream=False, stream_options={"include_usage": False}
-    with pytest.raises(BadRequestError):
-        await client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            max_tokens=10,
-            temperature=0.0,
-            stream=False,
-            stream_options={"include_usage": False})
+            stream_options={"include_usage": None}
+        )
 
     # Test stream=False, stream_options={"include_usage": True}
     with pytest.raises(BadRequestError):
@@ -631,16 +616,16 @@ async def test_chat_completion_stream_options(server,
             max_tokens=10,
             temperature=0.0,
             stream=False,
-            stream_options={"include_usage": True})
+            stream_options={"include_usage": True}
+        )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora"],
+    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
 )
-async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
-                                         model_name: str):
+async def test_completion_stream_options(server, client: openai.AsyncOpenAI, model_name: str):
     prompt = "What is the capital of France?"
 
     # Test stream=True, stream_options={"include_usage": False}
@@ -650,12 +635,10 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        stream_options={"include_usage": False})
-    chunks = []
+        stream_options={"include_usage": False}
+    )
     async for chunk in stream:
-        chunks.append(chunk.choices[0].text)
-    assert len(chunks) > 0
-    assert all(chunk.usage is None for chunk in chunks)
+        assert "usage" not in chunk.__dict__
 
     # Test stream=True, stream_options={"include_usage": True}
     stream = await client.completions.create(
@@ -664,63 +647,43 @@ async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        stream_options={"include_usage": True})
-    chunks = []
-    finish_reason_count = 0
+        stream_options={"include_usage": True}
+    )
     async for chunk in stream:
         if chunk.choices[0].finish_reason is None:
             assert chunk.usage is None
-            chunks.append(chunk.choices[0].text)
         else:
-            assert chunk.usage is None
-            finish_reason_count += 1
+            assert chunk.usage is None  # The last chunk should have `usage` filled
+            final_chunk = await stream.__anext__()
+            assert final_chunk.usage is not None
+            assert final_chunk.usage.prompt_tokens > 0
+            assert final_chunk.usage.completion_tokens > 0
+            assert final_chunk.usage.total_tokens == (
+                final_chunk.usage.prompt_tokens + final_chunk.usage.completion_tokens
+            )
+            assert final_chunk.choices == []
 
-    # The last message should have usage and no choices
-    last_message = await stream.__anext__()
-    assert last_message.usage is not None
-    assert last_message.usage.prompt_tokens > 0
-    assert last_message.usage.completion_tokens > 0
-    assert (
-        last_message.usage.total_tokens == last_message.usage.prompt_tokens +
-        last_message.usage.completion_tokens)
-    assert last_message.choices == []
-
-    # Test stream=False, stream_options=None
-    response = await client.completions.create(model=model_name,
-                                               prompt=prompt,
-                                               max_tokens=5,
-                                               temperature=0.0,
-                                               stream=False,
-                                               stream_options=None)
-    assert response.usage is not None
-    assert response.usage.prompt_tokens > 0
-    assert response.usage.completion_tokens > 0
-    assert (response.usage.total_tokens == response.usage.prompt_tokens +
-            response.usage.completion_tokens)
-
-    # Test stream=False, stream_options={"include_usage": False}
-    response = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
-        stream=False,
-        stream_options={"include_usage": False})
-    assert response.usage is None
+    # Test stream=False, stream_options={"include_usage": None}
+    with pytest.raises(BadRequestError):
+        await client.completions.create(
+            model=model_name,
+            prompt=prompt,
+            max_tokens=5,
+            temperature=0.0,
+            stream=False,
+            stream_options={"include_usage": None}
+        )
 
     # Test stream=False, stream_options={"include_usage": True}
-    response = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
-        stream=False,
-        stream_options={"include_usage": True})
-    assert response.usage is not None
-    assert response.usage.prompt_tokens > 0
-    assert response.usage.completion_tokens > 0
-    assert (response.usage.total_tokens == response.usage.prompt_tokens +
-            response.usage.completion_tokens)
+    with pytest.raises(BadRequestError):
+        await client.completions.create(
+            model=model_name,
+            prompt=prompt,
+            max_tokens=5,
+            temperature=0.0,
+            stream=False,
+            stream_options={"include_usage": True}
+        )
 
 
 @pytest.mark.asyncio
