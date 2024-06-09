@@ -51,7 +51,7 @@ class EmbeddingModelRunner(ModelRunner):
     ) -> Optional[PoolerOutput]:
         (input_tokens, input_positions, attn_metadata, pooling_metadata,
          lora_requests, lora_mapping, multi_modal_input
-         ) = self.convert_tensor_dict_to_model_input(tensor_dict)
+         ) = self.convert_broadcast_inputs_to_model_input(tensor_dict)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -85,8 +85,9 @@ class EmbeddingModelRunner(ModelRunner):
         return self.model.pooler(hidden_states=hidden_states,
                                  pooling_metadata=pooling_metadata)
 
-    def prepare_input_tensor_dict(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+    def prepare_inputs_to_broadcast(
+        self, seq_group_metadata_list: List[SequenceGroupMetadata]
+    ) -> Tuple[Dict[str, Any], Optional[List[Any]]]:
         # Prepare input tensors.
         (
             input_tokens,
@@ -120,11 +121,12 @@ class EmbeddingModelRunner(ModelRunner):
         if attn_metadata:
             metadata_dict.update(attn_metadata.asdict_zerocopy())
 
-        self.pooling_metadata = pooling_metadata
-        return metadata_dict
+        return metadata_dict, [pooling_metadata]
 
-    def convert_tensor_dict_to_model_input(self, metadata_dict: Dict[str,
-                                                                     Any]):
+    def convert_broadcast_inputs_to_model_input(
+            self,
+            metadata_dict: Dict[str, Any],
+            aux: Optional[List[Any]] = None):
         input_tokens = metadata_dict.pop("input_tokens")
         input_positions = metadata_dict.pop("input_positions")
         lora_mapping = metadata_dict.pop("lora_mapping")
@@ -134,8 +136,8 @@ class EmbeddingModelRunner(ModelRunner):
             attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
         else:
             attn_metadata = None
-        if hasattr(self, "pooling_metadata"):
-            pooling_metadata = self.pooling_metadata
+        if aux is not None:
+            pooling_metadata = aux[0]
         else:
             pooling_metadata = PoolingMetadata(seq_groups=None,
                                                seq_data=None,
@@ -151,8 +153,8 @@ class EmbeddingModelRunner(ModelRunner):
         # TODO: deprecate this function. It is only used in tests.
         assert self.is_driver_worker
         assert seq_group_metadata_list is not None
-        return self.convert_tensor_dict_to_model_input(
-            self.prepare_input_tensor_dict(seq_group_metadata_list))
+        return self.convert_broadcast_inputs_to_model_input(
+            *self.prepare_inputs_to_broadcast(seq_group_metadata_list))
 
     def _prepare_pooling(
         self,
