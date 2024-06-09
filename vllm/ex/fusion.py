@@ -16,10 +16,11 @@ from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
 """
 Fuse all the nodes in the given module into a single function call.
 """
+
+
 def fuse_graph_nodes(
     cc: CodeCache,
     fgen: FusedOpGenerator,
@@ -94,6 +95,8 @@ def fuse_graph_nodes(
 Determine whether or not node is a fusable operations.
 TODO: Smarter filter for 'getitem'.
 """
+
+
 def is_fusable(node: torch.fx.Node) -> bool:
     if not is_call(node):
         return False
@@ -106,9 +109,12 @@ def is_fusable(node: torch.fx.Node) -> bool:
         class_type = call_method_class(node)
         return op_name in FUSABLE and not FUSABLE[op_name]
 
+
 """
 Determine whether or not node is a fusable compute operation, e.g. gemm.
 """
+
+
 def is_compute(node: torch.fx.Node) -> bool:
     if not is_call(node):
         return False
@@ -130,6 +136,8 @@ def is_getitem(a: torch.fx.Node) -> bool:
 Are nodes a and b fusable together?
 This function assumes 'b' is a direct successor of 'a'.
 """
+
+
 def is_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
     return is_fusable(a) and is_fusable(b)
 
@@ -138,6 +146,8 @@ def is_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
 Are nodes 'a' and 'b' fusable together and is 'a' optionally a compute op?
 This function assumes 'b' is a direct successor of 'a'.
 """
+
+
 def is_compute_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
     return (is_fusable(a) or is_compute(a)) and is_fusable(b)
 
@@ -145,7 +155,10 @@ def is_compute_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
 """
 Determine if any kwargs associated with 'node' are supported.
 """
-def supported_kwargs(node: torch.fx.Node, allow_const_kwargs: bool = False) -> bool:
+
+
+def supported_kwargs(node: torch.fx.Node,
+                     allow_const_kwargs: bool = False) -> bool:
     if allow_const_kwargs:
         for arg in node.kwargs.values():
             if not isinstance(arg, torch.fx.node.BaseArgumentTypes):
@@ -159,14 +172,14 @@ def supported_kwargs(node: torch.fx.Node, allow_const_kwargs: bool = False) -> b
 1. create Partition objects from sequences of fusable nodes
 2. use fuse_partitions to recreate the graph torch._inductor.fx_passes.group_batch_fusion
 """
-def pointwise_fusion(
-    cc: CodeCache,
-    fgen: FusedOpGenerator,
-    mod: torch.fx.GraphModule,
-    example_inputs: List[torch.Tensor],
-    fuse_inputs: bool = False,
-    fuse_with_compute=True
-) -> torch.fx.GraphModule:
+
+
+def pointwise_fusion(cc: CodeCache,
+                     fgen: FusedOpGenerator,
+                     mod: torch.fx.GraphModule,
+                     example_inputs: List[torch.Tensor],
+                     fuse_inputs: bool = False,
+                     fuse_with_compute=True) -> torch.fx.GraphModule:
     # find all groups of nodes that can be fused and assign to
     # unique partition id, i.e. map_node
 
@@ -186,7 +199,7 @@ def pointwise_fusion(
     logger.debug("start fusion")
 
     # create partition groups
-    # run in reverse order so predecesors of non-unary ops will appear
+    # run in reverse order so predecessors of non-unary ops will appear
     # in the same partition.
     for n in reversed(mod.graph.nodes):
         logger.debug(f"CONSIDER {n}")
@@ -201,10 +214,14 @@ def pointwise_fusion(
 
         pred = is_fusable_pair if not fuse_with_compute else is_compute_fusable_pair
 
-        fusable = [pred(s, n) for s in fg.predecessors(n) if s.op != 'placeholder']
+        fusable = [
+            pred(s, n) for s in fg.predecessors(n) if s.op != 'placeholder'
+        ]
         if not all(fusable):
             if not n in node_map:
-                logger.debug(f"  REJECT {n} no fusable preds and not in map: {fusable}, {fg.predecessors(n)}")
+                logger.debug(
+                    f"  REJECT {n} no fusable preds and not in map: {fusable}, {fg.predecessors(n)}"
+                )
                 node_map[n] = 0
             continue
 
@@ -234,7 +251,6 @@ def pointwise_fusion(
         nodes = [n for n, p in node_map.items() if p == partition]
         return all([is_fusable(n) and not is_compute(n) for n in nodes])
 
-
     if fuse_with_compute:
         for n in mod.graph.nodes:
             if not is_call(n):
@@ -259,9 +275,11 @@ def pointwise_fusion(
 
     logger.debug(f"final node_map = {node_map}")
 
-    assert(all([n in node_map for n in mod.graph.nodes]))
+    assert (all([n in node_map for n in mod.graph.nodes]))
 
-    logger.debug(f"pre-fusion split mod:\n{graph_print_tabular(mod.graph, 'part', map_node)}")
+    logger.debug(
+        f"pre-fusion split mod:\n{graph_print_tabular(mod.graph, 'part', map_node)}"
+    )
 
     subgraphs = dict()
     for n, p in node_map.items():

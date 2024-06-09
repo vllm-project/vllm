@@ -23,16 +23,15 @@ from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
 """
 Similar to torch.fx.Graph.print_tabular except it returns a string and
 allows the addition of extra columns.
 """
-def graph_print_tabular(
-    g: torch.fx.Graph,
-    col: Optional[str] = None,
-    col_get: Optional[Callable] = None
-) -> str:
+
+
+def graph_print_tabular(g: torch.fx.Graph,
+                        col: Optional[str] = None,
+                        col_get: Optional[Callable] = None) -> str:
     try:
         from tabulate import tabulate
     except ImportError:
@@ -47,8 +46,8 @@ def graph_print_tabular(
 
     if col_get:
         headers.append(col)
-        node_specs = [[n.op, n.name, n.target, n.args, n.kwargs, col_get(n)]
-                      for n in g.nodes]
+        node_specs = [[n.op, n.name, n.target, n.args, n.kwargs,
+                       col_get(n)] for n in g.nodes]
     else:
         node_specs = [[n.op, n.name, n.target, n.args, n.kwargs]
                       for n in g.nodes]
@@ -63,6 +62,8 @@ def is_call(node: torch.fx.Node) -> bool:
 """
 Get the name of the function being called in a 'call_function' op.
 """
+
+
 def node_function_target(node: torch.fx.Node) -> str:
     assert is_call(node)
     return get_node_target(None, node)
@@ -72,6 +73,8 @@ def node_function_target(node: torch.fx.Node) -> str:
 Return a string representation of the type of the given argument.  This is
 used for name mangling.
 """
+
+
 def argument_type_str(arg: torch.fx.node.Argument):
     if isinstance(arg, torch.fx.Node):
         return str(extract_node_type(arg))
@@ -79,13 +82,11 @@ def argument_type_str(arg: torch.fx.node.Argument):
         return str(arg.dtype)
     elif isinstance(arg, torch.dtype):
         return str(arg)
-    elif (isinstance(arg, str) or
-          isinstance(arg, int) or
-          isinstance(arg, float) or
-          isinstance(arg, bool)):
+    elif (isinstance(arg, str) or isinstance(arg, int)
+          or isinstance(arg, float) or isinstance(arg, bool)):
         return type(arg).__name__
-    elif (isinstance(arg, types.EllipsisType) or
-          isinstance(arg, types.NoneType)):
+    elif (isinstance(arg, types.EllipsisType)
+          or isinstance(arg, types.NoneType)):
         return str(arg)
     elif isinstance(arg, tuple):
         return "T_" + "_".join([argument_type_str(a) for a in arg])
@@ -94,10 +95,13 @@ def argument_type_str(arg: torch.fx.node.Argument):
     else:
         raise RuntimeError(f"unsupported argument type {arg}")
 
+
 """
 Get the data type (float, int, fp16, etc.)  of the tensor associated with
 the given node.
 """
+
+
 def extract_node_type(n: torch.fx.Node):
     if 'tensor_meta' in n.meta:
         return n.meta['tensor_meta'].dtype
@@ -105,7 +109,7 @@ def extract_node_type(n: torch.fx.Node):
         return None
 
 
-def call_method_class(node: torch.fx.Node): # -> Type:
+def call_method_class(node: torch.fx.Node):  # -> Type:
     assert node.op == 'call_method'
     ex_val = node.args[0].meta.get('example_value')
     assert ex_val is not None
@@ -115,6 +119,8 @@ def call_method_class(node: torch.fx.Node): # -> Type:
 """
 Compose two functions.
 """
+
+
 def compose2(f: Callable, g: Callable) -> Callable:
     return lambda *a, **kw: g(f(*a, **kw))
 
@@ -122,6 +128,8 @@ def compose2(f: Callable, g: Callable) -> Callable:
 """
 Compose a list of functions.
 """
+
+
 def compose(*fs: List[Callable]) -> Callable:
     return functools.reduce(compose2, fs)
 
@@ -130,12 +138,16 @@ def compose(*fs: List[Callable]) -> Callable:
 Generate a mangled name from a list of call_function nodes.
 The mangled name includes the names of all the operators and their types.
 """
+
+
 def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_") -> str:
     name = ""
     sep = ""
     for n in nodes:
         fn = node_function_target(n)
-        types = [argument_type_str(arg).replace("torch.","") for arg in n.args]
+        types = [
+            argument_type_str(arg).replace("torch.", "") for arg in n.args
+        ]
         name = name + sep + f"{fn}_{'_'.join(types)}"
         sep = "_"
 
@@ -153,21 +165,21 @@ since we currently only care about single use submodules.
 
 TODO: can this be combined with ShapeProp somehow?
 """
+
+
 class ModuleInputGenerator(torch.fx.passes.fake_tensor_prop.FakeTensorProp):
+
     def __init__(
-            self,
-            module: torch.fx.GraphModule,
-            mode: Optional[FakeTensorMode] = None,
+        self,
+        module: torch.fx.GraphModule,
+        mode: Optional[FakeTensorMode] = None,
     ):
         super().__init__(module, mode)
         self.module_args = {}
 
-    def call_module(
-            self,
-            target: torch.fx.node.Target,
-            args: Tuple[torch.fx.node.Argument, ...],
-            kwargs: Dict[str, Any]
-    ) -> Any:
+    def call_module(self, target: torch.fx.node.Target,
+                    args: Tuple[torch.fx.node.Argument,
+                                ...], kwargs: Dict[str, Any]) -> Any:
         # Problem here with multiple call sites and different args,
         # for now set to None if there are multiple callers.
         # Could check for "compatible" inputs and allow.
@@ -191,7 +203,10 @@ TODO: turn getitems into "reader views"?
 
 TODO: might be able to use Node.all_input_nodes + Node.users instead
 """
+
+
 class FlowGraph:
+
     def __init__(self, gm: torch.fx.GraphModule):
         self.module = gm
         self.build()
@@ -208,11 +223,14 @@ class FlowGraph:
     """
     Construct the FlowGraph.
     """
+
     def build(self):
         self.succs = dict()
         self.preds = dict()
         self.outputs = [n for n in self.module.graph.nodes if n.op == 'output']
-        self.inputs = [n for n in self.module.graph.nodes if n.op == 'placeholder']
+        self.inputs = [
+            n for n in self.module.graph.nodes if n.op == 'placeholder'
+        ]
         visited = set()
         q = self.outputs
 
@@ -229,12 +247,14 @@ class FlowGraph:
     """
     The underlying GraphModule inputs.
     """
+
     def inputs(self) -> List[torch.fx.Node]:
         return self.inputs
 
     """
     The underlying GraphModule outputs.
     """
+
     def outputs(self) -> List[torch.fx.Node]:
         return self.outputs
 
@@ -257,24 +277,31 @@ class FlowGraph:
 
 
 class SubGraph:
-    def __init__(self, gm: torch.fx.GraphModule, nodes: Optional[List[torch.fx.Node]] = None):
+
+    def __init__(self,
+                 gm: torch.fx.GraphModule,
+                 nodes: Optional[List[torch.fx.Node]] = None):
         self.module = gm
         self.build(nodes)
 
     def in_subgraph(self, n: torch.fx.Node) -> bool:
         return n in self.nodes
 
-    def collect_inputs_outputs(self) -> Tuple[List[torch.fx.Node], List[torch.fx.Node]]:
+    def collect_inputs_outputs(
+            self) -> Tuple[List[torch.fx.Node], List[torch.fx.Node]]:
         inputs = []
         outputs = []
 
         for n in self.nodes:
-            new_inputs = [inp for inp in n.all_input_nodes if not self.in_subgraph(inp)]
+            new_inputs = [
+                inp for inp in n.all_input_nodes if not self.in_subgraph(inp)
+            ]
             for inp in new_inputs:
                 if inp not in inputs:
                     inputs.append(inp)
 
-            if any([user for user in n.users if not self.in_subgraph(user)]) and n not in outputs:
+            if any([user for user in n.users if not self.in_subgraph(user)
+                    ]) and n not in outputs:
                 outputs.append(n)
 
         return inputs, outputs
@@ -285,7 +312,8 @@ class SubGraph:
         worklist: collections.deque = collections.deque()
 
         for n in self.nodes:
-            count = len([inp for inp in n.all_input_nodes if self.in_subgraph(inp)])
+            count = len(
+                [inp for inp in n.all_input_nodes if self.in_subgraph(inp)])
             in_degree[n] = count
             if count == 0:
                 worklist.append(n)
@@ -334,14 +362,17 @@ class SubGraph:
 
         headers = ['opcode', 'name', 'target', 'args', 'kwargs']
 
-        node_specs = [['placeholder*', n.name, n.target, tuple(), dict()]
-                      for n in self.inputs]
+        node_specs = [['placeholder*', n.name, n.target,
+                       tuple(),
+                       dict()] for n in self.inputs]
 
         node_specs = node_specs + [[n.op, n.name, n.target, n.args, n.kwargs]
-                      for n in self.nodes]
+                                   for n in self.nodes]
 
-        node_specs = node_specs + [['output*', 'output*', 'output*', (n,), dict()]
-                      for n in self.outputs]
+        node_specs = node_specs + [[
+            'output*', 'output*', 'output*',
+            (n, ), dict()
+        ] for n in self.outputs]
 
         return tabulate(node_specs, headers=headers)
 
@@ -351,17 +382,19 @@ Given a list of cpp and cuda source files, build and load a pytorch extension
 module with the given name.  Loaded ops will appear in the torch.ops.{lib_name}
 namespace.
 """
-def build_extension(
-    lib_name: str,
-    sources: List[str],
-    opt: str = '-O2',
-    verbose: bool = False
-):
+
+
+def build_extension(lib_name: str,
+                    sources: List[str],
+                    opt: str = '-O2',
+                    verbose: bool = False):
     vllm_root = Path(__file__).parent.parent.parent
     torch.utils.cpp_extension.load(
         name=lib_name,
         sources=sources,
-        extra_cflags=[opt, f'-DLIBRARY_NAME={lib_name}', f'-I{vllm_root}/csrc'],
+        extra_cflags=[
+            opt, f'-DLIBRARY_NAME={lib_name}', f'-I{vllm_root}/csrc'
+        ],
         verbose=verbose,
         is_python_module=False,
     )
@@ -377,7 +410,8 @@ def add_uses_for_mutable_inputs(g: torch.fx.Graph):
                 for d in defs:
                     print(f"ADD USE {d}, {n}")
                     d.users[n] = None
-            elif isinstance(a, tuple) and any([isinstance(aa, torch.fx.Node) and aa in uses for aa in a]):
+            elif isinstance(a, tuple) and any(
+                [isinstance(aa, torch.fx.Node) and aa in uses for aa in a]):
                 for aa in a:
                     defs = uses[aa]
                     for d in defs:
@@ -386,7 +420,8 @@ def add_uses_for_mutable_inputs(g: torch.fx.Graph):
 
         if n.op != 'call_function':
             continue
-        sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(n.target, return_schemas=True)
+        sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(
+            n.target, return_schemas=True)
         if schemas is None or not any([s.is_mutable for s in schemas]):
             continue
 
@@ -421,7 +456,8 @@ def tag_side_effects(g: torch.fx.Graph):
         if n.op != 'call_function':
             continue
 
-        sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(n.target, return_schemas=True)
+        sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(
+            n.target, return_schemas=True)
         if schemas is None or not any([s.is_mutable for s in schemas]):
             continue
 
@@ -440,4 +476,5 @@ def tag_side_effects(g: torch.fx.Graph):
             _, s = matched_schemas[0]
             if s.is_mutable:
                 torch.fx.node.has_side_effect(n.target)
-                logger.debug(f"Found mutable or inplace signature {n.target}: {s}")
+                logger.debug(
+                    f"Found mutable or inplace signature {n.target}: {s}")

@@ -14,33 +14,33 @@ logger = init_logger(__name__)
 
 
 class OpSupport:
-    def __init__(
-        self,
-        op_name: Union[str, Callable],
-        is_fusable: bool = False,
-        is_compute: bool = False
-    ):
+
+    def __init__(self,
+                 op_name: Union[str, Callable],
+                 is_fusable: bool = False,
+                 is_compute: bool = False):
         self.op_name = operator_name(op_name)
 
 
 # Set of supported operations. These will be partitioned into separate
 # submodules by the backend.
-SUPPORTED  : Dict[str, Optional[Set[str]]] = dict()
+SUPPORTED: Dict[str, Optional[Set[str]]] = dict()
 
 # Dictionary of fusable operations. The key is the operation name and
 # the value indicates whether the operation is "compute" (e.g. gemm) or
 # not.
 FUSABLE = dict()
-
-
 """
 Extract a string operator name from a Callable (or string).
 """
-def operator_name(op: Union[str, Callable]) -> Tuple[Optional[str], Optional[str]]:
+
+
+def operator_name(
+        op: Union[str, Callable]) -> Tuple[Optional[str], Optional[str]]:
     if isinstance(op, str):
         return (None, op)
-    elif (isinstance(op, types.FunctionType) or
-          isinstance(op, types.BuiltinFunctionType)):
+    elif (isinstance(op, types.FunctionType)
+          or isinstance(op, types.BuiltinFunctionType)):
         return (None, f"{op.__module__}.{op.__name__}")
     elif isinstance(op, types.BuiltinMethodType):
         return (op.__module__, op.__name__)
@@ -54,6 +54,8 @@ def operator_name(op: Union[str, Callable]) -> Tuple[Optional[str], Optional[str
 Register 'op' as an operation supported by the backend.
 Can be used as a function decorator.
 """
+
+
 def register_supported(op: Union[str, Callable]):
     class_name, op_name = operator_name(op)
     if op_name is None:
@@ -71,6 +73,8 @@ def register_supported(op: Union[str, Callable]):
 Register 'op' as an operation that can be fused with other fusable ops.
 Can be used as a function decorator.
 """
+
+
 def register_fusable(op: Union[str, Callable], is_compute: bool = False):
     class_name, op_name = operator_name(op)
     if op_name is None:
@@ -86,6 +90,8 @@ def register_fusable(op: Union[str, Callable], is_compute: bool = False):
 """
 Register default supported operations.
 """
+
+
 def register_defaults():
     logger.debug("REGISTER DEFAULTS")
     register_fusable(torch.Tensor.to)
@@ -101,9 +107,10 @@ def register_defaults():
     register_fusable('torch.matmul', True)
     register_fusable('torch._C._nn.linear', True)
     register_fusable('torch.ops._C.cutlass_scaled_mm_dq', True)
-    register_fusable('torch.ops._C.cutlass_scaled_mm_dq_', True)
     register_fusable('torch.ops._C.static_scaled_int8_quant')
-    register_fusable('torch.ops._C.static_scaled_int8_quant_')
+    if False:  # functionalization
+        register_fusable('torch.ops._C.cutlass_scaled_mm_dq_', True)
+        register_fusable('torch.ops._C.static_scaled_int8_quant_')
 
 
 register_defaults()

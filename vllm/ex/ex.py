@@ -28,11 +28,12 @@ logger = init_logger(__name__)
 # Module partitioning
 #
 ###############################################################################
-
 """
 A callback for the fx CapabilityBasedPartitioner.  Nodes that are "supported"
 are partitioned into new submodules.
 """
+
+
 def is_node_supported(
     submodules: Mapping[str, torch.nn.Module],
     node: torch.fx.Node,
@@ -55,19 +56,18 @@ def is_node_supported(
 Partition 'gm' into submodules based on the 'is_node_supported' callback.
 Modules containing "supported" nodes will be optimized by the backend.
 """
+
+
 def partition_graph(
-    gm: torch.fx.GraphModule,
-    example_inputs: List[torch.Tensor]
+    gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]
 ) -> Tuple[torch.fx.GraphModule, List[Partition]]:
     support = create_op_support(is_node_supported)
 
-    p = CapabilityBasedPartitioner(
-        gm,
-        support,
-        allows_single_node_partition=False,
-        non_compute_ops=None,
-        allowed_single_node_partition_ops=None
-    )
+    p = CapabilityBasedPartitioner(gm,
+                                   support,
+                                   allows_single_node_partition=False,
+                                   non_compute_ops=None,
+                                   allowed_single_node_partition_ops=None)
     parts = p.propose_partitions()
     part_gm = p.fuse_partitions(parts)
 
@@ -79,11 +79,12 @@ def partition_graph(
 # Inliner
 #
 ###############################################################################
-
 """
 Inline all submodules in 'mod' by running the tracer on them.
 TBD
 """
+
+
 def inline_submodules(mod: torch.fx.GraphModule) -> torch.fx.GraphModule:
     return mod
 
@@ -93,10 +94,11 @@ def inline_submodules(mod: torch.fx.GraphModule) -> torch.fx.GraphModule:
 # Backend
 #
 ###############################################################################
-
 """
 Run optimizer on the given module.
 """
+
+
 def optimize(
     cc: CodeCache,
     fgen: FusedOpGenerator,
@@ -113,11 +115,11 @@ def optimize(
 """
 Compile a module with the given backend.
 """
-def backend_compile(
-    gm: torch.fx.GraphModule,
-    example_inputs: List[torch.Tensor],
-    backend: str ='inductor'
-) -> Callable:
+
+
+def backend_compile(gm: torch.fx.GraphModule,
+                    example_inputs: List[torch.Tensor],
+                    backend: str = 'inductor') -> Callable:
     try:
         backend = lookup_backend(backend)
         logger.debug(f"attempting {backend} on {gm.name}")
@@ -139,7 +141,8 @@ def node_in_module(n: torch.fx.Node, m: torch.fx.GraphModule) -> bool:
     return n.name in [nn.name for nn in m.graph.nodes]
 
 
-def module_in_partitions(parts: List[Partition], m: torch.fx.GraphModule) -> bool:
+def module_in_partitions(parts: List[Partition],
+                         m: torch.fx.GraphModule) -> bool:
     for p in parts:
         if node_in_module(next(iter(p.nodes)), m):
             return True
@@ -162,9 +165,10 @@ class backend_class:
     def __init__(self, backend: Optional[str] = 'inductor'):
         self.backend = backend
 
-    def __call__(self, gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]) -> Callable:
+    def __call__(self, gm: torch.fx.GraphModule,
+                 example_inputs: List[torch.Tensor]) -> Callable:
         # Nop for baseline testing
-        #return gm.forward
+        return gm.forward
 
         #logger.info("BACKEND")
 
@@ -194,9 +198,14 @@ class backend_class:
         gm.graph.eliminate_dead_code()
 
         if False:  # functionalize
-            gm = make_fx(functionalize(gm, remove='mutations'))(*example_inputs)
-            print(f"Functionalized module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}")
-            logger.debug(f"Functionalized module {gm}:\n{graph_print_tabular(gm.graph)}")
+            gm = make_fx(functionalize(gm,
+                                       remove='mutations'))(*example_inputs)
+            print(
+                f"Functionalized module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}"
+            )
+            logger.debug(
+                f"Functionalized module {gm}:\n{graph_print_tabular(gm.graph)}"
+            )
 
         # TODO: store these in the root module state dictionary so that code for
         # all sub-modules is shared?  Or should these be globals?
@@ -221,12 +230,12 @@ class backend_class:
         # Ensure that 'allow_non_fake_inputs' is True so that original
         # 'example_inputs' can be used.
         # Using unittest.mock is borrowed from torch/_guards.py
-        with unittest.mock.patch.object(fake_mode, "allow_non_fake_inputs", True):
+        with unittest.mock.patch.object(fake_mode, "allow_non_fake_inputs",
+                                        True):
             # Determine example inputs for submodules.
             # Note: static_shapes can be applied here if necessary.
             mig = ModuleInputGenerator(part_gm, fake_mode)
             mig.propagate(*example_inputs)
-
 
             part_gm = optimize(backend_class.cc, fgen, part_gm, example_inputs)
 
@@ -247,17 +256,22 @@ class backend_class:
                     m = optimize(backend_class.cc, fgen, m, module_inputs)
                     setattr(part_gm, name, m)
 
-                    logger.debug(f"Optimized {name}: {m.print_readable(False)}")
+                    logger.debug(
+                        f"Optimized {name}: {m.print_readable(False)}")
 
                     # TODO: don't really need to recompile if nothing was modified.
                     m.recompile()
 
                     if self.backend != None:
-                        m.forward = backend_compile(m, module_inputs, backend=self.backend)
+                        m.forward = backend_compile(m,
+                                                    module_inputs,
+                                                    backend=self.backend)
 
-        if False: # functionalize
-            with unittest.mock.patch.object(fake_mode, "allow_non_fake_inputs", True):
-                part_gm = torch.fx.passes.reinplace.reinplace(part_gm, *example_inputs)
+        if False:  # functionalize
+            with unittest.mock.patch.object(fake_mode, "allow_non_fake_inputs",
+                                            True):
+                part_gm = torch.fx.passes.reinplace.reinplace(
+                    part_gm, *example_inputs)
 
         part_gm.recompile()
 
@@ -270,7 +284,10 @@ class backend_class:
 """
 The default custom backend function for use with torch.compile.
 """
-def backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]) -> Callable:
+
+
+def backend(gm: torch.fx.GraphModule,
+            example_inputs: List[torch.Tensor]) -> Callable:
     return backend_class()(gm, example_inputs)
 
 
@@ -279,5 +296,7 @@ Construct a custom torch.compile backend with optional 'final' backend for
 optimized subgraphs. The default 'final' backend is the inductor. None can
 be used instead to leave optimized subgraphs as interpreted.
 """
+
+
 def make_backend(backend: Optional[str] = 'inductor') -> backend_class:
     return backend_class(backend)

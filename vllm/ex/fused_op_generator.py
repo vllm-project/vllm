@@ -13,15 +13,15 @@ import types
 from .utils import extract_node_type, compose, build_extension, mangle_name, argument_type_str, node_function_target
 
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
-from vllm.logger import init_logger #, _default_handler
+from vllm.logger import init_logger  #, _default_handler
 
 logger = init_logger(__name__)
-
-
 """
 An exception used to indicate a failure in the fusion or fused op generation process.
 Should be recoverable, i.e. can fall back to the non-fused version of graph.
 """
+
+
 class FusionFail(Exception):
     pass
 
@@ -54,6 +54,8 @@ as it is fused.
 In addition to generating the CUDA/C++ code, the FusedOpGenerator also needs
 to register the schemas and meta functions for torch.compile support.
 """
+
+
 class FusedOpGenerator:
     # A unique id to prevent multiple instances of the same torch library being created.
     N = 0
@@ -76,9 +78,14 @@ class FusedOpGenerator:
         self.fused_op.append(f'#include <iostream>')
         self.fused_op.append('#define _operator_add(a, b) ((a) + (b))')
         self.fused_op.append('#define _operator_mul(a, b) ((a) * (b))')
-        self.fused_op.append('#define TORCH_LIBRARY_EXPAND(name, mod) TORCH_LIBRARY(name, mod)')
-        self.fused_op.append('#define TORCH_LIBRARY_IMPL_EXPAND(name, k, mod) TORCH_LIBRARY_IMPL(name, k, mod)')
-        self.fused_op.append('inline torch::Tensor to_tensor(py::object obj) { return THPVariable_Unpack(obj.release().ptr()); }')
+        self.fused_op.append(
+            '#define TORCH_LIBRARY_EXPAND(name, mod) TORCH_LIBRARY(name, mod)')
+        self.fused_op.append(
+            '#define TORCH_LIBRARY_IMPL_EXPAND(name, k, mod) TORCH_LIBRARY_IMPL(name, k, mod)'
+        )
+        self.fused_op.append(
+            'inline torch::Tensor to_tensor(py::object obj) { return THPVariable_Unpack(obj.release().ptr()); }'
+        )
         self.fused_op.append('namespace py = pybind11;')
 
     # 'mangle' a python name so it can be used with C++.
@@ -95,6 +102,8 @@ class FusedOpGenerator:
             return s.replace('torch.ops.vllm.', '')
         elif s == 'torch::float16':
             return 'torch::kFloat16'
+        elif s == 'torch::float32':
+            return 'torch::kFloat32'
         else:
             return s.replace("_operator.", "_operator_")
 
@@ -103,7 +112,7 @@ class FusedOpGenerator:
         if isinstance(arg, types.EllipsisType):
             return "py::ellipsis()"
         elif isinstance(arg, types.NoneType):
-            return "std::nullopt" #"Py_None"
+            return "std::nullopt"  #"Py_None"
         elif isinstance(arg, int):
             return f"{arg}"
         elif isinstance(arg, slice):
@@ -121,15 +130,18 @@ class FusedOpGenerator:
 
         start = self.convert_getitem_arg(args[idx].start)
         stop = self.convert_getitem_arg(args[idx].stop)
-        step = f", {self.convert_getitem_arg(args[idx].step)}" if args[idx].step is not None else ""
+        step = f", {self.convert_getitem_arg(args[idx].step)}" if args[
+            idx].step is not None else ""
         return f"{idx}, {start}, {stop}{step}"
 
     # Detect simple 2d slices along a single dimension.
     def is_simple_slice(self, arg: torch.fx.node.Argument) -> str:
         if not isinstance(arg, tuple) or len(arg) != 2:
             return False
-        if not ((isinstance(arg[0], types.EllipsisType) and isinstance(arg[1], slice)) or
-                (isinstance(arg[1], types.EllipsisType) and isinstance(arg[0], slice))):
+        if not ((isinstance(arg[0], types.EllipsisType)
+                 and isinstance(arg[1], slice)) or
+                (isinstance(arg[1], types.EllipsisType)
+                 and isinstance(arg[0], slice))):
             return False
         return True
 
@@ -158,26 +170,30 @@ class FusedOpGenerator:
 
         return call_str
 
-    def last_uses(self, nodes: List[torch.fx.Node]) -> Dict[torch.fx.Node, List[torch.fx.Node]]:
+    def last_uses(
+        self, nodes: List[torch.fx.Node]
+    ) -> Dict[torch.fx.Node, List[torch.fx.Node]]:
         """
         Collect last uses locations for all variables in the set of nodes being fused.
         """
-        node_to_last_use : Dict[torch.fx.Node, torch.fx.Node] = {}
-        user_to_last_uses : Dict[torch.fx.Node, List[torch.fx.Node]] = {}
+        node_to_last_use: Dict[torch.fx.Node, torch.fx.Node] = {}
+        user_to_last_uses: Dict[torch.fx.Node, List[torch.fx.Node]] = {}
 
-        def register_last_uses(n : torch.fx.Node, user : torch.fx.Node):
+        def register_last_uses(n: torch.fx.Node, user: torch.fx.Node):
             if n not in node_to_last_use:
                 node_to_last_use[n] = user
                 user_to_last_uses.setdefault(user, []).append(n)
 
         for node in reversed(nodes):
-            torch.fx.node.map_arg(node.args, lambda n: register_last_uses(n, node))
-            torch.fx.node.map_arg(node.kwargs, lambda n: register_last_uses(n, node))
+            torch.fx.node.map_arg(node.args,
+                                  lambda n: register_last_uses(n, node))
+            torch.fx.node.map_arg(node.kwargs,
+                                  lambda n: register_last_uses(n, node))
 
         return user_to_last_uses
 
-
-    def delete_unused_values(self, user_to_last_uses, user : torch.fx.Node) -> str:
+    def delete_unused_values(self, user_to_last_uses,
+                             user: torch.fx.Node) -> str:
         """
         Delete values after their last use. This ensures that values that are
         not used in the remainder of the code are freed and the memory usage
@@ -191,9 +207,9 @@ class FusedOpGenerator:
         to_delete_str = ''
         sep = '  '
         for n in nodes_to_delete:
-            to_delete_str = to_delete_str + sep + self.mangle(n.name, '_') + " = torch::Tensor();"
+            to_delete_str = to_delete_str + sep + self.mangle(
+                n.name, '_') + " = torch::Tensor();"
         return to_delete_str
-
 
     #
     # Generate naive C++/CUDA code for a stack of fused ops.
@@ -207,11 +223,10 @@ class FusedOpGenerator:
     # Note: node.meta['tensor_meta'] will have shape and dtype fields
     #
     def make_fused_op(
-        self,
-        inputs: List[torch.fx.Node],
-        outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node],
-        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
+        self, inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
+        nodes: List[torch.fx.Node], kwargs: Dict[str,
+                                                 Dict[str,
+                                                      torch.fx.node.Argument]]
     ) -> torch.fx.node.Target:
         fns = [n.target for n in nodes]
         logger.debug(f"make_fused_op: {fns}")
@@ -250,7 +265,8 @@ class FusedOpGenerator:
 
             if fn == '_operator_getitem':
                 call_str = self.translate_getitem(n)
-                assert kwargs.get(n.name) is None or len(kwargs.get(n.name)) == 0
+                assert kwargs.get(n.name) is None or len(kwargs.get(
+                    n.name)) == 0
             else:
                 call_str = f"  auto {self.mangle(n.name, '_')} = "
                 first_arg = 0
@@ -258,15 +274,17 @@ class FusedOpGenerator:
                     call_str = call_str + f"{self.mangle(n.args[0].name, '::')}."
                     first_arg = 1
                 call_str = call_str + f"{self.mangle(fn, '::')}("
-                sep =''
+                sep = ''
                 for inp in n.args[first_arg:]:
                     # bit of a hack for optional/empty tensor arguments
                     if inp is None:
                         call_str = call_str + sep + "torch::Tensor()"
                     elif isinstance(inp, tuple):
-                        call_str = call_str + sep + "{" + ','.join([str(t) for t in inp]) + "}"
+                        call_str = call_str + sep + "{" + ','.join(
+                            [str(t) for t in inp]) + "}"
                     else:
-                        call_str = call_str + sep + self.rename(self.mangle(str(inp), '::'))
+                        call_str = call_str + sep + self.rename(
+                            self.mangle(str(inp), '::'))
                     sep = ', '
                 n_kwargs = kwargs.get(n.name)
                 # TODO
@@ -282,34 +300,37 @@ class FusedOpGenerator:
         self.fused_op.append(f"  return {self.mangle(outputs[0].name, '_')};")
 
         self.fused_op.append('}')
-        self.fused_op.append(f'TORCH_LIBRARY_EXPAND(fused_ops{self.N}, m) {oc} m.def("{op}{arg_sig}"); {cc}')
-        self.fused_op.append(f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, CPU, m) {oc} m.impl("{op}", &{op}); {cc}')
-        self.fused_op.append(f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, CUDA, m) {oc} m.impl("{op}", &{op}); {cc}')
+        self.fused_op.append(
+            f'TORCH_LIBRARY_EXPAND(fused_ops{self.N}, m) {oc} m.def("{op}{arg_sig}"); {cc}'
+        )
+        self.fused_op.append(
+            f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, CPU, m) {oc} m.impl("{op}", &{op}); {cc}'
+        )
+        self.fused_op.append(
+            f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, CUDA, m) {oc} m.impl("{op}", &{op}); {cc}'
+        )
         # For now, generate the meta function via 'generate_meta_function' even though this version is probably
         # more robust.
         #self.fused_op.append(f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, Meta, m) {oc} m.impl("{op}", &{op}); {cc}')
 
-        self.callables[op] = (
-            f"torch.ops.fused_ops{self.N}.{op}",
-            arg_sig,
-            self.generate_meta_function(inputs, outputs, nodes, kwargs)
-        )
+        self.callables[op] = (f"torch.ops.fused_ops{self.N}.{op}", arg_sig,
+                              self.generate_meta_function(
+                                  inputs, outputs, nodes, kwargs))
 
         return op
 
     # The schema is (mostly) derivable from types annotations on input/output nodes.
-    def generate_op_schema(
-        self,
-        inputs: List[torch.fx.Node],
-        outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node],
-        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
-    ):
+    def generate_op_schema(self, inputs: List[torch.fx.Node],
+                           outputs: List[torch.fx.Node],
+                           nodes: List[torch.fx.Node],
+                           kwargs: Dict[str, Dict[str,
+                                                  torch.fx.node.Argument]]):
         sep = f"("
         arg_sig = ""
         for i, n in enumerate(inputs):
             # TODO: the Tensor default here is sketchy
-            arg_type = self.mangle(n.type.__name__ if n.type is not None else "Tensor", '::')
+            arg_type = self.mangle(
+                n.type.__name__ if n.type is not None else "Tensor", '::')
             arg_name = self.mangle(n.name, '_')
             arg_sig = arg_sig + sep + f"{arg_type} {arg_name}"
             sep = ", "
@@ -319,7 +340,8 @@ class FusedOpGenerator:
 
         for i, n in enumerate(outputs):
             # TODO: the Tensor default here is sketchy
-            arg_type = self.mangle(n.type.__name__ if n.type is not None else "Tensor", '::')
+            arg_type = self.mangle(
+                n.type.__name__ if n.type is not None else "Tensor", '::')
             arg_sig = arg_sig + sep + arg_type
             sep = ", "
 
@@ -334,22 +356,19 @@ class FusedOpGenerator:
     # op takes all the inputs and chains the rest to subsequent ops.
     # See functools.partial and inspect.signature().parameters
     def generate_meta_function(
-        self,
-        inputs: List[torch.fx.Node],
-        outputs: List[torch.fx.Node],
-        nodes: List[torch.fx.Node],
-        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
-    ) -> Callable:
+            self, inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
+            nodes: List[torch.fx.Node],
+            kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> Callable:
         fns = [n.target for n in nodes]
         return compose(*fns)
 
-    # Regsiter schema for the given 'op' in the given 'lib'.
+    # Register schema for the given 'op' in the given 'lib'.
     def register_op_schema(self, library: str, op: str, sig: str):
         op = self.mangle(op, '::').replace("torch::ops::", "")
         logger.debug(f"Registering schema for {op}: {sig}")
         torch.library.define(f"{op}", sig)
 
-    # Regsiter meta function the given 'op' in the given 'lib'.
+    # Register meta function the given 'op' in the given 'lib'.
     def register_meta_function(self, library: str, op: str, meta_fn: Callable):
         # See also: torch.library.impl_abstract(qualname, func=None, *, lib=None, _stacklevel=1)
         op = self.mangle(op, '::').replace("torch::ops::", "")
@@ -376,7 +395,7 @@ class FusedOpGenerator:
                     prefix=self.filename,
                     suffix=".cpp",
                     mode='w',
-                    delete=False, # TODO: True
+                    delete=False,  # TODO: True
             ) as out:
                 logger.info(f"generating code to: {out.name}")
                 for l in self.fused_op:
