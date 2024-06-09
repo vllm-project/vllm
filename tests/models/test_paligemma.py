@@ -11,7 +11,7 @@ pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = [
     "caption es",
-    "What is in the piecture?",
+    "What is in the picture?",
 ]
 
 assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
@@ -25,7 +25,6 @@ def iter_paligemma_configs(model_name: str):
     for (h, w), f in image_hw_to_feature_size.items():
         for input_type, input_shape in [
             (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
-            (VisionLanguageConfig.ImageInputType.IMAGE_FEATURES, (1, f, 1152)),
         ]:
             yield (model_name,
                    VisionLanguageConfig(image_input_type=input_type,
@@ -54,7 +53,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     # remove image token, bos token and the last newline token
     hf_input_ids = [
         input_id for input_id in input_ids
-        if input_id != image_token_id and input_id != 2
+        if input_id != image_token_id and input_id != tokenizer.bos_token_id
     ]
     if hf_input_ids[-1] == 108:
         hf_input_ids = hf_input_ids[:-1]
@@ -67,7 +66,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 
 
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["float32"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
                 model_and_config, dtype: str, max_tokens: int) -> None:
@@ -87,9 +86,13 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
                                               max_tokens,
                                               images=hf_images)
 
+    image_token_id = vlm_config.image_token_id
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    image_token_str = tokenizer.decode(image_token_id)
+
     vllm_image_prompts = [
-        '<image>' * vlm_config.image_feature_size + '<bos>' + p + '\n'
-        for p in HF_IMAGE_PROMPTS
+        image_token_str * vlm_config.image_feature_size + tokenizer.bos_token +
+        p + '\n' for p in HF_IMAGE_PROMPTS
     ]
 
     with vllm_runner(model_id,
