@@ -103,30 +103,41 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
         return data
 
     def _parse_and_validate_image_input(
-            self, data: object) -> Optional[PaliGemmaImageInputs]:
+            self, **kwargs: object) -> Optional[PaliGemmaImageInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_features = kwargs.pop("image_features", None)
+
         expected_input_type = self.vision_language_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
-        if data is None:
-            return None
-
         if expected_input_type == ImageInputType.PIXEL_VALUES:
-            if not isinstance(data, torch.Tensor):
-                raise TypeError("Image pixel vector should be a tensor, "
-                                f"but received type: {type(data)}")
+            if image_features is not None:
+                raise ValueError(
+                    "Expected pixel values but got image features")
+            if pixel_values is None:
+                return None
+
+            if not isinstance(pixel_values, torch.Tensor):
+                raise ValueError("Incorrect type of pixel values")
 
             return PaliGemmaImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_image_data(data),
+                data=self._validate_image_data(pixel_values),
             )
-        elif expected_input_type == ImageInputType.IMAGE_FEATURES:
-            if not isinstance(data, torch.Tensor):
-                raise TypeError("Image feature vector should be a tensor, "
-                                f"but received type: {type(data)}")
+
+        if expected_input_type == ImageInputType.IMAGE_FEATURES:
+            if pixel_values is not None:
+                raise ValueError(
+                    "Expected image features but got pixel values")
+            if image_features is None:
+                return None
+
+            if not isinstance(image_features, torch.Tensor):
+                raise ValueError("Incorrect type of image features")
 
             return PaliGemmaImageFeatureInputs(
                 type="image_features",
-                data=self._validate_image_data(data),
+                data=self._validate_image_data(image_features),
             )
 
         return None
@@ -181,19 +192,17 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
 
         return inputs_embeds
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
-                image_input: Optional[torch.Tensor] = None) -> SamplerOutput:
+                **kwargs: object) -> SamplerOutput:
         """
         The correct prompt format needs to be:
         '<image>' * image_feature_size + '<bos>' + prompt + '\n'
 
         See https://github.com/huggingface/transformers/blob/25245ec26dc29bcf6102e1b4ddd0dfd02e720cf5/src/transformers/models/paligemma/processing_paligemma.py#L55
         """ # noqa
-        parsed_image_input = self._parse_and_validate_image_input(image_input)
+        parsed_image_input = self._parse_and_validate_image_input(**kwargs)
 
         if parsed_image_input is not None:
             vision_embeddings = self._process_image_input(parsed_image_input)
