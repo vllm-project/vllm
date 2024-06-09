@@ -645,8 +645,9 @@ class ModelRunner:
             num_prefills=num_prefills,
         )
 
-    def prepare_input_tensor_dict(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+    def prepare_inputs_to_broadcast(
+        self, seq_group_metadata_list: List[SequenceGroupMetadata]
+    ) -> Tuple[Dict, Optional[List]]:
         # Prepare input tensors.
         (
             input_tokens,
@@ -682,14 +683,11 @@ class ModelRunner:
         if attn_metadata:
             metadata_dict.update(attn_metadata.asdict_zerocopy())
 
-        # sampling_metadata should not appear in metadata_dict.
-        # but we need to access it later.
-        self.sampling_metadata = sampling_metadata
+        return metadata_dict, [sampling_metadata]
 
-        return metadata_dict
-
-    def convert_tensor_dict_to_model_input(self, metadata_dict: Dict[str,
-                                                                     Any]):
+    def convert_broadcast_inputs_to_model_input(self, metadata_dict: Dict[str,
+                                                                          Any],
+                                                aux: Optional[List[Any]]):
         input_tokens = metadata_dict.pop("input_tokens")
         input_positions = metadata_dict.pop("input_positions")
         selected_token_indices = metadata_dict.pop("selected_token_indices")
@@ -701,8 +699,8 @@ class ModelRunner:
         else:
             attn_metadata = None
 
-        if hasattr(self, "sampling_metadata"):
-            sampling_metadata = self.sampling_metadata
+        if aux is not None:
+            sampling_metadata = aux[0]
         else:
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
@@ -722,18 +720,20 @@ class ModelRunner:
         # TODO: deprecate this function. It is only used in tests.
         assert self.is_driver_worker
         assert seq_group_metadata_list is not None
-        return self.convert_tensor_dict_to_model_input(
-            self.prepare_input_tensor_dict(seq_group_metadata_list))
+        return self.convert_broadcast_inputs_to_model_input(
+            *self.prepare_inputs_to_broadcast(seq_group_metadata_list))
 
     @torch.inference_mode()
     def execute_model(
         self,
-        tensor_dict: Dict[str, Any],
+        broadcast_inputs: Dict[str, Any],
+        aux: Optional[List[Any]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_kwargs
-         ) = self.convert_tensor_dict_to_model_input(tensor_dict)
+         lora_requests, lora_mapping,
+         multi_modal_kwargs) = self.convert_broadcast_inputs_to_model_input(
+             broadcast_inputs, aux)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -842,8 +842,8 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        tensor_dict = self.prepare_input_tensor_dict(seqs)
-        self.execute_model(tensor_dict, kv_caches)
+        inputs_to_broadcast, aux = self.prepare_inputs_to_broadcast(seqs)
+        self.execute_model(inputs_to_broadcast, aux, kv_caches)
         torch.cuda.synchronize()
         return
 

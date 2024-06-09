@@ -263,10 +263,10 @@ class Worker(WorkerBase):
         }
 
         if num_seq_groups != 0:
-            tensor_dict = self.model_runner.prepare_input_tensor_dict(
+            inputs_to_broadcast, aux = self.model_runner.prepare_inputs_to_broadcast(  # noqa
                 seq_group_metadata_list)
-            data.update(tensor_dict)
-        broadcast_tensor_dict(data, src=0)
+            data.update(inputs_to_broadcast)
+        broadcast_tensor_dict(inputs_to_broadcast, src=0)
 
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
@@ -274,7 +274,8 @@ class Worker(WorkerBase):
         if num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(tensor_dict, self.gpu_cache)
+        output = self.model_runner.execute_model(inputs_to_broadcast, aux,
+                                                 self.gpu_cache)
 
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.
@@ -310,7 +311,7 @@ class Worker(WorkerBase):
         if num_seq_groups == 0:
             return False
 
-        self.model_runner.execute_model(data, self.gpu_cache)
+        self.model_runner.execute_model(data, None, self.gpu_cache)
         return True
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
