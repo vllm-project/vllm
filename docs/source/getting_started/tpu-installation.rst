@@ -14,12 +14,13 @@ Requirements
 
 Installation options:
 
-1. Build a docker image with `Dockerfile.tpu`.
-2. Build from source.
+1. :ref:`Build a docker image with Dockerfile <build_docker_tpu>`.
+2. :ref:`Build from source <build_from_source_tpu>`.
 
+.. _build_docker_tpu:
 
-Build a docker image with `Dockerfile.tpu`
-------------------------------------------
+Build a docker image with :code:`Dockerfile.tpu`
+------------------------------------------------
 
 `Dockerfile.tpu <https://github.com/vllm-project/vllm/blob/main/Dockerfile.tpu>`_ is provided to build a docker image with TPU support.
 
@@ -35,6 +36,8 @@ You can run the docker image with the following command:
     $ # Make sure to add `--privileged --net host --shm-size=16G`.
     $ docker run --privileged --net host --shm-size=16G -it vllm-tpu
 
+
+.. _build_from_source_tpu:
 
 Build from source
 -----------------
