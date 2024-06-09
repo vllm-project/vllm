@@ -1438,7 +1438,7 @@ async def test_chat_completion_stream_options(server,
     [MODEL_NAME, "zephyr-lora"],
 )
 async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
-                                    model_name: str):
+                                         model_name: str):
     prompt = "What is the capital of France?"
 
     # Test stream=True, stream_options={"include_usage": False}
