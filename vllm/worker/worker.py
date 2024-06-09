@@ -266,7 +266,7 @@ class Worker(WorkerBase):
             inputs_to_broadcast, aux = self.model_runner.prepare_inputs_to_broadcast(  # noqa
                 seq_group_metadata_list)
             data.update(inputs_to_broadcast)
-        broadcast_tensor_dict(inputs_to_broadcast, src=0)
+        broadcast_tensor_dict(data, src=0)
 
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
