@@ -1,3 +1,4 @@
+import gc
 import time
 import warnings
 from collections import defaultdict
@@ -35,6 +36,7 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
+_NUM_WARMUP_ITERS = 2
 
 
 class ModelInput(NamedTuple):
@@ -893,6 +895,10 @@ class ModelRunner:
         seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
+        # Prepare buffer for outputs. These will be reused for all batch sizes.
+        # It will be filled after the first graph capture.
+        hidden_states: Optional[torch.Tensor] = None
+
         graph_batch_size = _get_graph_batch_size(
             self.scheduler_config.max_num_seqs)
         batch_size_capture_list = [
@@ -929,9 +935,11 @@ class ModelRunner:
                     self.set_active_loras(set(), lora_mapping)
 
                 graph_runner = CUDAGraphRunner(self.model)
-                graph_runner.capture(
+                hidden_states = graph_runner.capture(
                     input_tokens[:batch_size],
                     input_positions[:batch_size],
+                    hidden_states[:batch_size]
+                    if hidden_states is not None else None,
                     kv_caches,
                     attn_metadata,
                     memory_pool=self.graph_memory_pool,
@@ -968,35 +976,46 @@ class CUDAGraphRunner:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        hidden_states: Optional[torch.Tensor],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         memory_pool: Optional[Tuple[int, int]],
         stream: torch.cuda.Stream,
         **kwargs,
-    ) -> None:
+    ) -> torch.Tensor:
         assert self._graph is None
-        # Run the model once without capturing the graph.
+        # Run the model a few times without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        self.model(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-            **kwargs,
-        )
-        torch.cuda.synchronize()
-
-        # Capture the graph.
-        self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
-            hidden_states = self.model(
+        # Note one iteration is not enough for torch.jit.script
+        for _ in range(_NUM_WARMUP_ITERS):
+            self.model(
                 input_ids,
                 positions,
                 kv_caches,
                 attn_metadata,
                 **kwargs,
             )
+        torch.cuda.synchronize()
+
+        # Capture the graph.
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
+            output_hidden_states = self.model(
+                input_ids,
+                positions,
+                kv_caches,
+                attn_metadata,
+                **kwargs,
+            )
+            if hidden_states is not None:
+                hidden_states.copy_(output_hidden_states)
+            else:
+                hidden_states = output_hidden_states
+            del output_hidden_states
+            # make sure `output_hidden_states` is deleted
+            # in the graph's memory pool
+            gc.collect()
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
@@ -1009,7 +1028,7 @@ class CUDAGraphRunner:
             "block_tables": attn_metadata.decode_metadata.block_tables,
         }
         self.output_buffers = {"hidden_states": hidden_states}
-        return
+        return hidden_states
 
     def forward(
         self,

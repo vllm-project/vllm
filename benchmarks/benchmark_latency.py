@@ -38,7 +38,8 @@ def main(args: argparse.Namespace):
               download_dir=args.download_dir,
               block_size=args.block_size,
               gpu_memory_utilization=args.gpu_memory_utilization,
-              load_format=args.load_format)
+              load_format=args.load_format,
+              distributed_executor_backend=args.distributed_executor_backend)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -246,5 +247,12 @@ if __name__ == '__main__':
         'section for more information.\n'
         '* "bitsandbytes" will load the weights using bitsandbytes '
         'quantization.\n')
+    parser.add_argument(
+        '--distributed-executor-backend',
+        choices=['ray', 'mp'],
+        default=None,
+        help='Backend to use for distributed serving. When more than 1 GPU '
+        'is used, will be automatically set to "ray" if installed '
+        'or "mp" (multiprocessing) otherwise.')
     args = parser.parse_args()
     main(args)
