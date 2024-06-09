@@ -79,7 +79,6 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             self.parallel_config.pipeline_parallel_size)
 
         # Set random seed.
-        # TODO: Set random seed for JAX
         set_random_seed(self.model_config.seed)
         xm.set_rng_state(self.model_config.seed, self.device)
 
