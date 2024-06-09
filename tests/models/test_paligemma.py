@@ -53,12 +53,12 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 
     # remove image token, bos token and the last newline token
     hf_input_ids = [
-        input_id for input_id in input_ids 
+        input_id for input_id in input_ids
         if input_id != image_token_id and input_id != 2
     ]
     if hf_input_ids[-1] == 108:
         hf_input_ids = hf_input_ids[:-1]
-    
+
     # remove image token from the output string
     hf_output_str = output_str \
         .replace(image_token_str * vlm_config.image_feature_size, "")
