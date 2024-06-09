@@ -66,7 +66,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 
 
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
-@pytest.mark.parametrize("dtype", ["float32"])
+@pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
                 model_and_config, dtype: str, max_tokens: int) -> None:
