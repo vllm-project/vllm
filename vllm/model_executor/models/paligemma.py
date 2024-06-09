@@ -35,7 +35,7 @@ class PaliGemmaMultiModalProjector(nn.Module):
                                            bias=True)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.linear(image_features)
+        hidden_states, _ = self.linear(image_features)
         return hidden_states
 
 
