@@ -25,7 +25,9 @@ from transformers import OPTConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (get_current_tp_rank_partition_size,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -67,11 +69,11 @@ class OPTAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
-        tensor_model_parallel_world_size = (
-            get_tensor_model_parallel_world_size())
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         total_num_heads = num_heads
-        assert num_heads % tensor_model_parallel_world_size == 0
-        self.num_heads = total_num_heads // tensor_model_parallel_world_size
+        self.num_heads = get_current_tp_rank_partition_size(
+            total_num_heads, tp_rank, tp_size)
         self.head_dim = embed_dim // total_num_heads
         self.scaling = self.head_dim**-0.5
 
@@ -87,6 +89,7 @@ class OPTAttention(nn.Module):
             embed_dim,
             bias=bias,
             quant_config=quant_config,
+            partition_multiple_of=self.head_dim,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
