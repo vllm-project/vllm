@@ -51,9 +51,10 @@ class VocabParallelEmbedding(torch.nn.Module):
                  embedding_dim: int,
                  params_dtype: Optional[torch.dtype] = None,
                  org_num_embeddings: Optional[int] = None,
-                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE):
+                 padding_size: Optional[int] = None):
         super().__init__()
 
+        padding_size = padding_size or get_tensor_model_parallel_world_size()
         # Keep the input dimensions.
         self.num_embeddings = num_embeddings
         self.org_vocab_size = org_num_embeddings or num_embeddings
