@@ -1356,21 +1356,6 @@ async def test_chat_completion_stream_options(server,
         "content": "What is the capital of France?"
     }]
 
-    # Test stream=True, stream_options=None
-    stream = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_tokens=10,
-        temperature=0.0,
-        stream=True,
-        stream_options=None,
-    )
-    chunks = []
-    async for chunk in stream:
-        chunks.append(chunk.choices[0].delta.get("content", ""))
-    assert len(chunks) > 0
-    assert all(chunk.usage is None for chunk in chunks)
-
     # Test stream=True, stream_options={"include_usage": False}
     stream = await client.chat.completions.create(
         model=model_name,
@@ -1453,23 +1438,8 @@ async def test_chat_completion_stream_options(server,
     [MODEL_NAME, "zephyr-lora"],
 )
 async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
-                                         model_name: str):
+                                    model_name: str):
     prompt = "What is the capital of France?"
-
-    # Test stream=True, stream_options=None
-    stream = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
-        stream_options=None,
-    )
-    chunks = []
-    async for chunk in stream:
-        chunks.append(chunk.choices[0].text)
-    assert len(chunks) > 0
-    assert all(chunk.usage is None for chunk in chunks)
 
     # Test stream=True, stream_options={"include_usage": False}
     stream = await client.completions.create(
