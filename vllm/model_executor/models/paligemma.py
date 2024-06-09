@@ -2,7 +2,7 @@ from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 from torch import nn
-from transformers import SiglipVisionModel, PaliGemmaConfig
+from transformers import PaliGemmaConfig, SiglipVisionModel
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
@@ -14,6 +14,8 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma import GemmaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import get_dummy_image_data
 from vllm.sequence import SamplerOutput
 
 from .vlm_base import VisionLanguageModelBase
@@ -53,6 +55,9 @@ PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,
                              PaliGemmaImageFeatureInputs]
 
 
+@MULTIMODAL_REGISTRY.register_image_feature_input()
+@MULTIMODAL_REGISTRY.register_image_pixel_input()
+@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
 
     def __init__(self,
@@ -182,7 +187,12 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
                 image_input: Optional[torch.Tensor] = None) -> SamplerOutput:
+        """
+        The correct prompt format needs to be:
+        '<image>' * image_feature_size + '<bos>' + prompt + '\n'
 
+        See https://github.com/huggingface/transformers/blob/25245ec26dc29bcf6102e1b4ddd0dfd02e720cf5/src/transformers/models/paligemma/processing_paligemma.py#L55
+        """ # noqa
         parsed_image_input = self._parse_and_validate_image_input(image_input)
 
         if parsed_image_input is not None:

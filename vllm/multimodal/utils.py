@@ -79,6 +79,8 @@ def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
 
     if config.hf_config.model_type == "llava":
         full_prompt = f"{image_prompt}\n{text_prompt}"
+    elif config.hf_config.model_type == "paligemma":
+        full_prompt = f"{image_prompt}<bos>{text_prompt}\n"
     else:
         raise ValueError(
             f"Unsupported model type: {config.hf_config.model_type}")

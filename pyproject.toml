@@ -71,5 +71,5 @@ markers = [
     "skip_global_cleanup",
     "llm: run tests for vLLM API only",
     "openai: run tests for OpenAI API only",
-    "llava: run tests for LLaVA models only",
+    "vlm: run tests for vision language models only",
 ]
