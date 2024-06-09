@@ -82,6 +82,7 @@ class Worker(WorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
+            tp_rank=self.rank,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
@@ -197,7 +198,7 @@ class Worker(WorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
+                                        self.parallel_config, self.rank)
         self.gpu_cache = self.cache_engine.gpu_cache
 
     def _warm_up_model(self) -> None:

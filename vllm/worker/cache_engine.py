@@ -24,6 +24,7 @@ class CacheEngine:
         cache_config: CacheConfig,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
+        tp_rank: int = 0,
     ) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
@@ -31,7 +32,8 @@ class CacheEngine:
 
         self.head_size = model_config.get_head_size()
         self.num_layers = model_config.get_num_layers(parallel_config)
-        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        self.num_kv_heads = model_config.get_num_kv_heads(
+            parallel_config, tp_rank)
 
         self.block_size = cache_config.block_size
         self.num_gpu_blocks = cache_config.num_gpu_blocks
@@ -44,7 +46,7 @@ class CacheEngine:
 
         # Get attention backend.
         self.attn_backend = get_attn_backend(
-            model_config.get_num_attention_heads(parallel_config),
+            model_config.get_num_attention_heads(parallel_config, tp_rank),
             self.head_size,
             self.num_kv_heads,
             model_config.get_sliding_window(),
@@ -96,9 +98,10 @@ class CacheEngine:
         cache_config: CacheConfig,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
+        tp_rank: int = 0,
     ) -> int:
         head_size = model_config.get_head_size()
-        num_heads = model_config.get_num_kv_heads(parallel_config)
+        num_heads = model_config.get_num_kv_heads(parallel_config, tp_rank)
         num_layers = model_config.get_num_layers(parallel_config)
 
         key_cache_block = cache_config.block_size * num_heads * head_size
