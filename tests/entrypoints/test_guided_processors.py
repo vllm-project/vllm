@@ -89,9 +89,10 @@ async def test_guided_logits_processor_black_box(backend: str):
     regex_request = CompletionRequest(model='test',
                                       prompt=token_ids,
                                       guided_regex=TEST_REGEX)
-    regex_lp = await get_guided_decoding_logits_processor_factory(
+    regex_lpf = await get_guided_decoding_logits_processor_factory(
         backend, regex_request, tokenizer)
-    assert regex_lp is not None
+    assert regex_lpf is not None
+    regex_lp = await regex_lpf.get_processor_async()
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
     tensor = regex_lp(token_ids, tensor)
@@ -103,9 +104,10 @@ async def test_guided_logits_processor_black_box(backend: str):
     json_request = CompletionRequest(model='test',
                                      prompt=token_ids,
                                      guided_json=TEST_SCHEMA)
-    json_lp = await get_guided_decoding_logits_processor_factory(
+    json_lpf = await get_guided_decoding_logits_processor_factory(
         backend, json_request, tokenizer)
-    assert json_lp is not None
+    assert json_lpf is not None
+    json_lp = await json_lpf.get_processor_async()
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
     tensor = json_lp(token_ids, tensor)

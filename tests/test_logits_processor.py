@@ -65,11 +65,13 @@ def test_logits_processors(seed: int, device: str):
     seq_group_metadata_list = []
     seq_lens = []
     for i in range(batch_size):
+        seq_data = {0: SequenceData([1, 2, 3])}
+        seq_data[0].logits_processors = [pick_ith]
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data=seq_data,
                 sampling_params=SamplingParams(temperature=0,
                                                logits_processors=[pick_ith]),
                 block_tables={0: [1]},
