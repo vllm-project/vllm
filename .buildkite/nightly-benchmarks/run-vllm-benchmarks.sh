@@ -90,6 +90,9 @@ kill_gpu_processes() {
   # waiting for GPU processes to be fully killed
   sleep 10
 
+  # remove vllm config file
+  rm -rf ~/.config/vllm
+
   # Print the GPU memory usage
   # so that we know if all GPU processes are killed.
   gpu_memory_usage=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
