@@ -41,6 +41,7 @@ steps:
         command:
         - bash /workspace/.buildkite/nightly-benchmarks/run-vllm-benchmarks.sh
         entrypoint: ""
+        init: false
         workdir: /workspace
         mount-buildkite-agent: true
         propagate-environment: true
