@@ -9,7 +9,7 @@ Requirements
 ------------
 
 * Google Cloud TPU VM (single host)
-* TPU versions: v5e, v5p, v4, v3
+* TPU versions: v5e, v5p, v4
 * Python: 3.10
 
 Installation options:
