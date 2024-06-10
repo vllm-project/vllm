@@ -229,6 +229,10 @@ def _is_cpu() -> bool:
     return VLLM_TARGET_DEVICE == "cpu"
 
 
+def _is_openvino() -> bool:
+    return VLLM_TARGET_DEVICE == "openvino"
+
+
 def _install_punica() -> bool:
     return envs.VLLM_INSTALL_PUNICA_KERNELS
 
@@ -325,6 +329,8 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"+neuron{neuron_version_str}"
+    elif _is_openvino():
+        version += "+openvino"
     elif _is_cpu():
         version += "+cpu"
     else:
@@ -372,11 +378,14 @@ def get_requirements() -> List[str]:
         requirements = _read_requirements("requirements-rocm.txt")
     elif _is_neuron():
         requirements = _read_requirements("requirements-neuron.txt")
+    elif _is_openvino():
+        requirements = _read_requirements("requirements-openvino.txt")
     elif _is_cpu():
         requirements = _read_requirements("requirements-cpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, or CPU.")
+            "Unsupported platform, please use CUDA, ROCm, Neuron, "
+            "OpenVINO, or CPU.")
     return requirements
 
 
@@ -385,7 +394,7 @@ ext_modules = []
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
-if not _is_neuron():
+if not (_is_neuron() or _is_openvino()):
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
     if _install_punica():

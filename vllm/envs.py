@@ -48,7 +48,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # ================== Installation Time Env Vars ==================
 
-    # Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
+    # Target device of vLLM, supporting [cuda (by default),
+    # rocm, neuron, cpu, openvino]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
 

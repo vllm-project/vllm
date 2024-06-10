@@ -7,7 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
-from vllm.utils import is_cpu, is_hip
+from vllm.utils import is_cpu, is_hip, is_openvino
 
 logger = init_logger(__name__)
 
@@ -17,6 +17,7 @@ class _Backend(enum.Enum):
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
+    OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
 
 
@@ -60,6 +61,10 @@ def get_attn_backend(
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
         return TorchSDPABackend
+    elif backend == _Backend.OPENVINO:
+        logger.info("Using OpenVINO Attention backend.")
+        from vllm.attention.backends.openvino import OpenVINOAttentionBackend
+        return OpenVINOAttentionBackend
     elif backend == _Backend.FLASHINFER:
         logger.info("Using Flashinfer backend.")
         logger.warning("Eager mode is required for the Flashinfer backend. "
@@ -99,6 +104,9 @@ def which_attn_to_use(
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return _Backend.TORCH_SDPA
+
+    if is_openvino():
+        return _Backend.OPENVINO
 
     if is_hip():
         # AMD GPUs.

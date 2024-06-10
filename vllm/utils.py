@@ -31,10 +31,12 @@ logger = init_logger(__name__)
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
     "float": torch.float,
     "fp8": torch.uint8,
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
+    "u8": torch.uint8
 }
 
 
@@ -133,6 +135,15 @@ def is_cpu() -> bool:
     from importlib.metadata import PackageNotFoundError, version
     try:
         return "cpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
+
+
+@lru_cache(maxsize=None)
+def is_openvino() -> bool:
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return "openvino" in version("vllm")
     except PackageNotFoundError:
         return False
 
@@ -468,7 +479,7 @@ def is_pin_memory_available() -> bool:
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
-    elif is_cpu():
+    elif is_cpu() or is_openvino():
         return False
     return True
 

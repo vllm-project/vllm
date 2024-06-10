@@ -45,6 +45,10 @@ steps:
       queue: intel
     command: bash .buildkite/run-cpu-test.sh
 
+  - label: "OpenVINO Test"
+    depends_on: ~
+    command: bash .buildkite/run-openvino-test.sh
+
   {% for step in steps %}
   - label: "{{ step.label }}"
     agents:

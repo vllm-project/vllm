@@ -494,11 +494,12 @@ class EngineArgs:
                   'Enabling this will use the fully sharded layers. '
                   'At high sequence length, max rank or '
                   'tensor parallel size, this is likely faster.'))
-        parser.add_argument("--device",
-                            type=str,
-                            default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron", "cpu"],
-                            help='Device type for vLLM execution.')
+        parser.add_argument(
+            "--device",
+            type=str,
+            default=EngineArgs.device,
+            choices=["auto", "cuda", "neuron", "openvino", "cpu"],
+            help='Device type for vLLM execution.')
 
         # Related to Vision-language models such as llava
         parser = EngineArgs.add_cli_args_for_vlm(parser)

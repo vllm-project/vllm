@@ -64,6 +64,7 @@ Documentation
    getting_started/installation
    getting_started/amd-installation
    getting_started/neuron-installation
+   getting_started/openvino-installation
    getting_started/cpu-installation
    getting_started/quickstart
    getting_started/examples/examples_index
