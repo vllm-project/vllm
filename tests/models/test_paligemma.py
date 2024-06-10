@@ -91,8 +91,7 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     image_token_str = tokenizer.decode(image_token_id)
 
     vllm_image_prompts = [
-        image_token_str * vlm_config.image_feature_size + tokenizer.bos_token +
-        p + '\n' for p in HF_IMAGE_PROMPTS
+        image_token_str * vlm_config.image_feature_size + p + '\n' for p in HF_IMAGE_PROMPTS
     ]
 
     with vllm_runner(model_id,
