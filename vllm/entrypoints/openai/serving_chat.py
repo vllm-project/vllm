@@ -32,6 +32,7 @@ from vllm.multimodal.utils import (async_get_and_parse_image,
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
+from llama_tools import preprocess_input, postprocess_output
 
 logger = init_logger(__name__)
 
@@ -210,11 +211,18 @@ class OpenAIServingChat(OpenAIServing):
             conversation: List[ConversationMessage] = []
             image_futures: List[Awaitable[ImagePixelData]] = []
 
+            raw_msgs = request.messages
+            if request.tools:
+                print("==================tools====================")
+                raw_msgs = preprocess_input(msgs=raw_msgs, tools=request.tools)
+            
             for msg in request.messages:
                 chat_parsed_result = self._parse_chat_message_content(msg)
 
                 conversation.extend(chat_parsed_result.messages)
                 image_futures.extend(chat_parsed_result.image_futures)
+            
+            conversation = raw_msgs
 
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
@@ -488,6 +496,7 @@ class OpenAIServingChat(OpenAIServing):
         choices = []
 
         role = self.get_chat_request_role(request)
+        print("========================output========================")
         for output in final_res.outputs:
             token_ids = output.token_ids
             top_logprobs = output.logprobs
@@ -501,6 +510,8 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
+            # TODO: use llama_tools to parse the output.text
+            print(output)
             if request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
                 message = ChatMessage(
