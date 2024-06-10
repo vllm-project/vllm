@@ -77,7 +77,7 @@ def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
     """Combine image and text prompts for vision language model depending on
     the model architecture."""
 
-    if config.hf_config.model_type == "llava":
+    if config.hf_config.model_type in ("llava", "llava_next"):
         full_prompt = f"{image_prompt}\n{text_prompt}"
     else:
         raise ValueError(
