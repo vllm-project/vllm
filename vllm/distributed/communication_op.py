@@ -280,7 +280,7 @@ def broadcast_tensor_dict(
 
     else:
         from vllm.distributed.parallel_state import _SHM_WORLD_BUFFER
-        metadata_list = _SHM_WORLD_BUFFER.broadcast_object(metadata_list)
+        metadata_list = _SHM_WORLD_BUFFER.broadcast_object(None)
         recv_metadata_list = [metadata_list]
         tensor_dict = {}
         async_handles = []
