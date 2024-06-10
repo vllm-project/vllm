@@ -32,7 +32,6 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  TODO(simon): bring H100 online
   - label: "H100: NVIDIA SMI"
     agents:
       queue: H100
