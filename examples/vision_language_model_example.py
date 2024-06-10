@@ -8,7 +8,7 @@ from PIL import Image
 from vllm import LLM
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 
-def run_idefics2_pixel_values():
+def run_idefics2_pixel_values(*, disable_image_processor: bool = False):
     llm = LLM(
         model="HuggingFaceM4/idefics2-8b",
         image_input_type="pixel_values",
@@ -22,14 +22,21 @@ def run_idefics2_pixel_values():
         "\nUSER: What is the content of this image?\nASSISTANT:")
 
     # This should be provided by another online or offline component.
-    images = torch.load("images/bird_pixel_values.pt")
-    print(images.shape)
-    outputs = llm.generate(prompt,
-                           multi_modal_data=MultiModalData(
-                               type=MultiModalData.Type.IMAGE, data=images))
+    if disable_image_processor:
+        image = torch.load("images/bird_pixel_values.pt")
+    else:
+        image = Image.open("images/bird.jpg")
 
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": ImagePixelData(image),
+    })
 
-def run_llava_pixel_values():
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+
+def run_llava_pixel_values(*, disable_image_processor: bool = False):
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",
         image_input_type="pixel_values",
@@ -80,13 +87,15 @@ def run_llava_image_features():
         generated_text = o.outputs[0].text
         print(generated_text)
 
-
 def main(args):
-    if args.type == "pixel_values":
+    if args.model == "llava" and args.type == "pixel_values":
         run_llava_pixel_values()
-    else:
+    elif args.model == "llava" and args.type == "image_features":
         run_llava_image_features()
-
+    elif args.model == "idefics2" and args.type == "pixel_values":
+        run_idefics2_pixel_values()
+    elif args.model == "idefics2" and args.type == "image_features":
+        print("Idefics2 does not support image_features")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Demo on Llava")

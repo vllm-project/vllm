@@ -21,6 +21,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import get_dummy_image_data
 from vllm.sequence import SamplerOutput
 
 from .vlm_base import VisionLanguageModelBase
@@ -480,7 +482,8 @@ class Idefics2Model(nn.Module):
                                             inputs_embeds=inputs_embeds)
             return hidden_states
 
-
+@MULTIMODAL_REGISTRY.register_image_pixel_input()
+@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class Idefics2ForConditionalGeneration(VisionLanguageModelBase):
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -527,9 +530,9 @@ class Idefics2ForConditionalGeneration(VisionLanguageModelBase):
                 positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
-                image_input: Optional[torch.Tensor] = None) -> SamplerOutput:
+                pixel_values: Optional[torch.Tensor] = None) -> SamplerOutput:
         outputs = self.model(input_ids, positions, kv_caches, attn_metadata,
-                             image_input)
+                             pixel_values)
         return outputs
 
     def compute_logits(self, hidden_states: torch.Tensor,
