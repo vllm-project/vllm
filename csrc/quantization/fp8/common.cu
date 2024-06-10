@@ -140,7 +140,7 @@ void static_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
       input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
         vllm::scaled_fp8_quant_kernel<scalar_t><<<grid, block, 0, stream>>>(
             out.data_ptr<c10::Float8_e4m3fn>(), input.data_ptr<scalar_t>(),
-            scale, num_elems);
+            scale.data_ptr<float>(), num_elems);
       });
 }
 
