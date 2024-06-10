@@ -102,6 +102,10 @@ class ResponseFormat(OpenAIBaseModel):
     type: Literal["text", "json_object"]
 
 
+class StreamOptions(OpenAIBaseModel):
+    include_usage: Optional[bool]
+
+
 class FunctionDefinition(OpenAIBaseModel):
     name: str
     description: Optional[str] = None
@@ -140,6 +144,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                 le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     tools: Optional[List[ChatCompletionToolsParam]] = None
@@ -269,6 +274,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logits_processors=logits_processors,
         )
 
+    @model_validator(mode='before')
+    @classmethod
+    def validate_stream_options(cls, values):
+        if (values.get('stream_options') is not None
+                and not values.get('stream')):
+            raise ValueError(
+                "stream_options can only be set if stream is true")
+        return values
+
     @model_validator(mode="before")
     @classmethod
     def check_guided_decoding_count(cls, data):
@@ -332,6 +346,7 @@ class CompletionRequest(OpenAIBaseModel):
                                 le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     suffix: Optional[str] = None
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
@@ -466,6 +481,14 @@ class CompletionRequest(OpenAIBaseModel):
                 "logprobs"] is not None and not 0 <= data["logprobs"] <= 5:
             raise ValueError(("if passed, `logprobs` must be a value",
                               " in the interval [0, 5]."))
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_stream_options(cls, data):
+        if data.get("stream_options") and not data.get("stream"):
+            raise ValueError(
+                "Stream options can only be defined when stream is True.")
         return data
 
 
