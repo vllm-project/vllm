@@ -699,8 +699,8 @@ class SchedulerConfig:
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
         self.max_num_batched_logprobs = (
-            max_num_batched_logprobs is not None and max_num_batched_logprobs
-            or min(self.max_num_batched_tokens, 256))
+            max_num_batched_logprobs if max_num_batched_logprobs is not None
+            else min(self.max_num_batched_tokens, 256))
 
         self._verify_args()
 
