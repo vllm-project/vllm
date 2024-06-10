@@ -10,9 +10,11 @@ import random
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 
 from transformers import AutoTokenizer
+
+from vllm.inputs import PromptStrictInputs
 
 from .common import (generate_synthetic_requests, num_available_gpus,
                      print_request_outputs, warmup_vllm_engine)
@@ -77,8 +79,7 @@ def run_vllm(requests: List[Tuple[str, int, int]],
         )
         # FIXME(woosuk): Do not use internal method.
         llm._add_request(
-            prompt=prompt,
-            prompt_token_ids=None,
+            inputs=cast(PromptStrictInputs, prompt),
             params=sampling_params,
         )
 

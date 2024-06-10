@@ -2,6 +2,7 @@
 
 import argparse
 import dataclasses
+import json
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -42,6 +43,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     enable_prefix_caching: bool = False
+    disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
@@ -51,6 +53,7 @@ class EngineArgs:
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
+    rope_scaling: Optional[dict] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     # UPSTREAM SYNC: keep sparsity argument
@@ -193,12 +196,11 @@ class EngineArgs:
         parser.add_argument(
             '--kv-cache-dtype',
             type=str,
-            choices=['auto', 'fp8'],
+            choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
             default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
-            'data type. FP8_E5M2 (without scaling) is only supported on cuda '
-            'version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
-            'supported for common inference criteria.')
+            'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
+            'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
         parser.add_argument(
             '--quantization-param-path',
             type=nullable_str,
@@ -270,6 +272,10 @@ class EngineArgs:
         parser.add_argument('--enable-prefix-caching',
                             action='store_true',
                             help='Enables automatic prefix caching.')
+        parser.add_argument('--disable-sliding-window',
+                            action='store_true',
+                            help='Disables sliding window, '
+                            'capping to sliding window size')
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             help='Use BlockSpaceMangerV2.')
@@ -345,6 +351,11 @@ class EngineArgs:
             'None, we first check the `sparsity_config` attribute '
             'in the model config file. If that is None we assume '
             'the model weights are dense')
+        parser.add_argument('--rope-scaling',
+                            default=None,
+                            type=json.loads,
+                            help='RoPE scaling configuration in JSON format. '
+                            'For example, {"type":"dynamic","factor":2.0}')
         parser.add_argument('--enforce-eager',
                             action='store_true',
                             help='Always use eager-mode PyTorch. If False, '
@@ -356,9 +367,9 @@ class EngineArgs:
                             help='Maximum context length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode. '
-                            '(DEPRECATED. Use --max-seq_len-to-capture instead'
+                            '(DEPRECATED. Use --max-seq-len-to-capture instead'
                             ')')
-        parser.add_argument('--max-seq_len-to-capture',
+        parser.add_argument('--max-seq-len-to-capture',
                             type=int,
                             default=EngineArgs.max_seq_len_to_capture,
                             help='Maximum sequence length covered by CUDA '
@@ -561,26 +572,14 @@ class EngineArgs:
     def create_engine_config(self, ) -> EngineConfig:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
-            self.model,
-            self.tokenizer,
-            self.tokenizer_mode,
-            self.trust_remote_code,
-            self.dtype,
-            self.seed,
-            self.revision,
-            self.code_revision,
-            self.tokenizer_revision,
-            self.max_model_len,
-            self.quantization,
-            self.quantization_param_path,
-            # UPSTREAM SYNC: keep sparsity argument
-            self.sparsity,
-            self.enforce_eager,
-            self.max_context_len_to_capture,
-            self.max_seq_len_to_capture,
-            self.max_logprobs,
-            self.skip_tokenizer_init,
-            self.served_model_name)
+            self.model, self.tokenizer, self.tokenizer_mode,
+            self.trust_remote_code, self.dtype, self.seed, self.revision,
+            self.code_revision, self.rope_scaling, self.tokenizer_revision,
+            self.max_model_len, self.quantization,
+            self.quantization_param_path, self.sparsity, self.enforce_eager,
+            self.max_context_len_to_capture, self.max_seq_len_to_capture,
+            self.max_logprobs, self.disable_sliding_window,
+            self.skip_tokenizer_init, self.served_model_name)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -664,9 +663,11 @@ class EngineArgs:
             guided_decoding_backend=self.guided_decoding_backend)
 
         if (model_config.get_sliding_window() is not None
-                and scheduler_config.chunked_prefill_enabled):
+                and scheduler_config.chunked_prefill_enabled
+                and not scheduler_config.use_v2_block_manager):
             raise ValueError(
-                "Chunked prefill is not supported with sliding window.")
+                "Chunked prefill is not supported with sliding window. "
+                "Set --disable-sliding-window to disable sliding window.")
 
         return EngineConfig(model_config=model_config,
                             cache_config=cache_config,

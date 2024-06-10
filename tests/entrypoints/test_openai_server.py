@@ -70,7 +70,7 @@ TEST_CHOICE = [
     "Swift", "Kotlin"
 ]
 
-pytestmark = pytest.mark.asyncio
+pytestmark = pytest.mark.openai
 
 
 @pytest.fixture(scope="session")
@@ -90,6 +90,8 @@ def server(zephyr_lora_files):
         "--max-model-len",
         "8192",
         "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.75",
         # lora config below
         "--enable-lora",
         "--lora-modules",
@@ -117,9 +119,11 @@ def embedding_server(zephyr_lora_files):
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.75",
         "--max-model-len",
         "8192",
-        "--enforce-eager",
     ])
     ray.get(server_runner.ready.remote())
     yield server_runner
@@ -135,6 +139,7 @@ def client():
     yield client
 
 
+@pytest.mark.asyncio
 async def test_check_models(server, client: openai.AsyncOpenAI):
     models = await client.models.list()
     models = models.data
@@ -146,6 +151,7 @@ async def test_check_models(server, client: openai.AsyncOpenAI):
     assert lora_models[1].id == "zephyr-lora2"
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
@@ -177,6 +183,27 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
         completion.choices[0].text) >= 5
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    # first test base model, then test loras
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+)
+async def test_no_logprobs(server, client: openai.AsyncOpenAI,
+                           model_name: str):
+    # test using token IDs
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+        logprobs=None,
+    )
+    choice = completion.choices[0]
+    assert choice.logprobs is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
@@ -195,9 +222,75 @@ async def test_zero_logprobs(server, client: openai.AsyncOpenAI,
     choice = completion.choices[0]
     assert choice.logprobs is not None
     assert choice.logprobs.token_logprobs is not None
-    assert choice.logprobs.top_logprobs is None
+    assert choice.logprobs.top_logprobs is not None
+    assert len(choice.logprobs.top_logprobs[0]) <= 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
+async def test_some_logprobs(server, client: openai.AsyncOpenAI,
+                             model_name: str):
+    # test using token IDs
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+        logprobs=5,
+    )
+    choice = completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.token_logprobs is not None
+    assert choice.logprobs.top_logprobs is not None
+    assert len(choice.logprobs.top_logprobs[0]) <= 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
+async def test_too_many_completion_logprobs(server, client: openai.AsyncOpenAI,
+                                            model_name: str):
+
+    with pytest.raises(
+        (openai.BadRequestError, openai.APIError)):  # test using token IDs
+        await client.completions.create(
+            model=MODEL_NAME,
+            prompt=[0, 0, 0, 0, 0],
+            max_tokens=5,
+            temperature=0.0,
+            logprobs=6,
+        )
+        ...
+    with pytest.raises(
+        (openai.BadRequestError, openai.APIError)):  # test using token IDs
+        stream = await client.completions.create(
+            model=MODEL_NAME,
+            prompt=[0, 0, 0, 0, 0],
+            max_tokens=5,
+            temperature=0.0,
+            logprobs=6,
+            stream=True,
+        )
+        async for chunk in stream:
+            ...
+
+    # the server should still work afterwards
+    completion = await client.completions.create(
+        model=model_name,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+    )
+    completion = completion.choices[0].text
+    assert completion is not None and len(completion) >= 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
@@ -224,8 +317,10 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
         chat_completion.choices) == 1
     assert chat_completion.choices[0].message is not None
     assert chat_completion.choices[0].logprobs is not None
-    assert chat_completion.choices[0].logprobs.top_logprobs is not None
-    assert len(chat_completion.choices[0].logprobs.top_logprobs[0]) == 5
+    assert chat_completion.choices[0].logprobs.content[
+        0].top_logprobs is not None
+    assert len(
+        chat_completion.choices[0].logprobs.content[0].top_logprobs) == 5
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 10
     assert message.role == "assistant"
@@ -242,9 +337,14 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
     assert message.content is not None and len(message.content) >= 0
 
 
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_too_many_logprobs(server, client: openai.AsyncOpenAI,
-                                 model_name: str):
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    # first test base model, then test loras
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+)
+async def test_no_logprobs_chat(server, client: openai.AsyncOpenAI,
+                                model_name: str):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -253,13 +353,92 @@ async def test_too_many_logprobs(server, client: openai.AsyncOpenAI,
         "content": "what is 1+1?"
     }]
 
-    # Default max_logprobs is 5, so this should raise an error
+    chat_completion = await client.chat.completions.create(model=model_name,
+                                                           messages=messages,
+                                                           max_tokens=5,
+                                                           temperature=0.0,
+                                                           logprobs=False)
+
+    choice = chat_completion.choices[0]
+    assert choice.logprobs is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    # just test 1 lora hereafter
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
+async def test_zero_logprobs_chat(server, client: openai.AsyncOpenAI,
+                                  model_name: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": "what is 1+1?"
+    }]
+
+    chat_completion = await client.chat.completions.create(model=model_name,
+                                                           messages=messages,
+                                                           max_tokens=5,
+                                                           temperature=0.0,
+                                                           logprobs=True,
+                                                           top_logprobs=0)
+
+    choice = chat_completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.content is not None
+    assert len(choice.logprobs.content[0].top_logprobs) <= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
+async def test_some_logprobs_chat(server, client: openai.AsyncOpenAI,
+                                  model_name: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": "what is 1+1?"
+    }]
+
+    chat_completion = await client.chat.completions.create(model=model_name,
+                                                           messages=messages,
+                                                           max_tokens=5,
+                                                           temperature=0.0,
+                                                           logprobs=True,
+                                                           top_logprobs=5)
+
+    choice = chat_completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.content is not None
+    assert len(choice.logprobs.content[0].top_logprobs) <= 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_too_many_chat_logprobs(server, client: openai.AsyncOpenAI,
+                                      model_name: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": "what is 1+1?"
+    }]
+
+    # Default max_logprobs is 20, so this should raise an error
     with pytest.raises((openai.BadRequestError, openai.APIError)):
         stream = await client.chat.completions.create(model=model_name,
                                                       messages=messages,
                                                       max_tokens=10,
                                                       logprobs=True,
-                                                      top_logprobs=10,
+                                                      top_logprobs=21,
                                                       stream=True)
         async for chunk in stream:
             ...
@@ -269,24 +448,8 @@ async def test_too_many_logprobs(server, client: openai.AsyncOpenAI,
                                              messages=messages,
                                              max_tokens=10,
                                              logprobs=True,
-                                             top_logprobs=10,
+                                             top_logprobs=30,
                                              stream=False)
-
-    with pytest.raises((openai.BadRequestError, openai.APIError)):
-        stream = await client.completions.create(model=model_name,
-                                                 prompt="Test",
-                                                 max_tokens=10,
-                                                 logprobs=10,
-                                                 stream=True)
-        async for chunk in stream:
-            ...
-
-    with pytest.raises(openai.BadRequestError):
-        await client.completions.create(model=model_name,
-                                        prompt="Test",
-                                        max_tokens=10,
-                                        logprobs=10,
-                                        stream=False)
 
     # the server should still work afterwards
     chat_completion = await client.chat.completions.create(model=model_name,
@@ -297,6 +460,7 @@ async def test_too_many_logprobs(server, client: openai.AsyncOpenAI,
     assert message.content is not None and len(message.content) >= 0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
@@ -334,6 +498,7 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
     assert "".join(chunks) == single_output
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
@@ -384,6 +549,7 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI,
     assert "".join(chunks) == output
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
@@ -437,6 +603,7 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI,
     assert texts[0] == texts[1]
 
 
+@pytest.mark.asyncio
 async def test_logits_bias(server, client: openai.AsyncOpenAI):
     prompt = "Hello, my name is"
     max_tokens = 5
@@ -484,6 +651,7 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
     assert first_response != completion.choices[0].text
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_json_completion(server, client: openai.AsyncOpenAI,
@@ -506,6 +674,7 @@ async def test_guided_json_completion(server, client: openai.AsyncOpenAI,
         jsonschema.validate(instance=output_json, schema=TEST_SCHEMA)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_json_chat(server, client: openai.AsyncOpenAI,
@@ -552,6 +721,7 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI,
     assert json1["age"] != json2["age"]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_regex_completion(server, client: openai.AsyncOpenAI,
@@ -572,6 +742,7 @@ async def test_guided_regex_completion(server, client: openai.AsyncOpenAI,
         assert re.fullmatch(TEST_REGEX, completion.choices[i].text) is not None
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_regex_chat(server, client: openai.AsyncOpenAI,
@@ -609,6 +780,7 @@ async def test_guided_regex_chat(server, client: openai.AsyncOpenAI,
     assert ip1 != ip2
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_choice_completion(server, client: openai.AsyncOpenAI,
@@ -628,6 +800,7 @@ async def test_guided_choice_completion(server, client: openai.AsyncOpenAI,
         assert completion.choices[i].text in TEST_CHOICE
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_choice_chat(server, client: openai.AsyncOpenAI,
@@ -666,6 +839,7 @@ async def test_guided_choice_chat(server, client: openai.AsyncOpenAI,
     assert choice1 != choice2
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI,
@@ -701,6 +875,7 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI,
             extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
@@ -722,15 +897,15 @@ async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
         top_logprobs=5,
         extra_body=dict(guided_choice=TEST_CHOICE,
                         guided_decoding_backend=guided_decoding_backend))
-    top_logprobs = chat_completion.choices[0].logprobs.top_logprobs
+    top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
     # -9999.0 is the minimum logprob returned by OpenAI
     assert all(
-        isinstance(logprob, float) and logprob >= -9999.0
-        for token_dict in top_logprobs
-        for token, logprob in token_dict.items())
+        isinstance(token.logprob, float) and token.logprob >= -9999.0
+        for token in top_logprobs)
 
 
+@pytest.mark.asyncio
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     for _ in range(2):
         resp = await client.chat.completions.create(
@@ -748,6 +923,7 @@ async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
         assert loaded == {"result": 2}, loaded
 
 
+@pytest.mark.asyncio
 async def test_extra_fields(server, client: openai.AsyncOpenAI):
     with pytest.raises(BadRequestError) as exc_info:
         await client.chat.completions.create(
@@ -763,6 +939,7 @@ async def test_extra_fields(server, client: openai.AsyncOpenAI):
     assert "extra_forbidden" in exc_info.value.message
 
 
+@pytest.mark.asyncio
 async def test_complex_message_content(server, client: openai.AsyncOpenAI):
     resp = await client.chat.completions.create(
         model=MODEL_NAME,
@@ -782,6 +959,7 @@ async def test_complex_message_content(server, client: openai.AsyncOpenAI):
     assert content == "2"
 
 
+@pytest.mark.asyncio
 async def test_custom_role(server, client: openai.AsyncOpenAI):
     # Not sure how the model handles custom roles so we just check that
     # both string and complex message content are handled in the same way
@@ -812,6 +990,7 @@ async def test_custom_role(server, client: openai.AsyncOpenAI):
     assert content1 == content2
 
 
+@pytest.mark.asyncio
 async def test_guided_grammar(server, client: openai.AsyncOpenAI):
     simple_sql_grammar = """
 start: select_statement
@@ -846,6 +1025,7 @@ number: "1" | "2"
     assert content.strip() == ground_truth
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
@@ -877,6 +1057,7 @@ async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
         assert len(logprobs.tokens) > 5
 
 
+@pytest.mark.asyncio
 async def test_long_seed(server, client: openai.AsyncOpenAI):
     for seed in [
             torch.iinfo(torch.long).min - 1,
@@ -896,6 +1077,7 @@ async def test_long_seed(server, client: openai.AsyncOpenAI):
                 or "less_than_equal" in exc_info.value.message)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [EMBEDDING_MODEL_NAME],
@@ -934,6 +1116,7 @@ async def test_single_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert embeddings.usage.total_tokens == 5
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [EMBEDDING_MODEL_NAME],

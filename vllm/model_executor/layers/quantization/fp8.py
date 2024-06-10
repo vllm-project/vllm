@@ -8,8 +8,9 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -58,9 +59,13 @@ class Fp8Config(QuantizationConfig):
                    activation_scheme=activation_scheme)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["Fp8LinearMethod"]:
+            self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention  # Avoid circular import
+
         if isinstance(layer, LinearBase):
             return Fp8LinearMethod(self)
+        if isinstance(layer, Attention):
+            return Fp8KVCacheMethod(self)
         return None
 
     def get_scaled_act_names(self) -> List[str]:
@@ -147,10 +152,10 @@ class Fp8LinearMethod(LinearMethodBase):
                 output_partition_sizes=output_partition_sizes,
                 **extra_weight_attrs)
 
-            # ACTIVATION SCALE
+            # INPUT ACTIVATION SCALE
             if self.quant_config.activation_scheme == "static":
                 self._create_scale_param(
-                    scale_name="act_scale",
+                    scale_name="input_scale",
                     layer=layer,
                     output_partition_sizes=output_partition_sizes,
                     **extra_weight_attrs)
@@ -183,7 +188,7 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.logical_widths = None
-            layer.act_scale = None
+            layer.input_scale = None
             return
 
         # If checkpoint is fp8, requantize the separately quantized logical
@@ -208,18 +213,18 @@ class Fp8LinearMethod(LinearMethodBase):
             weight = layer.weight
             layer.weight = Parameter(weight.t(), requires_grad=False)
 
-            # ACT_SCALE
+            # INPUT ACTIVATION SCALE
             #   Dynamic: set to None (required input to ops.scaled_fp8_quant).
-            #   Static:  set to max of the act_scales (since they are equal).
+            #   Static:  set to max of the input_scales (since they are equal).
             if self.quant_config.activation_scheme == "dynamic":
-                layer.act_scale = None
+                layer.input_scale = None
             elif self.quant_config.activation_scheme == "static":
-                if not all_close_1d(layer.act_scale):
+                if not all_close_1d(layer.input_scale):
                     raise ValueError(
-                        "All the act_scales for the logical weights of a layer "
-                        f"must be equal. But got {layer.act_scale}")
-                layer.act_scale = Parameter(layer.act_scale.max(),
-                                            requires_grad=False)
+                        "All the input_scales for the logical weights of a "
+                        f"layer must be equal. But got {layer.input_scale}")
+                layer.input_scale = Parameter(layer.input_scale.max(),
+                                              requires_grad=False)
             else:
                 raise ValueError(
                     f"Unknown scheme {self.quant_config.activation_scheme}")
@@ -229,10 +234,10 @@ class Fp8LinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         # ops.scaled_fp8_quant supports both dynamic and static quant.
-        #   If dynamic, layer.act_scale is None and x_scale computed from x.
-        #   If static,  layer.act_scale is scalar and x_scale set to act_scale.
+        #   If dynamic, layer.input_scale is None and x_scale computed from x.
+        #   If static,  layer.input_scale is scalar and x_scale uses it.
         qinput, x_scale = ops.scaled_fp8_quant(x,
-                                               layer.act_scale,
+                                               layer.input_scale,
                                                batch_dim_padding=17)
 
         # Fused GEMM_DQ -- note we padded the input above because
@@ -249,6 +254,44 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         return torch.narrow(output, 0, 0, x.shape[0])
+
+
+class Fp8KVCacheMethod(QuantizeMethodBase):
+    """Supports loading kv-cache scaling factors from FP8 checkpoints.
+    """
+
+    def __init__(self, quant_config: Fp8Config):
+        self.quant_config = quant_config
+
+    def create_weights(self, layer: torch.nn.Module):
+        """Create "weight" (aka kv_scale) for an attention layer. 
+        
+        Args:
+            layer: The layer that is using the QuantizeMethodBase factory.
+        """
+        # Initialize the KV cache scale to 1.0 as the default value.
+        # If the kv_scale appears in the checkpoint, it will be
+        # overwritten when loading weights.
+        layer.kv_scale = Parameter(torch.tensor(1.0), requires_grad=False)
+
+    def apply(self, layer: torch.nn.Module) -> torch.Tensor:
+        raise RuntimeError("Fp8KVCacheMethod.apply should not be called.")
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        # If the kv-cache dtype is auto, we enforce the kv-scale to be 1.0
+        # regardless whether the kv-scale is available in the checkpoint.
+        if layer.kv_cache_dtype != "auto":
+            kv_scale = layer.kv_scale.to("cpu").tolist()
+            if not isinstance(kv_scale, float):
+                raise ValueError("Only support per-tensor scaling factor "
+                                 "for fp8 KV cache")
+            layer._kv_scale = kv_scale
+            if layer._kv_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
+                print_warning_once(
+                    "Using KV cache scaling factor 1.0 for fp8_e4m3. This may "
+                    "cause accuracy issues. Please make sure kv-cache scaling "
+                    "factor is available in the fp8 checkpoint.")
+        del layer.kv_scale
 
 
 def all_close_1d(x: torch.Tensor) -> bool:

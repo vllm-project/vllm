@@ -7,6 +7,10 @@ from vllm.model_executor.layers.ops.rand import seeded_uniform
 from vllm.model_executor.utils import set_random_seed
 
 
+@pytest.mark.skip("C compiler not installed in NM automation. "
+                  "This codepath follows a triton pathway, which "
+                  "JITs using clang or gcc. Since neither are installed "
+                  "in our test instances, we need to skip this for now.")
 @pytest.mark.parametrize("dtype",
                          [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("use_3d", [True, False])

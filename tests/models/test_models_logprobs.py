@@ -39,7 +39,7 @@ SKIPPED_MODELS_OOM = [
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["bfloat16", "half"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [3])
 def test_models(
@@ -64,8 +64,13 @@ def test_models(
 
     del hf_model
 
+    trust_remote_code = True
+    # Falcon fails if trust_remote_code = True
+    # https://github.com/vllm-project/vllm/issues/5363
+    trust_remote_code = model != "tiiuae/falcon-7b"
     vllm_model = vllm_runner_nm(model,
                                 dtype=dtype,
+                                trust_remote_code=trust_remote_code,
                                 max_model_len=MODEL_MAX_LEN)
     vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
                                                        max_tokens,

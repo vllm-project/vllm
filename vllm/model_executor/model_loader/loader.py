@@ -24,7 +24,8 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
 # UPSTREAM SYNC: needed for sparsity
 from vllm.model_executor.model_loader.weight_utils import (
-    download_weights_from_hf, filter_files_not_needed_for_inference,
+    download_safetensors_index_file_from_hf, download_weights_from_hf,
+    filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     get_quant_config, get_sparse_config, initialize_dummy_weights,
     np_cache_weights_iterator, pt_weights_iterator,
     safetensors_weights_iterator)
@@ -209,7 +210,19 @@ class DefaultModelLoader(BaseModelLoader):
                     use_safetensors = True
                 break
 
-        if not use_safetensors:
+        if use_safetensors:
+            # For models like Mistral-7B-Instruct-v0.3
+            # there are both sharded safetensors files and a consolidated
+            # safetensors file. Using both breaks.
+            # Here, we download the `model.safetensors.index.json` and filter
+            # any files not found in the index.
+            if not is_local:
+                download_safetensors_index_file_from_hf(
+                    model_name_or_path, self.load_config.download_dir,
+                    revision)
+            hf_weights_files = filter_duplicate_safetensors_files(
+                hf_weights_files, hf_folder)
+        else:
             hf_weights_files = filter_files_not_needed_for_inference(
                 hf_weights_files)
 
@@ -444,6 +457,16 @@ class ShardedStateLoader(BaseModelLoader):
                     result[k] = t
         return result
 
+    def _prepare_weights(self, model_name_or_path: str,
+                         revision: Optional[str]):
+        if os.path.isdir(model_name_or_path):
+            return model_name_or_path
+        else:
+            allow_patterns = ["*.safetensors"]
+            return download_weights_from_hf(model_name_or_path,
+                                            self.load_config.download_dir,
+                                            allow_patterns, revision)
+
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
@@ -454,6 +477,10 @@ class ShardedStateLoader(BaseModelLoader):
         from safetensors.torch import safe_open
 
         from vllm.distributed import get_tensor_model_parallel_rank
+
+        local_model_path = self._prepare_weights(model_config.model,
+                                                 model_config.revision)
+
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
@@ -461,7 +488,7 @@ class ShardedStateLoader(BaseModelLoader):
                                           cache_config)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
-                model_config.model,
+                local_model_path,
                 self.pattern.format(rank=rank, part="*"),
             )
             filepaths = glob.glob(pattern)

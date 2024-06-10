@@ -62,7 +62,7 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`GPTBigCodeForCausalLM`
     - StarCoder, SantaCoder, WizardCoder
     - :code:`bigcode/starcoder`, :code:`bigcode/gpt_bigcode-santacoder`, :code:`WizardLM/WizardCoder-15B-V1.0`, etc.
-    -
+    - ✅︎
   * - :code:`GPTJForCausalLM`
     - GPT-J
     - :code:`EleutherAI/gpt-j-6b`, :code:`nomic-ai/gpt4all-j`, etc.
@@ -118,10 +118,14 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`PhiForCausalLM`
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
-    -
+    - ✅︎
   * - :code:`Phi3ForCausalLM`
     - Phi-3
     - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, etc.
+    -
+  * - :code:`Phi3SmallForCausalLM`
+    - Phi-3-Small
+    - :code:`microsoft/Phi-3-small-8k-instruct`, :code:`microsoft/Phi-3-small-128k-instruct`, etc.
     -
   * - :code:`QWenLMHeadModel`
     - Qwen

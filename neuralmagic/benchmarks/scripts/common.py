@@ -5,12 +5,13 @@ import asyncio
 import json
 import random
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, cast
 
 from transformers import PreTrainedTokenizerBase
 
 from vllm import LLM, SamplingParams
 from vllm import __version__ as __vllm_version__
+from vllm.inputs import PromptStrictInputs
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -139,8 +140,7 @@ def warmup_vllm_engine(engine: LLM,
             max_tokens=output_len,
         )
         engine._add_request(
-            prompt=prompt,
-            prompt_token_ids=None,
+            inputs=cast(PromptStrictInputs, prompt),
             params=sampling_params,
         )
 

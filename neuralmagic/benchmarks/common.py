@@ -28,7 +28,10 @@ def download_model(model: str) -> None:
 def max_model_length_from_model_id(model: str,
                                    trust_remote_code: bool = False) -> int:
     config = get_config(model, trust_remote_code=trust_remote_code)
-    return _get_and_verify_max_len(config, max_model_len=None)
+    return _get_and_verify_max_len(config,
+                                   max_model_len=None,
+                                   disable_sliding_window=False,
+                                   sliding_window_len=None)
 
 
 def script_args_to_cla(config: NamedTuple) -> Iterable[dict]:

@@ -87,8 +87,13 @@ def cutlass_int8_gemm_helper(m: int,
 @pytest.mark.parametrize("k", [128, 496, 1024])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.skipif(capability < 89,
-                    reason="FP8 is not supported on this GPU type.")
+# UPSTREAM SYNC: This is currently 90, because we need CUDA 12.4
+#   to use the cutlass fp8 kernels + we do not have this in our
+#   automation system yet.
+@pytest.mark.skipif(capability < 90,
+                    reason="FP8 cutlass is not supported on this GPU "
+                    "type because we need CUDA 12.4 + we do "
+                    "not have this in automation yet.")
 def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
                           per_out_ch: bool):
     cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch)
@@ -116,8 +121,13 @@ def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.skipif(capability < 89,
-                    reason="FP8 is not supported on this GPU type.")
+# UPSTREAM SYNC: This is currently 90, because we need CUDA 12.4
+#   to use the cutlass fp8 kernels + we do not have this in our
+#   automation system yet.
+@pytest.mark.skipif(capability < 90,
+                    reason="FP8 cutlass is not supported on this GPU "
+                    "type because we need CUDA 12.4 + we do "
+                    "not have this in automation yet.")
 def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                        out_dtype: Type[torch.dtype]):
     cutlass_fp8_gemm_helper(512, 512, 512, per_act_token, per_out_ch,
@@ -127,8 +137,13 @@ def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.skipif(capability < 89,
-                    reason="FP8 is not supported on this GPU type.")
+# UPSTREAM SYNC: This is currently 90, because we need CUDA 12.4
+#   to use the cutlass fp8 kernels + we do not have this in our
+#   automation system yet.
+@pytest.mark.skipif(capability < 90,
+                    reason="FP8 cutlass is not supported on this GPU "
+                    "type because we need CUDA 12.4 + we do "
+                    "not have this in automation yet.")
 def test_cutlass_fp8_gemm_devices(per_act_token: bool, per_out_ch: bool,
                                   device: str):
     cutlass_fp8_gemm_helper(512, 512, 512, per_act_token, per_out_ch,
@@ -151,8 +166,13 @@ def test_cutlass_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
 # kernel must handle any M thrown at it.
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.skipif(capability < 89,
-                    reason="FP8 is not supported on this GPU type.")
+# UPSTREAM SYNC: This is currently 90, because we need CUDA 12.4
+#   to use the cutlass fp8 kernels + we do not have this in our
+#   automation system yet.
+@pytest.mark.skipif(capability < 90,
+                    reason="FP8 cutlass is not supported on this GPU "
+                    "type because we need CUDA 12.4 + we do "
+                    "not have this in automation yet.")
 def test_cutlass_fp8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool):
     for nk in range(32, 128, 32):
         for m in range(1, 128):
@@ -189,4 +209,45 @@ def test_cutlass_subset():
                         scale_b *
                         b.to(dtype=torch.float32)).to(dtype=torch.bfloat16)
 
+    assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
+
+
+# Test to make sure cuda graphs work
+class CutlassLayer(torch.nn.Module):
+
+    def __init__(self, b, scale_a, scale_b, out_dtype):
+        super().__init__()
+        self.b = b
+        self.scale_a = scale_a
+        self.scale_b = scale_b
+        self.out_dtype = out_dtype
+
+    def forward(self, a):
+        return ops.cutlass_scaled_mm_dq(a, self.b, self.scale_a, self.scale_b,
+                                        self.out_dtype)
+
+
+def test_cutlass_cuda_graph():
+    m, n, k = 512, 512, 512
+
+    a = to_int8(torch.randn((m, k), device="cuda"))
+    b = to_int8(torch.randn((n, k), device="cuda").t())
+
+    scale_a = (torch.randn((m, 1), device="cuda", dtype=torch.float32) / 10)
+    scale_b = (torch.randn((1, n), device="cuda", dtype=torch.float32) / 10)
+
+    # Construct a trivial model with a single layer that calls a CUTLASS kernel
+    model = CutlassLayer(b, scale_a, scale_b, torch.bfloat16)
+
+    # Run the model with a cuda graph
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            out = model(a)
+    out.zero_()
+    g.replay()
+
+    baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
+                        scale_b * b.to(dtype=torch.float32)).to(torch.bfloat16)
     assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)

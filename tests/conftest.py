@@ -14,6 +14,7 @@ from tests.nm_utils.logging import make_logger
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
+from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.sequence import MultiModalData
 
@@ -563,12 +564,13 @@ class VllmRunner:
         block_size: int = 16,
         enable_chunked_prefill: bool = False,
         swap_space=4,
+        trust_remote_code: bool = True,
         **kwargs,
     ) -> None:
         self.model = LLM(
             model=model_name,
             tokenizer=tokenizer_name,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             dtype=dtype,
             swap_space=swap_space,
             disable_log_stats=disable_log_stats,
@@ -587,12 +589,22 @@ class VllmRunner:
     ) -> List[Tuple[List[int], str]]:
         if images is not None:
             assert len(prompts) == images.shape[0]
-        req_outputs = self.model.generate(
-            prompts,
-            sampling_params=sampling_params,
-            multi_modal_data=MultiModalData(type=MultiModalData.Type.IMAGE,
-                                            data=images)
-            if images is not None else None)
+
+        prompt_inputs: List[PromptInputs] = []
+        for i, prompt in enumerate(prompts):
+            image = None if images is None else images[i:i + 1]
+            mm_data = None if image is None else MultiModalData(
+                type=MultiModalData.Type.IMAGE,
+                data=image,
+            )
+
+            prompt_inputs.append({
+                "prompt": prompt,
+                "multi_modal_data": mm_data,
+            })
+
+        req_outputs = self.model.generate(prompt_inputs,
+                                          sampling_params=sampling_params)
         outputs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
@@ -683,28 +695,6 @@ def vllm_runner():
 
 # UPSTREAM SYNC: needed for nm-automation
 class VllmRunnerNm(VllmRunner):
-
-    def __init__(
-        self,
-        model_name: str,
-        sparsity: Optional[str] = None,
-        tokenizer_name: Optional[str] = None,
-        dtype: str = "half",
-        disable_log_stats: bool = True,
-        tensor_parallel_size: int = 1,
-        max_model_len: Optional[int] = None,
-    ) -> None:
-        self.model = LLM(
-            model=model_name,
-            sparsity=sparsity,
-            tokenizer=tokenizer_name,
-            trust_remote_code=True,
-            dtype=dtype,
-            swap_space=0,
-            disable_log_stats=disable_log_stats,
-            tensor_parallel_size=tensor_parallel_size,
-            max_model_len=max_model_len,
-        )
 
     def generate_w_logprobs(
         self,

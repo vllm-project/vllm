@@ -1,7 +1,3 @@
-# flake8: noqa
-# UPSTREAM SYNC: noqa is required for passing ruff.
-# This file has been modified by Neural Magic
-
 import datetime
 import importlib.util
 import io
@@ -98,7 +94,6 @@ class cmake_build_ext(build_ext):
             # when it is set, we reduce `num_jobs` to avoid
             # overloading the system.
             nvcc_threads = envs.NVCC_THREADS
-            print(f"NVCC THREADS {nvcc_threads}")
             if nvcc_threads is not None:
                 nvcc_threads = int(nvcc_threads)
                 logger.info(
@@ -383,11 +378,8 @@ def get_requirements() -> List[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if "vllm-nccl-cu12" in req:
-                req = req.replace("vllm-nccl-cu12",
-                                  f"vllm-nccl-cu{cuda_major}")
-            elif ("vllm-flash-attn" in req
-                  and not (cuda_major == "12" and cuda_minor == "1")):
+            if ("vllm-flash-attn" in req
+                    and not (cuda_major == "12" and cuda_minor == "1")):
                 # vllm-flash-attn is built only for CUDA 12.1.
                 # Skip for other versions.
                 continue
@@ -420,7 +412,8 @@ if not _is_neuron():
 _sparsity_deps = ["nm-magic-wand-nightly"]
 nm_release_type = os.getenv(NM_RELEASE_TYPE)
 if nm_release_type == 'RELEASE':
-    # gate magic-wand version in nm-vllm for release; for nightly, we always install the latest
+    # Gate magic-wand version in nm-vllm for release;
+    # For nightly, we always install the latest
     magic_wand_version_dep = "0.2.2"
     _sparsity_deps = [f"nm-magic-wand~={magic_wand_version_dep}"]
 

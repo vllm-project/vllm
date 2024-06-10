@@ -21,7 +21,7 @@ Launch Prometheus and Grafana servers with `docker compose`:
 docker compose up
 ```
 
-Submit some sample requests to the server (after `pip install aiohttp`):
+Submit some sample requests to the server:
 ```bash
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 
@@ -30,7 +30,8 @@ python3 ../../benchmarks/benchmark_serving.py \
     --tokenizer mistralai/Mistral-7B-v0.1 \
     --backend openai \
     --endpoint /v1/completions \
-    --dataset ShareGPT_V3_unfiltered_cleaned_split.json \
+    --dataset-name sharegpt \
+    --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
     --request-rate 3.0
 ```
 

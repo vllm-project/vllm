@@ -1,5 +1,3 @@
-# flake8: noqa
-# UPSTREAM SYNC: noqa is required for passing ruff run on nm-automation
 """
 This example shows how to use the multi-LoRA functionality
 for offline inference.
