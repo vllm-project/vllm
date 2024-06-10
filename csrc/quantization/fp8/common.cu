@@ -21,13 +21,6 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
 
 #define FP8_E4M3_MAX std::numeric_limits<c10::Float8_e4m3fn>::max()
 
-template <typename scalar_t>
-__device__ __forceinline__ c10::Float8_e4m3fn scaled_fp8_conversion_old(
-    const scalar_t val, const float scale) {
-  float x = static_cast<float>(val) / inverted_scale;
-  float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
-  return static_cast<c10::Float8_e4m3fn>(r);
-}
 
 template <typename scalar_t>
 __device__ __forceinline__ c10::Float8_e4m3fn scaled_fp8_conversion(
@@ -80,18 +73,6 @@ __global__ void segmented_max_reduction(float* __restrict__ scale,
 }
 
 template <typename scalar_t>
-__global__ void scaled_fp8_quant_kernel(c10::Float8_e4m3fn* __restrict__ out,
-                                        const scalar_t* __restrict__ input,
-                                        const float* __restrict__ scale,
-                                        int64_t num_elems) {
-  int i = blockDim.x * blockIdx.x + threadIdx.x;
-  while (i < num_elems) {
-    out[i] = scaled_fp8_conversion_old(input[i], *scale);
-    i += blockDim.x * gridDim.x;
-  }
-}
-
-template <typename scalar_t>
 struct __align__(8) vec4_t {
   scalar_t x;
   scalar_t y;
@@ -107,10 +88,10 @@ typedef struct __align__(4) {
 } float8x4_t;
 
 template <typename scalar_t>
-__global__ void scaled_fp8_quant_kernel_v2(c10::Float8_e4m3fn* __restrict__ out,
-                                        const scalar_t* __restrict__ input,
-                                        const float*  __restrict__ scale,
-                                        int64_t num_elems) {
+__global__ void scaled_fp8_quant_kernel(c10::Float8_e4m3fn* __restrict__ out,
+                                      const scalar_t* __restrict__ input,
+                                      const float*  __restrict__ scale,
+                                      int64_t num_elems) {
   int tid = blockDim.x * blockIdx.x + threadIdx.x;
 
   // Invert the scale so that we can use multiplications to avoid expensive division.
@@ -156,26 +137,7 @@ void static_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
       input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
         vllm::scaled_fp8_quant_kernel<scalar_t><<<grid, block, 0, stream>>>(
             out.data_ptr<c10::Float8_e4m3fn>(), input.data_ptr<scalar_t>(),
-            scale.data_ptr<float>(), num_elems);
-      });
-}
-
-void static_scaled_fp8_quant_v2(torch::Tensor& out,    // [..., d]
-                             torch::Tensor& input,  // [..., d]
-                             torch::Tensor& scale)  // [1]
-{
-  int64_t num_tokens = input.numel() / input.size(-1);
-  int64_t num_elems = input.numel();
-  dim3 grid(num_tokens);
-  dim3 block(1024);
-  const float inverted_scale = 1.0f / *(scale.data_ptr<float>());
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(), "scaled_fp8_quant_kernel_v2", [&] {
-        vllm::scaled_fp8_quant_kernel_v2<scalar_t><<<grid, block, 0, stream>>>(
-            out.data_ptr<c10::Float8_e4m3fn>(), input.data_ptr<scalar_t>(),
-            inverted_scale, num_elems);
+            scale, num_elems);
       });
 }
 
