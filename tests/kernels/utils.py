@@ -92,7 +92,7 @@ def ref_masked_attention(query: torch.Tensor,
     * key: batch_size x kv_padded_seq_len x num_heads x head_size
     * value: batch_size x kv_padded_seq_len x num_heads x head_size
     * scale: Attention scale factor
-    * Custom mask: custom attention mask; good place to inject a causal
+    * custom_mask: custom attention mask; good place to inject a causal
       attention mask
     * q_seq_lens: list of unpadded query seq_lens for each batch index
     * kv_seq_lens: list of unpadded key/value seq_lens for each batch index
