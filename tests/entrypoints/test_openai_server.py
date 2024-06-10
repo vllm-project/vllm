@@ -582,6 +582,7 @@ async def test_chat_completion_stream_options(server,
         temperature=0.0,
         stream=True,
         stream_options={"include_usage": True})
+
     async for chunk in stream:
         if chunk.choices[0].finish_reason is None:
             assert chunk.usage is None

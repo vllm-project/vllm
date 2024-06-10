@@ -365,8 +365,7 @@ class OpenAIServingChat(OpenAIServing):
                 final_usage = UsageInfo(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=previous_num_tokens[i],
-                    total_tokens=prompt_tokens +
-                    previous_num_tokens[i],
+                    total_tokens=prompt_tokens + previous_num_tokens[i],
                 )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
