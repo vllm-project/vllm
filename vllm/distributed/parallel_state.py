@@ -429,12 +429,12 @@ def is_in_the_same_node(pg: ProcessGroup):
     torch.distributed.barrier(group=pg)
 
     # clean up the shared memory segment
-    if rank == 0:
-        if shm:
-            shm.unlink()
-    else:
-        if shm:
-            with contextlib.suppress(OSError):
+    with contextlib.suppress(OSError):
+        if rank == 0:
+            if shm:
+                shm.unlink()
+        else:
+            if shm:
                 # fix to https://stackoverflow.com/q/62748654/9191338
                 resource_tracker.unregister(
                     shm._name, "shared_memory")  # type: ignore[attr-defined]
