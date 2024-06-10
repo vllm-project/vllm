@@ -262,12 +262,6 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
             image_features: For IMAGE_FEATURES, expects a batch with shape
                 [1, 576, 1024].
         """
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        tensor = torch.ones(24, device=device)
-        print("IN", tensor)
-        hidden_states = self.language_model(tensor, positions, kv_caches,
-                                            attn_metadata)
-        return hidden_states
         image_input = self._parse_and_validate_image_input(**kwargs)
 
         if image_input is not None:
