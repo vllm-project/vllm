@@ -168,7 +168,7 @@ void rotary_embedding_gptj_impl(
 };  // namespace
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
-                      torch::Tensor& key, int head_size,
+                      torch::Tensor& key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox) {
   int num_tokens = query.numel() / query.size(-1);
   int rot_dim = cos_sin_cache.size(1);
