@@ -28,7 +28,7 @@ steps:
         command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" ; ")) | safe }}"
         env:
           DOCKER_BUILDKIT: "1"
-        soft_fail: true
+        soft_fail: false
     {% endif %}
     {% endfor %}
 
