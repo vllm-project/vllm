@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import torch
 
@@ -15,6 +15,16 @@ from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
 
 logger = init_logger(__name__)
+
+
+class ModelRunnerInput(NamedTuple):
+    input_tokens: torch.Tensor
+    input_positions: torch.Tensor
+    attn_metadata: AttentionMetadata
+    pooling_metadata: PoolingMetadata
+    lora_requests: Set[LoRARequest]
+    lora_mapping: Optional[LoRAMapping]
+    multi_modal_input: Dict[str, torch.Tensor]
 
 
 class EmbeddingModelRunner(ModelRunner):
@@ -46,14 +56,11 @@ class EmbeddingModelRunner(ModelRunner):
     @torch.inference_mode()
     def execute_model(
         self,
-        broadcast_inputs: Dict[str, Any],
-        aux: Optional[List[Any]],
+        modelrunner_input: ModelRunnerInput,
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         (input_tokens, input_positions, attn_metadata, pooling_metadata,
-         lora_requests, lora_mapping, multi_modal_input
-         ) = self.convert_broadcast_inputs_to_modelrunner_input(
-             broadcast_inputs, aux)
+         lora_requests, lora_mapping, multi_modal_input) = modelrunner_input
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -144,8 +151,9 @@ class EmbeddingModelRunner(ModelRunner):
             pooling_metadata = PoolingMetadata(seq_groups=None,
                                                seq_data=None,
                                                prompt_lens=None)
-        return (input_tokens, input_positions, attn_metadata, pooling_metadata,
-                lora_requests, lora_mapping, multi_modal_kwargs)
+        return ModelRunnerInput(input_tokens, input_positions, attn_metadata,
+                                pooling_metadata, lora_requests, lora_mapping,
+                                multi_modal_kwargs)
 
     def prepare_modelrunner_input(
         self,

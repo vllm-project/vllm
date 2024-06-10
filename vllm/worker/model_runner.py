@@ -702,8 +702,7 @@ class ModelRunner:
         return metadata_dict, [sampling_metadata]
 
     def convert_broadcast_inputs_to_modelrunner_input(
-            self, metadata_dict: Dict[str, Any],
-            aux: Optional[List[Any]]) -> ModelRunnerInput:
+            self, metadata_dict: Dict[str, Any], aux: Optional[List[Any]]):
         input_tokens = metadata_dict.pop("input_tokens")
         input_positions = metadata_dict.pop("input_positions")
         selected_token_indices = metadata_dict.pop("selected_token_indices")
