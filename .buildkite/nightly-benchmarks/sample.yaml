@@ -9,7 +9,7 @@ steps:
           containers:
           # - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT
           # TODO(simon): check latest main branch or use the PR image.
-          - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
             command:
             - bash .buildkite/nightly-benchmarks/run-vllm-benchmarks.sh
             resources:
@@ -37,7 +37,7 @@ steps:
       queue: H100
     plugins:
     - docker#v5.11.0:
-        image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
         command:
         - bash .buildkite/nightly-benchmarks/run-vllm-benchmarks.sh
         propagate-environment: true
