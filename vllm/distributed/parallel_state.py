@@ -40,6 +40,7 @@ _DEVICE_WORLD_GROUP = None
 # group with `gloo` backend, to allow direct coordination between
 # processes through the CPU.
 _CPU_WORLD_GROUP = None
+_SHM_WORLD_BUFFER = None
 
 # In summary, after calling `init_distributed_environment`, we will
 # always have two groups: one for device-specific (and is the default)
@@ -98,11 +99,15 @@ def init_distributed_environment(
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank)
-        global _DEVICE_WORLD_GROUP, _CPU_WORLD_GROUP
+        global _DEVICE_WORLD_GROUP, _CPU_WORLD_GROUP, _SHM_WORLD_BUFFER
         _DEVICE_WORLD_GROUP = torch.distributed.group.WORLD
         ranks = list(range(torch.distributed.get_world_size()))
         _CPU_WORLD_GROUP = torch.distributed.new_group(ranks=ranks,
                                                        backend="gloo")
+        from vllm.distributed.device_communicators.shm_broadcast import ShmRingBuffer
+        _SHM_WORLD_BUFFER = ShmRingBuffer(pg=_CPU_WORLD_GROUP,
+                                          max_chunk_bytes=1024 * 1024,
+                                          max_chunks=2)
         # set the local rank
         # local_rank is not available in torch ProcessGroup,
         # see https://github.com/pytorch/pytorch/issues/122816
