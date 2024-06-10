@@ -161,7 +161,7 @@ jq -c '.[]' $LATENCY_TESTS | while read -r params; do
 done
 
 # upload artifacts
-/workspace/buildkite-agent artifact upload "/tmp/vllm/*"
+/workspace/buildkite-agent artifact upload "/tmp/vllm/*/*"
 
 exit 1
 
