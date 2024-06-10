@@ -6,18 +6,18 @@ import torch
 import torch.distributed
 
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceGroupMetadata)
-from vllm.spec_decode.interfaces import SpeculativeProposals
+from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeProposer
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.lora.request import LoRARequest
 
 from vllm.distributed.parallel_state import patch_tensor_parallel_group
 from vllm.config import ParallelConfig
-from vllm.worker.worker_base import WorkerBase
+from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 
 logger = logging.getLogger(__name__)
 
 
-class SingleTpWorker(WorkerBase):
+class SingleTpWorker(ProposerWorkerBase):
     """Class which allows a speculative draft model to run with tensor parallel
     degree of 1, while target model runs with larger tensor parallel degree.
     This reduces the overhead of small draft models.
@@ -44,16 +44,14 @@ class SingleTpWorker(WorkerBase):
 
     def __init__(
         self,
-        worker: WorkerBase, # MultiStepWorker
+        worker: ProposerWorkerBase,
     ):
         self._worker = worker
         self._single_tp_group = None
+        self._single_tp_cpu_group = None
 
         # Lazy initialization list.
-        self._proposer: Top1Proposer
-
-    def is_driver(self) -> bool:
-        return self._worker.is_driver()
+        self._proposer: SpeculativeProposer
 
     def init_device(self):
         """Initialize the model on all ranks.
@@ -80,7 +78,6 @@ class SingleTpWorker(WorkerBase):
 
 
     def set_include_gpu_probs_tensor(self):
-        # Need include_gpu_probs_tensor for multi_step_worker
         self._worker.set_include_gpu_probs_tensor()
 
     def load_model(self):
@@ -105,8 +102,8 @@ class SingleTpWorker(WorkerBase):
     @torch.inference_mode()
     def sampler_output(
         self,
+        execute_model_req: ExecuteModelRequest,
         sample_len: int,
-        execute_model_req: ExecuteModelRequest
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass sample_len times. Returns the list of
         sampler output, one per model forward pass, along with indicator of
@@ -117,7 +114,7 @@ class SingleTpWorker(WorkerBase):
         """
 
         ## Worker-side logic: skip
-        if not self.is_driver():
+        if execute_model_req is None:
             logger.info("Workers should not make proposals")
             return None
 
@@ -152,36 +149,32 @@ class SingleTpWorker(WorkerBase):
 
     def get_spec_proposals(
         self,
-        proposal_len: int,
-        execute_model_req: ExecuteModelRequest) -> SpeculativeProposals:
+        execute_model_req: ExecuteModelRequest,
+    ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
         with patch_tensor_parallel_group(self._single_tp_group, self._single_tp_cpu_group):
-            return self._proposer.get_proposals(proposal_len, execute_model_req)
+            return self._proposer.get_spec_proposals(execute_model_req)
 
     @torch.inference_mode()
-    def execute_model(self, execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        if execute_model_req is None: #if not self._worker.is_driver_worker:
+            return []
+
         with patch_tensor_parallel_group(self._single_tp_group, self._single_tp_cpu_group):
             return self._execute_model_tp1(execute_model_req)
 
     def _execute_model_tp1(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest]
     ) -> List[SamplerOutput]:
         logger.info("SingleTPWorker.execute_model_prefill()")
 
-        if execute_model_req is None:
-            seq_group_metadata_list = None
-        else:
-            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-
-        if not self._worker.is_driver():
-            logger.info("Draft worker returns []")
-            return []
-
-        assert seq_group_metadata_list is not None
-        assert execute_model_req is not None
+        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         num_seq_groups = len(seq_group_metadata_list)
         blocks_to_swap_in = execute_model_req.blocks_to_swap_in
         blocks_to_swap_out = execute_model_req.blocks_to_swap_out
