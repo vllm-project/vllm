@@ -1,0 +1,17 @@
+name: Get additinal docker image tag based on build type
+description: 'docker image tag for nm-vllm'
+inputs:
+  build_type:
+    description: "type of nm-vllm to install for the docker image: NIGHTLY (default) or RELEASE"
+    type: string
+    default: 'NIGHTLY'
+runs:
+  using: composite
+  steps:
+  - run: |
+      tag=nightly
+      if [[ "${build_type}" = "RELEASE" ]]; then
+          tag=latest
+      fi
+      echo "tag=${tag}" >> $GITHUB_OUTPUT
+    shell: bash

@@ -49,11 +49,18 @@ jobs:
             id: setup
             uses: ./.github/actions/nm-setup-nvidia-container-toolkit/
 
+          - name: Get image additional tag
+            id: tag
+            uses: ./.github/actions/nm-get-tag/
+            with:
+              build_type: ${{ inputs.build_type }}
+
           - name: Build image
             id: build
             uses: ./.github/actions/nm-build-docker/
             with:
               docker_tag: ${{ inputs.docker_tag }}
+              additional_tag: ${{ steps.tag.outputs.tag }}
               build_type: ${{ inputs.build_type }}
               build_version: ${{ inputs.build_version }}
 
@@ -66,11 +73,11 @@ jobs:
               push: true
               tags: ghcr.io/neuralmagic/nm-vllm-openai:${{ inputs.docker_tag }}
 
-          - name: Push image (latest for RELEASE)
+          - name: Push image
             uses: docker/build-push-action@v5
-            if: ${{ inputs.push_to_repository == 'yes' && steps.build.outputs.status == 0 && inputs.build_type == 'RELEASE' }}
+            if: ${{ inputs.push_to_repository == 'yes' && steps.build.outputs.status == 0 }}
             with:
               context: .
               target: vllm-openai
               push: true
-              tags: ghcr.io/neuralmagic/nm-vllm-openai:latest
+              tags: ghcr.io/neuralmagic/nm-vllm-openai:${{ steps.tag.outputs.tag }}
