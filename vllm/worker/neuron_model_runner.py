@@ -139,7 +139,7 @@ class NeuronModelRunner:
 
         return input_tokens, input_positions, input_block_ids
 
-    def prepare_input_tensors(
+    def prepare_modelrunner_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, SamplingMetadata]:
@@ -173,7 +173,7 @@ class NeuronModelRunner:
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_block_ids, sampling_metadata
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+         ) = self.prepare_modelrunner_input(seq_group_metadata_list)
 
         hidden_states = self.model(
             input_ids=input_tokens,

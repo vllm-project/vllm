@@ -51,8 +51,8 @@ class EmbeddingModelRunner(ModelRunner):
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         (input_tokens, input_positions, attn_metadata, pooling_metadata,
-         lora_requests, lora_mapping,
-         multi_modal_input) = self.convert_broadcast_inputs_to_model_input(
+         lora_requests, lora_mapping, multi_modal_input
+         ) = self.convert_broadcast_inputs_to_modelrunner_input(
              broadcast_inputs, aux)
 
         if self.lora_config:
@@ -125,7 +125,7 @@ class EmbeddingModelRunner(ModelRunner):
 
         return metadata_dict, [pooling_metadata]
 
-    def convert_broadcast_inputs_to_model_input(
+    def convert_broadcast_inputs_to_modelrunner_input(
             self,
             metadata_dict: Dict[str, Any],
             aux: Optional[List[Any]] = None):
@@ -147,7 +147,7 @@ class EmbeddingModelRunner(ModelRunner):
         return (input_tokens, input_positions, attn_metadata, pooling_metadata,
                 lora_requests, lora_mapping, multi_modal_kwargs)
 
-    def prepare_input_tensors(
+    def prepare_modelrunner_input(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
@@ -155,7 +155,7 @@ class EmbeddingModelRunner(ModelRunner):
         # TODO: deprecate this function. It is only used in tests.
         assert self.is_driver_worker
         assert seq_group_metadata_list is not None
-        return self.convert_broadcast_inputs_to_model_input(
+        return self.convert_broadcast_inputs_to_modelrunner_input(
             *self.prepare_inputs_to_broadcast(seq_group_metadata_list))
 
     def _prepare_pooling(

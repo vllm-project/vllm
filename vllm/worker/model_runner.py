@@ -70,6 +70,16 @@ class ModelInput(NamedTuple):
         )
 
 
+class ModelRunnerInput(NamedTuple):
+    input_tokens: torch.Tensor
+    input_positions: torch.Tensor
+    attn_metadata: AttentionMetadata
+    sampling_metadata: SamplingMetadata
+    lora_requests: Set[LoRARequest]
+    lora_mapping: Optional[LoRAMapping]
+    multi_modal_kwargs: Dict[str, torch.Tensor]
+
+
 class ModelRunner:
 
     def __init__(
@@ -691,9 +701,9 @@ class ModelRunner:
 
         return metadata_dict, [sampling_metadata]
 
-    def convert_broadcast_inputs_to_model_input(self, metadata_dict: Dict[str,
-                                                                          Any],
-                                                aux: Optional[List[Any]]):
+    def convert_broadcast_inputs_to_modelrunner_input(
+            self, metadata_dict: Dict[str, Any],
+            aux: Optional[List[Any]]) -> ModelRunnerInput:
         input_tokens = metadata_dict.pop("input_tokens")
         input_positions = metadata_dict.pop("input_positions")
         selected_token_indices = metadata_dict.pop("selected_token_indices")
@@ -714,32 +724,28 @@ class ModelRunner:
                 categorized_sample_indices=None,
                 num_prompts=0,
             )
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_kwargs)
+        return ModelRunnerInput(input_tokens, input_positions, attn_metadata,
+                                sampling_metadata, lora_requests, lora_mapping,
+                                multi_modal_kwargs)
 
-    def prepare_input_tensors(
+    def prepare_modelrunner_input(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
-        # TODO: deprecate this function. It is only used in tests.
         assert self.is_driver_worker
         assert seq_group_metadata_list is not None
-        return self.convert_broadcast_inputs_to_model_input(
+        return self.convert_broadcast_inputs_to_modelrunner_input(
             *self.prepare_inputs_to_broadcast(seq_group_metadata_list))
 
     @torch.inference_mode()
     def execute_model(
         self,
-        broadcast_inputs: Dict[str, Any],
-        aux: Optional[List[Any]],
+        modelrunner_input: ModelRunnerInput,
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping,
-         multi_modal_kwargs) = self.convert_broadcast_inputs_to_model_input(
-             broadcast_inputs, aux)
+         lora_requests, lora_mapping, multi_modal_kwargs) = modelrunner_input
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -848,8 +854,7 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        inputs_to_broadcast, aux = self.prepare_inputs_to_broadcast(seqs)
-        self.execute_model(inputs_to_broadcast, aux, kv_caches)
+        self.execute_model(self.prepare_modelrunner_input(seqs), kv_caches)
         torch.cuda.synchronize()
         return
 

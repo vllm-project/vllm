@@ -270,7 +270,7 @@ class CPUModelRunner:
             attn_metadata,
         )
 
-    def prepare_input_tensors(
+    def prepare_modelrunner_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
@@ -334,7 +334,7 @@ class CPUModelRunner:
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+         ) = self.prepare_modelrunner_input(seq_group_metadata_list)
 
         model_executable = self.model
         execute_model_kwargs = {

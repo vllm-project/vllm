@@ -274,7 +274,9 @@ class Worker(WorkerBase):
         if num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(inputs_to_broadcast, aux,
+        modelrunner_input = self.model_runner.convert_broadcast_inputs_to_modelrunner_input(  # noqa
+            inputs_to_broadcast, aux)
+        output = self.model_runner.execute_model(modelrunner_input,
                                                  self.gpu_cache)
 
         # Worker only supports single-step execution. Wrap the output in a list
@@ -311,7 +313,10 @@ class Worker(WorkerBase):
         if num_seq_groups == 0:
             return False
 
-        self.model_runner.execute_model(data, None, self.gpu_cache)
+        modelrunner_input = self.model_runner.convert_broadcast_inputs_to_modelrunner_input(  # noqa
+            data, None)
+
+        self.model_runner.execute_model(modelrunner_input, self.gpu_cache)
         return True
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
