@@ -92,7 +92,7 @@ Alongside each architecture, we include some popular models that use it.
     - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
     -
   * - :code:`LlavaNextForConditionalGeneration`
-    - LLaVA-Next
+    - LLaVA-NeXT
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
     -
   * - :code:`MiniCPMForCausalLM`
