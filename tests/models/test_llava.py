@@ -94,14 +94,13 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
         for p in HF_IMAGE_PROMPTS
     ]
 
-    vllm_model = vllm_runner(model_id,
-                             dtype=dtype,
-                             enforce_eager=True,
-                             **vlm_config.as_cli_args_dict())
-    vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
-                                              max_tokens,
-                                              images=vllm_images)
-    del vllm_model
+    with vllm_runner(model_id,
+                     dtype=dtype,
+                     enforce_eager=True,
+                     **vlm_config.as_cli_args_dict()) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+                                                  max_tokens,
+                                                  images=vllm_images)
 
     for i in range(len(HF_IMAGE_PROMPTS)):
         hf_output_ids, hf_output_str = hf_outputs[i]
