@@ -119,13 +119,13 @@ def mock_sampler_factory(request):
         if value == "rejection_sampler":
             sampler = MagicMock(spec=RejectionSampler) 
             sampler.token_id_dtype = torch.int64
-            return sampler, None
+            return sampler
         elif value == "typical_acceptance_sampler":
             sampler = MagicMock(spec=TypicalAcceptanceSampler)
             sampler.token_id_dtype = torch.int64
-            return None, sampler
+            return sampler
         else:
-            return None, None  # Return None for both samplers if the value is not recognized
+            return None  # Return None for both samplers if the value is not recognized
     
     value = request.param  # Get the value passed to the fixture
     return create_samplers(value)
