@@ -5,6 +5,7 @@ import torch
 
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.spec_decode_base_sampler import SpecDecodeBaseSampler
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.layers.typical_acceptance_sampler import TypicalAcceptanceSampler
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
@@ -120,13 +121,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
         
-        rejection_sampler: RejectionSampler = None
-        typical_acceptance_sampler: TypicalAcceptanceSampler = None
+        sampler: SpecDecodeBaseSampler = None
         if draft_token_sampling_method == "rejection_sampler":
-            rejection_sampler = RejectionSampler(
+            sampler = RejectionSampler(
                 disable_bonus_tokens=disable_bonus_tokens, )
         elif draft_token_sampling_method == "typical_acceptance_sampler":
-            typical_acceptance_sampler = TypicalAcceptanceSampler(
+            sampler = TypicalAcceptanceSampler(
                 disable_bonus_tokens=disable_bonus_tokens,
                 posterior_threshold=\
                     typical_acceptance_sampler_posterior_threshold,
@@ -137,16 +137,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker,
             scorer_worker,
             disable_by_batch_size=disable_by_batch_size,
-            rejection_sampler=rejection_sampler,
-            typical_acceptance_sampler=typical_acceptance_sampler)
+            sampler=sampler)
 
 
     def __init__(
         self,
         proposer_worker: ProposerWorkerBase,
         scorer_worker: WorkerBase,
-        rejection_sampler: Optional[RejectionSampler] = None,
-        typical_acceptance_sampler: Optional[TypicalAcceptanceSampler] = None,
+        sampler: SpecDecodeBaseSampler,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
     ):
@@ -169,9 +167,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
         self.disable_by_batch_size = disable_by_batch_size or float("inf")
-        self.rejection_sampler = rejection_sampler
-        self.typical_acceptance_sampler = typical_acceptance_sampler
-        sampler = self.rejection_sampler or self.typical_acceptance_sampler
+        self.verification_sampler = sampler
         assert sampler is not None, "Sampler is Not set, which is not expected."
         self._metrics = AsyncMetricsCollector(
             sampler
@@ -194,10 +190,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.load_model()
 
         self._metrics.init_gpu_tensors(self.rank)
-        if (self.rejection_sampler is not None):
-            self.rejection_sampler.init_gpu_tensors(self.rank)
-        if (self.typical_acceptance_sampler is not None):
-            self.typical_acceptance_sampler.init_gpu_tensors(self.rank)
+        self.verification_sampler.init_gpu_tensors(self.rank)
             
         self.scorer = BatchExpansionTop1Scorer(
             scorer_worker=self.scorer_worker,
@@ -500,16 +493,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                 bonus_token_ids: torch.Tensor,
                                 proposal_probs: torch.Tensor,
                                 proposal_token_ids: torch.Tensor):
-        if self.rejection_sampler is not None:
-            accepted_token_ids = self.rejection_sampler(
+        if isinstance(self.verification_sampler, RejectionSampler):
+            accepted_token_ids = self.verification_sampler(
                 target_probs=proposal_verifier_probs,
                 bonus_token_ids=bonus_token_ids,
                 draft_probs=proposal_probs,
                 draft_token_ids=proposal_token_ids,
             )
         else:
-            assert self.typical_acceptance_sampler is not None
-            accepted_token_ids = self.typical_acceptance_sampler(
+            assert isinstance(self.verification_sampler, TypicalAcceptanceSampler)
+            accepted_token_ids = self.verification_sampler(
                 target_probs=proposal_verifier_probs,
                 bonus_token_ids=bonus_token_ids,
                 draft_token_ids=proposal_token_ids,
