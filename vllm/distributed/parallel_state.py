@@ -402,27 +402,30 @@ def is_in_the_same_node(pg: ProcessGroup):
     magic_message = b"magic_message"
     shm = None
 
-    with contextlib.suppress(OSError):
-        if rank == 0:
-            # create a shared memory segment
-            shm = shared_memory.SharedMemory(create=True, size=128)
-            shm.buf[:len(magic_message)] = magic_message
-            torch.distributed.broadcast_object_list([shm.name],
-                                                    src=ranks[0],
-                                                    group=pg)
-            is_in_the_same_node[0] = 1
-        else:
-            # try to open the shared memory segment
-            recv = [None]
-            torch.distributed.broadcast_object_list(recv,
-                                                    src=ranks[0],
-                                                    group=pg)
-            name = recv[0]
-            shm = shared_memory.SharedMemory(name=name)
-            if shm.buf[:len(magic_message)] == magic_message:
-                is_in_the_same_node[rank] = 1
-    if shm:
-        shm.close()
+    try:
+        with contextlib.suppress(OSError):
+            if rank == 0:
+                # create a shared memory segment
+                shm = shared_memory.SharedMemory(create=True, size=128)
+                shm.buf[:len(magic_message)] = magic_message
+                torch.distributed.broadcast_object_list([shm.name],
+                                                        src=ranks[0],
+                                                        group=pg)
+                is_in_the_same_node[0] = 1
+            else:
+                # try to open the shared memory segment
+                recv = [None]
+                torch.distributed.broadcast_object_list(recv,
+                                                        src=ranks[0],
+                                                        group=pg)
+                name = recv[0]
+                shm = shared_memory.SharedMemory(name=name)
+                if shm.buf[:len(magic_message)] == magic_message:
+                    is_in_the_same_node[rank] = 1
+    finally:
+        if shm:
+            shm.close()
+
     torch.distributed.barrier(group=pg)
 
     # clean up the shared memory segment
