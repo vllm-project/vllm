@@ -42,11 +42,16 @@ __global__ void LLGemm1_kernel(float4 *af4, __half2 *bf4, __half2 *c, const int 
       __half2 acch2;
       __half2 oval;
 
-      #pragma unroll
-      for (int i=0; i<NUM_A_ROWS_PER_BLOCK; i++) {
-        // rowA_elem4[i] holds 8 * half numbers seen as a single float4.
-        rowA_elem4[i] = load_ntmprl(&af4[row_addr + threadid + K / 8 * i]);
+      // As we later use warp shuffle operations, we may have more threads in the block
+      // than the actual available data, hence the if guard here.
+      if(threadid * 8 < K) {
+        #pragma unroll
+        for (int i=0; i<NUM_A_ROWS_PER_BLOCK; i++) {
+          // rowA_elem4[i] holds 8 * half numbers seen as a single float4.
+          rowA_elem4[i] = load_ntmprl(&af4[row_addr + threadid + K / 8 * i]);
+        }
       }
+
       colB_elem4x = bf4[threadid*4+0];
       colB_elem4y = bf4[threadid*4+1];
       colB_elem4z = bf4[threadid*4+2];
@@ -70,6 +75,8 @@ __global__ void LLGemm1_kernel(float4 *af4, __half2 *bf4, __half2 *c, const int 
         Af2 = *(ah2lptr+3);
         acch2 = __hfma2(Af2,colB_elem4w,acch2);
         S = __half22float2(acch2);
+
+        // See comment above concerning the if guard.
         if(threadid * 8 < K) {
             acc[i] = S.x + S.y;  // accumulation on float
         }
