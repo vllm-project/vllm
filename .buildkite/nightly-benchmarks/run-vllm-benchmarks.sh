@@ -9,7 +9,7 @@
 # Benchmarking results will be at /vllm/benchmarks/results/benchmark_results.md
 
 
-set -e
+# set -e
 set -o pipefail
 
 
@@ -159,6 +159,11 @@ jq -c '.[]' $LATENCY_TESTS | while read -r params; do
   kill_gpu_processes
 
 done
+
+# upload artifacts
+/workspace/buildkite-agent artifact upload "/tmp/vllm/*"
+
+exit 1
 
 
 
