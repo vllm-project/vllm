@@ -140,10 +140,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales) -> ()");
   ops.impl("cutlass_scaled_mm", torch::kCUDA, &cutlass_scaled_mm);
-
-  ops.def(
-      "cutlass_gemm(Tensor! out, Tensor a, Tensor b) -> ()");
-  ops.impl("cutlass_gemm", torch::kCUDA, &cutlass_gemm);
 #endif
 
   // Quantized GEMM for GPTQ.

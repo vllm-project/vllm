@@ -84,21 +84,6 @@ struct enable_sm89_to_sm90 : Kernel {
 };
 
 template <typename ElementD, typename OutputTileThreadMap>
-struct TrivialEpilogue {
- private:
-  using Accum = cutlass::epilogue::threadblock::VisitorAccFetch;
-
- public:
-  using EVTCompute = cutlass::epilogue::threadblock::Sm80EVT<Accum>;
-  using ArgumentType = typename EVTCompute::Arguments;
-
-  template <typename... Args>
-  static ArgumentType prepare_args(Args... args) {
-    return {};
-  }
-};
-
-template <typename ElementD, typename OutputTileThreadMap>
 struct ScaledEpilogue {
  private:
   using Accum = cutlass::epilogue::threadblock::VisitorAccFetch;
@@ -381,106 +366,6 @@ void cutlass_scaled_mm_sm89(torch::Tensor& out, torch::Tensor const& a,
           cutlass::arch::Sm89, enable_sm89_to_sm90, cutlass::float_e4m3_t,
           cutlass::half_t, ScaledEpilogue, TileShape, WarpShape,
           InstructionShape, 5>>(out, a, b, a_scales, b_scales);
-    }
-  }
-}
-
-void cutlass_gemm_sm75(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b) {
-  TORCH_CHECK(a.dtype() == torch::kInt8);
-  TORCH_CHECK(b.dtype() == torch::kInt8);
-
-  using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
-  using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
-  using InstructionShape = typename cutlass::gemm::GemmShape<8, 8, 16>;
-
-  if (out.dtype() == torch::kInt8) {
-    return cutlass_gemm_caller<cutlass_2x_gemm<
-        cutlass::arch::Sm75, enable_sm75_to_sm80, int8_t, int8_t,
-        TrivialEpilogue, TileShape, WarpShape, InstructionShape, 2>>(out, a, b);
-  } else if (out.dtype() == torch::kBFloat16) {
-    return cutlass_gemm_caller<cutlass_2x_gemm<
-        cutlass::arch::Sm75, enable_sm75_to_sm80, int8_t, cutlass::bfloat16_t,
-        TrivialEpilogue, TileShape, WarpShape, InstructionShape, 2>>(out, a, b);
-  } else {
-    TORCH_CHECK(out.dtype() == torch::kFloat16);
-    return cutlass_gemm_caller<cutlass_2x_gemm<
-        cutlass::arch::Sm75, enable_sm75_to_sm80, int8_t, cutlass::half_t,
-        TrivialEpilogue, TileShape, WarpShape, InstructionShape, 2>>(out, a, b);
-  }
-}
-
-void cutlass_gemm_sm80(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b) {
-  TORCH_CHECK(a.dtype() == torch::kInt8);
-  TORCH_CHECK(b.dtype() == torch::kInt8);
-
-  using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
-  using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
-  using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
-
-  if (out.dtype() == torch::kInt8) {
-    return cutlass_gemm_caller<cutlass_2x_gemm<
-        cutlass::arch::Sm80, enable_sm80_to_sm89, int8_t, int8_t,
-        TrivialEpilogue, TileShape, WarpShape, InstructionShape, 5>>(out, a, b);
-  } else if (out.dtype() == torch::kBFloat16) {
-    return cutlass_gemm_caller<cutlass_2x_gemm<
-        cutlass::arch::Sm80, enable_sm80_to_sm89, int8_t, cutlass::bfloat16_t,
-        TrivialEpilogue, TileShape, WarpShape, InstructionShape, 5>>(out, a, b);
-  } else {
-    TORCH_CHECK(out.dtype() == torch::kFloat16);
-    return cutlass_gemm_caller<cutlass_2x_gemm<
-        cutlass::arch::Sm80, enable_sm80_to_sm89, int8_t, cutlass::half_t,
-        TrivialEpilogue, TileShape, WarpShape, InstructionShape, 5>>(out, a, b);
-  }
-}
-
-void cutlass_gemm_sm89(torch::Tensor& out, torch::Tensor const& a,
-                       torch::Tensor const& b) {
-  using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
-  using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
-  using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
-
-  if (a.dtype() == torch::kInt8) {
-    TORCH_CHECK(b.dtype() == torch::kInt8);
-
-    if (out.dtype() == torch::kInt8) {
-      return cutlass_gemm_caller<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89_to_sm90, int8_t, int8_t,
-          TrivialEpilogue, TileShape, WarpShape, InstructionShape, 5>>(out, a,
-                                                                       b);
-    } else if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_caller<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89_to_sm90, int8_t, cutlass::bfloat16_t,
-          TrivialEpilogue, TileShape, WarpShape, InstructionShape, 5>>(out, a,
-                                                                       b);
-    } else {
-      assert(out.dtype() == torch::kFloat16);
-      return cutlass_gemm_caller<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89_to_sm90, int8_t, cutlass::half_t,
-          TrivialEpilogue, TileShape, WarpShape, InstructionShape, 5>>(out, a,
-                                                                       b);
-    }
-  } else {
-    TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-    TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
-
-    if (out.dtype() == torch::kFloat8_e4m3fn) {
-      return cutlass_gemm_caller<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89_to_sm90, cutlass::float_e4m3_t,
-          cutlass::float_e4m3_t, TrivialEpilogue, TileShape, WarpShape,
-          InstructionShape, 5>>(out, a, b);
-    } else if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_caller<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89_to_sm90, cutlass::float_e4m3_t,
-          cutlass::bfloat16_t, TrivialEpilogue, TileShape, WarpShape,
-          InstructionShape, 5>>(out, a, b);
-    } else {
-      TORCH_CHECK(out.dtype() == torch::kFloat16);
-      return cutlass_gemm_caller<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89_to_sm90, cutlass::float_e4m3_t,
-          cutlass::half_t, TrivialEpilogue, TileShape, WarpShape,
-          InstructionShape, 5>>(out, a, b);
     }
   }
 }
