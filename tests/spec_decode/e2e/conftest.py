@@ -272,7 +272,7 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
      baseline_batch_token_ids) = get_output_from_llm_generator(
          baseline_llm_generator, prompts, sampling_params)
 
-    #assert len(baseline_batch_token_ids) == len(prompts)
+    assert len(baseline_batch_token_ids) == len(prompts)
     assert len(spec_batch_token_ids) == len(prompts)
 
     for i, (baseline_token_ids, baseline_tokens, spec_token_ids,
