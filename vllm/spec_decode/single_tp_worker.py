@@ -1,20 +1,22 @@
 import copy
-from typing import List, Tuple, Set, Optional
-import logging
+from typing import List, Tuple, Set, Optional, Union
+from datetime import timedelta
 
 import torch
 import torch.distributed
 
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeProposer
+from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
+from vllm.worker.worker import Worker
 from vllm.lora.request import LoRARequest
 
 from vllm.distributed.parallel_state import patch_tensor_parallel_group
 from vllm.config import ParallelConfig
-from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
+from vllm.logger import init_logger
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 class SingleTpWorker(ProposerWorkerBase):
@@ -44,7 +46,7 @@ class SingleTpWorker(ProposerWorkerBase):
 
     def __init__(
         self,
-        worker: ProposerWorkerBase,
+        worker: Union[Worker, ProposerWorkerBase],
     ):
         self._worker = worker
         self._single_tp_group = None
@@ -60,8 +62,9 @@ class SingleTpWorker(ProposerWorkerBase):
         self process.
         """
         world_rank = torch.distributed.get_rank()
-        self._single_tp_group = torch.distributed.new_group(ranks=[world_rank])
+        self._single_tp_group = torch.distributed.new_group(ranks=[world_rank], timeout=timedelta(seconds=10))
         self._single_tp_cpu_group = torch.distributed.new_group(ranks=[world_rank],
+                                                                timeout=timedelta(seconds=10),
                                                                 backend="gloo")
  
         logger.info(f"init_device. world_rank: {world_rank}, single_tp_group: {self._single_tp_group}, single_tp_cput_group: {self._single_tp_cpu_group}")
@@ -172,13 +175,24 @@ class SingleTpWorker(ProposerWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest]
     ) -> List[SamplerOutput]:
-        logger.info("SingleTPWorker.execute_model_prefill()")
+        logger.info("SingleTPWorker.execute_model_tp1()")
 
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         num_seq_groups = len(seq_group_metadata_list)
-        blocks_to_swap_in = execute_model_req.blocks_to_swap_in
-        blocks_to_swap_out = execute_model_req.blocks_to_swap_out
-        blocks_to_copy = execute_model_req.blocks_to_copy
+        # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
+        # they contain parameters to launch cudamemcpyasync.
+        blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
+                                         device="cpu",
+                                         dtype=torch.int64).view(-1, 2)
+        blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
+                                          device="cpu",
+                                          dtype=torch.int64).view(-1, 2)
+        # `blocks_to_copy` is a gpu tensor. The src and tgt of
+        # blocks to copy are in the same device, and `blocks_to_copy`
+        # can be used directly within cuda kernels.
+        blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                      device=self._worker.device,
+                                      dtype=torch.int64).view(-1, 2)
 
         self._worker.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
@@ -190,7 +204,7 @@ class SingleTpWorker(ProposerWorkerBase):
         output = self._worker.model_runner.execute_model(seq_group_metadata_list,
                                                 self._worker.gpu_cache)
 
-        logger.info("SingleTPWorker.execute_model_prefill() output:")
+        logger.info("SingleTPWorker.execute_model_tp1() output:")
         if output is not None:
             for seq_group_output in output.outputs:
                 for sample in seq_group_output.samples:

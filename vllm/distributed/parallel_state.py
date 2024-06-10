@@ -4,6 +4,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
 from typing import List, Optional
+from datetime import timedelta
 
 import contextlib
 import torch
@@ -11,8 +12,6 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-
-from datetime import timedelta
 
 logger = init_logger(__name__)
 
@@ -128,6 +127,8 @@ def init_distributed_environment(
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         del data
+    else:
+        logger.info("torch.distributed has already been initialized")
 
 
 def initialize_model_parallel(

@@ -10,6 +10,9 @@ from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativePropose
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class MultiStepWorker(Worker, ProposerWorkerBase):
@@ -72,7 +75,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         # Run model sample_len times.
         model_outputs = []
-        for _ in range(sample_len):
+        for i in range(sample_len):
+            logger.info(f"Driver runs multiple draft steps. {i+1}/{sample_len}")
             model_output = super().execute_model(
                 execute_model_req=copied_execute_model_req)
             assert (len(model_output) == 1

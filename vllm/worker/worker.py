@@ -20,6 +20,9 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class Worker(WorkerBase):
@@ -227,9 +230,11 @@ class Worker(WorkerBase):
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
         if not self.is_driver_worker:
+            logger.info("Worker.execute_model()")
             self._execute_model_non_driver()
             return []
 
+        logger.info("Driver. Worker.execute_model()")
         if execute_model_req is None:
             # This signals that there's no more requests to process for now.
             # All workers are running infinite loop with broadcast_tensor_dict,
@@ -269,6 +274,7 @@ class Worker(WorkerBase):
         if num_seq_groups == 0:
             return []
 
+        logger.info("Worker.model_runner.execute_model()")
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.gpu_cache)
 
