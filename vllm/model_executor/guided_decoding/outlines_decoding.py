@@ -51,6 +51,7 @@ pair   : UNESCAPED_STRING ":" value
 
 global_thread_pool = None  # used for generating logits processor fsm
 
+
 class OutlinesDecodingLogitsProcessorFactory(LogitsProcessorFactory):
 
     def __init__(self, guide: str, tokenizer: PreTrainedTokenizerBase,
@@ -63,7 +64,7 @@ class OutlinesDecodingLogitsProcessorFactory(LogitsProcessorFactory):
 
     def get_processor(self) -> LogitsProcessor:
         return _get_logits_processor(self.guide, self.tokenizer, self.mode,
-                                         self.whitespace_pattern)
+                                     self.whitespace_pattern)
 
     async def get_processor_async(self) -> LogitsProcessor:
         global global_thread_pool
@@ -73,9 +74,9 @@ class OutlinesDecodingLogitsProcessorFactory(LogitsProcessorFactory):
         loop = asyncio.get_running_loop()
 
         return await loop.run_in_executor(global_thread_pool,
-                                            _get_logits_processor,
-                                            self.guide, self.tokenizer,
-                                            self.mode, self.whitespace_pattern)
+                                          _get_logits_processor, self.guide,
+                                          self.tokenizer, self.mode,
+                                          self.whitespace_pattern)
 
 
 async def get_outlines_guided_decoding_logits_processor(
@@ -92,7 +93,7 @@ async def get_outlines_guided_decoding_logits_processor(
     guide, mode = _get_guide_and_mode(request)
     if not guide or not mode:
         return None
-    
+
     return OutlinesDecodingLogitsProcessorFactory(
         guide, tokenizer, mode, request.guided_whitespace_pattern)
 
