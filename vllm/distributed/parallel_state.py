@@ -402,7 +402,7 @@ def is_in_the_same_node(pg: ProcessGroup):
     magic_message = b"magic_message"
     shm = None
 
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(OSError):
         if rank == 0:
             # create a shared memory segment
             shm = shared_memory.SharedMemory(create=True, size=128)
@@ -431,7 +431,7 @@ def is_in_the_same_node(pg: ProcessGroup):
             shm.unlink()
     else:
         if shm:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError):
                 # fix to https://stackoverflow.com/q/62748654/9191338
                 resource_tracker.unregister(
                     shm._name, "shared_memory")  # type: ignore[attr-defined]
