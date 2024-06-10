@@ -54,12 +54,12 @@ tail -n 24 benchmark_serving.txt >> benchmark_results.md # last 24 lines
 echo '```' >> benchmark_results.md
 
 # if the agent binary is not found, skip uploading the results, exit 0
-if [ ! -f /workspace/buildkite-agent ]; then
+if [ ! -f buildkite-agent ]; then
     exit 0
 fi
 
 # upload the results to buildkite
-/workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < benchmark_results.md
+buildkite-agent annotate --style "info" --context "benchmark-results" < benchmark_results.md
 
 # exit with the exit code of the benchmarks
 if [ $bench_latency_exit_code -ne 0 ]; then
@@ -75,4 +75,4 @@ if [ $bench_serving_exit_code -ne 0 ]; then
 fi
 
 rm ShareGPT_V3_unfiltered_cleaned_split.json
-/workspace/buildkite-agent artifact upload "*.json"
+buildkite-agent artifact upload "*.json"
