@@ -164,12 +164,8 @@ class ModelConfig:
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is None:
-            # SparseML uses a "compression_config" with a "quantization_config".
-            compression_cfg = getattr(self.hf_config, "compression_config",
-                                      None)
-            if compression_cfg is not None:
-                quant_cfg = compression_cfg.get("quantization_config", None)
-
+            # compress-tensors uses a "compression_config" key
+            quant_cfg = getattr(self.hf_config, "compression_config", None)
         return quant_cfg
 
     def _verify_quantization(self) -> None:
