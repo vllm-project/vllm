@@ -13,12 +13,34 @@ from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import (make_tensor_with_pad, maybe_make_int_tensor,
                         maybe_make_long_tensor, maybe_max)
 
+# String name of register which may be set in order to
+# force auto-selection of attention backend by Attention
+# wrapper
 STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
+
+# Possible string values of STR_BACKEND_ENV_VAR
+# register, corresponding to possible backends
+STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
+STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
+STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
+STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 
 class QKVInputs(NamedTuple):
+    '''
+    Data structure for representing unpacked attention inputs, 
+    query/key/value.
+
+    Attributes:
+
+        * {query,key,value}: unpacked (batch_size x padded_seq_len x 
+                             num_heads x head_size) attention inputs
+        * q_seq_lens: query sequence lengths list
+        * kv_seq_lens: shared key/value sequence lengths list
+    '''
+
     query: torch.Tensor
     key: torch.Tensor
     value: torch.Tensor
@@ -27,11 +49,37 @@ class QKVInputs(NamedTuple):
 
 
 class QKVO(NamedTuple):
+    '''
+    Data structure for representing unpacked attention inputs, 
+    alongside unpacked known-correct attention output
+
+    Attributes:
+
+        * qkv: unpacked (batch_size x padded_seq_len x 
+                             num_heads x head_size) attention inputs
+        * ideal_output: unpacked (batch_size x padded_seq_len x 
+                        num_heads x head_size) known-correct attention output
+    '''
+
     qkv: QKVInputs
     ideal_output: torch.Tensor
 
 
 class PackedQKVInputs(NamedTuple):
+    '''
+    Data structure for representing packed attention inputs
+
+    Attributes:
+
+        * {query,key,value}: packed (number_of_tokens x num_heads 
+                             x head_size) attention inputs
+        * q_seq_lens: list of query start locations within packed tensor
+        * kv_seq_lens: shared list of key/value start locations within
+                       packed tensor
+        * q_seq_lens: query sequence lengths list
+        * kv_seq_lens: shared key/value sequence lengths list
+    '''
+
     query: torch.Tensor
     key: torch.Tensor
     value: torch.Tensor
@@ -42,16 +90,51 @@ class PackedQKVInputs(NamedTuple):
 
 
 class PackedQKVO(NamedTuple):
+    '''
+    Data structure for representing packed attention inputs, 
+    alongside packed known-correct attention output
+
+    Attributes:
+
+        * packed_qkv: packed (number_of_tokens x num_heads 
+                      x head_size) attention inputs
+        * ideal_output: packed (number_of_tokens x num_heads 
+                        x head_size) known-correct attention output
+    '''
+
     packed_qkv: PackedQKVInputs
     ideal_output: torch.Tensor
 
 
 class KVMemoryMap(NamedTuple):
+    '''
+    Data structure for encapsulating KV cache memory mapping.
+
+    Attributes:
+
+        * block_tables: KV cache block tables
+        * slot_mapping: mapping of sequence offset to physical address
+    '''
+
     block_tables: torch.Tensor
     slot_mapping: torch.Tensor
 
 
 class PhaseTestParameters(NamedTuple):
+    '''
+    Data structure for encapsulating the test parameters
+    for a given test "phase" (prefill or decode phase) and attention
+    scenario (encoder, decoder-self, encoder/decoder-cross)
+
+    Attributes:
+
+        * packed_qkvo: packed (number_of_tokens x num_heads 
+                       x head_size) attention inputs & known-correct
+                       output
+        * kv_mmap: KV cache memory mapping, specific to this test phase &
+                   attention scenario
+    '''
+
     packed_qkvo: PackedQKVO
     kv_mmap: KVMemoryMap
 
@@ -174,7 +257,9 @@ def make_qkv(
 
     Returns:
 
-    * QKVInputs structure
+    * Overall QKVInputs structure (containing full unpacked Q/K/V tensors)
+    * Prefill QKVInputs structure (containing all but the last sequence offset)
+    * Decode QKVInputs structure (containing all only the last sequence offset)
     '''
 
     if force_max_len:
@@ -245,18 +330,18 @@ def make_qkv(
     decode_q_seq_lens = [1 for _ in q_seq_lens]
     decode_kv_seq_lens = [1 for _ in kv_seq_lens]
 
-    return QKVInputs(query,
+    return QKVInputs(query, # Overall QKV inputs
                      key,
                      value,
                      q_seq_lens,
                      kv_seq_lens), \
-           QKVInputs(prefill_query,
+           QKVInputs(prefill_query, # Prefill subset of QKV sequences
                      prefill_key,
                      prefill_value,
                      prefill_q_seq_lens,
                      prefill_kv_seq_lens), \
            QKVInputs(
-                     decode_query,
+                     decode_query, # Decode subset of KV sequences
                      decode_key,
                      decode_value,
                      decode_q_seq_lens,
@@ -311,19 +396,14 @@ def pack_qkv(qkv: QKVInputs, device: Union[torch.device,
 
     Arguments:
 
-    * query: batch_size x padded_seq_len x num_heads x head_size
-    * key: batch_size x padded_seq_len x num_heads x head_size
-    * value: batch_size x padded_seq_len x num_heads x head_size
-    * q_seq_lens: list of token counts for each query
-    * kv_seq_lens: list of token counts for each key/value
+    * qkv: Unpacked (batch_size x padded_seq_len x num_heads x head_size)
+           attention inputs
+    * device: CPU or CUDA device
 
     Returns
 
-    * packed_query: number_of_tokens x num_heads x head_size
-    * packed_key: number_of_tokens x num_heads x head_size
-    * packed_value: number_of_tokens x num_heads x head_size
-    * q_start_loc_list: start idx of each query in packed_query
-    * kv_start_loc_list: start idx of each {key,value} in packed_{key,value}
+    * Packed (number_of_tokens x num_heads x head_size) QKV inputs
+      derived from unpacked inputs
     '''
 
     if qkv.query is None:
@@ -367,7 +447,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
     * Backend instance
     '''
-    if backend_name == "XFORMERS":
+    if backend_name == STR_XFORMERS_ATTN_VAL:
         return XFormersBackend()
     raise AssertionError(
         f"Unrecognized backend_name {backend_name} for unit test")
@@ -383,20 +463,19 @@ def _make_metadata_tensors(
 
     Arguments:
 
-    * is_prompt: True -> Prefill, False -> Decode
-    * seq_lens: list of token-counts for each seq
+    * seq_lens: list of token-counts for each decoder input seq
     * context_lens: list of context length values for each seq
+    * encoder_seq_lens: list of token-counts for each encoder input seq
     * device: CPU or CUDA device
 
     Returns:
 
-    * seq_lens_tensor: seq_lens list, as tensor
+    * seq_lens_tensor: decoder seq_lens list, as tensor
     * context_lens_tensor: context_lens list, as tensor
-    * max_query_len: max(seq_lens) if is_seq, o/w 1
     * max_context_len: max(context_lens)
     * max_seq_len: max(seq_lens)
     * seq_start_loc: start idx of each sequence
-    * query_start_loc: start idx of each query
+    * max_encoder_seq_len: encoder seq_lens list, as tensor
     '''
     seq_lens_tensor = maybe_make_int_tensor(seq_lens, device)
     context_lens_tensor = maybe_make_int_tensor(context_lens, device)
@@ -614,12 +693,15 @@ def make_test_metadata(
     cross_test_params: Optional[PhaseTestParameters] = None
 ) -> AttentionMetadata:
     '''
-    Construct fake attention metadata for a combined self-/cross-attention
-    scenario i.e. an encoder/decoder model. 
+    Construct fake attention metadata for a given test phase
+    (prefill-phase or decode-phase).
 
-    is_encoder_only_test=True causes the default attention metadata attention
-    type to be AttentionType.ENCODER. False causes the default to 
-    be AttentionType.DECODER.
+    encoder_test_params and cross_test_params arguments all encoder
+    attention and enc/dec cross-attention to use distinct metadata values
+    from decoder self-attention (decoder_test_params.)
+    
+    if encoder_test_params and cross_test_params are None, the attention
+    metadata will support decoder-only scenario.
 
     Assumptions:
 
@@ -630,32 +712,29 @@ def make_test_metadata(
     * attn_backend: Backend for sourcing attention kernels
     * is_prompt: prefill if True, o/w decode
     * seq_lens: list of token counts for each sequence
-    * context_lens: list of context lengths for each sequence
-    * block_tables: self-attention block tables
-    * slot_mapping: self-attention slot_mapping
-    * is_encoder_only_test: True if testing encoder; False if testing
-      decoder self-attention or encoder/decoder cross-attention.
+    * decoder_test_params: decoder self-attention test params; 
+                           this function requires
+                           kv_mmap (memory mapping) field
+    * default_attn_type: value of attn_metadata.attention_type at
+                         construction time
     * device: CPU or CUDA device
-    * encoder_seq_lens: list of token counts for each encoder sequence, if any
-      exist
-    * cross_block_tables: cross-attention block tables, if required
-    * cross_slot_mapping: cross-attention slot mapping, if required
+    * encoder_test_params: encoder attention test params;
+                           this function requires encoder query
+                           sequence lengths field. If None,
+                           encoder query sequence lengths are
+                           treated as None
+    * cross_test_params: enc/dec cross-attention test params;
+                         this function requires kv_mmap field.
+                         If None, KV cache memory map data
+                         structures are treated as None
 
     Return:
 
-    * AttentionMetadata structure supporting self- and cross-attention
+    * AttentionMetadata structure
     '''
 
-    # Extract
-    # * Decoder input sequence lengths (seq_lens)
-    # * Decoder self-attention slot mapping & block tables (kv_mmap)
-    #seq_lens = decoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
     kv_mmap = decoder_test_params.kv_mmap
 
-    # is_prompt determines whether input tokens are treated
-    # as 100% prefill or 100% decode. In either case,
-    # the number of {prefills, decodes} and the number of
-    # {prefill, decode} tokens can be inferred from seq_lens
     num_prefills_or_decodes = len(seq_lens)
 
     # Prefill: operate on total num. of prompt
@@ -684,6 +763,8 @@ def make_test_metadata(
         cross_kv_mmap = cross_test_params.kv_mmap
 
     if is_prompt:
+        # Prefill-phase scenario
+
         num_prefills = num_prefills_or_decodes
         num_prefill_tokens = num_prefill_or_decode_tokens
         num_decode_tokens = 0
@@ -721,6 +802,7 @@ def make_test_metadata(
                                 cross_kv_mmap.block_tables)
 
     else:  # not is_prompt
+        # Decode-phase scenario
 
         num_prefills = 0
         num_prefill_tokens = 0
