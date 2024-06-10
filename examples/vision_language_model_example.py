@@ -3,9 +3,10 @@ import os
 import subprocess
 
 import torch
+from PIL import Image
 
 from vllm import LLM
-from vllm.sequence import MultiModalData
+from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 
 def run_idefics2_pixel_values():
     llm = LLM(
@@ -27,9 +28,6 @@ def run_idefics2_pixel_values():
                            multi_modal_data=MultiModalData(
                                type=MultiModalData.Type.IMAGE, data=images))
 
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
 
 def run_llava_pixel_values():
     llm = LLM(
@@ -38,17 +36,22 @@ def run_llava_pixel_values():
         image_token_id=32000,
         image_input_shape="1,3,336,336",
         image_feature_size=576,
+        disable_image_processor=disable_image_processor,
     )
 
     prompt = "<image>" * 576 + (
         "\nUSER: What is the content of this image?\nASSISTANT:")
 
-    # This should be provided by another online or offline component.
-    images = torch.load("images/stop_sign_pixel_values.pt")
+    if disable_image_processor:
+        image = torch.load("images/stop_sign_pixel_values.pt")
+    else:
+        image = Image.open("images/stop_sign.jpg")
 
-    outputs = llm.generate(prompt,
-                           multi_modal_data=MultiModalData(
-                               type=MultiModalData.Type.IMAGE, data=images))
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": ImagePixelData(image),
+    })
+
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
@@ -66,25 +69,24 @@ def run_llava_image_features():
     prompt = "<image>" * 576 + (
         "\nUSER: What is the content of this image?\nASSISTANT:")
 
-    # This should be provided by another online or offline component.
-    images = torch.load("images/stop_sign_image_features.pt")
+    image: torch.Tensor = torch.load("images/stop_sign_image_features.pt")
 
-    outputs = llm.generate(prompt,
-                           multi_modal_data=MultiModalData(
-                               type=MultiModalData.Type.IMAGE, data=images))
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": ImageFeatureData(image),
+    })
+
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
-        
+
+
 def main(args):
-    if args.model == "llava" and args.type == "pixel_values":
+    if args.type == "pixel_values":
         run_llava_pixel_values()
-    elif args.model == "llava" and args.type == "image_features":
+    else:
         run_llava_image_features()
-    elif args.model == "idefics2" and args.type == "pixel_values":
-        run_idefics2_pixel_values()
-    elif args.model == "idefics2" and args.type == "image_features":
-        print("Idefics2 does not support image_features")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Demo on Llava")

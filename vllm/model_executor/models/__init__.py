@@ -58,6 +58,7 @@ _GENERATION_MODELS = {
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
     "Idefics2ForConditionalGeneration":
     ("idefics2", "Idefics2ForConditionalGeneration")
+    "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {
