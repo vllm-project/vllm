@@ -265,18 +265,12 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         ignore_eos=ignore_eos,
         temperature=temperature,
     )
-    start = time.time()
     spec_batch_tokens, spec_batch_token_ids = get_output_from_llm_generator(
         test_llm_generator, prompts, sampling_params)
-    end = time.time()
-    print('time for spec decode ' + str(end - start))
 
-    start = time.time()
     (baseline_batch_tokens,
      baseline_batch_token_ids) = get_output_from_llm_generator(
          baseline_llm_generator, prompts, sampling_params)
-    end = time.time()
-    print('time for base line ' + str(end - start))
 
     #assert len(baseline_batch_token_ids) == len(prompts)
     assert len(spec_batch_token_ids) == len(prompts)
