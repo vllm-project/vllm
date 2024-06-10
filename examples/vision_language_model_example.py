@@ -2,8 +2,8 @@ import argparse
 import os
 import subprocess
 
-import torch
 from PIL import Image
+import torch
 
 from vllm import LLM
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
