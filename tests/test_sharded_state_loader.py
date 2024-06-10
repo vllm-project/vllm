@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import os
 import shutil
 from tempfile import TemporaryDirectory
@@ -18,9 +19,7 @@ prompts = [
 
 # Create a sampling params object.
 sampling_params = SamplingParams(
-    temperature=0.8,
-    top_p=0.95,
-    seed=0,
+    temperature=0,
     max_tokens=256,
     ignore_eos=True,
 )
@@ -40,51 +39,89 @@ def test_filter_subtensors():
     filtered_state_dict = ShardedStateLoader._filter_subtensors(state_dict)
     assert tuple(filtered_state_dict.keys()) == ("a", "b", "c")
     for key, tensor in filtered_state_dict.items():
-        assert tensor.equal(state_dict[key])
+        # NOTE: don't use `euqal` here, as the tensor might contain NaNs
+        assert tensor is state_dict[key]
+
+
+@pytest.fixture(scope="module")
+def llama_2_7b_files():
+    with TemporaryDirectory() as cache_dir:
+        input_dir = snapshot_download("meta-llama/Llama-2-7b-hf",
+                                      cache_dir=cache_dir,
+                                      ignore_patterns="*.bin*")
+        yield input_dir
+
+
+def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
+    llm_sharded_writer = LLM(model=input_dir, **kwargs)
+
+    # Dump worker states to output directory
+    llm_sharded_writer.llm_engine.model_executor.save_sharded_state(
+        path=output_dir)
+    # Copy metadata files to output directory
+    for file in os.listdir(input_dir):
+        if not any(file.endswith(ext) for ext in weights_patterns):
+            shutil.copy(f"{input_dir}/{file}", output_dir)
+
+
+def _run_generate(input_dir, queue: mp.Queue, **kwargs):
+    llm = LLM(model=input_dir, **kwargs)
+    gen = llm.generate(prompts, sampling_params)
+    queue.put([g.outputs[0].__dict__ for g in gen])
+    queue.close()
+    queue.join_thread()
 
 
 @pytest.mark.parametrize("enable_lora", [False, True])
-def test_sharded_state_loader(enable_lora):
-    weights_patterns = ("*.bin", "*.pt", "*.safetensors")
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
+                              llama_2_7b_files):
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
-    with TemporaryDirectory() as cache_dir, TemporaryDirectory() as output_dir:
-        input_dir = snapshot_download("meta-llama/Llama-2-7b-hf",
-                                      cache_dir=cache_dir)
+    weights_patterns = ("*.safetensors", )
+    gpu_memory_utilization = 0.8
+    input_dir = llama_2_7b_files
+    ctx = mp.get_context("spawn")
 
-        llm = LLM(
-            model=input_dir,
-            worker_use_ray=True,
-            gpu_memory_utilization=0.3,
-        )
+    # Run in separate processes for memory & CUDA isolation
+    with TemporaryDirectory() as output_dir:
+        p = ctx.Process(target=_run_writer,
+                        args=(input_dir, output_dir, weights_patterns),
+                        kwargs=dict(
+                            tensor_parallel_size=tp_size,
+                            distributed_executor_backend="mp",
+                            gpu_memory_utilization=gpu_memory_utilization,
+                            enforce_eager=True,
+                        ))
+        p.start()
+        p.join()
 
-        # Dump worker states to output directory
-        model_executor = llm.llm_engine.model_executor
-        model_executor.save_sharded_state(path=output_dir)
-        # Copy metadata files to output directory
-        for file in os.listdir(input_dir):
-            if not any(file.endswith(ext) for ext in weights_patterns):
-                shutil.copy(f"{input_dir}/{file}", output_dir)
-        del llm.llm_engine.model_executor
+        queue = ctx.Queue()
 
-        llm_before = LLM(
-            model=input_dir,
-            worker_use_ray=True,
-            enable_lora=enable_lora,
-            gpu_memory_utilization=0.3,
-        )
-        gen_before = llm_before.generate(prompts, sampling_params)
-        out_before = [gen.outputs[0].__dict__ for gen in gen_before]
-        del llm_before.llm_engine.model_executor
+        p = ctx.Process(target=_run_generate,
+                        args=(input_dir, queue),
+                        kwargs=dict(
+                            distributed_executor_backend="mp",
+                            enable_lora=enable_lora,
+                            gpu_memory_utilization=gpu_memory_utilization,
+                            tensor_parallel_size=tp_size,
+                        ))
+        p.start()
+        p.join()
+        out_before = queue.get()
 
-        llm_after = LLM(
-            model=output_dir,
-            worker_use_ray=True,
-            enable_lora=enable_lora,
-            gpu_memory_utilization=0.3,
-            load_format="sharded_state",
-        )
-        gen_after = llm_after.generate(prompts, sampling_params)
-        out_after = [gen.outputs[0].__dict__ for gen in gen_after]
-        del llm_after.llm_engine.model_executor
+        p = ctx.Process(target=_run_generate,
+                        args=(output_dir, queue),
+                        kwargs=dict(
+                            distributed_executor_backend="mp",
+                            enable_lora=enable_lora,
+                            gpu_memory_utilization=gpu_memory_utilization,
+                            tensor_parallel_size=tp_size,
+                            load_format="sharded_state",
+                        ))
+        p.start()
+        p.join()
+        out_after = queue.get()
 
         assert out_before == out_after
