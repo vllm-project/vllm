@@ -1,8 +1,9 @@
 """
 Tests:
 
-* E2E Encoder attention + Decoder self-attention +
-      Encoder/decoder cross-attention
+* E2E test of Encoder attention + Decoder self-attention +
+      Encoder/decoder cross-attention (collectively
+      "encoder/decoder attention")
 * Confirm enc/dec models will fail for chunked prefill
 * Confirm enc/dec models will fail for prefix caching
 
@@ -40,9 +41,8 @@ HEAD_SIZES_FOR_UNSUPP = [HEAD_SIZES[0]]
 
 class TestPoint(NamedTuple):
     """
-    Encapsulates the attributes which define the
-    test_enc_dec_self_and_cross_attention_prefill_decode_phases()
-    test
+    Encapsulates the attributes which define a single invocation
+    of the test_e2e_enc_dec_attn() test
 
     Attributes:
         num_heads: The number of heads in the model.
@@ -66,6 +66,34 @@ class TestPoint(NamedTuple):
 
 
 class TestResources(NamedTuple):
+    '''
+    Encapsuates key components for performing an
+    encoder/decoder attention test
+
+    Note that
+    (1) attn automatically selects an attention backend
+        based on platform info & a set of canned
+        heuristics
+    (2) attn_backend is thus *not the same backend
+        instance* used by attn, but rather it is
+        intended to be a
+        *different instance* of the *same backend class*;
+        it is assumed that the user of TestResources
+        will leverage attn_backend for the purpose of
+        constructing backend-compatible attention
+        metadata instances
+   
+    Attributes:
+
+    * scale: 1/sqrt(d) scale factor for attn
+    * attn_backend: implementatino of abstraction
+                    attention interface using
+                    a particular kernel library
+                    i.e. XFormers
+    * attn: Attention layer instance
+    * kv_cache: shared key/value cache for all attention
+    '''
+
     scale: float
     attn_backend: AttentionBackend
     attn: Attention
@@ -649,7 +677,7 @@ def _run_encoder_decoder_cross_attention_test(
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("max_dec_seq_len", MAX_DEC_SEQ_LENS)
 @pytest.mark.parametrize("max_enc_seq_len", MAX_ENC_SEQ_LENS)
-def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
+def test_e2e_enc_dec_attn(
         num_heads: int, head_size: int, backend_name: str, batch_size: int,
         block_size: int, max_dec_seq_len: int, max_enc_seq_len: int,
         monkeypatch) -> None:
