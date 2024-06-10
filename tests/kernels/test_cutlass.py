@@ -75,10 +75,9 @@ def cutlass_int8_gemm_helper(m: int,
         (1, n_b_scales), device=device, dtype=torch.float32) / 10)
 
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
-    baseline = (
-        scale_b * scale_a *
-        torch.mm(a.to(dtype=torch.float32), b.to(dtype=torch.float32))).to(
-            dtype=out_dtype)
+    baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
+                    scale_b *
+                    b.to(dtype=torch.float32)).to(dtype=out_dtype)
 
     assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
 
