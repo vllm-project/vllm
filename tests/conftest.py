@@ -1,6 +1,8 @@
 import contextlib
 import gc
 import os
+import subprocess
+import sys
 from typing import Any, Dict, List, Optional, Tuple, TypeVar
 
 import pytest
@@ -352,7 +354,10 @@ class HfRunner:
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         return self.model.encode(prompts)
 
-    def __del__(self):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
         del self.model
         cleanup()
 
@@ -488,7 +493,10 @@ class VllmRunner:
             outputs.append(embedding)
         return outputs
 
-    def __del__(self):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
         del self.model
         cleanup()
 
@@ -522,3 +530,22 @@ def caplog_vllm(temporary_enable_log_propagate, caplog):
     # To capture vllm log, we should enable propagate=True temporarily
     # because caplog depends on logs propagated to the root logger.
     yield caplog
+
+
+@pytest.fixture(scope="session")
+def num_gpus_available():
+    """Get number of GPUs without initializing the CUDA context
+    in current process."""
+
+    try:
+        out = subprocess.run([
+            sys.executable, "-c",
+            "import torch; print(torch.cuda.device_count())"
+        ],
+                             capture_output=True,
+                             check=True,
+                             text=True)
+    except subprocess.CalledProcessError as e:
+        logger.warning("Failed to get number of GPUs.", exc_info=e)
+        return 0
+    return int(out.stdout.strip())

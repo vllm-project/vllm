@@ -1,5 +1,5 @@
 #include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 
 #include <cmath>
@@ -160,7 +160,7 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
 template <typename Tout, typename Tin, int Vec_size>
 struct call_convert_fp8
 {
-    void operator()(torch::Tensor& src_data, torch::Tensor& dst_data, torch::Tensor& scale)
+    void operator()(torch::Tensor const& src_data, torch::Tensor& dst_data, torch::Tensor const& scale)
     {
         const auto N = src_data.numel() / 2;
         //std::cout << N << "\n";
@@ -185,7 +185,7 @@ struct call_convert_fp8
     }
 };
 
-void convert_fp8(torch::Tensor& dst_data, torch::Tensor& src_data, torch::Tensor& scale)
+void convert_fp8(torch::Tensor& dst_data, torch::Tensor const& src_data, torch::Tensor const& scale)
 {
     torch::Device src_device = src_data.device();
     torch::Device dst_device = dst_data.device();
