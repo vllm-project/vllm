@@ -124,7 +124,7 @@ class BertEmbedding(nn.Module):
         else:
             input_shape = inputs_embeds.size()[:-1]
             device = inputs_embeds.device
-        seq_length = input_shape.size(1)
+        seq_length = input_shape[0]
 
         # input embeddings
         if inputs_embeds is None:
@@ -302,7 +302,7 @@ class BertSelfAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        atten_output = self.atten(q, k, v, kv_cache, attn_metadata)
+        atten_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(atten_output)
         return output
 
