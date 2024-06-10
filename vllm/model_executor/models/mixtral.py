@@ -591,7 +591,9 @@ class MixtralForCausalLM(nn.Module):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
-
+            
+            if is_hpu():
+                torch.hpu.synchronize()
 
 def all_close_1d(x: torch.Tensor) -> bool:
     assert len(x.shape) == 1
