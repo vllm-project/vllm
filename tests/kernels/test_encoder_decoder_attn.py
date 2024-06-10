@@ -67,7 +67,7 @@ class TestPoint(NamedTuple):
 
 class TestResources(NamedTuple):
     '''
-    Encapsuates key components for performing an
+    Encapsulates key components for performing an
     encoder/decoder attention test
 
     Note that
