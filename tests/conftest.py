@@ -26,7 +26,6 @@ logger = init_logger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
-_ATTN_SINKS_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "paxos-paper.txt")]
 
 # Multi modal related
 # You can use `.buildkite/download-images.sh` to download the assets
@@ -136,14 +135,6 @@ def example_prompts() -> List[str]:
 def example_long_prompts() -> List[str]:
     prompts = []
     for filename in _LONG_PROMPTS:
-        prompts += _read_prompts(filename)
-    return prompts
-
-
-@pytest.fixture
-def attn_sinks_prompts() -> List[str]:
-    prompts = []
-    for filename in _ATTN_SINKS_PROMPTS:
         prompts += _read_prompts(filename)
     return prompts
 
@@ -470,6 +461,21 @@ class VllmRunner:
             outputs.append((output_ids, output_str, output_logprobs))
         return outputs
 
+    def generate_w_cum_logprobs(
+        self,
+        prompts: List[str],
+        sampling_params: SamplingParams,
+    ) -> List[Tuple[str, float]]:
+        req_outputs = self.model.generate(prompts,
+                                          sampling_params=sampling_params)
+        outputs: List[Tuple[str, float]] = []
+        for req_output in req_outputs:
+            compl_output = req_output.outputs[0]
+            output_str = compl_output.text
+            output_logprob = compl_output.cumulative_logprob
+            outputs.append((output_str, output_logprob))
+        return outputs
+    
     def generate_greedy(
         self,
         prompts: List[str],
