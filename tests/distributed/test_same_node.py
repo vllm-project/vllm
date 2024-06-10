@@ -1,3 +1,5 @@
+import torch
+
 from vllm.distributed.parallel_state import is_in_the_same_node
 
 torch.distributed.init_process_group(backend="gloo")
