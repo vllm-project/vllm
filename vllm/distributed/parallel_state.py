@@ -376,3 +376,47 @@ def destroy_model_parallel():
     _PP_DEVICE_GROUP = None
     global _PP_GLOBAL_RANKS
     _PP_GLOBAL_RANKS = None
+
+def is_in_the_same_node(pg: ProcessGroup):
+    """
+    This is a collective operation that checks if all processes in the group
+    are in the same node. It tests if all processes are attached to the same
+    memory system (shared access to shared memory).
+    """
+    assert torch.distributed.get_backend(group) != torch.distributed.Backend.NCCL, (
+        "is_in_the_same_node should be tested with a non-NCCL group.")
+    # local rank inside the group
+    rank = torch.distributed.get_rank(group=pg)
+    world_size = torch.distributed.get_world_size(group=pg)
+    is_in_the_same_node = torch.tensor([0] * world_size, dtype=torch.int32)
+    # global ranks of the processes in the group
+    ranks = torch.distributed.get_process_group_ranks(pg)
+    magic_message = b"magic_message"
+    shm = None
+    if rank == 0:
+        # create a shared memory segment
+        from multiprocessing import shared_memory
+        shm = shared_memory.SharedMemory(create=True, size=128)
+        shm.buf[:len(magic_message)] = magic_message
+        torch.distributed.broadcast_object_list([shm.name], src=ranks[0], group=pg)
+        is_in_the_same_node[0] = 1
+    else:
+        recv = [None]
+        torch.distributed.broadcast_object_list(recv, src=ranks[0], group=pg)
+        name = recv[0]
+        try:
+            shm = shared_memory.SharedMemory(name=name)
+            if shm.buf[:len(magic_message)] == magic_message:
+                is_in_the_same_node[rank] = 1
+        except Exception:
+            pass
+
+    torch.distributed.barrier(group=pg)
+    if shm:
+        shm.close()
+    torch.distributed.barrier(group=pg)
+    if rank == 0:
+        shm.unlink()
+    
+    torch.distributed.all_reduce(is_in_the_same_node, group=pg)
+    return is_in_the_same_node.sum().item() == world_size
