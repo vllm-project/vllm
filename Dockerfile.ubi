@@ -210,7 +210,7 @@ RUN umask 002 \
 COPY LICENSE /licenses/vllm.md
 
 USER 2000
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server", "--distributed-executor-backend=mp"]
 
 
 FROM vllm-openai as vllm-grpc-adapter
@@ -222,4 +222,4 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 ENV GRPC_PORT=8033
 USER 2000
-ENTRYPOINT ["python3", "-m", "vllm_tgis_adapter"]
+ENTRYPOINT ["python3", "-m", "vllm_tgis_adapter", "--distributed-executor-backend=mp"]
