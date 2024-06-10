@@ -28,9 +28,6 @@ import torch
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
-from vllm.distributed.device_communicators.custom_all_reduce import (
-    CustomAllreduce)
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 
 
@@ -86,8 +83,8 @@ class GroupCoordinator:
     use_pynccl: bool  # a hint of whether to use PyNccl
     use_custom_allreduce: bool  # a hint of whether to use CustomAllreduce
     # communicators are only created for world size > 1
-    pynccl_comm: Optional[PyNcclCommunicator]  # PyNccl communicator
-    ca_comm: Optional[CustomAllreduce]  # Custom allreduce communicator
+    pynccl_comm: Optional[Any]  # PyNccl communicator
+    ca_comm: Optional[Any]  # Custom allreduce communicator
 
     def __init__(
         self,
@@ -126,6 +123,12 @@ class GroupCoordinator:
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
+
+        # lazy import to avoid documentation build error
+        from vllm.distributed.device_communicators.custom_all_reduce import (
+            CustomAllreduce)
+        from vllm.distributed.device_communicators.pynccl import (
+            PyNcclCommunicator)
 
         self.pynccl_comm: Optional[PyNcclCommunicator]
         if use_pynccl and self.world_size > 1:
