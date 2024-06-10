@@ -67,7 +67,8 @@ def from_layer_logits_processor(
     model_config: Optional[PretrainedConfig] = None,
 ) -> LogitsProcessorWithLoRA:
     ret = LogitsProcessorWithLoRA(layer, lm_head.embedding_dim,
-                                  lm_head.weight.dtype, lm_head.weight.device)
+                                  lm_head.weight.dtype, lm_head.weight.device,
+                                  lm_head.get_sharded_to_full_mapping())
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret
 

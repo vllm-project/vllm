@@ -1,14 +1,17 @@
 import contextlib
 import gc
 import os
-from typing import Any, Dict, List, Optional, Tuple
+import subprocess
+import sys
+from typing import Any, Dict, List, Optional, Tuple, TypeVar
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,
-                          LlavaConfig, LlavaForConditionalGeneration)
+from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
+                          AutoProcessor, AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
@@ -18,6 +21,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
+from vllm.utils import is_cpu
 
 logger = init_logger(__name__)
 
@@ -27,24 +31,19 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 # Multi modal related
 # You can use `.buildkite/download-images.sh` to download the assets
-_PIXEL_VALUES_FILES = [
+PIXEL_VALUES_FILES = [
     os.path.join(_TEST_DIR, "images", filename) for filename in
     ["stop_sign_pixel_values.pt", "cherry_blossom_pixel_values.pt"]
 ]
-_IMAGE_FEATURES_FILES = [
+IMAGE_FEATURES_FILES = [
     os.path.join(_TEST_DIR, "images", filename) for filename in
     ["stop_sign_image_features.pt", "cherry_blossom_image_features.pt"]
 ]
-_IMAGE_FILES = [
+IMAGE_FILES = [
     os.path.join(_TEST_DIR, "images", filename)
     for filename in ["stop_sign.jpg", "cherry_blossom.jpg"]
 ]
-_IMAGE_PROMPTS = [
-    "<image>\nUSER: What's the content of the image?\nASSISTANT:",
-    "<image>\nUSER: What is the season?\nASSISTANT:"
-]
-assert len(_PIXEL_VALUES_FILES) == len(_IMAGE_FEATURES_FILES) == len(
-    _IMAGE_FILES) == len(_IMAGE_PROMPTS)
+assert len(PIXEL_VALUES_FILES) == len(IMAGE_FEATURES_FILES) == len(IMAGE_FILES)
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -58,7 +57,8 @@ def cleanup():
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
-    torch.cuda.empty_cache()
+    if not is_cpu():
+        torch.cuda.empty_cache()
 
 
 @pytest.fixture()
@@ -82,13 +82,8 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 
 
 @pytest.fixture(scope="session")
-def hf_image_prompts() -> List[str]:
-    return _IMAGE_PROMPTS
-
-
-@pytest.fixture(scope="session")
 def hf_images() -> List[Image.Image]:
-    return [Image.open(filename) for filename in _IMAGE_FILES]
+    return [Image.open(filename) for filename in IMAGE_FILES]
 
 
 @pytest.fixture()
@@ -98,26 +93,17 @@ def vllm_images(request) -> List[MultiModalData]:
             VisionLanguageConfig.ImageInputType.IMAGE_FEATURES):
         return [
             ImageFeatureData(torch.load(filename))
-            for filename in _IMAGE_FEATURES_FILES
+            for filename in IMAGE_FEATURES_FILES
         ]
     else:
         return [
-            ImagePixelData(Image.open(filename)) for filename in _IMAGE_FILES
+            ImagePixelData(Image.open(filename)) for filename in IMAGE_FILES
         ]
 
 
 @pytest.fixture()
 def vllm_image_tensors(request) -> List[torch.Tensor]:
-    return [torch.load(filename) for filename in _PIXEL_VALUES_FILES]
-
-
-@pytest.fixture()
-def vllm_image_prompts(request) -> List[str]:
-    vision_language_config = request.getfixturevalue("model_and_config")[1]
-    return [
-        "<image>" * (vision_language_config.image_feature_size - 1) + p
-        for p in _IMAGE_PROMPTS
-    ]
+    return [torch.load(filename) for filename in PIXEL_VALUES_FILES]
 
 
 @pytest.fixture
@@ -142,38 +128,50 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "float": torch.float,
 }
 
-AutoModelForCausalLM.register(LlavaConfig, LlavaForConditionalGeneration)
-
-_EMBEDDING_MODELS = [
-    "intfloat/e5-mistral-7b-instruct",
-]
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
 
 
 class HfRunner:
+
+    def wrap_device(self, input: _T) -> _T:
+        if not is_cpu():
+            return input.to("cuda")
+        else:
+            return input.to("cpu")
 
     def __init__(
         self,
         model_name: str,
         dtype: str = "half",
+        *,
+        is_embedding_model: bool = False,
+        is_vision_model: bool = False,
     ) -> None:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
         self.model_name = model_name
 
-        if model_name in _EMBEDDING_MODELS:
+        if is_embedding_model:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(
-                model_name,
-                device="cpu",
-            ).to(dtype=torch_dtype).cuda()
+            self.model = self.wrap_device(
+                SentenceTransformer(
+                    model_name,
+                    device="cpu",
+                ).to(dtype=torch_dtype))
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            ).cuda()
+            if is_vision_model:
+                auto_cls = AutoModelForVision2Seq
+            else:
+                auto_cls = AutoModelForCausalLM
+
+            self.model = self.wrap_device(
+                auto_cls.from_pretrained(
+                    model_name,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=True,
+                ))
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
@@ -214,7 +212,7 @@ class HfRunner:
             inputs = self.processor(**processor_kwargs)
 
             output_ids = self.model.generate(
-                **inputs.to("cuda"),
+                **self.wrap_device(inputs),
                 use_cache=True,
                 **kwargs,
             )
@@ -271,7 +269,7 @@ class HfRunner:
         for prompt in prompts:
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
             output = self.model.generate(
-                input_ids.cuda(),
+                self.wrap_device(input_ids),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
@@ -306,7 +304,7 @@ class HfRunner:
         for prompt in prompts:
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
             output = self.model.generate(
-                input_ids.cuda(),
+                self.wrap_device(input_ids),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
@@ -356,7 +354,10 @@ class HfRunner:
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         return self.model.encode(prompts)
 
-    def __del__(self):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
         del self.model
         cleanup()
 
@@ -492,7 +493,10 @@ class VllmRunner:
             outputs.append(embedding)
         return outputs
 
-    def __del__(self):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
         del self.model
         cleanup()
 
@@ -526,3 +530,22 @@ def caplog_vllm(temporary_enable_log_propagate, caplog):
     # To capture vllm log, we should enable propagate=True temporarily
     # because caplog depends on logs propagated to the root logger.
     yield caplog
+
+
+@pytest.fixture(scope="session")
+def num_gpus_available():
+    """Get number of GPUs without initializing the CUDA context
+    in current process."""
+
+    try:
+        out = subprocess.run([
+            sys.executable, "-c",
+            "import torch; print(torch.cuda.device_count())"
+        ],
+                             capture_output=True,
+                             check=True,
+                             text=True)
+    except subprocess.CalledProcessError as e:
+        logger.warning("Failed to get number of GPUs.", exc_info=e)
+        return 0
+    return int(out.stdout.strip())
