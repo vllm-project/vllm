@@ -274,8 +274,9 @@ class Worker(WorkerBase):
         if num_seq_groups == 0:
             return []
 
-        modelrunner_input = self.model_runner.convert_broadcast_inputs_to_modelrunner_input(  # noqa
-            inputs_to_broadcast, aux)
+        modelrunner_input = (
+            self.model_runner.convert_broadcast_inputs_to_modelrunner_input(
+                inputs_to_broadcast, aux))
         output = self.model_runner.execute_model(modelrunner_input,
                                                  self.gpu_cache)
 
@@ -313,8 +314,9 @@ class Worker(WorkerBase):
         if num_seq_groups == 0:
             return False
 
-        modelrunner_input = self.model_runner.convert_broadcast_inputs_to_modelrunner_input(  # noqa
-            data, None)
+        modelrunner_input = (
+            self.model_runner.convert_broadcast_inputs_to_modelrunner_input(
+                data, None))
 
         self.model_runner.execute_model(modelrunner_input, self.gpu_cache)
         return True
