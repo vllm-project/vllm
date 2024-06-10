@@ -37,6 +37,7 @@ def run_idefics2_pixel_values(*, disable_image_processor: bool = False):
         generated_text = o.outputs[0].text
         print(generated_text)
 
+
 def run_llava_pixel_values(*, disable_image_processor: bool = False):
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",
@@ -88,6 +89,7 @@ def run_llava_image_features():
         generated_text = o.outputs[0].text
         print(generated_text)
 
+
 def main(args):
     if args.model == "llava" and args.type == "pixel_values":
         run_llava_pixel_values()
@@ -98,9 +100,10 @@ def main(args):
     elif args.model == "idefics2" and args.type == "image_features":
         print("Idefics2 does not support image_features")
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Demo on Llava")
-    
+
     parser.add_argument("--model",
                         type=str,
                         choices=["llava", "idefics2"],
@@ -112,7 +115,7 @@ if __name__ == "__main__":
                         choices=["pixel_values", "image_features"],
                         default="pixel_values",
                         help="image input type")
-                        
+
     args = parser.parse_args()
     # Download from s3
     s3_bucket_path = "s3://vllm-public-assets/vision_model_images/"
@@ -132,4 +135,3 @@ if __name__ == "__main__":
     ])
 
     main(args)
-    
