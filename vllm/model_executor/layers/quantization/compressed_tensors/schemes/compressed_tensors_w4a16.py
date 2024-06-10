@@ -3,7 +3,7 @@ from typing import Callable, List, Optional
 import torch
 from torch.nn import Parameter
 
-from vllm._C import ops
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.gptq_marlin import (
