@@ -1,33 +1,47 @@
-from typing import Optional, Tuple, Type
+import contextlib
+from typing import List, Optional, Tuple, Type
 
 import torch
 
 try:
-    from vllm._C import cache_ops as vllm_cache_ops
-    from vllm._C import ops as vllm_ops
-except ImportError:
-    pass
+    import vllm._C
+except ImportError as e:
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
+    logger.warning("Failed to import from vllm._C with %r", e)
+
+with contextlib.suppress(ImportError):
+    import vllm._moe_C
+
+with contextlib.suppress(ImportError):
+    # ruff: noqa: F401
+    import vllm._punica_C
+
+
+def is_custom_op_supported(op_name: str) -> bool:
+    op, overloads = torch._C._jit_get_operation(op_name)
+    return op is not None
 
 
 # activation ops
 def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    vllm_ops.silu_and_mul(out, x)
+    torch.ops._C.silu_and_mul(out, x)
 
 
 def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    vllm_ops.gelu_and_mul(out, x)
+    torch.ops._C.gelu_and_mul(out, x)
 
 
 def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    vllm_ops.gelu_tanh_and_mul(out, x)
+    torch.ops._C.gelu_tanh_and_mul(out, x)
 
 
 def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
-    vllm_ops.gelu_fast(out, x)
+    torch.ops._C.gelu_fast(out, x)
 
 
 def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
-    vllm_ops.gelu_new(out, x)
+    torch.ops._C.gelu_new(out, x)
 
 
 # page attention ops
@@ -51,7 +65,7 @@ def paged_attention_v1(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    vllm_ops.paged_attention_v1(
+    torch.ops._C.paged_attention_v1(
         out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
         kv_scale, tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
@@ -81,7 +95,7 @@ def paged_attention_v2(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    vllm_ops.paged_attention_v2(
+    torch.ops._C.paged_attention_v2(
         out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
         alibi_slopes, kv_cache_dtype, kv_scale, tp_rank,
@@ -98,8 +112,8 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    vllm_ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache,
-                              is_neox)
+    torch.ops._C.rotary_embedding(positions, query, key, head_size,
+                                  cos_sin_cache, is_neox)
 
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
@@ -107,20 +121,20 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
                              cos_sin_cache: torch.Tensor, is_neox: bool,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
-    vllm_ops.batched_rotary_embedding(positions, query, key, head_size,
-                                      cos_sin_cache, is_neox, rot_dim,
-                                      cos_sin_cache_offsets)
+    torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
+                                          cos_sin_cache, is_neox, rot_dim,
+                                          cos_sin_cache_offsets)
 
 
 # layer norm ops
 def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
              epsilon: float) -> None:
-    vllm_ops.rms_norm(out, input, weight, epsilon)
+    torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
-    vllm_ops.fused_add_rms_norm(input, residual, weight, epsilon)
+    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
 # quantization ops
@@ -128,13 +142,13 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
-    return vllm_ops.awq_dequantize(qweight, scales, zeros, split_k_iters, thx,
-                                   thy)
+    return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
+                                       thx, thy)
 
 
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
              scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
-    return vllm_ops.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
+    return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
 # gptq
@@ -142,27 +156,27 @@ def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
               b_g_idx: torch.Tensor, use_exllama: bool,
               bit: int) -> torch.Tensor:
-    return vllm_ops.gptq_gemm(a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
-                              b_g_idx, use_exllama, bit)
+    return torch.ops._C.gptq_gemm(a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
+                                  b_g_idx, use_exllama, bit)
 
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
                  bit: int) -> None:
-    vllm_ops.gptq_shuffle(q_weight, q_perm, bit)
+    torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
 
 # squeezellm
 def squeezellm_gemm(vec: torch.Tensor, mat: torch.Tensor, mul: torch.Tensor,
                     lookup_table: torch.Tensor) -> None:
-    vllm_ops.squeezellm_gemm(vec, mat, mul, lookup_table)
+    torch.ops._C.squeezellm_gemm(vec, mat, mul, lookup_table)
 
 
 # marlin
 def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                 b_scales: torch.Tensor, workspace: torch.Tensor, size_m: int,
                 size_n: int, size_k: int) -> torch.Tensor:
-    return vllm_ops.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
-                                size_n, size_k)
+    return torch.ops._C.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
+                                    size_n, size_k)
 
 
 # marlin_24
@@ -170,14 +184,14 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_meta: torch.Tensor, b_scales: torch.Tensor,
                         workspace: torch.Tensor, num_bits: int, size_m: int,
                         size_n: int, size_k: int) -> torch.Tensor:
-    return vllm_ops.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
-                                        workspace, num_bits, size_m, size_n,
-                                        size_k)
+    return torch.ops._C.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
+                                            workspace, num_bits, size_m,
+                                            size_n, size_k)
 
 
 # cutlass
 def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
-                         a_scales: torch.Tensor, b_scales: torch.Tensor,
+                         scale_a: torch.Tensor, scale_b: torch.Tensor,
                          out_dtype: Type[torch.dtype]) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
@@ -186,7 +200,7 @@ def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    vllm_ops.cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales)
+    torch.ops._C.cutlass_scaled_mm_dq(out, a, b, scale_a, scale_b)
 
     return out
 
@@ -196,21 +210,22 @@ def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
               codebook_partition_sizes: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
-    return vllm_ops.aqlm_gemm(input, codes, codebooks, scales,
-                              codebook_partition_sizes, bias)
+    return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
+                                  codebook_partition_sizes, bias)
 
 
 def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
                  codebook_partition_sizes: torch.Tensor) -> torch.Tensor:
-    return vllm_ops.aqlm_dequant(codes, codebooks, codebook_partition_sizes)
+    return torch.ops._C.aqlm_dequant(codes, codebooks,
+                                     codebook_partition_sizes)
 
 
 # gptq_marlin
 def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                        size_k: int, size_n: int,
                        num_bits: int) -> torch.Tensor:
-    return vllm_ops.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
-                                       num_bits)
+    return torch.ops._C.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
+                                           num_bits)
 
 
 def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -218,9 +233,9 @@ def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                      perm: torch.Tensor, workspace: torch.Tensor,
                      num_bits: int, size_m: int, size_n: int, size_k: int,
                      is_k_full: bool) -> torch.Tensor:
-    return vllm_ops.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
-                                     workspace, num_bits, size_m, size_n,
-                                     size_k, is_k_full)
+    return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
+                                         workspace, num_bits, size_m, size_n,
+                                         size_k, is_k_full)
 
 
 # fp8
@@ -257,28 +272,40 @@ def scaled_fp8_quant(
         output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
     if scale is None:
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-        vllm_ops.dynamic_scaled_fp8_quant(output, input, scale)
+        torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        vllm_ops.static_scaled_fp8_quant(output, input, scale)
+        torch.ops._C.static_scaled_fp8_quant(output, input, scale)
     return output, scale
 
 
 # int8
-def static_scaled_int8_quant(input: torch.Tensor,
-                             scale: torch.Tensor) -> torch.Tensor:
+def scaled_int8_quant(
+        input: torch.Tensor,
+        scale: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Quantize the input tensor to int8 and return the quantized tensor.
+    Quantize the input tensor to int8 and return the quantized tensor and scale.
 
     Args:
         input: The input tensor to be quantized to int8.
-        scale: Scaling factor for the int8 quantization.
+        scale: Optional scaling factor for the int8 quantization.
+            When not provided, we invoke dynamic-per-token quantization.
 
     Returns:
-        torch.Tensor: Output tensor in int8.
+      Tuple[Torch.Tensor, Torch.Tensor] : Output int8 tensor and scales.
     """
-    q = torch.empty_like(input, dtype=torch.int8)
-    vllm_ops.static_scaled_int8_quant(q, input, scale)
-    return q
+    output = torch.empty_like(input, dtype=torch.int8)
+    if scale is not None:
+        # static-per-tensor quantization.
+        torch.ops._C.static_scaled_int8_quant(output, input, scale)
+        return output, scale
+
+    # dynamic-per-token quantization.
+    input_scales = torch.empty((input.numel() // input.shape[-1], 1),
+                               device=input.device,
+                               dtype=torch.float32)
+    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales)
+    return output, input_scales
 
 
 # moe
@@ -286,9 +313,16 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
                          experts_ids: torch.Tensor,
                          num_tokens_post_pad: torch.Tensor) -> None:
-    vllm_ops.moe_align_block_size(topk_ids, num_experts, block_size,
-                                  sorted_token_ids, experts_ids,
-                                  num_tokens_post_pad)
+    torch.ops._C.moe_align_block_size(topk_ids, num_experts, block_size,
+                                      sorted_token_ids, experts_ids,
+                                      num_tokens_post_pad)
+
+
+def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                 token_expert_indicies: torch.Tensor,
+                 gating_output: float) -> None:
+    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
+                                  token_expert_indicies, gating_output)
 
 
 def reshape_and_cache(
@@ -300,8 +334,9 @@ def reshape_and_cache(
     kv_cache_dtype: str,
     kv_scale: float,
 ) -> None:
-    vllm_cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                     slot_mapping, kv_cache_dtype, kv_scale)
+    torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
+                                             value_cache, slot_mapping,
+                                             kv_cache_dtype, kv_scale)
 
 
 def reshape_and_cache_flash(
@@ -312,25 +347,115 @@ def reshape_and_cache_flash(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
 ) -> None:
-    vllm_cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
-                                           slot_mapping, kv_cache_dtype)
+    torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
+                                                   value_cache, slot_mapping,
+                                                   kv_cache_dtype)
 
 
 def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
-    vllm_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+    torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
-    vllm_cache_ops.swap_blocks(src, dst, block_mapping)
+    torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
 def convert_fp8(output: torch.Tensor,
                 input: torch.Tensor,
                 scale: float = 1.0,
                 kv_dtype: str = "fp8") -> None:
-    vllm_cache_ops.convert_fp8(output, input, scale, kv_dtype)
+    torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
-#TODO: cuda_utils, custom_ar
+def get_device_attribute(attribute: int, device: int) -> int:
+    return torch.ops._C_cuda_utils.get_device_attribute(attribute, device)
+
+
+def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
+    # ruff: noqa: E501
+    return torch.ops._C_cuda_utils.get_max_shared_memory_per_block_device_attribute(
+        device)
+
+
+# custom ar
+def init_custom_ar(meta: torch.Tensor, rank_data: torch.Tensor,
+                   handles: List[str], offsets: List[int], rank: int,
+                   full_nvlink: bool) -> int:
+    return torch.ops._C_custom_ar.init_custom_ar(meta, rank_data, handles,
+                                                 offsets, rank, full_nvlink)
+
+
+def should_custom_ar(inp: torch.Tensor, max_size: int, world_size: int,
+                     full_nvlink: bool) -> bool:
+    return torch.ops._C_custom_ar.should_custom_ar(inp, max_size, world_size,
+                                                   full_nvlink)
+
+
+def all_reduce_reg(fa: int, inp: torch.Tensor, out: torch.Tensor) -> None:
+    torch.ops._C_custom_ar.all_reduce_reg(fa, inp, out)
+
+
+def all_reduce_unreg(fa: int, inp: torch.Tensor, reg_buffer: torch.Tensor,
+                     out: torch.Tensor) -> None:
+    torch.ops._C_custom_ar.all_reduce_unreg(fa, inp, reg_buffer, out)
+
+
+def dispose(fa: int) -> None:
+    torch.ops._C_custom_ar.dispose(fa)
+
+
+def meta_size() -> int:
+    return torch.ops._C_custom_ar.meta_size()
+
+
+def register_buffer(fa: int, t: torch.Tensor, handles: List[str],
+                    offsets: List[int]) -> None:
+    return torch.ops._C_custom_ar.register_buffer(fa, t, handles, offsets)
+
+
+def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[str], List[int]]:
+    return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta(fa)
+
+
+def register_graph_buffers(fa: int, handles: List[str],
+                           offsets: List[List[int]]) -> None:
+    torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
+
+
+# punica
+def dispatch_bgmv(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    indicies: torch.Tensor,
+    layer_idx: int,
+    scale: float,
+) -> None:
+    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx,
+                                      scale)
+
+
+def dispatch_bgmv_low_level(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    indicies: torch.Tensor,
+    layer_idx: int,
+    scale: float,
+    h_in: int,
+    h_out: int,
+    y_offset: int,
+) -> None:
+    torch.ops._punica_C.dispatch_bgmv_low_level(
+        y,
+        x,
+        w_t_all,
+        indicies,
+        layer_idx,
+        scale,
+        h_in,
+        h_out,
+        y_offset,
+    )
