@@ -109,8 +109,7 @@ def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("out_dtype",
-                         [torch.bfloat16, torch.float16, torch.int8])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                         out_dtype: Type[torch.dtype]):
     cutlass_int8_gemm_helper(512, 512, 512, per_act_token, per_out_ch,
@@ -119,8 +118,7 @@ def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("out_dtype",
-                         [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
