@@ -49,6 +49,9 @@ steps:
           {% if not step.no_gpu %}
           gpus: all
           {% endif %}
+          {% if step.label == "Benchmarks" %}
+          mount-buildkite-agent: true
+          {% endif %}
           command: ["bash", "-c", "cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
           environment:
             - VLLM_USAGE_SOURCE=ci-test
