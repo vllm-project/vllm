@@ -51,7 +51,7 @@ class SchedulingBudget:
     """
     token_budget: int
     max_num_seqs: int
-    logprob_budget: int  # Added to prevent OOM in calculating logprobs
+    logprob_budget: int = 256  # Added to prevent OOM in calculating logprobs
     _requeset_ids_num_batched_tokens: Set[str] = field(default_factory=set)
     _requeset_ids_num_curr_seqs: Set[str] = field(default_factory=set)
     _requeset_ids_num_batched_logprobs: Set[str] = field(default_factory=set)
