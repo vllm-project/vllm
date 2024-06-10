@@ -40,6 +40,7 @@ steps:
         image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
         command:
         - bash /workspace/.buildkite/nightly-benchmarks/run-vllm-benchmarks.sh
+        entrypoint: ""
         workdir: /workspace
         mount-buildkite-agent: true
         propagate-environment: true
