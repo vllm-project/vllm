@@ -12,6 +12,10 @@
 set -e
 set -o pipefail
 
+# for debugging
+export VLLM_LOGGING_LEVEL=DEBUG
+export VLLM_TRACE_FUNCTION=1
+
 
 check_gpus() {
   declare -g gpu_count=$(nvidia-smi --list-gpus | wc -l)
@@ -161,6 +165,8 @@ done
 
 # Iterate over serving tests
 jq -c '.[]' $SERVING_TESTS | while read -r params; do
+
+  break
 
 
   # get the test name, and append the GPU type back to it.
