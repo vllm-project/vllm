@@ -2,11 +2,12 @@ import argparse
 import os
 import subprocess
 
-from PIL import Image
 import torch
+from PIL import Image
 
 from vllm import LLM
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
+
 
 def run_idefics2_pixel_values(*, disable_image_processor: bool = False):
     llm = LLM(
