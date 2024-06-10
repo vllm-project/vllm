@@ -104,13 +104,8 @@ struct ScaledEpilogue {
       cutlass::epilogue::fusion::Sm90EVT<Compute1, ScaleA, EVTCompute0>;
   using ArgumentType = typename EVTCompute::Arguments;
 
-  template <typename... Args>
-  static ArgumentType prepare_args(Args... args) {
-    auto tuple = std::make_tuple(args...);
-
-    torch::Tensor const& a_scales = std::get<0>(tuple);
-    torch::Tensor const& b_scales = std::get<1>(tuple);
-
+  static ArgumentType prepare_args(torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales) {
     using ScaleA_Args = typename ScaleA::Arguments;
     using ScaleB_Args = typename ScaleB::Arguments;
 
