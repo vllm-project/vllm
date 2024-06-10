@@ -7,7 +7,8 @@ from vllm._C import ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinState, marlin_permute_scales)
+    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N, GPTQMarlinState,
+    marlin_permute_scales)
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsW4A16"]
@@ -15,7 +16,11 @@ __all__ = ["CompressedTensorsW4A16"]
 
 class CompressedTensorsW4A16(CompressedTensorsScheme):
 
-    def __init__(self, strategy: str, group_size: Optional[int] = None):
+    def __init__(self,
+                 strategy: str,
+                 num_bits: int,
+                 group_size: Optional[int] = None):
+        self.num_bits = num_bits
         self.strategy = strategy
         self.group_size = group_size
 
@@ -29,7 +34,7 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
 
-        pack_factor = 8
+        pack_factor = 32 // self.num_bits
         output_size_per_partition = sum(output_partition_sizes)
 
         if self.group_size is not None:
@@ -54,12 +59,13 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
             requires_grad=False,
         )
 
-        set_weight_attrs(weight, {
-            "input_dim": 1,
-            "output_dim": 0,
-            "packed_dim": 1,
-            "pack_factor": 8
-        })
+        set_weight_attrs(
+            weight, {
+                "input_dim": 1,
+                "output_dim": 0,
+                "packed_dim": 1,
+                "pack_factor": pack_factor
+            })
         set_weight_attrs(weight, {"weight_loader": weight_loader})
 
         layer.register_parameter("weight_packed", weight)
@@ -80,9 +86,9 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
         })
         layer.register_parameter("weight_scale", weight_scale)
 
-        weight_shape = Parameter(torch.empty(2,
-                                             device="cuda",
-                                             dtype=torch.int64),
+        # A 2D array defining the original shape of the weights
+        # before packing
+        weight_shape = Parameter(torch.empty(2, dtype=torch.int64),
                                  requires_grad=False)
 
         layer.register_parameter("weight_shape", weight_shape)
@@ -96,7 +102,9 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
         layer.is_k_full = True
         layer.group_size = group_size
 
-        max_workspace_size = (output_size_per_partition // 64) * 16
+        max_workspace_size = (
+            output_size_per_partition //
+            GPTQ_MARLIN_MIN_THREAD_N) * GPTQ_MARLIN_MAX_PARALLEL
 
         workspace = torch.zeros(max_workspace_size,
                                 dtype=torch.int,
@@ -138,7 +146,7 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
             # Repack weights
             marlin_qweight = ops.gptq_marlin_repack(
                 layer.weight_packed.t().contiguous(), layer.g_idx_sort_indices,
-                part_size_k, part_size_n, 4)
+                part_size_k, part_size_n, self.num_bits)
 
             replace_tensor("weight_packed", marlin_qweight)
 
@@ -148,12 +156,13 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
 
             marlin_scales = marlin_permute_scales(
                 layer.weight_scale.squeeze().t().contiguous(), scales_size_k,
-                scales_size_n, layer.group_size, 4)
+                scales_size_n, layer.group_size, self.num_bits)
             replace_tensor("weight_scale", marlin_scales)
 
         output = ops.gptq_marlin_gemm(reshaped_x, layer.weight_packed,
                                       layer.weight_scale, layer.g_idx,
                                       layer.g_idx_sort_indices,
-                                      layer.workspace, 4, size_m, part_size_n,
-                                      part_size_k, layer.is_k_full)
+                                      layer.workspace, self.num_bits, size_m,
+                                      part_size_n, part_size_k,
+                                      layer.is_k_full)
         return output.reshape(out_shape)

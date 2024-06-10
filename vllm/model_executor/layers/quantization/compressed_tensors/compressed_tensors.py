@@ -47,19 +47,27 @@ class CompressedTensorsConfig(QuantizationConfig):
         layer_quant_details: Dict[str, Any] = dict()
         ignore: List[str] = config.get("ignore", None)
 
+        # The quant_config has multiple config_groups, each containing
+        # an input_activations key with details about how the activations are
+        # quantized, a weights key indicating how the weights are quantized,
+        # and a list of targets under the `targets` key, dictating which
+        # layers are impacted by the quantization details. The quantization
+        # details follow the structure defined by the QuantizationArgs
+        # pydantic model, which is used to verify the structure of the
+        # quant_config and also store the details for later use.
         for key, quant_config in config["config_groups"].items():
             targets = quant_config.get("targets")
             for target in targets:
                 layer_quant_details[target] = {}
                 layer_quant_details[target][
-                    "weight"] = QuantizationArgs.parse_obj(
+                    "weights"] = QuantizationArgs.parse_obj(
                         quant_config.get("weights"))
                 try:
                     layer_quant_details[target][
-                        "input"] = QuantizationArgs.parse_obj(
+                        "input_activations"] = QuantizationArgs.parse_obj(
                             quant_config.get("input_activations"))
                 except Exception:
-                    layer_quant_details[target]["input"] = None
+                    layer_quant_details[target]["input_activations"] = None
 
         return cls(layer_quant_details=layer_quant_details, ignore=ignore)
 
@@ -102,7 +110,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                     input_quant: BaseModel) -> "CompressedTensorsScheme":
 
         if self._is_w4a16(weight_quant, input_quant):
-            return CompressedTensorsW4A16(strategy=weight_quant.strategy,
+            return CompressedTensorsW4A16(num_bits=weight_quant.num_bits,
+                                          strategy=weight_quant.strategy,
                                           group_size=weight_quant.group_size)
 
         if self._is_static_tensor_w8a8(weight_quant, input_quant):
@@ -130,8 +139,9 @@ class CompressedTensorsConfig(QuantizationConfig):
             raise ValueError(
                 f"Could not find quantization details for {layer}.")
 
-        return self._get_schema(weight_quant=layer_quant_details["weight"],
-                                input_quant=layer_quant_details["input"])
+        return self._get_schema(
+            weight_quant=layer_quant_details["weights"],
+            input_quant=layer_quant_details["input_activations"])
 
 
 class CompressedTensorsLinearMethod(LinearMethodBase):
