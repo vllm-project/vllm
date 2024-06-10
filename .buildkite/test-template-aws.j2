@@ -22,7 +22,9 @@ steps:
   {% for step in steps %}
   - label: "{{ step.label }}"
     agents:
-      {% if step.no_gpu %}
+      {% if step.label == "Documentation Build" %}
+      queue: small_cpu_queue
+      {% elif step.no_gpu %}
       queue: cpu_queue
       {% elif step.num_gpus == 2 or step.num_gpus == 4 %}
       queue: gpu_4_queue
