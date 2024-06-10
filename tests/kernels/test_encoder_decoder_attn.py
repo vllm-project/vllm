@@ -677,10 +677,10 @@ def _run_encoder_decoder_cross_attention_test(
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("max_dec_seq_len", MAX_DEC_SEQ_LENS)
 @pytest.mark.parametrize("max_enc_seq_len", MAX_ENC_SEQ_LENS)
-def test_e2e_enc_dec_attn(
-        num_heads: int, head_size: int, backend_name: str, batch_size: int,
-        block_size: int, max_dec_seq_len: int, max_enc_seq_len: int,
-        monkeypatch) -> None:
+def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
+                          batch_size: int, block_size: int,
+                          max_dec_seq_len: int, max_enc_seq_len: int,
+                          monkeypatch) -> None:
     '''
     Encoder/decoder attention test:
 
