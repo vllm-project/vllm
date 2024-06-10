@@ -16,13 +16,13 @@ def run_idefics2_pixel_values(*, disable_image_processor: bool = False):
         image_token_id=32000,
         image_input_shape="1,3,980,980",
         image_feature_size=576,
+        disable_image_processor=disable_image_processor,
         dtype='float16',
     )
 
     prompt = "<image>" * 64 + (
         "\nUSER: What is the content of this image?\nASSISTANT:")
 
-    # This should be provided by another online or offline component.
     if disable_image_processor:
         image = torch.load("images/bird_pixel_values.pt")
     else:
