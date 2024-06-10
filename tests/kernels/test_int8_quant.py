@@ -1,7 +1,8 @@
 import pytest
 import torch
 
-from vllm._C import ops
+# ruff: noqa: F401
+import vllm._C
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
@@ -33,7 +34,7 @@ def test_dynamic_scaled_int8_quant(num_tokens: int, hidden_size: int,
 
     ops_out = torch.empty_like(x, dtype=torch.int8, device="cuda")
     scales_out = torch.empty_like(scales, dtype=torch.float32, device="cuda")
-    ops.dynamic_scaled_int8_quant(ops_out, x, scales_out)
+    torch.ops._C.dynamic_scaled_int8_quant(ops_out, x, scales_out)
 
     assert torch.allclose(scales_out, scales)
     assert torch.allclose(torch_out, ops_out,
@@ -60,6 +61,6 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
     out2 = torch.empty_like(x, dtype=torch.int8)
     scale_argument = torch.tensor([scale], dtype=torch.float32, device="cuda")
 
-    ops.static_scaled_int8_quant(out2, x, scale_argument)
+    torch.ops._C.static_scaled_int8_quant(out2, x, scale_argument)
     assert torch.allclose(out1, out2,
                           atol=1)  # big atol to account for rounding errors

@@ -423,7 +423,9 @@ class Scheduler:
                 num_running_seqs = seq_group.get_max_num_running_seqs()
                 budget.subtract_num_seqs(seq_group.request_id,
                                          num_running_seqs)
-                if curr_loras is not None and seq_group.lora_int_id > 0:
+
+                if (curr_loras is not None and seq_group.lora_int_id > 0
+                        and seq_group.lora_int_id in curr_loras):
                     curr_loras.remove(seq_group.lora_int_id)
 
                 if running_queue:
