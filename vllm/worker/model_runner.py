@@ -730,8 +730,7 @@ class ModelRunner:
     def prepare_modelrunner_input(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
+    ):
         assert self.is_driver_worker
         assert seq_group_metadata_list is not None
         return self.convert_broadcast_inputs_to_modelrunner_input(

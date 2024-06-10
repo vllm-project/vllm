@@ -155,17 +155,6 @@ class EmbeddingModelRunner(ModelRunner):
                                 pooling_metadata, lora_requests, lora_mapping,
                                 multi_modal_kwargs)
 
-    def prepare_modelrunner_input(
-        self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
-               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
-        # TODO: deprecate this function. It is only used in tests.
-        assert self.is_driver_worker
-        assert seq_group_metadata_list is not None
-        return self.convert_broadcast_inputs_to_modelrunner_input(
-            *self.prepare_inputs_to_broadcast(seq_group_metadata_list))
-
     def _prepare_pooling(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
