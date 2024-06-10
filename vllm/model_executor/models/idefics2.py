@@ -387,7 +387,8 @@ class Idefics2Model(nn.Module):
         self.vision_model = SiglipVisionModel(config.vision_config)
         self.connector = Idefics2Connector(config, quant_config)
         ##Mistral Language Decoder
-        self.text_model = LlamaModel(config.text_config, linear_method)
+        self.text_model = LlamaModel(config.text_config, linear_method,
+                                     quant_config)
         self.image_seq_len = config.perceiver_config.resampler_n_latents
         self.image_token_id = self.config.image_token_id
         self._use_flash_attention_2 =\
@@ -481,6 +482,7 @@ class Idefics2Model(nn.Module):
                                             attn_metadata,
                                             inputs_embeds=inputs_embeds)
             return hidden_states
+
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input()
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
