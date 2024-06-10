@@ -12,11 +12,13 @@ vLLM is a community project. Our compute resources for development and testing a
 - Crusoe Cloud
 - Databricks
 - DeepInfra
+- Dropbox
 - Lambda Lab
 - NVIDIA
 - Replicate
 - Roblox
 - RunPod
+- Sequoia Capital
 - Trainy
 - UC Berkeley
 - UC San Diego

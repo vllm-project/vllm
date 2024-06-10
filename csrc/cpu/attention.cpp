@@ -390,6 +390,9 @@ void paged_attention_v1_impl_launcher(
     case 128:
       LAUNCH_V1_ATTENTION_KERNEL(T, 128, BLOCK_SIZE);
       break;
+    case 192:
+      LAUNCH_V1_ATTENTION_KERNEL(T, 192, BLOCK_SIZE);
+      break;
     case 256:
       LAUNCH_V1_ATTENTION_KERNEL(T, 256, BLOCK_SIZE);
       break;
@@ -415,14 +418,18 @@ void paged_attention_v1_impl_launcher(
   }
 }  // namespace
 
-void paged_attention_v1(torch::Tensor& out, torch::Tensor& query,
-                        torch::Tensor& key_cache, torch::Tensor& value_cache,
-                        int num_kv_heads, float scale,
-                        torch::Tensor& block_tables, torch::Tensor& seq_lens,
-                        int block_size, int max_seq_len,
-                        const c10::optional<torch::Tensor>& alibi_slopes,
-                        const std::string& kv_cache_dtype, float kv_scale) {
+void paged_attention_v1(
+    torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
+    torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
+    int64_t max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step) {
   TORCH_CHECK(kv_scale == 1.0f);
+  TORCH_CHECK(blocksparse_vert_stride <= 1,
+              "CPU backend does not support blocksparse attention yet.");
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v1_impl",
                                [&] {
                                  CPU_KERNEL_GUARD_IN(paged_attention_v1_impl)
@@ -700,6 +707,9 @@ void paged_attention_v2_impl_launcher(
     case 128:
       LAUNCH_V2_ATTENTION_KERNEL(T, 128, BLOCK_SIZE);
       break;
+    case 192:
+      LAUNCH_V2_ATTENTION_KERNEL(T, 192, BLOCK_SIZE);
+      break;
     case 256:
       LAUNCH_V2_ATTENTION_KERNEL(T, 256, BLOCK_SIZE);
       break;
@@ -726,16 +736,19 @@ void paged_attention_v2_impl_launcher(
   }
 }  // namespace
 
-void paged_attention_v2(torch::Tensor& out, torch::Tensor& exp_sums,
-                        torch::Tensor& max_logits, torch::Tensor& tmp_out,
-                        torch::Tensor& query, torch::Tensor& key_cache,
-                        torch::Tensor& value_cache, int num_kv_heads,
-                        float scale, torch::Tensor& block_tables,
-                        torch::Tensor& seq_lens, int block_size,
-                        int max_seq_len,
-                        const c10::optional<torch::Tensor>& alibi_slopes,
-                        const std::string& kv_cache_dtype, float kv_scale) {
+void paged_attention_v2(
+    torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
+    torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
+    torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
+    int64_t max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step) {
   TORCH_CHECK(kv_scale == 1.0f);
+  TORCH_CHECK(blocksparse_vert_stride <= 1,
+              "CPU backend does not support blocksparse attention yet.");
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v2_impl",
                                [&] {
                                  CPU_KERNEL_GUARD_IN(paged_attention_v2_impl)
