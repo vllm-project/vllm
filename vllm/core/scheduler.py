@@ -651,7 +651,8 @@ class Scheduler:
         else:
             prompt_limit = min(self.scheduler_config.max_model_len,
                                self.scheduler_config.max_num_batched_tokens)
-            if seq_group.sampling_params.prompt_logprobs:
+            if (seq_group.sampling_params is not None
+                    and seq_group.sampling_params.prompt_logprobs):
                 prompt_limit = min(
                     prompt_limit,
                     self.scheduler_config.max_num_batched_logprobs)
