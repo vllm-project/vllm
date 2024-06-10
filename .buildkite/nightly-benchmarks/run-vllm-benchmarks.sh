@@ -12,9 +12,7 @@
 set -e
 set -o pipefail
 
-# for debugging
-export VLLM_LOGGING_LEVEL=DEBUG
-export VLLM_TRACE_FUNCTION=1
+
 
 
 check_gpus() {
@@ -90,6 +88,10 @@ kill_gpu_processes() {
   # so that we know if all GPU processes are killed.
   gpu_memory_usage=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
   echo "GPU 0 Memory Usage: $gpu_memory_usage MB"
+
+  # for debugging
+  export VLLM_LOGGING_LEVEL=DEBUG
+  export VLLM_TRACE_FUNCTION=1
 
 }
 
