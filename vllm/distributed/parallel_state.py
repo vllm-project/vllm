@@ -5,11 +5,14 @@
 """Tensor and pipeline parallel groups."""
 from typing import List, Optional
 
+import contextlib
 import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+
+from datetime import timedelta
 
 logger = init_logger(__name__)
 
@@ -84,7 +87,7 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
 ):
-    logger.debug(
+    logger.info(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
         distributed_init_method, backend)
@@ -97,11 +100,13 @@ def init_distributed_environment(
             backend=backend,
             init_method=distributed_init_method,
             world_size=world_size,
+            timeout=timedelta(seconds=10),
             rank=rank)
         global _DEVICE_WORLD_GROUP, _CPU_WORLD_GROUP
         _DEVICE_WORLD_GROUP = torch.distributed.group.WORLD
         ranks = list(range(torch.distributed.get_world_size()))
         _CPU_WORLD_GROUP = torch.distributed.new_group(ranks=ranks,
+                                                       timeout=timedelta(seconds=10),
                                                        backend="gloo")
         # set the local rank
         # local_rank is not available in torch ProcessGroup,
@@ -180,8 +185,8 @@ def initialize_model_parallel(
         ranks = list(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
-        group = torch.distributed.new_group(ranks, backend=backend)
-        cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+        group = torch.distributed.new_group(ranks, backend=backend, timeout=timedelta(seconds=10))
+        cpu_group = torch.distributed.new_group(ranks, backend="gloo", timeout=timedelta(seconds=10))
         if rank in ranks:
             _TP_DEVICE_GROUP = group
             _TP_CPU_GROUP = cpu_group
@@ -210,8 +215,8 @@ def initialize_model_parallel(
         "pipeline model parallel group is already initialized")
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
-        group = torch.distributed.new_group(ranks, backend=backend)
-        cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+        group = torch.distributed.new_group(ranks, backend=backend, timeout=timedelta(seconds=10))
+        cpu_group = torch.distributed.new_group(ranks, backend="gloo", timeout=timedelta(seconds=10))
         if rank in ranks:
             _PP_DEVICE_GROUP = group
             _PP_CPU_GROUP = cpu_group
@@ -255,6 +260,44 @@ def ensure_model_parallel_initialized(
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
     return (_TP_DEVICE_GROUP is not None and _PP_DEVICE_GROUP is not None)
+
+
+override = False
+
+@contextlib.contextmanager
+def patch_tensor_parallel_group(group, cpu_group, pynccl_comm=None, ca_comm=None):
+    global override
+    assert not override, "should not override during override"
+    override = True
+    old_world_group = get_world_group()
+    old_world_cpu_group = get_cpu_world_group()
+    old_tp_group = get_tensor_model_parallel_group()
+    old_tp_cpu_group = get_tensor_model_parallel_cpu_group()
+    old_tp_pynccl_comm = get_tp_pynccl_communicator()
+    old_tp_ca_comm = get_tp_ca_communicator()
+    global _DEVICE_WORLD_GROUP, _CPU_WORLD_GROUP, _TP_DEVICE_GROUP, _TP_CPU_GROUP, _TP_PYNCCL_COMMUNICATOR, _TP_CA_COMMUNICATOR
+    _DEVICE_WORLD_GROUP = group
+    _CPU_WORLD_GROUP = cpu_group
+    _TP_DEVICE_GROUP = group
+    _TP_CPU_GROUP = cpu_group
+    _TP_PYNCCL_COMMUNICATOR = pynccl_comm
+    _TP_CA_COMMUNICATOR = ca_comm
+    try:
+        yield
+    finally:
+        override = False
+        _DEVICE_WORLD_GROUP = old_world_group
+        _CPU_WORLD_GROUP = old_world_cpu_group
+        _TP_DEVICE_GROUP = old_tp_group
+        _TP_CPU_GROUP = old_tp_cpu_group
+        _TP_PYNCCL_COMMUNICATOR = old_tp_pynccl_comm
+        _TP_CA_COMMUNICATOR = old_tp_ca_comm
+
+
+def get_world_group():
+    """Get the GPU world group."""
+    assert _DEVICE_WORLD_GROUP is not None, ("World group is not initialized")
+    return _DEVICE_WORLD_GROUP
 
 
 def get_cpu_world_group():

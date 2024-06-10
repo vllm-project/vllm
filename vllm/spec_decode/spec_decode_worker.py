@@ -13,6 +13,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
+from vllm.spec_decode.single_tp_worker import SingleTpWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.util import (create_sequence_group_output,
@@ -105,6 +106,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                                   ngram_prompt_lookup_max)
         else:
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+            proposer_worker = SingleTpWorker.maybe_wrap_worker(proposer_worker, draft_worker_kwargs['parallel_config'], scorer_worker.parallel_config)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))

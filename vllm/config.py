@@ -946,9 +946,8 @@ class SpeculativeConfig:
         draft worker can have a different parallel strategy, e.g. TP=1.
         """
         draft_parallel_config = ParallelConfig(
-            pipeline_parallel_size=target_parallel_config.
-            pipeline_parallel_size,
-            tensor_parallel_size=target_parallel_config.tensor_parallel_size,
+            pipeline_parallel_size=1,
+            tensor_parallel_size=1,
             distributed_executor_backend=target_parallel_config.
             distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
