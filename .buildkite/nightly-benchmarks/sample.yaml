@@ -9,7 +9,7 @@ steps:
           containers:
           # - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT
           # TODO(simon): check latest main branch or use the PR image.
-          - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:45c35f0d58f4508bf43bd6af1d3d0d0ec0c915e6
+          - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
             command:
             - bash .buildkite/nightly-benchmarks/run-vllm-benchmarks.sh
             resources:
@@ -32,16 +32,16 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  # TODO(simon): bring H100 online
-  # - label: "H100: NVIDIA SMI"
-  #   agents:
-  #     queue: H100
-  #   plugins:
-  #   - docker#v5.11.0:
-  #       image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:45c35f0d58f4508bf43bd6af1d3d0d0ec0c915e6
-  #       command:
-  #       - bash -c 'nvidia-smi && nvidia-smi topo -m'
-  #       propagate-environment: true
-  #       ipc: host
-  #       gpus: all
+  TODO(simon): bring H100 online
+  - label: "H100: NVIDIA SMI"
+    agents:
+      queue: H100
+    plugins:
+    - docker#v5.11.0:
+        image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
+        command:
+        - bash .buildkite/nightly-benchmarks/run-vllm-benchmarks.sh
+        propagate-environment: true
+        ipc: host
+        gpus: all
 
