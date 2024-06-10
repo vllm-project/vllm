@@ -45,4 +45,7 @@ steps:
         propagate-environment: true
         ipc: host
         gpus: all
+        environment:
+        - VLLM_USAGE_SOURCE
+        - HF_TOKEN
 
