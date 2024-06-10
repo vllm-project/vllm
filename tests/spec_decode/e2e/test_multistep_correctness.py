@@ -221,8 +221,6 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
 
         # Print spec metrics.
         "disable_log_stats": False,
-
-        #"tensor_parallel_size" : 1,
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -257,9 +255,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         # Use small output len for fast test.
         256,
     ])
-@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("batch_size", [64])
 @pytest.mark.parametrize("seed", [1])
-def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_1(
+def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
     """Verify greedy equality on a tiny model and large batch size.
@@ -268,7 +266,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_1(
                                          test_llm_generator,
                                          batch_size,
                                          max_output_len=output_len,
-                                         force_output_len=False)
+                                         force_output_len=True)
 
 
 @pytest.mark.parametrize(
@@ -408,7 +406,7 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         )
     },
 ])
-@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize(
     "output_len",
     [
@@ -564,6 +562,7 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
+            
             # Artificially limit the draft model max model len; this forces vLLM
             # to skip speculation once the sequences grow beyond 32-k tokens.
             "speculative_max_model_len": 32,
