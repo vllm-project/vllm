@@ -1,17 +1,17 @@
 #include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
-#include <torch/extension.h>
+#include <torch/all.h>
 
 #include "custom_all_reduce.cuh"
 
-// fake pointer type
-using fptr_t = uint64_t;
+// fake pointer type, must match fptr_t type in ops.h
+using fptr_t = int64_t;
 static_assert(sizeof(void*) == sizeof(fptr_t));
 
 fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
                       const std::vector<std::string>& handles,
-                      const std::vector<int64_t>& offsets, int rank,
+                      const std::vector<int64_t>& offsets, int64_t rank,
                       bool full_nvlink) {
   int world_size = offsets.size();
   if (world_size > 8)
@@ -55,7 +55,7 @@ bool _is_weak_contiguous(torch::Tensor& t) {
           t.numel() * t.element_size());
 }
 
-bool should_custom_ar(torch::Tensor& inp, int max_size, int world_size,
+bool should_custom_ar(torch::Tensor& inp, int64_t max_size, int64_t world_size,
                       bool full_nvlink) {
   auto inp_size = inp.numel() * inp.element_size();
   // custom allreduce requires input byte size to be multiples of 16
@@ -125,7 +125,7 @@ void dispose(fptr_t _fa) {
   delete fa;
 }
 
-int meta_size() { return sizeof(vllm::Signal); }
+int64_t meta_size() { return sizeof(vllm::Signal); }
 
 void register_buffer(fptr_t _fa, torch::Tensor& t,
                      const std::vector<std::string>& handles,
@@ -134,10 +134,16 @@ void register_buffer(fptr_t _fa, torch::Tensor& t,
   fa->register_buffer(handles, offsets, t.data_ptr());
 }
 
-std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
+std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
     fptr_t _fa) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
-  return fa->get_graph_buffer_ipc_meta();
+  auto [handle_bytes, offsets] = fa->get_graph_buffer_ipc_meta();
+  auto options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+  auto handles =
+      torch::empty({static_cast<int64_t>(handle_bytes.size())}, options);
+  std::memcpy(handles.data_ptr(), handle_bytes.data(), handle_bytes.size());
+  return {handles, std::move(offsets)};
 }
 
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
