@@ -1,12 +1,11 @@
 .. _fp8:
 
-FP8 Weight and Activation Quantization
-======================================
-
-Introduction to FP8
--------------------
+FP8
+==================
 
 vLLM supports FP8 (8-bit floating point) computation using hardware acceleration on GPUs such as Nvidia H100 and AMD MI300x. Currently, only Hopper and Ada Lovelace GPUs are supported. Quantization of models with FP8 allows for a 2x reduction in model memory requirements and up to a 1.6x improvement in throughput with minimal impact on accuracy.
+
+Please visit the HF collection of `quantized FP8 checkpoints of popular LLMs ready to use with vLLM <https://huggingface.co/collections/neuralmagic/fp8-llms-for-vllm-666742ed2b78b7ac8df13127>`_.
 
 The FP8 types typically supported in hardware have two distinct representations, each useful in different scenarios:
 
@@ -26,7 +25,7 @@ In this mode, all Linear modules (except for the final `lm_head`) have their wei
     model = LLM("facebook/opt-125m", quantization="fp8")
     # INFO 06-10 17:55:42 model_runner.py:157] Loading model weights took 0.1550 GB
 
-.. note::
+.. warning::
 
     Currently, we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model.
 
@@ -47,6 +46,10 @@ Offline Quantization with Dynamic Activation Scaling Factors
 
 You can use AutoFP8 to produce checkpoints with their weights quantized to FP8 ahead of time and let vLLM handle calculating dynamic scales for the activations at runtime for maximum accuracy. You can enable this with the `activation_scheme="dynamic"` argument.
 
+.. warning::
+
+    Please note that although this mode doesn't give you better performance, it reduces memory footprint compared to online quantization.
+
 .. code-block:: python
 
     from auto_fp8 import AutoFP8ForCausalLM, BaseQuantizeConfig
@@ -54,6 +57,7 @@ You can use AutoFP8 to produce checkpoints with their weights quantized to FP8 a
     pretrained_model_dir = "meta-llama/Meta-Llama-3-8B-Instruct"
     quantized_model_dir = "Meta-Llama-3-8B-Instruct-FP8-Dynamic"
 
+    # For dynamic activation scales, there is no need for calbration examples
     examples = []
     quantize_config = BaseQuantizeConfig(quant_method="fp8", activation_scheme="dynamic")
 
