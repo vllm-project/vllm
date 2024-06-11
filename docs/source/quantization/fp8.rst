@@ -13,7 +13,7 @@ The FP8 types typically supported in hardware have two distinct representations,
 - **E5M2**: Consists of 1 sign bit, 5 exponent bits, and 2 bits of mantissa. It can store values up to +/-57344, +/- ``inf``, and ``nan``. The tradeoff for the increased dynamic range is lower precision of the stored values.
 
 Quick Start with Online Dynamic Quantization
--------------------------------------
+--------------------------------------------
 
 Dynamic quantization of an original precision BF16/FP16 model to FP8 can be achieved with vLLM without any calibration data required. You can enable the feature by specifying ``--quantization="fp8"`` in the command line or setting ``quantization="fp8"`` in the LLM constructor.
 
@@ -173,25 +173,28 @@ Here we detail the structure for the FP8 checkpoints.
 
 The following is necessary to be present in the model's ``config.json``:
 
-.. code-block:: yaml
+.. code-block:: text
+
     "quantization_config": {
         "quant_method": "fp8",
         "activation_scheme": "static" or "dynamic"
-      },
+    }
 
 
 Each quantized layer in the state_dict will have these tensors:
 
-* If the config has `"activation_scheme": "static"`:
+* If the config has ``"activation_scheme": "static"``:
 
 .. code-block:: text
+
     model.layers.0.mlp.down_proj.weight              < F8_E4M3
     model.layers.0.mlp.down_proj.input_scale         < F32
     model.layers.0.mlp.down_proj.weight_scale        < F32
 
-* If the config has `"activation_scheme": "dynamic"`:
+* If the config has ``"activation_scheme": "dynamic"``:
 
 .. code-block:: text
+
     model.layers.0.mlp.down_proj.weight              < F8_E4M3
     model.layers.0.mlp.down_proj.weight_scale        < F32
 
@@ -199,4 +202,5 @@ Each quantized layer in the state_dict will have these tensors:
 Additionally, there can be `FP8 kv-cache scaling factors <https://github.com/vllm-project/vllm/pull/4893>`_ contained within quantized checkpoints specified through the ``.kv_scale`` parameter present on the Attention Module, such as:
 
 .. code-block:: text
+
     model.layers.0.self_attn.kv_scale	             < F32
