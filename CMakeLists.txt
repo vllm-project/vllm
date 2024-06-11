@@ -33,7 +33,8 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.3.0")
 set(TORCH_SUPPORTED_VERSION_ROCM_5X "2.0.1")
-set(TORCH_SUPPORTED_VERSION_ROCM_6X "2.1.1")
+set(TORCH_SUPPORTED_VERSION_ROCM_60 "2.1.1")
+set(TORCH_SUPPORTED_VERSION_ROCM_61 "2.3.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -105,11 +106,20 @@ elseif(HIP_FOUND)
       "expected for ROCMm 5.x build, saw ${Torch_VERSION} instead.")
   endif()
 
-  # ROCm 6.x
+  # ROCm 6.0
   if (ROCM_VERSION_DEV_MAJOR EQUAL 6 AND
-      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_6X})
-    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_6X} "
-      "expected for ROCMm 6.x build, saw ${Torch_VERSION} instead.")
+      ROCM_VERSION_DEV_MINOR EQUAL 0 AND
+      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_60})
+    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_60} "
+      "expected for ROCMm 6.0 build, saw ${Torch_VERSION} instead.")
+  endif()
+
+  # ROCm 6.1
+  if (ROCM_VERSION_DEV_MAJOR EQUAL 6 AND
+      ROCM_VERSION_DEV_MINOR EQUAL 1 AND
+      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_61})
+    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_61} "
+      "expected for ROCMm 6.1 build, saw ${Torch_VERSION} instead.")
   endif()
 else()
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")

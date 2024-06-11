@@ -1,29 +1,33 @@
-# default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
+# Default ROCm 6.1 base image
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1.1_ubuntu20.04_py3.9_pytorch_staging"
 
-FROM $BASE_IMAGE
+# Tested and supported base rocm/pytorch images
+ARG ROCm_5_7_BASE="rocm/pytorch:rocm5.7_ubuntu20.04_py3.9_pytorch_2.0.1" \
+    ROCm_6_0_BASE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" \
+    ROCM_6_1_BASE="rocm/pytorch:rocm6.1.1_ubuntu20.04_py3.9_pytorch_staging"
 
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
+# Default ROCm ARCHes to build vLLM for.
+ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
 
-RUN echo "Base image is $BASE_IMAGE"
-
-ARG ROCm_5_7_BASE="rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" \
-    ROCm_6_0_BASE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
-
-ARG FA_GFX_ARCHS="gfx90a;gfx942"
-RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
-
-ARG FA_BRANCH="ae7928c"
-RUN echo "FA_BRANCH is $FA_BRANCH"
-
-# whether to build flash-attention
-# if 0, will not build flash attention
-# this is useful for gfx target where flash-attention is not supported
-# In that case, we need to use the python reference attention implementation in vllm
+# Whether to build CK-based flash-attention
+# If 0, will not build flash attention
+# This is useful for gfx target where flash-attention is not supported
+# (i.e. those that do not appear in `FA_GFX_ARCHS`)
+# Triton FA is used by default on ROCm now so this is unnecessary.
 ARG BUILD_FA="1"
 
-# whether to build triton on rocm
+ARG FA_GFX_ARCHS="gfx90a;gfx942"
+ARG FA_BRANCH="ae7928c"
+
+# Whether to build triton on rocm
 ARG BUILD_TRITON="1"
+
+
+### Base image build stage
+FROM $BASE_IMAGE AS base
+
+# Import arg(s) defined before this build stage
+ARG PYTORCH_ROCM_ARCH
 
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -y
@@ -39,79 +43,110 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     wget \
     unzip \
-    nvidia-cuda-toolkit \
     tmux \
     ccache \
  && rm -rf /var/lib/apt/lists/*
 
-### Mount Point ###
-# When launching the container, mount the code directory to /app
+# When launching the container, mount the code directory to /vllm-workspace
 ARG APP_MOUNT=/vllm-workspace
-VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}
 
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers pandas
+RUN pip install --upgrade pip
+RUN pip install --no-cache-dir fastapi ninja tokenizers pandas
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
 ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin:
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib/:/libtorch/lib:
 ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include/:/opt/rocm/include/:
 
-# Install ROCm flash-attention
-RUN if [ "$BUILD_FA" = "1" ]; then \
-    mkdir libs \
+ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
+ENV CCACHE_DIR=/root/.cache/ccache
+
+
+### Flash-Attention build stage
+FROM base AS build_fa
+ARG BUILD_FA
+ARG FA_GFX_ARCHS
+ARG FA_BRANCH
+# Build ROCm flash-attention
+RUN --mount=type=cache,target=${CCACHE_DIR} \
+    if [ "$BUILD_FA" = "1" ]; then \
+    mkdir -p libs \
     && cd libs \
     && git clone https://github.com/ROCm/flash-attention.git \
     && cd flash-attention \
-    && git checkout ${FA_BRANCH} \
+    && git checkout "${FA_BRANCH}" \
     && git submodule update --init \
-    && export GPU_ARCHS=${FA_GFX_ARCHS} \
-    && if [ "$BASE_IMAGE" = "$ROCm_5_7_BASE" ]; then \
-        patch /opt/conda/envs/py_3.10/lib/python3.10/site-packages/torch/utils/hipify/hipify_python.py hipify_patch.patch; fi \
-    && python3 setup.py install \
-    && cd ..; \
+    && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
+        *"rocm-5.7"*) \
+            export VLLM_TORCH_PATH="$(python3 -c 'import torch; print(torch.__path__[0])')" \
+            && patch "${VLLM_TORCH_PATH}"/utils/hipify/hipify_python.py hipify_patch.patch;; \
+        *) ;; esac \
+    && GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
+    # Create an empty directory otherwise
+    else mkdir -p /install; \
     fi
 
-# Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
-# Manually removed it so that later steps of numpy upgrade can continue
-RUN if [ "$BASE_IMAGE" = "$ROCm_6_0_BASE" ]; then \
-    rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/; fi
 
+### Triton build stage
+FROM base AS build_triton
+ARG BUILD_TRITON
 # build triton
-RUN if [ "$BUILD_TRITON" = "1" ]; then \
+RUN --mount=type=cache,target=${CCACHE_DIR} \
+    if [ "$BUILD_TRITON" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
-    && pip uninstall -y triton \
     && git clone https://github.com/ROCm/triton.git \
     && cd triton/python \
-    && pip3 install . \
-    && cd ../..; \
+    && python3 setup.py bdist_wheel --dist-dir=/install; \
+    # Create an empty directory otherwise
+    else mkdir -p /install; \
     fi
 
-WORKDIR /vllm-workspace
+
+### Final vLLM build stage
+FROM base AS final
+
+# Copy flash-attn wheel(s) if any
+RUN --mount=type=bind,from=build_fa,src=/install,target=/install \
+    mkdir -p libs && cp /install/*.whl libs
+
+# Copy triton wheel(s) if any
+RUN --mount=type=bind,from=build_triton,src=/install,target=/install \
+    mkdir -p libs && cp /install/*.whl libs
+
+# Install any dependencies that were built
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if ls libs/*.whl; then \
+    pip install libs/*.whl; fi
+
+# Import the vLLM development directory from the build context
 COPY . .
 
-#RUN python3 -m pip install pynvml # to be removed eventually
-RUN python3 -m pip install --upgrade pip numba
+# Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
+# Manually remove it so that later steps of numpy upgrade can continue
+RUN case "$(which python3)" in \
+        *"/opt/conda/envs/py_3.9"*) \
+            rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/;; \
+        *) ;; esac
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade numba
 
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 # Workaround for ray >= 2.10.0
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 
-ENV VLLM_NCCL_SO_PATH=/opt/rocm/lib/librccl.so
-
-ENV CCACHE_DIR=/root/.cache/ccache
-RUN --mount=type=cache,target=/root/.cache/ccache \
+RUN --mount=type=cache,target=${CCACHE_DIR} \
     --mount=type=cache,target=/root/.cache/pip \
     pip install -U -r requirements-rocm.txt \
-    && if [ "$BASE_IMAGE" = "$ROCm_6_0_BASE" ]; then \
-       patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch; fi \
-    && python3 setup.py install \
-    && export VLLM_PYTHON_VERSION=$(python -c "import sys; print(str(sys.version_info.major) + str(sys.version_info.minor))") \
-    && cp build/lib.linux-x86_64-cpython-${VLLM_PYTHON_VERSION}/vllm/*.so vllm/ \
-    && cd ..
-
+    && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
+        *"rocm-6.0"*) \
+            patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h rocm_patch/rocm_bf16.patch;; \
+        *"rocm-6.1"*) \
+            cp rocm_patch/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6;; \
+        *) ;; esac \
+    && python3 setup.py develop
 
 CMD ["/bin/bash"]
