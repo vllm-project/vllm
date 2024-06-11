@@ -4,11 +4,12 @@ Debugging Tips
 ===============
 
 Debugging hang/crash issues
------------------------------
+---------------------------
 
 When an vLLM instance hangs or crashes, it is very difficult to debug the issue. Here are some tips to help debug the issue:
 
 - Set the environment variable ``export VLLM_LOGGING_LEVEL=DEBUG`` to turn on more logging.
+- Set the environment variable ``export CUDA_LAUNCH_BLOCKING=1`` to know exactly which CUDA kernel is causing the trouble.
 - Set the environment variable ``export NCCL_DEBUG=TRACE`` to turn on more logging for NCCL.
 - Set the environment variable ``export VLLM_TRACE_FUNCTION=1`` . All the function calls in vLLM will be recorded. Inspect these log files, and tell which function crashes or hangs. **Note: it will generate a lot of logs and slow down the system. Only use it for debugging purposes.**
 
