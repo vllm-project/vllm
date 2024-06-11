@@ -295,23 +295,23 @@ def test_correctly_formats_output(
 
     target_worker.execute_model.return_value = [target_output[0]]
 
-    sampler_output = torch.randint(low=0,
-                                   high=vocab_size,
-                                   size=(batch_size, k + 1),
-                                   dtype=torch.int64,
-                                   device='cuda')
+    verification_sampler_output = torch.randint(low=0,
+                                                high=vocab_size,
+                                                size=(batch_size, k + 1),
+                                                dtype=torch.int64,
+                                                device='cuda')
     for i in range(batch_size):
         minimum_accepted_tokens = 1
-        sampler_output[i][
+        verification_sampler_output[i][
             -random.randint(minimum_accepted_tokens, k + 1):] = -1
     
-    verification_sampler.return_value = sampler_output
+    verification_sampler.return_value = verification_sampler_output
     output = worker.execute_model(execute_model_req=ExecuteModelRequest(
         seq_group_metadata_list=seq_group_metadata_list,
         num_lookahead_slots=k))
 
     expected_output = create_sampler_output_list(
-        token_ids=sampler_output.transpose(0, 1),
+        token_ids=verification_sampler_output.transpose(0, 1),
         probs=[None for _ in range(k + 1)],
         logprobs=[None for _ in range(k + 1)])
 
@@ -419,16 +419,16 @@ def test_collects_metrics(
 
     target_worker.execute_model.return_value = [target_output[0]]
 
-    sampler_output = torch.randint(low=0,
-                                   high=vocab_size,
-                                   size=(batch_size, k + 1),
-                                   dtype=torch.int64,
-                                   device='cuda')
+    verification_sampler_output = torch.randint(low=0,
+                                                high=vocab_size,
+                                                size=(batch_size, k + 1),
+                                                dtype=torch.int64,
+                                                device='cuda')
     for i in range(batch_size):
         minimum_accepted_tokens = 1
-        sampler_output[i][
+        verification_sampler_output[i][
             -random.randint(minimum_accepted_tokens, k + 1):] = -1
-    verification_sampler.return_value = sampler_output
+    verification_sampler.return_value = verification_sampler_output
 
     mock_rejsample_metrics = MagicMock(
         spec=SpecDecodeWorkerMetrics) if returns_metrics else None
@@ -594,8 +594,6 @@ def test_determine_num_available_blocks(available_gpu_blocks: int,
     """
     draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
-    rejection_sampler = MagicMock(spec=RejectionSampler)
-    rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     target_worker.determine_num_available_blocks.return_value = (
