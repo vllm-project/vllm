@@ -1,20 +1,20 @@
-from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.attention import AttentionMetadata
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping
-from vllm.lora.request import LoRARequest
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
-from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata, ModelInput
+from vllm.sequence import (ModelInput, PoolerOutput, SequenceData,
+                           SequenceGroupMetadata)
 from vllm.worker.model_runner import ModelRunner
+
+if TYPE_CHECKING:
+    from vllm.model_executor import SamplingMetadata
 
 logger = init_logger(__name__)
 

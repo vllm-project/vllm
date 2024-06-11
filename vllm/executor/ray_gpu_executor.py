@@ -181,7 +181,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
         Passing None will cause the driver to stop the model execution
         loop running in each of the remote workers.
         """
-        return self.driver_worker.execute_method("execute_model", execute_model_req)
+        return self.driver_worker.execute_method("execute_model",
+                                                 execute_model_req)
 
     def _run_workers(
         self,

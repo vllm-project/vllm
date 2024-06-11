@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 
 import torch
 import torch.distributed
@@ -15,7 +15,8 @@ from vllm.distributed import (broadcast_tensor_dict,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput, ModelInput
+from vllm.sequence import (ExecuteModelRequest, ModelInput, PoolerOutput,
+                           SamplerOutput)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import ModelRunner
@@ -260,11 +261,11 @@ class Worker(WorkerBase):
 
         if self.is_driver_worker:
             if execute_model_req is None:
-                # This signals that there's no more requests to process for now.
-                # All workers are running infinite loop with broadcast_tensor_dict,
-                # and it stops the loop when the driver broadcasts an empty input.
-                # Send an empty input to notify all other workers to stop their
-                # execution loop.
+                # This signals that there's no more requests to process for
+                # now.  All workers are running infinite loop with
+                # broadcast_tensor_dict, and it stops the loop when the driver
+                # broadcasts an empty input.  Send an empty input to notify all
+                # other workers to stop their execution loop.
                 broadcast_tensor_dict({}, src=0)
                 return None
 
@@ -283,8 +284,8 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def execute_model_local(
-        self,
-        model_input: ModelInput) -> List[Union[SamplerOutput, PoolerOutput]]:
+            self, model_input: ModelInput
+    ) -> List[Union[SamplerOutput, PoolerOutput]]:
         self.cache_swap(model_input.blocks_to_swap_in,
                         model_input.blocks_to_swap_out,
                         model_input.blocks_to_copy)
