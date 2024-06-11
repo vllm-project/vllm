@@ -67,6 +67,8 @@ async def validation_exception_handler(_, exc):
 @router.get("/health")
 async def health() -> Response:
     """Health check."""
+    if not openai_serving_chat:
+        return JSONResponse({"status": "openai serving chat not connected"}, status_code=500)
     await openai_serving_chat.engine.check_health()
     return JSONResponse({"status": "ok"}, status_code=200)
 
