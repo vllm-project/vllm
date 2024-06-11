@@ -28,13 +28,11 @@ def test_models(
     model: str,
     dtype: str,
 ) -> None:
-    hf_model = hf_runner(model, dtype=dtype, is_embedding_model=True)
-    hf_outputs = hf_model.encode(example_prompts)
-    del hf_model
+    with hf_runner(model, dtype=dtype, is_embedding_model=True) as hf_model:
+        hf_outputs = hf_model.encode(example_prompts)
 
-    vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs = vllm_model.encode(example_prompts)
-    del vllm_model
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.encode(example_prompts)
 
     similarities = compare_embeddings(hf_outputs, vllm_outputs)
     all_similarities = torch.stack(similarities)
