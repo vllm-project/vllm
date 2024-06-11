@@ -285,48 +285,6 @@ class Worker(WorkerBase):
         self,
         model_input: ModelInput,
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
-        #if not self.is_driver_worker:
-        #    self._execute_model_non_driver()
-        #    return []
-
-        #if execute_model_req is None:
-        #    # This signals that there's no more requests to process for now.
-        #    # All workers are running infinite loop with broadcast_tensor_dict,
-        #    # and it stops the loop when the driver broadcasts an empty input.
-        #    # Send an empty input to notify all other workers to stop their
-        #    # execution loop.
-        #    broadcast_tensor_dict({}, src=0)
-        #    return []
-
-        #seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-        #num_seq_groups = len(seq_group_metadata_list)
-        ## `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
-        ## they contain parameters to launch cudamemcpyasync.
-        #blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
-        #                                 device="cpu",
-        #                                 dtype=torch.int64).view(-1, 2)
-        #blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
-        #                                  device="cpu",
-        #                                  dtype=torch.int64).view(-1, 2)
-        ## `blocks_to_copy` is a gpu tensor. The src and tgt of
-        ## blocks to copy are in the same device, and `blocks_to_copy`
-        ## can be used directly within cuda kernels.
-        #blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
-        #                              device=self.device,
-        #                              dtype=torch.int64).view(-1, 2)
-        #data: Dict[str, Any] = {
-        #    "num_seq_groups": num_seq_groups,
-        #    "blocks_to_swap_in": blocks_to_swap_in,
-        #    "blocks_to_swap_out": blocks_to_swap_out,
-        #    "blocks_to_copy": blocks_to_copy,
-        #}
-        #broadcast_tensor_dict(data, src=0)
-
-        #self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
-
-        #output = self.model_runner.execute_model(seq_group_metadata_list,
-        #                                         self.gpu_cache)
-
         self.cache_swap(
                 model_input.blocks_to_swap_in,
                 model_input.blocks_to_swap_out,
