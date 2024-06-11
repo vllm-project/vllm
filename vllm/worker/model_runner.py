@@ -131,6 +131,7 @@ class ModelRunner:
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
+        # Flashinfer fields
         self.paged_kv_indptr_tensor = None
         self.paged_kv_indices_tensor = None
         self.paged_kv_last_page_len_tensor = None
@@ -436,7 +437,8 @@ class ModelRunner:
                     multi_modal_input_list.append(
                         seq_group_metadata.multi_modal_data.data)
 
-                if _is_block_tables_empty(seq_group_metadata.block_tables):
+                is_profile_run = _is_block_tables_empty(seq_group_metadata.block_tables)
+                if is_profile_run:
                     # During memory profiling, the block tables are not
                     # initialized yet. In this case, we just use a dummy
                     # slot mapping.
@@ -475,17 +477,20 @@ class ModelRunner:
                     slot = block_number * self.block_size + block_offset
                     slot_mapping.append(slot)
 
-                if self.attn_backend.get_name() == "flashinfer":
-
+                if self.attn_backend.get_name() == "flashinfer":        
                     start_idx = self.paged_kv_indptr_tensor[
                         flashinfer_batch_idx]
-                    # end_idx = start_idx + len(block_table)
-                    for idx, block in enumerate(block_table):
+                    block_table_bound = seq_data.get_len(
+                            ) // self.block_size + 1 if seq_data.get_len(
+                            ) % self.block_size != 0 else seq_data.get_len(
+                            ) // self.block_size
+                    # end_idx = start_idx + block_table_bound
+                    for idx, block in enumerate(block_table[:block_table_bound]):
                         self.paged_kv_indices_tensor[start_idx + idx] = block
                     # self.paged_kv_indices_tensor[start_idx:end_idx] = block_table
                     self.paged_kv_indptr_tensor[
                         flashinfer_batch_idx +
-                        1] = start_idx + len(block_table)
+                        1] = start_idx + block_table_bound
                     last_page_len = seq_len % self.block_size
                     if last_page_len == 0:
                         last_page_len = self.block_size
@@ -604,30 +609,16 @@ class ModelRunner:
                 paged_kv_indptr_tensor = None
                 paged_kv_last_page_len_tensor = None
 
-            if num_decode_tokens and self.decode_wrapper is None:
-                self.decode_workspace_buffer = torch.empty(128 * 1024 * 1024,
+            
+            if num_decode_tokens:
+                if use_captured_graph and not is_profile_run:
+                    self.decode_wrapper = self.graph_runners[batch_size].decode_wrapper
+                else:
+                    if self.decode_wrapper is None:
+                        self.decode_workspace_buffer = torch.empty(128 * 1024 * 1024,
                                                            dtype=torch.uint8,
                                                            device=self.device)
-
-                if use_captured_graph:
-                    self.indptr_buffer = torch.empty(
-                        self.scheduler_config.max_num_seqs + 1,
-                        dtype=torch.int32,
-                        device=self.device)
-                    self.indices_buffer = torch.empty(
-                        self.cache_config.num_gpu_blocks,
-                        dtype=torch.int32,
-                        device=self.device)
-                    self.last_page_len_buffer = torch.empty(
-                        self.scheduler_config.max_num_seqs,
-                        dtype=torch.int32,
-                        device=self.device)
-                    self.decode_wrapper = \
-                            CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
-                            self.decode_workspace_buffer, self.indptr_buffer,
-                            self.indices_buffer, self.last_page_len_buffer, "NHD")
-                else:
-                    self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                        self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                         self.decode_workspace_buffer, "NHD")
 
             if num_prefill_tokens and self.prefill_wrapper is None:
@@ -954,26 +945,27 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
-        indptr_buffer = torch.empty(self.scheduler_config.max_num_seqs + 1,
-                                    dtype=torch.int32,
-                                    device=self.device)
-        indices_buffer = torch.empty(self.cache_config.num_gpu_blocks,
-                                     dtype=torch.int32,
-                                     device=self.device)
-        last_page_len_buffer = torch.empty(self.scheduler_config.max_num_seqs,
-                                           dtype=torch.int32,
-                                           device=self.device)
-        decode_workspace_buffer = torch.empty(128 * 1024 * 1024,
-                                              dtype=torch.uint8,
-                                              device=self.device)
-        decode_wrapper = CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
-            decode_workspace_buffer, indptr_buffer, indices_buffer,
-            last_page_len_buffer, "NHD")
-
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
+                print("Capture-----------------", batch_size)
+                indptr_buffer = torch.empty(batch_size + 1,
+                                    dtype=torch.int32,
+                                    device=self.device)
+                indices_buffer = torch.empty(self.cache_config.num_gpu_blocks,
+                                            dtype=torch.int32,
+                                            device=self.device)
+                last_page_len_buffer = torch.empty(batch_size,
+                                                dtype=torch.int32,
+                                                device=self.device)
+                decode_workspace_buffer = torch.empty(128 * 1024 * 1024,
+                                                    dtype=torch.uint8,
+                                                    device=self.device)
+                decode_wrapper = CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
+                    decode_workspace_buffer, indptr_buffer, indices_buffer,
+                    last_page_len_buffer, "NHD")
+        
                 kv_cache_dtype = get_kv_cache_torch_dtype(
                     self.kv_cache_dtype, self.model_config.dtype)
                 paged_kv_indptr_tensor_host = torch.arange(0, batch_size +
@@ -1037,6 +1029,13 @@ class ModelRunner:
 
                 graph_runner = CUDAGraphRunner(self.model,
                                                self.attn_backend.get_name())
+                
+                graph_runner.indptr_buffer = indptr_buffer
+                graph_runner.indices_buffer = indices_buffer
+                graph_runner.last_page_len_buffer = last_page_len_buffer
+                graph_runner.decode_workspace_buffer = decode_workspace_buffer
+                graph_runner.decode_wrapper = decode_wrapper
+
                 graph_runner.capture(
                     input_tokens[:batch_size],
                     input_positions[:batch_size],
@@ -1068,6 +1067,13 @@ class CUDAGraphRunner:
         self.output_buffers: Dict[str, torch.Tensor] = {}
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
+
+        # Flashinfer fields
+        self.decode_workspace_buffer = None
+        self.indptr_buffer = None
+        self.indices_buffer = None
+        self.last_page_len_buffer = None
+        self.decode_wrapper = None
 
     @property
     def graph(self):
