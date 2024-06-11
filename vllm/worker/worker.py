@@ -214,11 +214,11 @@ class Worker(WorkerBase):
         blocks_to_copy: Optional[torch.Tensor],
     ) -> None:
         # Issue cache operations.
-        if blocks_to_swap_in is not None:
+        if blocks_to_swap_in is not None and blocks_to_swap_in.numel() > 0:
             self.cache_engine.swap_in(blocks_to_swap_in)
-        if blocks_to_swap_out is not None:
+        if blocks_to_swap_out is not None and blocks_to_swap_out.numel() > 0:
             self.cache_engine.swap_out(blocks_to_swap_out)
-        if blocks_to_copy is not None:
+        if blocks_to_copy is not None and blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
 
     @torch.inference_mode()
