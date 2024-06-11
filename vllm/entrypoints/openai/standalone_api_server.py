@@ -32,6 +32,7 @@ from vllm.usage.usage_lib import UsageContext
 
 openai_serving_chat: OpenAIServingChat = None
 openai_serving_completion: OpenAIServingCompletion = None
+engine: AsyncLLMEngine = None
 logger = init_logger(__name__)
 
 
@@ -179,12 +180,22 @@ if __name__ == "__main__":
         engine, served_model_names, args.lora_modules)
 
     app.root_path = args.root_path
-    uvicorn.run("vllm.entrypoints.openai.standalone_api_server:get_app",
-                host=args.host,
-                port=args.port,
-                log_level=args.uvicorn_log_level,
-                ssl_keyfile=args.ssl_keyfile,
-                ssl_certfile=args.ssl_certfile,
-                ssl_ca_certs=args.ssl_ca_certs,
-                ssl_cert_reqs=args.ssl_cert_reqs,
-                workers=args.workers)
+    if args.workers > 1:
+        uvicorn.run("vllm.entrypoints.openai.standalone_api_server:get_app",
+                    host=args.host,
+                    port=args.port,
+                    log_level=args.uvicorn_log_level,
+                    ssl_keyfile=args.ssl_keyfile,
+                    ssl_certfile=args.ssl_certfile,
+                    ssl_ca_certs=args.ssl_ca_certs,
+                    ssl_cert_reqs=args.ssl_cert_reqs,
+                    workers=args.workers)
+    else:
+        uvicorn.run("vllm.entrypoints.openai.api_server:app",
+                    host=args.host,
+                    port=args.port,
+                    log_level=args.uvicorn_log_level,
+                    ssl_keyfile=args.ssl_keyfile,
+                    ssl_certfile=args.ssl_certfile,
+                    ssl_ca_certs=args.ssl_ca_certs,
+                    ssl_cert_reqs=args.ssl_cert_reqs)
