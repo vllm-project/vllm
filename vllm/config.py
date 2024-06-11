@@ -93,6 +93,7 @@ class ModelConfig:
         revision: Optional[str] = None,
         code_revision: Optional[str] = None,
         rope_scaling: Optional[dict] = None,
+        rope_theta: Optional[float] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
@@ -113,6 +114,7 @@ class ModelConfig:
         self.revision = revision
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
+        self.rope_theta = rope_theta
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
             self.tokenizer_revision = revision
@@ -132,7 +134,7 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling)
+                                    code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(
