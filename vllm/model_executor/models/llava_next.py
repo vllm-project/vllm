@@ -59,8 +59,8 @@ LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
                              LlavaNextImageFeatureInputs]
 
 
-def _image_pixel_processor(ctx: InputContext,
-                           data: ImagePixelData) -> Dict[str, torch.Tensor]:
+def _pixel_mapper(ctx: InputContext,
+                  data: ImagePixelData) -> Dict[str, torch.Tensor]:
     image = data.image
 
     if isinstance(image, torch.Tensor):
@@ -84,7 +84,7 @@ def _image_pixel_processor(ctx: InputContext,
 
 
 @INPUT_REGISTRY.MULTIMODAL.register_image_feature_input_mapper()
-@INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper(_image_pixel_processor)
+@INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper(_pixel_mapper)
 @INPUT_REGISTRY.register_dummy_data(
     DummyImageDataFactories.for_model(LlavaNextConfig))
 class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
