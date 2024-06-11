@@ -149,7 +149,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     tools: Optional[List[ChatCompletionToolsParam]] = None
-    tool_choice: Optional[Union[Literal["none"],
+    tool_choice: Optional[Union[Literal["none", "auto"],
                                 ChatCompletionNamedToolChoiceParam]] = "none"
     user: Optional[str] = None
 
@@ -308,8 +308,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_tool_choice(cls, data):
         if "tool_choice" in data and data["tool_choice"] != "none":
-            if not isinstance(data["tool_choice"], dict):
-                raise ValueError("Currently only named tools are supported.")
+            # if not isinstance(data["tool_choice"], dict): # Rubra supports auto tool_choice
+            #     raise ValueError("Currently only named tools are supported.")
             if "tools" not in data or data["tools"] is None:
                 raise ValueError(
                     "When using `tool_choice`, `tools` must be set.")

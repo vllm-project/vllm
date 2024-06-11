@@ -214,7 +214,8 @@ class OpenAIServingChat(OpenAIServing):
             raw_msgs = request.messages
             if request.tools:
                 print("==================tools====================")
-                raw_msgs = preprocess_input(msgs=raw_msgs, tools=request.tools)
+                tools = [t.model_dump() for t in request.tools]
+                raw_msgs = preprocess_input(msgs=raw_msgs, tools=tools)
             
             for msg in request.messages:
                 chat_parsed_result = self._parse_chat_message_content(msg)
@@ -515,6 +516,8 @@ class OpenAIServingChat(OpenAIServing):
 
             # TODO: use llama_tools to parse the output.text
             print(output)
+
+            finish_reason = output.finish_reason
             if request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
                 message = ChatMessage(
@@ -525,8 +528,21 @@ class OpenAIServingChat(OpenAIServing):
                             name=request.tool_choice.function.name,
                             arguments=output.text))
                     ])
-            elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, content=output.text)
+            # elif not request.tool_choice or request.tool_choice == "none":
+            else:
+                # post processing to determine if there's function(s)
+                content = output.text  
+                function_output = postprocess_output(output_str=content)
+                tool_calls = []
+                if function_output:
+                    print(f"Parsed function output: {function_output}\n\n")
+                    for fc in function_output:
+                        function = FunctionCall(name=fc["function"]["name"], arguments=fc["function"]["arguments"])
+                        call = ToolCall(function=function)
+                        tool_calls.append(call)
+                    content = ""
+                    finish_reason = "tool_calls"
+                message = ChatMessage(role=role, content=content, tool_calls=tool_calls)
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
