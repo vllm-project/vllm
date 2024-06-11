@@ -13,6 +13,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
 
@@ -60,9 +61,37 @@ class BertEmbeddingModel(nn.Module):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # TODO: load weights
-        for name, ts in weights:
-            print("Parameter: ", name)
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "query", "q"),
+            ("qkv_proj", "key", "k"),
+            ("qkv_proj", "value", "v"),
+        ]
+        params_dict = dict(self.model.named_parameters())
+        for name, loaded_weight in weights:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+
+                # TODO: check
+                ## Skip loading extra bias for GPTQ models.
+                #if name.endswith(".bias") and name not in params_dict:
+                #    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # TODO: check
+                # # Skip loading extra bias for GPTQ models.
+                # if name.endswith(".bias") and name not in params_dict:
+                #     continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
 
 
 class BertModel(nn.Module):
