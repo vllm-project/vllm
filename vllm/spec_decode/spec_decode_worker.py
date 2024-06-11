@@ -144,7 +144,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self,
         proposer_worker: ProposerWorkerBase,
         scorer_worker: WorkerBase,
-        sampler: SpecDecodeBaseSampler,
+        verification_sampler: SpecDecodeBaseSampler,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
     ):
@@ -167,13 +167,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
         self.disable_by_batch_size = disable_by_batch_size or float("inf")
-        self.verification_sampler = sampler
-        assert sampler is not None, "Sampler is Not set, which is not expected."
+        self.verification_sampler = verification_sampler
+        assert (
+            self.verification_sampler is not None,
+            "Sampler is Not set, which is not expected."
+        )
         self._metrics = AsyncMetricsCollector(
-            sampler
+            self.verification_sampler
         ) if metrics_collector is None else metrics_collector
-        self.probs_dtype = sampler.probs_dtype
-        self.token_id_dtype = sampler.token_id_dtype
+        self.probs_dtype = self.verification_sampler.probs_dtype
+        self.token_id_dtype = self.verification_sampler.token_id_dtype
         # Lazy initiazliation.
         self.scorer: SpeculativeScorer
 
