@@ -12,7 +12,7 @@ from .data import LLMInputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VisionLanguageConfig
-    from vllm.multimodal import MultiModalData, MultiModalRegistry
+    from vllm.multimodal import MultiModalData
     from vllm.sequence import SequenceData
 
 logger = init_logger(__name__)
@@ -62,18 +62,11 @@ class InputRegistry:
     processing according to the target model.
     """
 
-    def __init__(self, *, multimodal_registry: "MultiModalRegistry") -> None:
-        self._multimodal_registry = multimodal_registry
-
+    def __init__(self) -> None:
         self._dummy_factories_by_model_type: Dict[Type[nn.Module],
                                                   DummyDataFactory] = {}
         self._input_processors_by_model_type: Dict[Type[nn.Module],
                                                    InputProcessor] = {}
-
-    @property
-    def MULTIMODAL(self) -> "MultiModalRegistry":
-        """Access the registry for processing multimodal inputs."""
-        return self._multimodal_registry
 
     def _default_dummy_data_factory(
         self,
