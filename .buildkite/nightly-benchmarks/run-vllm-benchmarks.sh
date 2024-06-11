@@ -64,7 +64,7 @@ json2args() {
 wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
-  timeout 600 bash -c '
+  timeout 1200 bash -c '
     until curl localhost:8000/v1/completions; do
       sleep 1
     done' && return 0 || return 1
@@ -108,6 +108,7 @@ upload_to_buildkite() {
 
   # if the agent binary is not found, skip uploading the results, exit 0
   if [ ! -f /workspace/buildkite-agent ]; then
+    echo "buildkite-agent binary not found. Skip uploading the results."
     return 0
   fi
   /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
