@@ -689,7 +689,11 @@ __global__ void paged_attention_v2_reduce_kernel(
 // TODO(woosuk): Tune NUM_THREADS.
 template <typename T, typename CACHE_T, int BLOCK_SIZE,
           vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
+#ifndef USE_ROCM
           int NUM_THREADS = 128>
+#else
+          int NUM_THREADS = 1024>
+#endif
 void paged_attention_v1_launcher(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int num_kv_heads, float scale,
@@ -844,7 +848,11 @@ void paged_attention_v1(
 
 template <typename T, typename CACHE_T, int BLOCK_SIZE,
           vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
+#ifndef USE_ROCM
           int NUM_THREADS = 128, int PARTITION_SIZE = 512>
+#else
+          int NUM_THREADS = 1024, int PARTITION_SIZE = 1024>
+#endif
 void paged_attention_v2_launcher(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
