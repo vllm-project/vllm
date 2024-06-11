@@ -223,7 +223,7 @@ async def test_zero_logprobs(server, client: openai.AsyncOpenAI,
     assert choice.logprobs is not None
     assert choice.logprobs.token_logprobs is not None
     assert choice.logprobs.top_logprobs is not None
-    assert len(choice.logprobs.top_logprobs[0]) <= 1
+    assert len(choice.logprobs.top_logprobs[0]) == 1
 
 
 @pytest.mark.asyncio
@@ -245,7 +245,7 @@ async def test_some_logprobs(server, client: openai.AsyncOpenAI,
     assert choice.logprobs is not None
     assert choice.logprobs.token_logprobs is not None
     assert choice.logprobs.top_logprobs is not None
-    assert len(choice.logprobs.top_logprobs[0]) <= 6
+    assert 5 <= len(choice.logprobs.top_logprobs[0]) <= 6
 
 
 @pytest.mark.asyncio
@@ -477,8 +477,6 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
         temperature=0.0,
     )
     single_output = single_completion.choices[0].text
-    single_usage = single_completion.usage
-
     stream = await client.completions.create(model=model_name,
                                              prompt=prompt,
                                              max_tokens=5,
@@ -494,7 +492,6 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
     assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == "length"
     assert chunk.choices[0].text
-    assert chunk.usage == single_usage
     assert "".join(chunks) == single_output
 
 
@@ -547,6 +544,138 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI,
     assert chunk.choices[0].finish_reason == stop_reason
     assert delta.content
     assert "".join(chunks) == output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
+)
+async def test_chat_completion_stream_options(server,
+                                              client: openai.AsyncOpenAI,
+                                              model_name: str):
+    messages = [{
+        "role": "system",
+        "content": "You are a helpful assistant."
+    }, {
+        "role": "user",
+        "content": "What is the capital of France?"
+    }]
+
+    # Test stream=True, stream_options={"include_usage": False}
+    stream = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_tokens=10,
+        temperature=0.0,
+        stream=True,
+        stream_options={"include_usage": False})
+    async for chunk in stream:
+        assert chunk.usage is None
+
+    # Test stream=True, stream_options={"include_usage": True}
+    stream = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_tokens=10,
+        temperature=0.0,
+        stream=True,
+        stream_options={"include_usage": True})
+
+    async for chunk in stream:
+        if chunk.choices[0].finish_reason is None:
+            assert chunk.usage is None
+        else:
+            assert chunk.usage is None
+            final_chunk = await stream.__anext__()
+            assert final_chunk.usage is not None
+            assert final_chunk.usage.prompt_tokens > 0
+            assert final_chunk.usage.completion_tokens > 0
+            assert final_chunk.usage.total_tokens == (
+                final_chunk.usage.prompt_tokens +
+                final_chunk.usage.completion_tokens)
+            assert final_chunk.choices == []
+
+    # Test stream=False, stream_options={"include_usage": None}
+    with pytest.raises(BadRequestError):
+        await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            max_tokens=10,
+            temperature=0.0,
+            stream=False,
+            stream_options={"include_usage": None})
+
+    # Test stream=False, stream_options={"include_usage": True}
+    with pytest.raises(BadRequestError):
+        await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            max_tokens=10,
+            temperature=0.0,
+            stream=False,
+            stream_options={"include_usage": True})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
+)
+async def test_completion_stream_options(server, client: openai.AsyncOpenAI,
+                                         model_name: str):
+    prompt = "What is the capital of France?"
+
+    # Test stream=True, stream_options={"include_usage": False}
+    stream = await client.completions.create(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+        stream_options={"include_usage": False})
+    async for chunk in stream:
+        assert chunk.usage is None
+
+    # Test stream=True, stream_options={"include_usage": True}
+    stream = await client.completions.create(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+        stream_options={"include_usage": True})
+    async for chunk in stream:
+        if chunk.choices[0].finish_reason is None:
+            assert chunk.usage is None
+        else:
+            assert chunk.usage is None
+            final_chunk = await stream.__anext__()
+            assert final_chunk.usage is not None
+            assert final_chunk.usage.prompt_tokens > 0
+            assert final_chunk.usage.completion_tokens > 0
+            assert final_chunk.usage.total_tokens == (
+                final_chunk.usage.prompt_tokens +
+                final_chunk.usage.completion_tokens)
+            assert final_chunk.choices == []
+
+    # Test stream=False, stream_options={"include_usage": None}
+    with pytest.raises(BadRequestError):
+        await client.completions.create(model=model_name,
+                                        prompt=prompt,
+                                        max_tokens=5,
+                                        temperature=0.0,
+                                        stream=False,
+                                        stream_options={"include_usage": None})
+
+    # Test stream=False, stream_options={"include_usage": True}
+    with pytest.raises(BadRequestError):
+        await client.completions.create(model=model_name,
+                                        prompt=prompt,
+                                        max_tokens=5,
+                                        temperature=0.0,
+                                        stream=False,
+                                        stream_options={"include_usage": True})
 
 
 @pytest.mark.asyncio
@@ -906,6 +1035,191 @@ async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_named_tool_use(server, client: openai.AsyncOpenAI,
+                              guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        f"Give an example JSON for an employee profile that "
+        f"fits this schema: {TEST_SCHEMA}"
+    }]
+
+    # non-streaming
+
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=1000,
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name",
+                "description": "This is a dummy function",
+                "parameters": TEST_SCHEMA
+            }
+        }],
+        tool_choice={
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name"
+            }
+        })
+    message = chat_completion.choices[0].message
+    assert len(message.content) == 0
+    json_string = message.tool_calls[0].function.arguments
+    json1 = json.loads(json_string)
+    jsonschema.validate(instance=json1, schema=TEST_SCHEMA)
+
+    messages.append({"role": "assistant", "content": json_string})
+    messages.append({
+        "role":
+        "user",
+        "content":
+        "Give me another one with a different name and age"
+    })
+
+    # streaming
+
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=1000,
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name",
+                "description": "This is a dummy function",
+                "parameters": TEST_SCHEMA
+            }
+        }],
+        tool_choice={
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name"
+            }
+        },
+        stream=True)
+
+    output = []
+    finish_reason_count = 0
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.role:
+            assert delta.role == "assistant"
+        assert delta.content is None or len(delta.content) == 0
+        if delta.tool_calls:
+            output.append(delta.tool_calls[0].function.arguments)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
+    json2 = json.loads("".join(output))
+    jsonschema.validate(instance=json2, schema=TEST_SCHEMA)
+    assert json1["name"] != json2["name"]
+    assert json1["age"] != json2["age"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guided_decoding_backend", ["outlines"])
+async def test_required_tool_use_not_yet_supported(
+        server, client: openai.AsyncOpenAI, guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        f"Give an example JSON for an employee profile that "
+        f"fits this schema: {TEST_SCHEMA}"
+    }]
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=1000,
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "dummy_function_name",
+                    "description": "This is a dummy function",
+                    "parameters": TEST_SCHEMA
+                }
+            }],
+            tool_choice="required")
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=1000,
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "dummy_function_name",
+                    "description": "This is a dummy function",
+                    "parameters": TEST_SCHEMA
+                }
+            }],
+            tool_choice="auto")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guided_decoding_backend", ["outlines"])
+async def test_inconsistent_tool_choice_and_tools(
+        server, client: openai.AsyncOpenAI, guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        f"Give an example JSON for an employee profile that "
+        f"fits this schema: {TEST_SCHEMA}"
+    }]
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(model=MODEL_NAME,
+                                             messages=messages,
+                                             max_tokens=1000,
+                                             tool_choice={
+                                                 "type": "function",
+                                                 "function": {
+                                                     "name":
+                                                     "dummy_function_name"
+                                                 }
+                                             })
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=1000,
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "dummy_function_name",
+                    "description": "This is a dummy function",
+                    "parameters": TEST_SCHEMA
+                }
+            }],
+            tool_choice={
+                "type": "function",
+                "function": {
+                    "name": "nondefined_function_name"
+                }
+            })
+
+
+@pytest.mark.asyncio
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     for _ in range(2):
         resp = await client.chat.completions.create(
@@ -1031,8 +1345,9 @@ number: "1" | "2"
     "model_name",
     [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
 )
+@pytest.mark.parametrize("logprobs_arg", [1, 0])
 async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
-                                       model_name: str):
+                                       model_name: str, logprobs_arg: int):
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
     # test using text and token IDs
     for prompt in ("Hello, my name is", [0, 0, 0, 0, 0]):
@@ -1041,7 +1356,7 @@ async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
                                                      max_tokens=5,
                                                      temperature=0.0,
                                                      echo=True,
-                                                     logprobs=1)
+                                                     logprobs=logprobs_arg)
 
         prompt_text = tokenizer.decode(prompt) if isinstance(prompt,
                                                              list) else prompt
@@ -1054,6 +1369,9 @@ async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
                 and logprobs.token_logprobs[0] is None)
         assert (len(logprobs.top_logprobs) > 5
                 and logprobs.top_logprobs[0] is None)
+        for top_logprobs in logprobs.top_logprobs[1:]:
+            assert max(logprobs_arg,
+                       1) <= len(top_logprobs) <= logprobs_arg + 1
         assert len(logprobs.tokens) > 5
 
 

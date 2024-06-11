@@ -8,6 +8,7 @@ Run `pytest tests/models/test_big_models.py`.
 import sys
 
 import pytest
+import torch
 
 MODELS = [
     "meta-llama/Llama-2-7b-hf",
@@ -36,9 +37,14 @@ SKIPPED_MODELS_PY38 = [
     "mosaicml/mpt-7b",
 ]
 
+#TODO: remove this after CPU float16 support ready
+target_dtype = "float"
+if torch.cuda.is_available():
+    target_dtype = "half"
+
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [32])
 def test_models(
     hf_runner,
@@ -59,13 +65,11 @@ def test_models(
         pytest.skip(reason="This model has custom code that does not "
                     "support Python 3.8")
 
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-    del hf_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    del vllm_model
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
@@ -78,15 +82,14 @@ def test_models(
 
 @pytest.mark.skip("Slow and not useful (just prints model).")
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", [target_dtype])
 def test_model_print(
     vllm_runner,
     model: str,
     dtype: str,
 ) -> None:
-    vllm_model = vllm_runner(model, dtype=dtype)
-    # This test is for verifying whether the model's extra_repr
-    # can be printed correctly.
-    print(vllm_model.model.llm_engine.model_executor.driver_worker.
-          model_runner.model)
-    del vllm_model
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        # This test is for verifying whether the model's extra_repr
+        # can be printed correctly.
+        print(vllm_model.model.llm_engine.model_executor.driver_worker.
+              model_runner.model)

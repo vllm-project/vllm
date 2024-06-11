@@ -1,10 +1,11 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, PreTrainedTokenizerBase
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -114,7 +115,11 @@ class ModelConfig:
         self.revision = revision
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
-        self.tokenizer_revision = tokenizer_revision
+        # The tokenizer version is consistent with the model version by default.
+        if tokenizer_revision is None:
+            self.tokenizer_revision = revision
+        else:
+            self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         # UPSTREAM SYNC: keep sparsity
@@ -191,12 +196,8 @@ class ModelConfig:
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is None:
-            # SparseML uses a "compression_config" with a "quantization_config".
-            compression_cfg = getattr(self.hf_config, "compression_config",
-                                      None)
-            if compression_cfg is not None:
-                quant_cfg = compression_cfg.get("quantization_config", None)
-
+            # compress-tensors uses a "compression_config" key
+            quant_cfg = getattr(self.hf_config, "compression_config", None)
         return quant_cfg
 
     def _verify_quantization(self) -> None:
@@ -272,6 +273,12 @@ class ModelConfig:
                 f"Total number of hidden layers ({total_num_hidden_layers}) "
                 "must be divisible by pipeline parallel size "
                 f"({pipeline_parallel_size}).")
+
+        if self.quantization == "bitsandbytes" and (
+                parallel_config.tensor_parallel_size > 1
+                or parallel_config.pipeline_parallel_size > 1):
+            raise ValueError(
+                "BitAndBytes quantization with TP or PP is not supported yet.")
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled.
@@ -359,7 +366,7 @@ class ModelConfig:
     def get_num_attention_heads(self,
                                 parallel_config: "ParallelConfig") -> int:
         return self.hf_text_config.num_attention_heads // \
-                    parallel_config.tensor_parallel_size
+            parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
@@ -519,6 +526,7 @@ class LoadFormat(str, enum.Enum):
     DUMMY = "dummy"
     TENSORIZER = "tensorizer"
     SHARDED_STATE = "sharded_state"
+    BITSANDBYTES = "bitsandbytes"
 
 
 @dataclass
@@ -676,19 +684,24 @@ class SchedulerConfig:
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
         embedding_mode: Whether the running model is for embedding.
+        preemption_mode: Whether to perform preemption by swapping or 
+            recomputation. If not specified, we determine the mode as follows:
+            We use recomputation by default since it incurs lower overhead than
+            swapping. However, when the sequence group has multiple sequences
+            (e.g., beam search), recomputation is not currently supported. In
+            such a case, we use swapping instead.
     """
 
-    def __init__(
-        self,
-        max_num_batched_tokens: Optional[int],
-        max_num_seqs: int,
-        max_model_len: int,
-        use_v2_block_manager: bool = False,
-        num_lookahead_slots: int = 0,
-        delay_factor: float = 0.0,
-        enable_chunked_prefill: bool = False,
-        embedding_mode: Optional[bool] = False,
-    ) -> None:
+    def __init__(self,
+                 max_num_batched_tokens: Optional[int],
+                 max_num_seqs: int,
+                 max_model_len: int,
+                 use_v2_block_manager: bool = False,
+                 num_lookahead_slots: int = 0,
+                 delay_factor: float = 0.0,
+                 enable_chunked_prefill: bool = False,
+                 embedding_mode: Optional[bool] = False,
+                 preemption_mode: Optional[str] = None) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -714,6 +727,7 @@ class SchedulerConfig:
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
+        self.preemption_mode = preemption_mode
 
         self._verify_args()
 
@@ -1119,10 +1133,12 @@ class VisionLanguageConfig:
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
+    # The image processor to load from HuggingFace
+    image_processor: Optional[str]
+    image_processor_revision: Optional[str]
 
     @classmethod
-    def get_image_input_enum_type(
-            cls, value: str) -> "VisionLanguageConfig.ImageInputType":
+    def get_image_input_enum_type(cls, value: str) -> ImageInputType:
         """Get the image input type from a string."""
         try:
             return cls.ImageInputType[value.upper()]
@@ -1130,6 +1146,35 @@ class VisionLanguageConfig:
             raise ValueError(f"{value} is not a valid choice. "
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
+
+    #TODO(ywang96): make this a cached property once we refactor the
+    # VisionLanguageConfig class.
+    def get_image_token_text(
+            self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
+        """Get the image token placeholder text to be inserted into the 
+        text prompt and the string representation of the image token id.
+        """
+        image_token_str = tokenizer.decode(self.image_token_id)
+        return image_token_str * self.image_feature_size, image_token_str
+
+    def as_cli_args_dict(self) -> Dict[str, Any]:
+        """Flatten vision language config to pure args.
+
+        Compatible with what llm entrypoint expects.
+        """
+        result: Dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, enum.Enum):
+                result[f.name] = value.name.lower()
+            elif isinstance(value, tuple):
+                result[f.name] = ",".join([str(item) for item in value])
+            else:
+                result[f.name] = value
+
+        result["disable_image_processor"] = self.image_processor is None
+
+        return result
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -1240,7 +1285,7 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            "%d. Assuming the model's maximum length is %d.", possible_keys,
+            "%s. Assuming the model's maximum length is %d.", possible_keys,
             default_max_len)
         derived_max_model_len = default_max_len
 
