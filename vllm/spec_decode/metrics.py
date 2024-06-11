@@ -41,11 +41,6 @@ class SpecDecodeWorkerMetrics:
     # The number of speculative tokens per sequence.
     num_spec_tokens: int
 
-    total_time: float
-    total_calls: int
-    avg_time: float
-
-
 Timer = Callable[[], float]
 
 
@@ -164,10 +159,6 @@ class AsyncMetricsCollector:
         else:
             system_efficiency = float("nan")
 
-        #print('emitted_tokens ' + str(emitted_tokens))
-        #print('accepted_tokens ' + str(accepted_tokens))
-        #print('draft_tokens ' + str(draft_tokens))
-
         return SpecDecodeWorkerMetrics(
             num_spec_tokens=k,
             draft_acceptance_rate=draft_acceptance_rate,
@@ -175,9 +166,6 @@ class AsyncMetricsCollector:
             accepted_tokens=accepted_tokens,
             draft_tokens=draft_tokens,
             emitted_tokens=emitted_tokens,
-            total_time=self.spec_decode_base_sampler.total_time,
-            total_calls=self.spec_decode_base_sampler.total_calls,
-            avg_time= self.spec_decode_base_sampler.total_time * 1.0 / self.spec_decode_base_sampler.total_calls * 1.0 
         )
 
     @staticmethod
