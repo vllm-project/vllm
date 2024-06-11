@@ -41,7 +41,7 @@ class HabanaPagedAttention:
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, num_kv_heads, head_size, block_size)
+        return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def split_kv_cache(
@@ -86,7 +86,7 @@ class HabanaPagedAttention:
         alibi_slopes: Optional[torch.Tensor],
         kv_scale: float,
     ) -> torch.Tensor:
-        block_size = value_cache.shape[3]
+        block_size = value_cache.shape[1]
         return ops.paged_attention_v1(
             query,
             key_cache,

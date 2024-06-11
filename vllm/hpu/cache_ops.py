@@ -10,49 +10,13 @@ import torch
 import habana_frameworks.torch as htorch
 
 
-def pad_to_full_block(data, block_size, pad_value):
-    seq_dim = 1
-    pad_shape = list(data.shape)
-    remainder = pad_shape[seq_dim] % block_size
-    if remainder == 0:
-        return data
-    pad_shape[seq_dim] = block_size - remainder
-    pad = torch.full(pad_shape, pad_value, dtype=data.dtype, device=data.device)
-    return torch.cat([data, pad], dim=seq_dim)
-
-
-def initialize_cache(data, indices, cache):
-    block_size = cache.size(-1)
-    data = data.unflatten(0, (-1, block_size)).permute(0, 2, 3, 1)
-    indices = indices.unflatten(0, (-1, block_size))[:,0]
-    cache.index_copy_(0, indices, data)
-
-
-def update_cache(data, indices, offsets, cache):
-    prev = cache.index_select(0, indices)
-    idx = offsets.view(-1, 1, 1, 1).expand(-1, data.size(1), data.size(2), -1)
-    prev.scatter_(-1, idx, data.unsqueeze(-1))
-    cache.index_copy_(0, indices, prev)
-
-
-def reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, dtype, is_prompt):
-    block_size = key_cache.size(-1)
-    assert slot_mapping.dim() == 2, 'This implementation requires unflattened slot_mapping!'
-
-    if is_prompt:
-        block_indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
-        batch_size, seq_length = block_indices.shape
-        key = pad_to_full_block(key.unflatten(0, (batch_size, seq_length)), block_size, 0).flatten(0, 1)
-        value = pad_to_full_block(value.unflatten(0, (batch_size, seq_length)), block_size, 0).flatten(0, 1)
-        block_indices = pad_to_full_block(block_indices, block_size, -1).flatten(0, 1)
-        initialize_cache(key, block_indices, key_cache)
-        initialize_cache(value, block_indices, value_cache)
-    else:
-        slot_mapping = slot_mapping.flatten()
-        block_indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
-        block_offsets = torch.fmod(slot_mapping, block_size)
-        update_cache(key, block_indices, block_offsets, key_cache)
-        update_cache(value, block_indices, block_offsets, value_cache)
+def reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, dtype, is_prompt=False):
+    block_size = key_cache.size(1)
+    slot_mapping = slot_mapping.flatten()
+    indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    offsets = torch.fmod(slot_mapping, block_size)
+    key_cache.index_put_((indices, offsets), key)
+    value_cache.index_put_((indices, offsets), value)
 
 
 def swap_blocks(src, dst, block_mapping):

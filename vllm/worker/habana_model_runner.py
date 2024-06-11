@@ -976,8 +976,7 @@ class HabanaModelRunner:
             total_batch_seq += batch_seq
         graphed = list(c[:2] for c in self.graphed_buckets if c[2] == is_prompt)
         logger.info(f'{phase} captured:{len(graphed)} ({100 * len(graphed) / num_candidates:.1f}%) used_mem:{format_bytes(total_mem)} buckets:{sorted(list(graphed))}')
-        
-        
+
     @torch.inference_mode()
     def warmup_model(self, kv_caches: List[torch.Tensor]) -> None:
         if os.environ.get('VLLM_SKIP_WARMUP', 'false').lower() == 'true':

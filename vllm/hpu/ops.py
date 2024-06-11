@@ -31,23 +31,24 @@ def gelu_fast(output, input):
     raise NotImplementedError
 
 
-def fetch_from_cache(cache, blocks):
-    return [cache.index_select(0, blocks[:, i]) for i in range(blocks.size(1))]
+def fetch_from_cache(cache, blocks, permutations):
+    return [cache.index_select(0, blocks[:, i]).permute(permutations) for i in range(blocks.size(1))]
 
 
 @hpu_utils.with_mark_steps
 def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block_tables, context_lens, block_size, alibi_slopes, kv_cache_dtype=None) -> None:
     seq_len = block_tables.size(1)
     batch_size, query_heads, _ = query.shape
-    _, kv_heads, _, _ = key_cache.shape
+    _, _, kv_heads, _ = key_cache.shape
     min_inf = torch.finfo(query.dtype).min
     mask = (torch.arange(0, seq_len * block_size, dtype=torch.int32, device=key_cache.device)
             .view(1, -1)
             .expand(batch_size, -1)
             .ge(context_lens.view(-1, 1))
             .view(batch_size, 1, 1, -1))
+    query.mul_(scale)
     query = query.unsqueeze(-2)
-    keys = fetch_from_cache(key_cache, block_tables)
+    keys = fetch_from_cache(key_cache, block_tables, (0, 2, 3, 1))
     if query_heads != kv_heads:
         query = query.unflatten(1, (kv_heads, -1))
         keys = [k.unflatten(1, (kv_heads, 1)) for k in keys]
@@ -55,24 +56,22 @@ def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block
 
     attn_weights = [torch.matmul(query, k) for k in keys]
     attn_weights = (torch.cat(attn_weights, dim=-1)
-                    .mul_(scale)
                     .masked_fill(mask, min_inf)
                     .softmax(dim=-1))
 
-    values = fetch_from_cache(value_cache, block_tables)
+    values = fetch_from_cache(value_cache, block_tables, (0, 2, 1, 3))
     if PA_SPLIT_VALUE:
         attn_weights = attn_weights.split(block_size, dim=-1)
     else:
-        values = [torch.cat(values, dim=-1)]
+        values = [torch.cat(values, dim=-2)]
         attn_weights = [attn_weights]
     if query_heads != kv_heads:
         values = [v.unflatten(1, (kv_heads, 1)) for v in values]
-    attn_weights = [torch.matmul(a, v.transpose(-1, -2)).squeeze(-2) for a, v in zip(attn_weights, values)]
+    attn_weights = [torch.matmul(a, v) for a, v in zip(attn_weights, values)]
     if query_heads != kv_heads:
         attn_weights = [a.flatten(1, 2) for a in attn_weights]
     attn_weights = sum(attn_weights)
-
-    return attn_weights
+    return attn_weights.squeeze(-2)
 
 
 def rms_norm(out, hidden_states, weight, eps):

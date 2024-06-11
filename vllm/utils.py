@@ -410,7 +410,7 @@ def create_kv_caches_with_random(
 
     scale = head_size**-0.5
     if is_hpu():
-        key_cache_shape = (num_blocks, num_heads, head_size, block_size)
+        key_cache_shape = (num_blocks, block_size, num_heads, head_size)
     else:
         x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
         key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
@@ -429,7 +429,10 @@ def create_kv_caches_with_random(
                 f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_cache)
 
-    value_cache_shape = (num_blocks, num_heads, head_size, block_size)
+    if is_hpu():
+        value_cache_shape = (num_blocks, block_size, num_heads, head_size)
+    else:
+        value_cache_shape = (num_blocks, num_heads, head_size, block_size)
     value_caches = []
     for _ in range(num_layers):
         value_cache = torch.empty(size=value_cache_shape,

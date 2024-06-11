@@ -102,7 +102,6 @@ def test_copy_blocks(
     if is_hpu():
         tmp_block_mapping_dict = {}
         for src, dst in block_mapping:
-            print(src, dst, tmp_block_mapping_dict)
             if not tmp_block_mapping_dict.get(src):
                 tmp_block_mapping_dict[src] = [dst]
                 continue
@@ -191,17 +190,11 @@ def test_reshape_and_cache(
     kv_scale = 1.0
 
     # Call the reshape_and_cache kernel.
-    if is_hpu():
-        cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                    slot_mapping.view((1, -1)), "auto", False)
-    else:
-        cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                    slot_mapping, "auto")
+    cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
+                                slot_mapping, "auto")
 
     # Run the reference implementation.
-    if is_hpu():
-        reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0].shape)
-    else:
+    if not is_hpu():
         reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)
     block_indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
     block_indices = block_indices.cpu().tolist()
@@ -211,10 +204,13 @@ def test_reshape_and_cache(
         block_idx = block_indices[i]
         block_offset = block_offsets[i]
         if is_hpu():
-            cloned_key_cache[block_idx, :, :, block_offset] = reshaped_key[i]
+            cloned_key_cache[block_idx, block_offset, :, :] = key[i]
         else:
             cloned_key_cache[block_idx, :, :, block_offset, :] = reshaped_key[i]
-        cloned_value_cache[block_idx, :, :, block_offset] = value[i]
+        if is_hpu():
+            cloned_value_cache[block_idx, block_offset, :, :] = value[i]
+        else:
+            cloned_value_cache[block_idx, :, :, block_offset] = value[i]
 
     if kv_cache_dtype == "fp8":
         assert torch.allclose(result_key_cache,

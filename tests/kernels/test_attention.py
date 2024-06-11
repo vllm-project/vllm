@@ -74,9 +74,14 @@ def ref_single_query_cached_kv_attention(
     alibi_slopes: Optional[torch.Tensor],
 ) -> None:
     num_query_heads = query.shape[1]
-    num_kv_heads = value_cache.shape[1]
-    head_size = value_cache.shape[2]
-    block_size = value_cache.shape[3]
+    if not is_hpu():
+        num_kv_heads = value_cache.shape[1]
+        head_size = value_cache.shape[2]
+        block_size = value_cache.shape[3]
+    else:
+        block_size = value_cache.shape[1]
+        num_kv_heads = value_cache.shape[2]
+        head_size = value_cache.shape[3]
     num_seqs = query.shape[0]
 
     block_tables = block_tables.cpu().tolist()
@@ -93,13 +98,16 @@ def ref_single_query_cached_kv_attention(
             block_offset = j % block_size
 
             if is_hpu():
-                k = key_cache[block_number, :, :, block_offset]
+                k = key_cache[block_number, block_offset, :, :]
             else:
                 k = key_cache[block_number, :, :, block_offset, :]
             k = k.reshape(num_kv_heads, head_size)
             keys.append(k)
 
-            v = value_cache[block_number, :, :, block_offset]
+            if is_hpu():
+                v = value_cache[block_number, block_offset, :, :]
+            else:
+                v = value_cache[block_number, :, :, block_offset]
             values.append(v)
         keys = torch.stack(keys, dim=0)
         values = torch.stack(values, dim=0)
