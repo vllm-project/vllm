@@ -146,7 +146,10 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self._warmup_model()
 
     def _warmup_model(self) -> None:
-        self.model_runner.warmup_model(self.tpu_cache)
+        # FIXME(woosuk): Here we are abusing `enforce-eager` which is defined
+        # for CUDA graphs. We should refactor this part.
+        if not self.model_config.enforce_eager:
+            self.model_runner.warmup_model(self.tpu_cache)
 
     def get_cache_block_size_bytes(self) -> int:
         head_size = self.model_config.get_head_size()
