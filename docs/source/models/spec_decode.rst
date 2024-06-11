@@ -17,6 +17,7 @@ Speculating with a draft model
 The following code configures vLLM to use speculative decoding with a draft model, speculating 5 tokens at a time.
 
 .. code-block:: python
+
     from vllm import LLM, SamplingParams
     
     prompts = [
@@ -45,6 +46,7 @@ The following code configures vLLM to use speculative decoding where proposals a
 matching n-grams in the prompt. For more information read `this thread. <https://x.com/joao_gante/status/1747322413006643259>`_
 
 .. code-block:: python
+
     from vllm import LLM, SamplingParams
     
     prompts = [
