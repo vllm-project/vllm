@@ -5,9 +5,9 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
+import torch
 import triton
 import triton.language as tl
-import torch
 
 
 @triton.jit
@@ -30,6 +30,10 @@ def _bgmv_shrink_kernel(
     BLOCK_K: tl.constexpr,
     SPLIT_K: tl.constexpr,
 ):
+    """
+    GroupGEMV,Additionally, introducing SPLIT-K can improve large hidden_size's
+    performance
+    """
     pid_sk = tl.program_id(axis=0)
     cur_batch = tl.program_id(axis=1)
     lora_index = tl.load(lora_indices + cur_batch)
@@ -81,7 +85,6 @@ def bgmv_shrink(
     scaling: float,
 ):
     """
-
     Args:
         inputs (torch.Tensor): input tensor
         lora_a_weights (torch.Tensor): lora'a weight
@@ -92,7 +95,11 @@ def bgmv_shrink(
         scaling (float):  Scaling factor.
     """
     assert inputs.dtype == lora_a_weights.dtype
-    assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
+    assert inputs.dtype in [torch.float16, torch.bfloat16]
+    assert lora_a_weights.dtype in [
+        torch.float16,
+        torch.bfloat16,
+    ]
     assert inputs.size(1) == lora_a_weights.size(-1)
     assert lora_indices_tensor.size(0) == batchs
     assert inputs.is_contiguous()
@@ -106,14 +113,13 @@ def bgmv_shrink(
     assert output_tensor.is_contiguous()
     # TODO tuning this config
     N, K = lora_a_weights.shape[-2:]  # K=hidden_size,N=rank
-    BLOCK_K = 512
+    BLOCK_K = 256
     BLOCK_N = triton.next_power_of_2(output_tensor.size(1))
-    SPLIT_K = 16
+    SPLIT_K = 64
     grid = [
         SPLIT_K,
         batchs,
     ]
-    config = {"num_stages": 4, "num_warps": 8}
     _bgmv_shrink_kernel[grid](
         inputs,
         lora_a_weights,
@@ -132,6 +138,5 @@ def bgmv_shrink(
         BLOCK_N,
         BLOCK_K,
         SPLIT_K,
-        **config,
     )
     return

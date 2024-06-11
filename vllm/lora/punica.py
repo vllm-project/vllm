@@ -4,12 +4,12 @@ from typing import Optional
 
 import torch
 
-from vllm.lora.ops.sgmv_expand import sgmv_expand
-from vllm.lora.ops.sgmv_shrink import sgmv_shrink
 from vllm.lora.ops.bgmv_expand import bgmv_expand
-from vllm.lora.ops.bgmv_shrink import bgmv_shrink
-from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
 from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
+from vllm.lora.ops.bgmv_shrink import bgmv_shrink
+from vllm.lora.ops.sgmv_expand import sgmv_expand
+from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
+from vllm.lora.ops.sgmv_shrink import sgmv_shrink
 
 
 def _raise_import_error(e):
@@ -155,9 +155,6 @@ def add_lora(
                                  scale)
 
 
-
-
-
 def add_lora_slice(
     y: torch.Tensor,
     x: torch.Tensor,
@@ -232,6 +229,7 @@ def add_lora_slice(
         y_offset,
     )
 
+
 def add_lora_triton(
     y: torch.Tensor,
     x: torch.Tensor,
@@ -248,11 +246,42 @@ def add_lora_triton(
     *,
     buffer: Optional[torch.Tensor] = None,
 ):
+    """ 
+    Semantics:
+      y[i] += (
+          x[i].unsqueeze(0)
+          @ wa_t_all[lora_index_tensor[i], layer_idx, :, :].transpose(-1, -2)
+          @ wb_t_all[lora_index_tensor[i], layer_idx, :, :].transpose(-1, -2)
+          * scale
+        ).squeeze(0)
+    Args:
+        y (torch.Tensor):  (batch_size, output_dim).Will be changed in-place.
+        x (torch.Tensor):  (batch_size, hidden_dim)
+        wa_t_all (torch.Tensor):  (num_loras, lora_rank, hidden_dim)
+        wb_t_all (torch.Tensor): (num_loras, output_dim, lora_rank)
+        b_seq_start_tensor (torch.Tensor): (batch_size,). The cumulative
+            sequence lengths of the sequences in the batch, used to index
+            into sequence. E.g.,if the sequence length is [4, 6], it is
+            [0, 4]. Used only during the prefilling stage.
+        seq_length_tensor (torch.Tensor): batch_size,). record the sequence
+            length of the sequences in the batch. Used only during the 
+            prefilling stage.
+        lora_index_tensor (torch.Tensor): (batch_size,). The LoRA index
+            corresponding to each batch
+        batch_size (int): batch size. Used only during the prefilling stage.
+        max_length (int):  maximum seq length in the batch.Used only during the 
+            prefilling stage.
+        layer_idx (int): Layer index of LoRA weights.
+        scale (float):  Scaling factor.
+        is_prefilling (bool): True indicates the prefilling stage, while False 
+        indicates the decoding stage."
+        buffer (Optional[torch.Tensor], optional): (batch_size,rank) 
+    """
     r = wb_t_all.size(-1)
     if buffer is None:
-        # We set the buffer to be float32 by default to avoid
-        # numerical inaccuracies that would otherwise happen
-        # due to downcasting.
+        # We set the buffer to be float32 by default ,refer to:
+        # https://github.com/triton-lang/triton/issues/1387
+
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
@@ -342,6 +371,7 @@ def _lora_bgmv(
                 batch_size,
                 add_inputs=True)
 
+
 def add_lora_triton_slice(
     y: torch.Tensor,
     x: torch.Tensor,
@@ -361,30 +391,9 @@ def add_lora_triton_slice(
     buffer: Optional[torch.Tensor] = None,
 ):
     """
-    Same as `add_lora` but you can operate on slices of y.
+    Same as `add_lora_triton` but you can operate on slices of y.
     Pass whole y, define y_offset and y_slice_size.
-
-    Semantics:
-      y[i] += (
-          x[i].unsqueeze(0)
-          @ wa_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
-          @ wb_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
-          * scale
-        ).squeeze(0)
-
-    Args:
-      y: Shape: `[B, H2]`. Output vectors. Will be changed in-place.
-      x: Shape: `[B, H1]`. Input vectors.
-      wa_t_all: Shape: `[None, L, R, H1]`. All of the transposed
-        LoRA A matrices.
-      wb_t_all: Shape: `[None, L, H2, R]`. All of the transposed
-        LoRA B matrices.
-      indicies: Shape: `[B]`. Indices of the LoRA weights.
-      layer_idx: Layer index of LoRA weights.
-      scale: Scaling factor.
-      y_offset: Offset to apply to the starting column of y.
-      y_slice_size: Size of the y column slice.
-    #"""
+    """
     # try:
     #     import vllm._punica_C as punica_kernels
     # except ImportError as e:

@@ -106,9 +106,7 @@ def sgmv_expand(
     max_seq_length: int,
     add_inputs: bool = False,
 ):
-    """_summary_
-
-
+    """
     Args:
         inputs (torch.Tensor): input tensor
         lora_b_weights (torch.Tensor): lora'a weight
@@ -132,7 +130,6 @@ def sgmv_expand(
     assert lora_b_weights.dtype in [
         torch.float16,
         torch.bfloat16,
-        torch.float32,
     ]
     assert inputs.size(1) == lora_b_weights.size(-1)
     assert b_seq_start_loc.size(0) == batchs

@@ -451,7 +451,7 @@ class LoRAModelManager:
         # element contains batch_size, max_length, 0 or 1. Use 1 for the
         # prefilling stage and 0 for the decoding stage.The reason for
         # distinguishing between the prefilling and decoding stage is that
-        # if we have implemented bgmv, it can be utilized during the decoding
+        # we had implemented bgmv, it can be utilized during the decoding
         # stage.
         self.batch_mlen_stage_lst = [-1] * 3
         self._create_lora_modules()

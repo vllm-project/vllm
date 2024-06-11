@@ -16,9 +16,8 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_gather)
 from vllm.distributed.utils import divide
-from vllm.lora.punica import (add_lora_triton,
-                              add_lora_triton_slice)
 from vllm.lora.ops.sgmv_expand import sgmv_expand
+from vllm.lora.punica import add_lora_triton, add_lora_triton_slice
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -63,6 +62,7 @@ def _not_fully_sharded_can_replace(can_replace):
 
     return dec
 
+
 def _apply_lora_triton(
     x: torch.Tensor,
     lora_a_stacked: torch.Tensor,
@@ -72,30 +72,40 @@ def _apply_lora_triton(
     lora_index_tensor: torch.Tensor,
     batch_mlen_stage_lst: List[int],
     output: torch.Tensor,
-):
-    # """Applies lora to each input.
+) -> torch.Tensor:
+    """Applies lora to each input.   This method applies all loras to each 
+    input. It uses the `lora_index_tensor` vector to determine which lora 
+    yields the correct output. An index of -1 means no lora should be
+    applied. This method adds the final lora results to the output.
 
-    # This method applies all loras to each input. It uses the
-    # indices vector to determine which lora yields the
-    # correct output. An index of -1 means no lora should be
-    # applied. This method adds the final lora results to the
-    # output.
-
-    # Input shapes:
-    #     x:               (batch_size, hidden_dim)
-    #     lora_a_stacked:  (num_loras, lora_rank, hidden_dim)
-    #     lora_b_stacked:  (num_loras, output_dim, lora_rank)
-    #     indices:         (batch_size)
-    #     output:          (batch_size, output_dim)
-    # """
+    Args:
+        x (torch.Tensor): (batch_size, hidden_dim)
+        lora_a_stacked (torch.Tensor): (num_loras, lora_rank, hidden_dim)
+        lora_b_stacked (torch.Tensor): (num_loras, output_dim, lora_rank)
+        b_seq_start_tensor (torch.Tensor): (batch_size,). The cumulative
+            sequence lengths of the sequences in the batch, used to index
+            into sequence. E.g.,if the sequence length is [4, 6], it is
+            [0, 4].
+        seq_length_tensor (torch.Tensor): batch_size,). record the sequence
+            length of the sequences in the batch
+        lora_index_tensor (torch.Tensor): (batch_size,). The LoRA index
+            corresponding to each batch
+        batch_mlen_stage_lst (List[int]): (3,).Sequentially represent batch
+            size, maximum seq length, and prefilling stage flag.
+        output (torch.Tensor):  (batch_size, output_dim)  
+        
+    Returns:
+        output (torch.Tensor):  (batch_size, output_dim)  
+        
+    """
     org_output = output
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
-
+    #
     batch_size = batch_mlen_stage_lst[0]
     max_length = batch_mlen_stage_lst[1]
     is_prefilling = bool(batch_mlen_stage_lst[2])
-    # maybe we need not  restrict  range to [:batch_size]
+
     add_lora_triton(output, x, lora_a_stacked, lora_b_stacked,
                     b_seq_start_tensor[:batch_size],
                     seq_length_tensor[:batch_size],
@@ -114,22 +124,31 @@ def _apply_lora_triton_nslice(
     batch_mlen_stage_lst: List[int],
     output: torch.Tensor,
     output_slices: Tuple[int, ...],
-):
-    # """Applies lora to each input.
+) -> torch.Tensor:
+    """Applies lora to each input.  This method applies all loras to each 
+    input. It uses the `lora_index_tensor` vector to determine which lora 
+    yields the correct output. An index of -1 means no lora should be
+    applied. This method adds the final lora results to the output.
 
-    # This method applies all loras to each input. It uses the
-    # indices vector to determine which lora yields the
-    # correct output. An index of -1 means no lora should be
-    # applied. This method adds the final lora results to the
-    # output.
+    Args:
+        x (torch.Tensor): (batch_size, hidden_dim)
+        lora_a_stacked (torch.Tensor): (num_loras, lora_rank, hidden_dim)
+        lora_b_stacked (torch.Tensor): (num_loras, output_dim, lora_rank)
+        b_seq_start_tensor (torch.Tensor): (batch_size,). The cumulative
+            sequence lengths of the sequences in the batch, used to index
+            into sequence. E.g.,if the sequence length is [4, 6], it is
+            [0, 4].
+        seq_length_tensor (torch.Tensor): batch_size,). record the sequence
+            length of the sequences in the batch
+        lora_index_tensor (torch.Tensor): (batch_size,). The LoRA index
+            corresponding to each batch
+        batch_mlen_stage_lst (List[int]): (3,).Sequentially represent batch
+            size, maximum seq length, and prefilling stage flag.
+        output_slices (Tuple[int, ...]): Size of each output column 
 
-    # Input shapes:
-    #     x:               (batch_size, hidden_dim)
-    #     lora_a_stacked:  (num_loras, lora_rank, hidden_dim)
-    #     lora_b_stacked:  (num_loras, output_dim, lora_rank)
-    #     indices:         (batch_size)
-    #     output:          (batch_size, output_dim)
-    # """
+    Returns:
+        output (torch.Tensor):  (batch_size, output_dim) 
+    """
     org_output = output
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
@@ -1238,9 +1257,9 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits
 
-        batch_mlen_stage_lst=self.batch_mlen_stage_lst.copy()
+        batch_mlen_stage_lst = self.batch_mlen_stage_lst.copy()
         # LogitsProcessorWithLoRA always using bgmv
-        batch_mlen_stage_lst[2]=False
+        batch_mlen_stage_lst[2] = False
         _apply_lora_triton(hidden_states, self.lora_a_stacked,
                            self.lora_b_stacked, self.b_seq_start_tensor,
                            self.seq_length_tensor,
