@@ -1,5 +1,4 @@
-from typing import (Dict, Iterable, List, Literal, Optional, Tuple, TypedDict,
-                    Union)
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -13,7 +12,6 @@ from typing_extensions import NotRequired
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
 from vllm.inputs import INPUT_REGISTRY
-from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -23,7 +21,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal.image import DummyImageDataFactories, ImagePixelData
+from vllm.multimodal.image import DummyImageDataFactories, ImageInputProcessors
 from vllm.sequence import SamplerOutput
 
 from .llava import LlavaMultiModalProjector, merge_vision_embeddings
@@ -59,34 +57,12 @@ LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
                              LlavaNextImageFeatureInputs]
 
 
-def _pixel_mapper(ctx: InputContext,
-                  data: ImagePixelData) -> Dict[str, torch.Tensor]:
-    image = data.image
-
-    if isinstance(image, torch.Tensor):
-        pixel_values = image.to(ctx.model_config.dtype)
-        batch_size, _, _, h, w = pixel_values.shape
-        image_sizes = torch.tensor([(w, h) for _ in range(batch_size)])
-
-        return {"pixel_values": pixel_values, "image_sizes": image_sizes}
-
-    # Temporary patch before dynamic number of image tokens is supported
-    _, _, h, w = ctx.get_multimodal_config().image_input_shape
-    if (w, h) != (image.width, image.height):
-        logger.warning(
-            "Dynamic image shape is currently not supported. "
-            "Resizing input image to (%d, %d).", w, h)
-
-        data.image = image.resize((w, h))
-
-    return INPUT_REGISTRY.MULTIMODAL._get_plugin_for_data_type(ImagePixelData) \
-        ._default_input_mapper(ctx, data)
-
-
 @INPUT_REGISTRY.MULTIMODAL.register_image_feature_input_mapper()
-@INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper(_pixel_mapper)
+@INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(
     DummyImageDataFactories.for_model(LlavaNextConfig))
+@INPUT_REGISTRY.register_input_processor(
+    ImageInputProcessors.for_model(LlavaNextConfig))
 class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
     """
     Args to `forward()`:

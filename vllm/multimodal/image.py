@@ -14,6 +14,7 @@ from vllm.inputs.registry import DummyDataFactory, InputContext, InputProcessor
 from vllm.logger import init_logger
 from vllm.sequence import SequenceData
 from vllm.transformers_utils.image_processor import get_image_processor
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from .base import MultiModalData, MultiModalPlugin
 
@@ -25,6 +26,7 @@ else:
 logger = init_logger(__name__)
 
 _cached_get_image_processor = lru_cache(get_image_processor)
+_cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
 def _get_clip_num_patches(hf_config: CLIPVisionConfig) -> int:
