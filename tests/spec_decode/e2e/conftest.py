@@ -1,5 +1,4 @@
 import asyncio
-import os
 import time
 from itertools import cycle
 from typing import Dict, List, Optional, Tuple, Union
@@ -78,6 +77,11 @@ class AsyncLLM:
             swap_space=swap_space,
             enforce_eager=enforce_eager,
             max_seq_len_to_capture=max_seq_len_to_capture,
+            # For now use ray for the distributed back-end, since
+            # we rely on the use of engine_use_ray=True to avoid
+            # reinitializing CUDA in the same process (driver worker)
+            engine_use_ray=True,
+            distributed_executor_backend="ray",
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
@@ -173,11 +177,6 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
         if "use_async" in kwargs:
             use_async = kwargs.pop("use_async")
         print(f'{use_async=}')
-
-        if os.getenv("DISTRIBUTED_EXECUTOR_BACKEND") == "ray":
-            kwargs["engine_use_ray"] = True
-            if kwargs.get("tensor_parallel_size", 1) > 1:
-                kwargs["distributed_executor_backend"] = "ray"
 
         print(f'Creating {baseline_or_test=} LLM for {test_name=}. {kwargs=}')
         llm = AsyncLLM(**kwargs) if use_async else LLM(**kwargs)
