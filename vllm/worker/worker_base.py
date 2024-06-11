@@ -2,10 +2,11 @@ import importlib
 import os
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Set, Tuple
+import torch
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest, SamplerOutput, ModelInput
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 
@@ -46,11 +47,42 @@ class WorkerBase(ABC):
         """
         raise NotImplementedError
 
+    @torch.inference_mode()
+    def start_worker_execution_loop(self) -> None:
+        """Execute model loop in parallel worker.
+
+        You can stop the loop by executing a driver worker with an empty output.
+        See `stop_remote_worker_execution_loop` for more details.
+        """
+        while True:
+            model_input = self.prepare_model_input(execute_model_req=None)
+
+            if model_input is None:
+                return
+
+            return self.execute_model(model_input)
+
+    @abstractmethod
+    def prepare_model_input_local(self, execute_model_req: ExecuteModelRequest) -> ModelInput:
+        """
+        Prepare a model execution request locally. This method is not allowed
+        to communicate with external devices.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare_model_input(self, execute_model_req: Optional[ExecuteModelRequest] = None) -> ModelInput:
+        """
+        Prepare a model execution request. Communication with other workers
+        may occur to produce the model input that should be passed to
+        execute_model.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+            self,
+            model_input: ModelInput) -> List[SamplerOutput]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         raise NotImplementedError

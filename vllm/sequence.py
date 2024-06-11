@@ -2,8 +2,9 @@
 import copy
 import enum
 from abc import ABC, abstractmethod
+import dataclasses
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, Set, Any
 
 import torch
 
@@ -14,6 +15,10 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
+    from vllm.attention import AttentionMetadata
+    from vllm.model_executor import SamplingMetadata
+    from vllm.model_executor.pooling_metadata import PoolingMetadata
+
     from vllm.multimodal import MultiModalData
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
@@ -163,6 +168,8 @@ class SequenceData:
 
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
+        # TODO: Check who calls this and make sure it's synchronized across
+        # driver and workers.
         self._num_computed_tokens += num_new_computed_tokens
         assert self._num_computed_tokens <= self.get_len(), (
             self._num_computed_tokens, self.get_len())
@@ -841,7 +848,8 @@ class PoolerOutput:
 
 @dataclass
 class ExecuteModelRequest:
-    """The model execution request."""
+    """The model execution request, containing CPU metadata only. The LLM
+    engine should create an instance of this class for each request batch."""
     # The sequence group metadata list.
     seq_group_metadata_list: List[SequenceGroupMetadata]
     # Blocks to swap in. List of CPU -> GPU block number.
@@ -867,3 +875,111 @@ class ExecuteModelRequest:
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
         )
+
+@dataclass(frozen=True)
+class ModelInput:
+    """Local inputs to each worker's `execute_model` function. May contain
+    device-specific data. Different worker backends may have different methods
+    of converting from the global ExecuteModelRequest produced by the LLM
+    engine to the worker-local ModelInput objects.
+    """
+    num_seq_groups: int = None
+    blocks_to_swap_in: torch.Tensor = None
+    blocks_to_swap_out: torch.Tensor = None
+    blocks_to_copy: torch.Tensor = None
+
+    input_tokens: torch.Tensor = None
+    input_positions: torch.Tensor = None
+    seq_lens: List[int] = None
+    query_lens: List[int] = None
+    lora_mapping: Optional["LoRAMapping"] = None
+    lora_requests: Set[LoRARequest] = None
+    multi_modal_kwargs: Dict[str, torch.Tensor] = None
+    slot_mapping: torch.Tensor = None
+    num_prefill_tokens: int = None
+    num_decode_tokens: int = None
+    num_prefills: int = None
+    sampling_metadata: Optional["SamplingMetadata"] = None
+    attn_metadata: Optional["AttentionMetadata"] = None
+    pooling_metadata: Optional["PoolingMetadata"] = None
+
+    BROADCASTABLE_FIELDS: List[str] = (
+            "num_seq_groups",
+            "blocks_to_swap_in",
+            "blocks_to_swap_out",
+            "blocks_to_copy",
+            "input_tokens",
+            "input_positions",
+            "lora_requests",
+            "lora_mapping",
+            "multi_modal_kwargs",
+            "num_prefill_tokens",
+            "num_decode_tokens",
+            "slot_mapping",
+            "num_prefills",
+            )
+
+    @classmethod
+    def _get_valid_kwargs(cls,
+            selected_token_indices: Optional[torch.Tensor] = None,
+            sampling_metadata: Optional["SamplingMetadata"] = None,
+            attn_backend: Optional["AttentionBackend"] = None,
+            attn_metadata: Optional["AttentionMetadata"] = None, **kwargs) -> Dict[str, Any]:
+        from vllm.model_executor import SamplingMetadata
+        if sampling_metadata is None:
+            if selected_token_indices is not None:
+                # Workers do not perform sampling.
+                sampling_metadata = SamplingMetadata(
+                        seq_groups=None,
+                        selected_token_indices=selected_token_indices,
+                        categorized_sample_indices=None,
+                        num_prompts=0,
+                        )
+        kwargs["sampling_metadata"] = sampling_metadata
+
+        if attn_metadata is None:
+            if attn_backend is not None:
+
+                valid_attn_kwargs = {}
+                for field in dataclasses.fields(attn_backend.get_metadata_cls()):
+                    val = kwargs.get(field.name, None)
+                    if val is not None:
+                        valid_attn_kwargs[field.name] = val
+
+                attn_metadata = attn_backend.make_metadata(
+                        **valid_attn_kwargs
+                        )
+        kwargs["attn_metadata"] = attn_metadata
+
+        # Drop extra kwargs that may have been used to initialize other
+        # values.
+        valid_kwargs = {}
+        for field in dataclasses.fields(cls):
+            val = kwargs.get(field.name, None)
+            if val is not None:
+                valid_kwargs[field.name] = val
+        return valid_kwargs
+
+
+    @classmethod
+    def new(cls, **kwargs) -> "ModelInput":
+        valid_kwargs = cls._get_valid_kwargs(**kwargs)
+        return cls(**valid_kwargs)
+
+    def replace(self, **kwargs) -> "ModelInput":
+        valid_kwargs = self.__class__._get_valid_kwargs(**kwargs)
+        return dataclasses.replace(self, **valid_kwargs)
+
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Union[int, torch.Tensor]]:
+        tensor_dict = {}
+        for field in self.BROADCASTABLE_FIELDS:
+            val = getattr(self, field, None)
+            if val is not None:
+                tensor_dict[field] = val
+
+        if self.sampling_metadata is not None:
+            tensor_dict["selected_token_indices"] = self.sampling_metadata.selected_token_indices
+        if self.attn_metadata is not None:
+            tensor_dict.update(self.attn_metadata.asdict_zerocopy())
+
+        return tensor_dict

@@ -84,8 +84,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         Passing None will cause the driver to stop the model execution
         loop running in each of the remote workers.
         """
-        return self.driver_worker.execute_model(
-            execute_model_req=execute_model_req)
+        model_input = self.driver_worker.prepare_model_input(execute_model_req)
+        return self.driver_worker.execute_model(model_input)
 
     def _run_workers(
         self,

@@ -21,7 +21,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata,  ModelInput
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 
@@ -38,36 +38,36 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 _NUM_WARMUP_ITERS = 2
 
 
-class ModelInput(NamedTuple):
-    input_tokens: torch.Tensor
-    input_positions: torch.Tensor
-    attn_metadata: Optional[AttentionMetadata]
-    seq_lens: List[int]
-    query_lens: List[int]
-    lora_mapping: Optional[LoRAMapping]
-    lora_requests: Set[LoRARequest]
-    multi_modal_kwargs: Dict[str, torch.Tensor]
-    slot_mapping: torch.Tensor
-    num_prefill_tokens: int
-    num_decode_tokens: int
-    num_prefills: int
-
-    @classmethod
-    def empty(cls, device):
-        return ModelInput(
-            input_tokens=torch.empty(0, device=device),
-            input_positions=torch.empty(0, device=device),
-            attn_metadata=None,
-            seq_lens=[],
-            query_lens=[],
-            lora_mapping=None,
-            lora_requests=set(),
-            multi_modal_kwargs={},
-            slot_mapping=torch.empty(0, device=device),
-            num_prefill_tokens=0,
-            num_decode_tokens=0,
-            num_prefills=0,
-        )
+#class ModelInput(NamedTuple):
+#    input_tokens: torch.Tensor
+#    input_positions: torch.Tensor
+#    attn_metadata: Optional[AttentionMetadata]
+#    seq_lens: List[int]
+#    query_lens: List[int]
+#    lora_mapping: Optional[LoRAMapping]
+#    lora_requests: Set[LoRARequest]
+#    multi_modal_kwargs: Dict[str, torch.Tensor]
+#    slot_mapping: torch.Tensor
+#    num_prefill_tokens: int
+#    num_decode_tokens: int
+#    num_prefills: int
+#
+#    @classmethod
+#    def empty(cls, device):
+#        return ModelInput(
+#            input_tokens=torch.empty(0, device=device),
+#            input_positions=torch.empty(0, device=device),
+#            attn_metadata=None,
+#            seq_lens=[],
+#            query_lens=[],
+#            lora_mapping=None,
+#            lora_requests=set(),
+#            multi_modal_kwargs={},
+#            slot_mapping=torch.empty(0, device=device),
+#            num_prefill_tokens=0,
+#            num_decode_tokens=0,
+#            num_prefills=0,
+#        )
 
 
 class ModelRunner:
@@ -280,7 +280,7 @@ class ModelRunner:
         paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
-            return ModelInput.empty(self.device)
+            return ModelInput()
 
         if self.sliding_window is not None:
             sliding_window_blocks = (self.sliding_window + self.block_size -
@@ -630,7 +630,11 @@ class ModelRunner:
             for k, v in multi_modal_kwargs_list.items()
         }
 
-        return ModelInput(
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list, seq_lens, query_lens, self.device,
+            self.pin_memory)
+
+        return ModelInput.new(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
             attn_metadata=attn_metadata,
@@ -643,107 +647,104 @@ class ModelRunner:
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
+            sampling_metadata=sampling_metadata,
         )
 
-    def prepare_input_tensors(
-        self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            # Prepare input tensors.
-            (
-                input_tokens,
-                input_positions,
-                attn_metadata,
-                seq_lens,
-                query_lens,
-                lora_mapping,
-                lora_requests,
-                multi_modal_kwargs,
-                slot_mapping,
-                num_prefill_tokens,
-                num_decode_tokens,
-                num_prefills,
-            ) = self._prepare_model_input(seq_group_metadata_list)
-            sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list, seq_lens, query_lens, self.device,
-                self.pin_memory)
+    #def prepare_input_tensors(
+    #    self,
+    #    seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+    #) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
+    #           Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
+    #    if self.is_driver_worker:
+    #        assert seq_group_metadata_list is not None
+    #        # Prepare input tensors.
+    #        (
+    #            input_tokens,
+    #            input_positions,
+    #            attn_metadata,
+    #            seq_lens,
+    #            query_lens,
+    #            lora_mapping,
+    #            lora_requests,
+    #            multi_modal_kwargs,
+    #            slot_mapping,
+    #            num_prefill_tokens,
+    #            num_decode_tokens,
+    #            num_prefills,
+    #        ) = self._prepare_model_input(seq_group_metadata_list)
+    #        sampling_metadata = SamplingMetadata.prepare(
+    #            seq_group_metadata_list, seq_lens, query_lens, self.device,
+    #            self.pin_memory)
 
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-                "lora_requests": lora_requests,
-                "lora_mapping": lora_mapping,
-                "multi_modal_kwargs": multi_modal_kwargs,
-                "num_prefill_tokens": num_prefill_tokens,
-                "num_decode_tokens": num_decode_tokens,
-                "slot_mapping": slot_mapping,
-                "num_prefills": num_prefills,
-            }
-            if attn_metadata:
-                metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
-        else:
-            metadata_dict = broadcast_tensor_dict(src=0)
-            input_tokens = metadata_dict.pop("input_tokens")
-            input_positions = metadata_dict.pop("input_positions")
-            selected_token_indices = metadata_dict.pop(
-                "selected_token_indices")
-            lora_mapping = metadata_dict.pop("lora_mapping")
-            lora_requests = metadata_dict.pop("lora_requests")
-            multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
-            if metadata_dict:
-                attn_metadata = self.attn_backend.make_metadata(
-                    **metadata_dict)
-            else:
-                attn_metadata = None
-            sampling_metadata = SamplingMetadata(
-                seq_groups=None,
-                selected_token_indices=selected_token_indices,
-                categorized_sample_indices=None,
-                num_prompts=0,
-            )
+    #        metadata_dict = {
+    #            "input_tokens": input_tokens,
+    #            "input_positions": input_positions,
+    #            "selected_token_indices":
+    #            sampling_metadata.selected_token_indices,
+    #            "lora_requests": lora_requests,
+    #            "lora_mapping": lora_mapping,
+    #            "multi_modal_kwargs": multi_modal_kwargs,
+    #            "num_prefill_tokens": num_prefill_tokens,
+    #            "num_decode_tokens": num_decode_tokens,
+    #            "slot_mapping": slot_mapping,
+    #            "num_prefills": num_prefills,
+    #        }
+    #        if attn_metadata:
+    #            metadata_dict.update(attn_metadata.asdict_zerocopy())
+    #        broadcast_tensor_dict(metadata_dict, src=0)
+    #    else:
+    #        metadata_dict = broadcast_tensor_dict(src=0)
+    #        input_tokens = metadata_dict.pop("input_tokens")
+    #        input_positions = metadata_dict.pop("input_positions")
+    #        selected_token_indices = metadata_dict.pop(
+    #            "selected_token_indices")
+    #        lora_mapping = metadata_dict.pop("lora_mapping")
+    #        lora_requests = metadata_dict.pop("lora_requests")
+    #        multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
+    #        if metadata_dict:
+    #            attn_metadata = self.attn_backend.make_metadata(
+    #                **metadata_dict)
+    #        else:
+    #            attn_metadata = None
+    #        sampling_metadata = SamplingMetadata(
+    #            seq_groups=None,
+    #            selected_token_indices=selected_token_indices,
+    #            categorized_sample_indices=None,
+    #            num_prompts=0,
+    #        )
 
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_kwargs)
+    #    return (input_tokens, input_positions, attn_metadata,
+    #            sampling_metadata, lora_requests, lora_mapping,
+    #            multi_modal_kwargs)
 
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        model_input: ModelInput,
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_kwargs
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
-
         if self.lora_config:
-            self.set_active_loras(lora_requests, lora_mapping)
+            self.set_active_loras(model_input.lora_requests, model_input.lora_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
-        prefill_meta = attn_metadata.prefill_metadata
-        decode_meta = attn_metadata.decode_metadata
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+        decode_meta = model_input.attn_metadata.decode_metadata
         if prefill_meta is None and decode_meta.use_cuda_graph:
-            graph_batch_size = input_tokens.shape[0]
+            graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
 
         hidden_states = model_executable(
-            input_ids=input_tokens,
-            positions=input_positions,
+            input_ids=model_input.input_tokens,
+            positions=model_input.input_positions,
             kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-            **multi_modal_kwargs,
+            attn_metadata=model_input.attn_metadata,
+            **model_input.multi_modal_kwargs,
         )
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        logits = self.model.compute_logits(hidden_states, model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
@@ -752,7 +753,7 @@ class ModelRunner:
         # Sample the next token.
         output = self.model.sample(
             logits=logits,
-            sampling_metadata=sampling_metadata,
+            sampling_metadata=model_input.sampling_metadata,
         )
 
         return output
@@ -829,7 +830,8 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        self.execute_model(seqs, kv_caches)
+        model_input = self._prepare_model_input(seqs)
+        self.execute_model(model_input, kv_caches)
         torch.cuda.synchronize()
         return
 
