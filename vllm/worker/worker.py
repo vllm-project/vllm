@@ -225,7 +225,7 @@ class Worker(WorkerBase):
     def prepare_model_input_local(
             self,
             execute_model_req: ExecuteModelRequest) -> ModelInput:
-        model_input = self.model_runner._prepare_model_input(
+        model_input = self.model_runner.prepare_model_input_tensors(
                 execute_model_req.seq_group_metadata_list
                 )
 

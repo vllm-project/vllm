@@ -82,38 +82,19 @@ class EmbeddingModelRunner(ModelRunner):
         return self.model.pooler(hidden_states=hidden_states,
                                  pooling_metadata=model_input.pooling_metadata)
 
-    def prepare_input_tensors(
+    def prepare_model_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> ModelInput:
         assert seq_group_metadata_list is not None
-        # Prepare input tensors.
-        (
-            input_tokens,
-            input_positions,
-            attn_metadata,
-            seq_lens,
-            _,
-            lora_mapping,
-            lora_requests,
-            multi_modal_kwargs,
-            slot_mapping,
-            num_prefill_tokens,
-            num_decode_tokens,
-            num_prefills,
-        ) = self._prepare_model_input(seq_group_metadata_list)
+        model_input = self._prepare_model_input_tensors(seq_group_metadata_list)
         # Prepare PoolingMetadata
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
-                                                 seq_lens)
+                                                 model_input.seq_lens)
 
-        return ModelInput(
-                input_tokens=input_tokens,
-                input_positions=input_positions,
-                attn_metadata=attn_metadata,
+        return model_input.replace(
                 pooling_metadata=pooling_metadata,
-                lora_requests=lora_requests,
-                lora_mapping=lora_mapping,
-                multi_modal_kwargs=multi_modal_kwargs)
+                )
 
     def _prepare_pooling(
         self,
