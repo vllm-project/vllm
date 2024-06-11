@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Type
 
 from transformers import PretrainedConfig
 
@@ -9,7 +9,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
 
 logger = init_logger(__name__)
 
-_CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
+_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "dbrx": DbrxConfig,
     "mpt": MPTConfig,
