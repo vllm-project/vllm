@@ -50,10 +50,10 @@ class AsyncMetricsCollector:
     """
 
     def __init__(self,
-                 spec_decode_base_sampler: SpecDecodeBaseSampler,
+                 spec_decode_sampler: SpecDecodeBaseSampler,
                  timer: Optional[Timer] = None,
                  collect_interval_s: float = 5.0):
-        self.spec_decode_base_sampler = spec_decode_base_sampler
+        self.spec_decode_sampler = spec_decode_sampler
         self._timer = time.time if timer is None else timer
 
         self._rank: Optional[int] = None
@@ -116,13 +116,13 @@ class AsyncMetricsCollector:
 
         with torch.cuda.stream(self._copy_stream):
             self._aggregate_num_accepted_tokens.copy_(
-                self.spec_decode_base_sampler.num_accepted_tokens, non_blocking=True)
+                self.spec_decode_sampler.num_accepted_tokens, non_blocking=True)
             self._aggregate_num_emitted_tokens.copy_(
-                self.spec_decode_base_sampler.num_emitted_tokens, non_blocking=True)
+                self.spec_decode_sampler.num_emitted_tokens, non_blocking=True)
             # Number of draft tokens is calculated on CPU, so no copy is
             # required.
             self._aggregate_num_draft_tokens = (
-                self.spec_decode_base_sampler.num_draft_tokens)
+                self.spec_decode_sampler.num_draft_tokens)
 
         aggregate_metrics_ready = torch.cuda.Event()
         aggregate_metrics_ready.record(self._copy_stream)

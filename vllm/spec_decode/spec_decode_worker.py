@@ -474,9 +474,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
-
-        #print('_total_time_in_verify ' + str(self._total_time_in_verify))
-        #print('_num_calls ' + str(self._num_calls))
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
