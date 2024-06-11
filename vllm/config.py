@@ -603,9 +603,25 @@ class ParallelConfig:
                                  f"'{self.distributed_executor_backend}'.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
+            # We use multiprocessing by default if world_size fits on the
+            # current node and we aren't in a ray placement group.
+            from torch.cuda import device_count
+
             from vllm.executor import ray_utils
+            backend = "mp"
             ray_found = ray_utils.ray is not None
-            self.distributed_executor_backend = "ray" if ray_found else "mp"
+            if device_count() < self.world_size:
+                if not ray_found:
+                    raise ValueError("Unable to load Ray which is "
+                                     "required for multi-node inference")
+                backend = "ray"
+            elif ray_found:
+                from ray.util import get_current_placement_group
+                if self.placement_group or get_current_placement_group():
+                    backend = "ray"
+            self.distributed_executor_backend = backend
+            logger.info("Defaulting to use %s for distributed inference",
+                        backend)
 
         self._verify_args()
 

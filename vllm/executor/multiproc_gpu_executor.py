@@ -19,10 +19,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
     """Python multiprocessing-based multi-GPU executor"""
 
     def _init_executor(self) -> None:
-        assert (
-            not self.speculative_config
-        ), "Speculative decoding not yet supported for MultiProcGPU backend."
-
         # Create the parallel GPU workers.
         world_size = self.parallel_config.tensor_parallel_size
 
