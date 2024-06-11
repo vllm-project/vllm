@@ -51,12 +51,12 @@ def get_config(model: str,
         config = config_class.from_pretrained(model,
                                               revision=revision,
                                               code_revision=code_revision)
-    for key in ["rope_scaling", "rope_theta"]:
-        if locals()[key] is not None:
+    for key, value in [("rope_scaling", rope_scaling),
+                       ("rope_theta", rope_theta)]:
+        if value is not None:
             logger.info("Updating %s from %r to %r", key,
-                        getattr(config, key, None),
-                        locals()[key])
-            config.update({key: locals()[key]})
+                        getattr(config, key, None), value)
+            config.update({key: value})
     return config
 
 
