@@ -150,6 +150,7 @@ run_latency_tests() {
 
     ############## for debugging
     if [[ $gpu-count -eq 8 ]]; then 
+      echo "TP is 8"
       export VLLM_LOGGING_LEVEL=DEBUG
       export VLLM_TRACE_FUNCTION=1
     fi
