@@ -5,7 +5,8 @@ from datetime import timedelta
 import torch
 import torch.distributed
 
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceGroupMetadata)
+from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeProposer
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
@@ -30,7 +31,8 @@ class SingleTpWorker(ProposerWorkerBase):
 
     @classmethod
     def maybe_wrap_worker(cls, worker, draft_parallel_config: ParallelConfig,
-                          target_parallel_config: ParallelConfig, is_driver_worker: bool):
+                          target_parallel_config: ParallelConfig,
+                          is_driver_worker: bool):
         """Wrap the worker in a SingleTpWorker if necessary.
         """
         draft_tp = draft_parallel_config.tensor_parallel_size
@@ -45,8 +47,8 @@ class SingleTpWorker(ProposerWorkerBase):
             logger.info(f"Wrapping {type(worker)} in {cls}")
             return cls(worker)
         else:
-            logger.info(f"None for non-driver workers")
-            return DummyProposerWorker()
+            logger.info(f"dummy worker for non-driver")
+            return DummyProposerWorker(worker)
 
     def __init__(
         self,
@@ -66,16 +68,19 @@ class SingleTpWorker(ProposerWorkerBase):
         self process.
         """
         world_rank = torch.distributed.get_rank()
-        self._single_tp_group = torch.distributed.new_group(ranks=[world_rank], timeout=timedelta(seconds=10))
-        self._single_tp_cpu_group = torch.distributed.new_group(ranks=[world_rank],
-                                                                timeout=timedelta(seconds=10),
-                                                                backend="gloo")
- 
-        logger.info(f"init_device. world_rank: {world_rank}, single_tp_group: {self._single_tp_group}, single_tp_cput_group: {self._single_tp_cpu_group}")
+        self._single_tp_group = torch.distributed.new_group(
+            ranks=[world_rank], timeout=timedelta(seconds=10))
+        self._single_tp_cpu_group = torch.distributed.new_group(
+            ranks=[world_rank], timeout=timedelta(seconds=10), backend="gloo")
 
-        with patch_tensor_parallel_group(self._single_tp_group, self._single_tp_cpu_group):
+        logger.info(
+            f"init_device. world_rank: {world_rank}, single_tp_group: {self._single_tp_group}, single_tp_cput_group: {self._single_tp_cpu_group}"
+        )
+
+        with patch_tensor_parallel_group(self._single_tp_group,
+                                         self._single_tp_cpu_group):
             self._worker.init_device()
- 
+
         self._proposer = Top1Proposer(
             self,
             self._worker.device,
@@ -83,28 +88,28 @@ class SingleTpWorker(ProposerWorkerBase):
             max_proposal_len=self.max_model_len,
         )
 
-
     def set_include_gpu_probs_tensor(self):
         self._worker.set_include_gpu_probs_tensor()
 
     def load_model(self):
         logger.info("SingleTPWorker.load_model()")
-        with patch_tensor_parallel_group(self._single_tp_group, self._single_tp_cpu_group):
+        with patch_tensor_parallel_group(self._single_tp_group,
+                                         self._single_tp_cpu_group):
             self._worker.load_model()
 
     def determine_num_available_blocks(self):
         """Profile the model on all ranks.
         """
-        with patch_tensor_parallel_group(self._single_tp_group, self._single_tp_cpu_group):
+        with patch_tensor_parallel_group(self._single_tp_group,
+                                         self._single_tp_cpu_group):
             return self._worker.determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int):
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int):
         """Initialize the cache engine on all ranks.
         """
-        with patch_tensor_parallel_group(self._single_tp_group, self._single_tp_cpu_group):
-            self._worker.initialize_cache(num_gpu_blocks,
-                                          num_cpu_blocks)
+        with patch_tensor_parallel_group(self._single_tp_group,
+                                         self._single_tp_cpu_group):
+            self._worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @torch.inference_mode()
     def sampler_output(
@@ -120,7 +125,7 @@ class SingleTpWorker(ProposerWorkerBase):
         For multi step worker, this indicator shall be True.
         """
 
-        ## Worker-side logic: skip
+        ## Worker-side logic: skip # TODO: REMOVE
         if execute_model_req is None:
             logger.info("Workers do not make proposals")
             return None
@@ -142,7 +147,8 @@ class SingleTpWorker(ProposerWorkerBase):
         # Run model sample_len times.
         model_outputs = []
         for i in range(sample_len):
-            logger.info(f"Driver runs multiple draft steps. {i+1}/{sample_len}")
+            logger.info(
+                f"Driver runs multiple draft steps. {i+1}/{sample_len}")
             model_output = self._execute_model_tp1(
                 execute_model_req=copied_execute_model_req)
             assert (len(model_output) == 1
@@ -161,7 +167,8 @@ class SingleTpWorker(ProposerWorkerBase):
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
-        with patch_tensor_parallel_group(self._single_tp_group, self._single_tp_cpu_group):
+        with patch_tensor_parallel_group(self._single_tp_group,
+                                         self._single_tp_cpu_group):
             return self._proposer.get_spec_proposals(execute_model_req)
 
     @torch.inference_mode()
@@ -169,15 +176,15 @@ class SingleTpWorker(ProposerWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        if execute_model_req is None: #if not self._worker.is_driver_worker:
+        if execute_model_req is None:  #if not self._worker.is_driver_worker:
             return []
 
-        with patch_tensor_parallel_group(self._single_tp_group, self._single_tp_cpu_group):
+        with patch_tensor_parallel_group(self._single_tp_group,
+                                         self._single_tp_cpu_group):
             return self._execute_model_tp1(execute_model_req)
 
     def _execute_model_tp1(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest]
+        self, execute_model_req: Optional[ExecuteModelRequest]
     ) -> List[SamplerOutput]:
         logger.info("SingleTPWorker.execute_model_tp1()")
 
@@ -198,15 +205,16 @@ class SingleTpWorker(ProposerWorkerBase):
                                       device=self._worker.device,
                                       dtype=torch.int64).view(-1, 2)
 
-        self._worker.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+        self._worker.cache_swap(blocks_to_swap_in, blocks_to_swap_out,
+                                blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
             return []
 
         logger.info("SingleTPWorker._worker.model_runner.execute_model()")
-        output = self._worker.model_runner.execute_model(seq_group_metadata_list,
-                                                self._worker.gpu_cache)
+        output = self._worker.model_runner.execute_model(
+            seq_group_metadata_list, self._worker.gpu_cache)
 
         logger.info("SingleTPWorker.execute_model_tp1() output:")
         if output is not None:
@@ -217,7 +225,6 @@ class SingleTpWorker(ProposerWorkerBase):
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.
         return [output]
-
 
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
@@ -354,6 +361,12 @@ class SingleTpWorker(ProposerWorkerBase):
 
 class DummyProposerWorker(ProposerWorkerBase):
 
+    def __init__(
+        self,
+        worker: Union[Worker, ProposerWorkerBase],
+    ):
+        self._worker = worker
+
     def init_device(self):
         pass
 
@@ -366,8 +379,7 @@ class DummyProposerWorker(ProposerWorkerBase):
     def determine_num_available_blocks(self):
         pass
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int):
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int):
         pass
 
     def sampler_output(
@@ -401,3 +413,10 @@ class DummyProposerWorker(ProposerWorkerBase):
     def list_loras(self) -> Set[int]:
         pass
 
+    @property
+    def max_model_len(self) -> int:
+        return self._worker.max_model_len
+
+    @property
+    def vocab_size(self) -> int:
+        return self._worker.vocab_size
