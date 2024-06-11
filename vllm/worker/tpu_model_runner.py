@@ -441,9 +441,11 @@ class ModelWrapper(nn.Module):
         hidden_states = hidden_states.flatten(0, 1)
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
-        logits = logits.div_(t.unsqueeze(dim=1))
-        # FIXME(woosuk): Disabled top-p sampling because it's too slow.
-        # logits = _apply_top_p(logits, p)
+        logits = logits / t.unsqueeze(dim=1)
+        # NOTE(woosuk): Top-p sampling can be expensive especially for small
+        # models with a large vocab size like Gemma-2B. We can consider
+        # skipping it when all of the top-p values are 1.0.
+        logits = _apply_top_p(logits, p.unsqueeze(dim=1))
         probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
         # FIXME(woosuk): best_of > 1 is not supported.
         next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(dim=1)
@@ -471,19 +473,9 @@ def _get_padded_batch_size(batch_size: int) -> int:
 
 
 def _apply_top_p(logits: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
-    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
-
-    # Apply top-p.
-    probs_sort = logits_sort.softmax(dim=-1)
-    probs_sum = probs_sort.cumsum(dim=-1)
-    top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
-    # at least one
-    top_p_mask[:, -1] = False
-    logits_sort.masked_fill_(top_p_mask, -float("inf"))
-
-    # Re-sort the probabilities.
-    src = torch.arange(logits_idx.shape[-1],
-                       device=logits_idx.device).expand_as(logits_idx)
-    logits_idx_inv = src.scatter(dim=-1, index=logits_idx, src=src)
-    logits = torch.gather(logits_sort, dim=-1, index=logits_idx_inv)
+    logits_sorted = torch.sort(logits, dim=-1, descending=True).values
+    sorted_cum_probs = torch.cumsum(logits_sorted.softmax(dim=-1), dim=-1)
+    cutoff_index = torch.sum(sorted_cum_probs < p, dim=-1, keepdim=True)
+    cutoff_logit = torch.gather(logits_sorted, -1, cutoff_index)
+    logits = logits.masked_fill_(logits < cutoff_logit, -float("inf"))
     return logits
