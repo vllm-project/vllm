@@ -42,10 +42,24 @@ def cleanup():
     ray.shutdown()
 
 
+@pytest.fixture()
+def should_do_global_cleanup_after_test(request) -> bool:
+    """Allow subdirectories to skip global cleanup by overriding this fixture.
+    This can provide a ~10x speedup for non-GPU unit tests since they don't need
+    to initialize torch.
+    """
+
+    if request.node.get_closest_marker("skip_global_cleanup"):
+        return False
+
+    return True
+
+
 @pytest.fixture(autouse=True)
-def cleanup_fixture():
+def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
-    cleanup()
+    if should_do_global_cleanup_after_test:
+        cleanup()
 
 
 @pytest.fixture
@@ -185,7 +199,6 @@ def long_context_lora_files_32k():
     return snapshot_download(repo_id="SangBinCho/long_context_32k_testing")
 
 
-# SANG-TODO Download long lora files.
 @pytest.fixture(scope="session")
 def long_context_infos(long_context_lora_files_16k_1,
                        long_context_lora_files_16k_2,
