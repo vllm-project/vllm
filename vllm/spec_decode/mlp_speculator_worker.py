@@ -38,7 +38,8 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
 
         model_outputs = self.model_runner.model.generate_proposals(
             input_ids=input_tokens,
-            previous_hidden_states=execute_model_req.previous_hidden_states,
+            previous_hidden_states=execute_model_req.previous_hidden_states.
+            hidden_states,
             num_predict_tokens=sample_len,
             sampling_metadata=sampling_metadata)
 
