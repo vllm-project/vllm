@@ -114,7 +114,7 @@ def test_all_non_zero_with_zero_filter(fake_sequence_group_metadata):
     assert indices == []
 
 @pytest.fixture
-def mock_sampler_factory(request):
+def mock_spec_decode_sampler(request):
     def create_samplers(value):
         if value == "rejection_sampler":
             sampler = MagicMock(spec=RejectionSampler) 
@@ -125,7 +125,7 @@ def mock_sampler_factory(request):
             sampler.token_id_dtype = torch.int64
             return sampler
         else:
-            return None  # Return None for both samplers if the value is not recognized
+            return None  # Return None if the value is not recognized
     
     value = request.param  # Get the value passed to the fixture
     return create_samplers(value)

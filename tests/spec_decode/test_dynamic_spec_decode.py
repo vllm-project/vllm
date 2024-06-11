@@ -10,16 +10,16 @@ from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
 
 from .utils import create_batch, mock_worker
-from .test_utils import mock_sampler_factory
+from .test_utils import mock_spec_decode_sampler
 
 @pytest.mark.parametrize('queue_size', [4])
 @pytest.mark.parametrize('batch_size', [1])
 @pytest.mark.parametrize('k', [1])
-@pytest.mark.parametrize("mock_sampler_factory",
+@pytest.mark.parametrize("mock_spec_decode_sampler",
   ["rejection_sampler", "typical_acceptance_sampler"], indirect=True)
 @torch.inference_mode()
 def test_disable_spec_tokens(
-    queue_size: int, batch_size: int, k: int, mock_sampler_factory):
+    queue_size: int, batch_size: int, k: int, mock_spec_decode_sampler):
     """Verify that speculative tokens are disabled when the batch size
     exceeds the threshold.
     """
@@ -29,7 +29,7 @@ def test_disable_spec_tokens(
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     worker = SpecDecodeWorker(proposer_worker=draft_worker,
                               scorer_worker=target_worker,
-                              spec_decode_sampler=mock_sampler_factory,
+                              spec_decode_sampler=mock_spec_decode_sampler,
                               metrics_collector=metrics_collector,
                               disable_by_batch_size=disable_by_batch_size)
 

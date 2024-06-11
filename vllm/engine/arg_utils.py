@@ -98,8 +98,8 @@ class EngineArgs:
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
     speculative_draft_token_sampling_method: str = 'rejection_sampler'
-    typical_acceptance_sampler_posterior_threshold: float = 0.49
-    typical_acceptance_sampler_posterior_alpha: float = 0.7
+    typical_acceptance_sampler_posterior_threshold: float = 0.09
+    typical_acceptance_sampler_posterior_alpha: float = 0.3
     qlora_adapter_name_or_path: Optional[str] = None
 
     def __post_init__(self):
