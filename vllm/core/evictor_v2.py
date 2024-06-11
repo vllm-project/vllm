@@ -1,5 +1,5 @@
 import enum
-from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod, abstractproperty
 from typing import OrderedDict, Tuple
 
 
@@ -46,8 +46,7 @@ class Evictor(ABC):
         """Remove a given block id from the cache."""
         pass
 
-    @property
-    @abstractmethod
+    @abstractproperty
     def num_blocks(self) -> int:
         pass
 
@@ -91,9 +90,9 @@ class LRUEvictor(Evictor):
         # at the start of OrderedDict. Loop through all these blocks to
         # find the one with maximum number of hashed tokens.
         for _id, block in self.free_table.items():
-            if evicted_block.last_accessed > block.last_accessed or (
-                    evicted_block.last_accessed == block.last_accessed and
-                    evicted_block.num_hashed_tokens < block.num_hashed_tokens):
+            if evicted_block.last_accessed < block.last_accessed:
+                break
+            if evicted_block.num_hashed_tokens < block.num_hashed_tokens:
                 evicted_block = block
                 evicted_block_id = _id
 
@@ -109,6 +108,7 @@ class LRUEvictor(Evictor):
 
     def update(self, block_id: int, last_accessed: float):
         self.free_table[block_id].last_accessed = last_accessed
+        self.free_table.move_to_end(block_id)
 
     def remove(self, block_id: int):
         if block_id not in self.free_table:
