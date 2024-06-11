@@ -3,7 +3,6 @@ from typing import (Dict, Iterable, List, Literal, Optional, Tuple, TypedDict,
 
 import torch
 import torch.nn as nn
-from PIL import Image
 # TODO(xwjiang): We should port CLIPVisionModel's code over to not depend on
 # transformers' impl.
 from transformers import CLIPVisionModel, LlavaNextConfig
@@ -12,7 +11,9 @@ from transformers.models.llava_next.modeling_llava_next import (
 from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.inputs import INPUT_REGISTRY
+from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -22,9 +23,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
-from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
-from vllm.sequence import SamplerOutput, SequenceData
+from vllm.multimodal.image import DummyImageDataFactories, ImagePixelData
+from vllm.sequence import SamplerOutput
 
 from .llava import LlavaMultiModalProjector, merge_vision_embeddings
 from .vlm_base import VisionLanguageModelBase
@@ -59,41 +59,19 @@ LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
                              LlavaNextImageFeatureInputs]
 
 
-def _get_dummy_image_data(
-    seq_len: int,
-    model_config: ModelConfig,
-    vlm_config: VisionLanguageConfig,
-) -> Tuple[SequenceData, MultiModalData]:
-    seq_data, fake_mm_data = get_dummy_image_data(seq_len, model_config,
-                                                  vlm_config)
-
-    config_input_type = vlm_config.image_input_type
-    ImageInputType = VisionLanguageConfig.ImageInputType
-
-    if config_input_type == ImageInputType.PIXEL_VALUES:
-        _, c, h, w = vlm_config.image_input_shape
-        mode = {1: "L", 3: "RGB"}[c]
-        fake_mm_data = ImagePixelData(Image.new(mode, (w, h), color=0))
-
-    return seq_data, fake_mm_data
-
-
-def _image_pixel_processor(
-    data: ImagePixelData,
-    model_config: ModelConfig,
-    vlm_config: VisionLanguageConfig,
-) -> Dict[str, torch.Tensor]:
+def _image_pixel_processor(ctx: InputContext,
+                           data: ImagePixelData) -> Dict[str, torch.Tensor]:
     image = data.image
 
     if isinstance(image, torch.Tensor):
-        pixel_values = image.to(model_config.dtype)
+        pixel_values = image.to(ctx.model_config.dtype)
         batch_size, _, _, h, w = pixel_values.shape
         image_sizes = torch.tensor([(w, h) for _ in range(batch_size)])
 
         return {"pixel_values": pixel_values, "image_sizes": image_sizes}
 
     # Temporary patch before dynamic number of image tokens is supported
-    _, _, h, w = vlm_config.image_input_shape
+    _, _, h, w = ctx.get_multimodal_config().image_input_shape
     if (w, h) != (image.width, image.height):
         logger.warning(
             "Dynamic image shape is currently not supported. "
@@ -101,12 +79,14 @@ def _image_pixel_processor(
 
         data.image = image.resize((w, h))
 
-    return MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
-        ._default_input_processor(data, model_config, vlm_config)
+    return INPUT_REGISTRY.MULTIMODAL._get_plugin_for_data_type(ImagePixelData) \
+        ._default_input_mapper(ctx, data)
 
 
-@MULTIMODAL_REGISTRY.register_image_pixel_input(_image_pixel_processor)
-@MULTIMODAL_REGISTRY.register_dummy_data(_get_dummy_image_data)
+@INPUT_REGISTRY.MULTIMODAL.register_image_feature_input_mapper()
+@INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper(_image_pixel_processor)
+@INPUT_REGISTRY.register_dummy_data(
+    DummyImageDataFactories.for_model(LlavaNextConfig))
 class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
     """
     Args to `forward()`:
