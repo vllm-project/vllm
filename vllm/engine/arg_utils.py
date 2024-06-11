@@ -564,16 +564,21 @@ class EngineArgs:
             type=str,
             default=EngineArgs.speculative_draft_token_sampling_method,
             choices=['rejection_sampler', 'typical_acceptance_sampler'],
-            help='The draft token sampler to use for speculative decoding.')
+            help='Specify the draft token sampling method for speculative decoding. '
+            'Two types of samplers are supported: '
+            '1) RejectionSampler which does not allow changing the '
+            'acceptance rate of draft tokens, '
+            '2) TypicalAccpetanceSampler which is configurable, allowing for a higher '
+            'acceptance rate at the cost of lower quality, and vice versa.')
 
         parser.add_argument(
             '--typical-acceptance-sampler-posterior-threshold',
             type=float,
             default=EngineArgs.typical_acceptance_sampler_posterior_threshold,
-            help='A threshold value that sets a lower bound on the '
-            'posterior probability of a token for it to be accepted. This '
-            'parameter is used by the TypicalAcceptanceSampler for making '
-            'sampling decisions during speculative decoding.')
+            help='Set the lower bound threshold for the posterior '
+            'probability of a token to be accepted. This threshold is '
+            'used by the TypicalAcceptanceSampler to make sampling decisions '
+            'during speculative decoding.')
 
         parser.add_argument(
             '--typical-acceptance-sampler-posterior-alpha',

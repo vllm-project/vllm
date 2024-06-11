@@ -139,7 +139,7 @@ def test_correctly_calls_target_model(
 @pytest.mark.parametrize("mock_sampler_factory",
   ["rejection_sampler", "typical_acceptance_sampler"], indirect=True)
 @torch.inference_mode()
-def test_correctly_calls_verification_sampler(
+def test_correctly_calls_spec_decode_sampler(
     k: int, batch_size: int, mock_sampler_factory):
     """Verify SpecDecodeWorker calls the rejection sampler with
     correct inputs. Everything else is mocked out.
@@ -150,7 +150,7 @@ def test_correctly_calls_verification_sampler(
                                vocab_size=vocab_size,
                                use_spec=False)
     target_worker = mock_worker(vocab_size=vocab_size, use_spec=False)
-    verification_sampler = mock_sampler_factory
+    spec_decode_base_sampler = mock_sampler_factory
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
@@ -158,7 +158,7 @@ def test_correctly_calls_verification_sampler(
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              verification_sampler, metrics_collector)
+                              spec_decode_base_sampler, metrics_collector)
     worker.init_device()
 
     proposal_token_ids = torch.randint(low=0,
@@ -205,15 +205,15 @@ def test_correctly_calls_verification_sampler(
 
     exception_secret = 'artificial stop'
 
-    verification_sampler.side_effect = ValueError(exception_secret)
+    spec_decode_base_sampler.side_effect = ValueError(exception_secret)
 
     with pytest.raises(ValueError, match=exception_secret):
         worker.execute_model(execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
             num_lookahead_slots=k))
 
-    assert len(verification_sampler.call_args_list) == 1
-    _, kwargs = verification_sampler.call_args_list[0]
+    assert len(spec_decode_base_sampler.call_args_list) == 1
+    _, kwargs = spec_decode_base_sampler.call_args_list[0]
     actual = SimpleNamespace(**kwargs)
 
     assert torch.equal(actual.bonus_token_ids,
@@ -222,7 +222,7 @@ def test_correctly_calls_verification_sampler(
         actual.target_probs,
         target_token_probs.reshape(batch_size, k + 1, -1)[:, :-1])
     assert torch.equal(actual.draft_token_ids, proposal_token_ids)
-    if isinstance(verification_sampler, RejectionSampler):
+    if isinstance(spec_decode_base_sampler, RejectionSampler):
         assert torch.equal(actual.draft_probs, proposal_probs)
 
 
@@ -247,9 +247,9 @@ def test_correctly_formats_output(
     target_worker.device = 'cuda'
 
     set_random_seed(1)
-    verification_sampler = mock_sampler_factory
+    spec_decode_base_sampler = mock_sampler_factory
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              verification_sampler,
+                              spec_decode_base_sampler,
                               metrics_collector)
     worker.init_device()
 
@@ -295,23 +295,23 @@ def test_correctly_formats_output(
 
     target_worker.execute_model.return_value = [target_output[0]]
 
-    verification_sampler_output = torch.randint(low=0,
-                                                high=vocab_size,
-                                                size=(batch_size, k + 1),
-                                                dtype=torch.int64,
-                                                device='cuda')
+    spec_decode_sampler_output = torch.randint(low=0,
+                                               high=vocab_size,
+                                               size=(batch_size, k + 1),
+                                               dtype=torch.int64,
+                                               device='cuda')
     for i in range(batch_size):
         minimum_accepted_tokens = 1
-        verification_sampler_output[i][
+        spec_decode_sampler_output[i][
             -random.randint(minimum_accepted_tokens, k + 1):] = -1
     
-    verification_sampler.return_value = verification_sampler_output
+    spec_decode_base_sampler.return_value = spec_decode_sampler_output
     output = worker.execute_model(execute_model_req=ExecuteModelRequest(
         seq_group_metadata_list=seq_group_metadata_list,
         num_lookahead_slots=k))
 
     expected_output = create_sampler_output_list(
-        token_ids=verification_sampler_output.transpose(0, 1),
+        token_ids=spec_decode_sampler_output.transpose(0, 1),
         probs=[None for _ in range(k + 1)],
         logprobs=[None for _ in range(k + 1)])
 
@@ -365,7 +365,7 @@ def test_collects_metrics(
                                vocab_size=vocab_size,
                                use_spec=False)
     target_worker = mock_worker(vocab_size=vocab_size, use_spec=False)
-    verification_sampler = mock_sampler_factory
+    spec_decode_sampler = mock_sampler_factory
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
@@ -373,7 +373,7 @@ def test_collects_metrics(
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              verification_sampler,
+                              spec_decode_sampler,
                               metrics_collector)
     worker.init_device()
 
@@ -419,16 +419,16 @@ def test_collects_metrics(
 
     target_worker.execute_model.return_value = [target_output[0]]
 
-    verification_sampler_output = torch.randint(low=0,
-                                                high=vocab_size,
-                                                size=(batch_size, k + 1),
-                                                dtype=torch.int64,
-                                                device='cuda')
+    spec_decode_sampler_output = torch.randint(low=0,
+                                               high=vocab_size,
+                                               size=(batch_size, k + 1),
+                                               dtype=torch.int64,
+                                               device='cuda')
     for i in range(batch_size):
         minimum_accepted_tokens = 1
-        verification_sampler_output[i][
+        spec_decode_sampler_output[i][
             -random.randint(minimum_accepted_tokens, k + 1):] = -1
-    verification_sampler.return_value = verification_sampler_output
+    spec_decode_sampler.return_value = spec_decode_sampler_output
 
     mock_rejsample_metrics = MagicMock(
         spec=SpecDecodeWorkerMetrics) if returns_metrics else None
@@ -538,11 +538,11 @@ def test_init_device(mock_sampler_factory):
     """
     draft_worker = mock_worker(cls=MultiStepWorker, use_spec=False)
     target_worker = mock_worker(use_spec=False)
-    verification_sampler = mock_sampler_factory
+    spec_decode_sampler = mock_sampler_factory
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              verification_sampler,
+                              spec_decode_sampler,
                               metrics_collector)
 
     worker.init_device()
@@ -552,7 +552,7 @@ def test_init_device(mock_sampler_factory):
     target_worker.init_device.assert_called_once()
 
     metrics_collector.init_gpu_tensors.assert_called_once()
-    verification_sampler.init_gpu_tensors.assert_called_once()
+    spec_decode_sampler.init_gpu_tensors.assert_called_once()
 
 @pytest.mark.parametrize("mock_sampler_factory",
   ["rejection_sampler", "typical_acceptance_sampler"], indirect=True)

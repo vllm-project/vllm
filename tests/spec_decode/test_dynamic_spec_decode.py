@@ -29,7 +29,7 @@ def test_disable_spec_tokens(
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     worker = SpecDecodeWorker(proposer_worker=draft_worker,
                               scorer_worker=target_worker,
-                              verification_sampler=mock_sampler_factory,
+                              spec_decode_sampler=mock_sampler_factory,
                               metrics_collector=metrics_collector,
                               disable_by_batch_size=disable_by_batch_size)
 

@@ -45,8 +45,8 @@ Timer = Callable[[], float]
 
 
 class AsyncMetricsCollector:
-    """Class which copies rejection sampler metrics from the device to CPU on a
-    non-default Torch stream.
+    """Class which copies rejection/typical-acceptance sampler metrics
+    from the device to CPU on a non-default Torch stream.
     """
 
     def __init__(self,
@@ -94,7 +94,7 @@ class AsyncMetricsCollector:
         return None
 
     def _should_collect_rejsample_metrics(self, now: float) -> bool:
-        """Return whether or not this iteration should print rejection sampling
+        """Return whether or not this iteration should print sampling
         metrics.
         """
         if self._rank != 0:
@@ -106,8 +106,8 @@ class AsyncMetricsCollector:
         return True
 
     def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
-        """Copy rejection sampling metrics (number of accepted tokens, etc) to
-        CPU asynchronously.
+        """Copy rejection/typical-acceptance sampling metrics 
+        (number of accepted tokens, etc) to CPU asynchronously.
 
         Returns a CUDA event recording when the copy is complete.
         """

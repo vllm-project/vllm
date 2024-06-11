@@ -82,8 +82,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         welcome!).
     * Only top-1 proposal and scoring are implemented. Tree-attention is left as
         future work.
-    * Only lossless rejection sampling is supported. Contributions adding lossy
-        verification routines are welcome (e.g. Medusa's typical acceptance).
     * All sequences in a batch must have the same proposal length, or zero. This
         can be improved by having per-sequence speculation in the future.
     * The scoring forward pass is done without an MQA kernel, which is
@@ -121,12 +119,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
         
-        sampler: SpecDecodeBaseSampler = None
+        spec_decode_sampler: SpecDecodeBaseSampler = None
         if draft_token_sampling_method == "rejection_sampler":
-            sampler = RejectionSampler(
+            spec_decode_sampler = RejectionSampler(
                 disable_bonus_tokens=disable_bonus_tokens, )
         elif draft_token_sampling_method == "typical_acceptance_sampler":
-            sampler = TypicalAcceptanceSampler(
+            spec_decode_sampler = TypicalAcceptanceSampler(
                 disable_bonus_tokens=disable_bonus_tokens,
                 posterior_threshold=\
                     typical_acceptance_sampler_posterior_threshold,
@@ -137,14 +135,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker,
             scorer_worker,
             disable_by_batch_size=disable_by_batch_size,
-            sampler=sampler)
+            spec_decode_sampler=spec_decode_sampler)
 
 
     def __init__(
         self,
         proposer_worker: ProposerWorkerBase,
         scorer_worker: WorkerBase,
-        verification_sampler: SpecDecodeBaseSampler,
+        spec_decode_sampler: SpecDecodeBaseSampler,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
     ):
@@ -157,8 +155,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             scorer_worker: A worker that produces probabilities of speculative
                 tokens according to some base model. Typically a vanilla vLLM
                 Worker.
-            rejection_sampler: A Torch module used to perform modified rejection
-                sampling for speculative decoding.
+            spec_decode_sampler: A Torch module used to perform modified
+                sampling of the draft tokens in the verification step of
+                speculative decoding. Currently we support two different 
+                types of sampler namely RejectionSampler and
+                TypicalAcceptanceSampler. 'spec_decode_sampler' is either an
+                instance of RejectionSampler or TypicalAcceptanceSampler.
             disable_by_batch_size: If the batch size is larger than this,
                 disable speculative decoding for new incoming requests.
             metrics_collector: Helper class for collecting metrics; can be set
@@ -167,16 +169,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
         self.disable_by_batch_size = disable_by_batch_size or float("inf")
-        self.verification_sampler = verification_sampler
+        self.spec_decode_sampler = spec_decode_sampler
         assert (
-            self.verification_sampler is not None,
+            self.spec_decode_sampler is not None,
             "Sampler is Not set, which is not expected."
         )
         self._metrics = AsyncMetricsCollector(
-            self.verification_sampler
+            self.spec_decode_sampler
         ) if metrics_collector is None else metrics_collector
-        self.probs_dtype = self.verification_sampler.probs_dtype
-        self.token_id_dtype = self.verification_sampler.token_id_dtype
+        self.probs_dtype = self.spec_decode_sampler.probs_dtype
+        self.token_id_dtype = self.spec_decode_sampler.token_id_dtype
         # Lazy initiazliation.
         self.scorer: SpeculativeScorer
 
@@ -193,7 +195,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.load_model()
 
         self._metrics.init_gpu_tensors(self.rank)
-        self.verification_sampler.init_gpu_tensors(self.rank)
+        self.spec_decode_sampler.init_gpu_tensors(self.rank)
             
         self.scorer = BatchExpansionTop1Scorer(
             scorer_worker=self.scorer_worker,
@@ -208,7 +210,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def _configure_model_sampler_for_spec_decode(self):
         """Configure model sampler to emit GPU tensors. This allows spec decode
         to keep data on device without transferring to CPU and serializing,
-        which significantly reduces overhead of rejection sampling.
+        which significantly reduces overhead of sampling during verification.
 
         NOTE(cade): This breaks abstraction boundaries pretty badly. The better
         design is to have the "move to CPU and serialize" sampling decision be
@@ -496,16 +498,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                 bonus_token_ids: torch.Tensor,
                                 proposal_probs: torch.Tensor,
                                 proposal_token_ids: torch.Tensor):
-        if isinstance(self.verification_sampler, RejectionSampler):
-            accepted_token_ids = self.verification_sampler(
+        if isinstance(self.spec_decode_sampler, RejectionSampler):
+            accepted_token_ids = self.spec_decode_sampler(
                 target_probs=proposal_verifier_probs,
                 bonus_token_ids=bonus_token_ids,
                 draft_probs=proposal_probs,
                 draft_token_ids=proposal_token_ids,
             )
         else:
-            assert isinstance(self.verification_sampler, TypicalAcceptanceSampler)
-            accepted_token_ids = self.verification_sampler(
+            assert isinstance(self.spec_decode_sampler, TypicalAcceptanceSampler)
+            accepted_token_ids = self.spec_decode_sampler(
                 target_probs=proposal_verifier_probs,
                 bonus_token_ids=bonus_token_ids,
                 draft_token_ids=proposal_token_ids,

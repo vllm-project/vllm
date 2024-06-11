@@ -803,7 +803,20 @@ class SpeculativeConfig:
                 window, if provided.
             ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
                 window, if provided.
-
+            draft_token_sampling_method (Optional[str]): The sampling method
+                to use for accepting draft tokens. This can take two possible
+                values 'rejection_sampler' and 'typical_acceptance_sampler'
+                for RejectionSampler and TypicalAcceptanceSampler
+                respectively.
+            typical_acceptance_sampler_posterior_threshold (Optional[float]):
+                A threshold value that sets a lower bound on the posterior
+                probability of a token in target model for it to be accepted.
+                This threshold is only used when we use a 
+                TypicalAcceptanceSampler for token acceptance.
+            typical_acceptance_sampler_posterior_alpha (Optional[float]):
+                A scaling factor for the entropy-based threshold in the
+                TypicalAcceptanceSampler.
+    
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
