@@ -10,7 +10,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
-from vllm.utils import is_cpu
 
 
 class TorchSDPABackend(AttentionBackend):
@@ -105,9 +104,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
     ) -> None:
         assert blocksparse_params is None, ValueError(
             "Torch SPDA does not support block-sparse attention.")
-        assert is_cpu(), RuntimeError(
-            "Torch SDPA is only used for the CPU backend.")
-
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
