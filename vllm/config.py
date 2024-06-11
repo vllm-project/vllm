@@ -1,10 +1,11 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, PreTrainedTokenizerBase
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -92,6 +93,7 @@ class ModelConfig:
         revision: Optional[str] = None,
         code_revision: Optional[str] = None,
         rope_scaling: Optional[dict] = None,
+        rope_theta: Optional[float] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
@@ -99,7 +101,7 @@ class ModelConfig:
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: Optional[int] = None,
-        max_logprobs: int = 5,
+        max_logprobs: int = 20,
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
@@ -112,7 +114,12 @@ class ModelConfig:
         self.revision = revision
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
-        self.tokenizer_revision = tokenizer_revision
+        self.rope_theta = rope_theta
+        # The tokenizer version is consistent with the model version by default.
+        if tokenizer_revision is None:
+            self.tokenizer_revision = revision
+        else:
+            self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
@@ -127,7 +134,7 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling)
+                                    code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(
@@ -159,12 +166,8 @@ class ModelConfig:
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is None:
-            # SparseML uses a "compression_config" with a "quantization_config".
-            compression_cfg = getattr(self.hf_config, "compression_config",
-                                      None)
-            if compression_cfg is not None:
-                quant_cfg = compression_cfg.get("quantization_config", None)
-
+            # compress-tensors uses a "compression_config" key
+            quant_cfg = getattr(self.hf_config, "compression_config", None)
         return quant_cfg
 
     def _verify_quantization(self) -> None:
@@ -1113,6 +1116,35 @@ class VisionLanguageConfig:
             raise ValueError(f"{value} is not a valid choice. "
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
+
+    #TODO(ywang96): make this a cached property once we refactor the
+    # VisionLanguageConfig class.
+    def get_image_token_text(
+            self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
+        """Get the image token placeholder text to be inserted into the 
+        text prompt and the string representation of the image token id.
+        """
+        image_token_str = tokenizer.decode(self.image_token_id)
+        return image_token_str * self.image_feature_size, image_token_str
+
+    def as_cli_args_dict(self) -> Dict[str, Any]:
+        """Flatten vision language config to pure args.
+
+        Compatible with what llm entrypoint expects.
+        """
+        result: Dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, enum.Enum):
+                result[f.name] = value.name.lower()
+            elif isinstance(value, tuple):
+                result[f.name] = ",".join([str(item) for item in value])
+            else:
+                result[f.name] = value
+
+        result["disable_image_processor"] = self.image_processor is None
+
+        return result
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
