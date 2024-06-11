@@ -101,10 +101,22 @@ def supports_lora(
             "embedding_modules",
             "embedding_padding_modules",
         )
-        if any(hasattr(model, attr) for attr in lora_attrs):
-            logger.warning(
-                "The model (%s) contains LoRA-specific attributes, "
-                "but does not set `supports_lora=True`.", model)
+        missing_attrs = tuple(attr for attr in lora_attrs
+                              if not hasattr(model, attr))
+
+        if getattr(model, "supports_lora", False):
+            if missing_attrs:
+                logger.warning(
+                    "The model (%s) sets `supports_lora=True`, "
+                    "but is missing LoRA-specific attributes: %s",
+                    model,
+                    missing_attrs,
+                )
+        else:
+            if not missing_attrs:
+                logger.warning(
+                    "The model (%s) contains all LoRA-specific attributes, "
+                    "but does not set `supports_lora=True`.", model)
 
     return result
 
