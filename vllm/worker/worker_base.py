@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 
+from vllm.distributed import DistributedContext
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, ModelInput, SamplerOutput
@@ -92,7 +93,15 @@ class WorkerBase(ABC):
         if model_input is None:
             return None
 
-        return self.execute_model_local(model_input)
+        # Disallow control plane communication in worker-local code.
+        comm_ctx = DistributedContext.get_current()
+        comm_allowed = comm_ctx.communication_allowed
+        comm_ctx.communication_allowed = False
+        try:
+            return_val = self.execute_model_local(model_input)
+        finally:
+            comm_ctx.communication_allowed = comm_allowed
+        return return_val
 
     @abstractmethod
     def execute_model_local(self,

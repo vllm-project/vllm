@@ -15,6 +15,22 @@ from .parallel_state import (get_cpu_world_group, get_pp_pynccl_communicator,
 
 
 @dataclass
+class DistributedContext:
+    communication_allowed: bool = True
+
+    @staticmethod
+    def get_current() -> "DistributedContext":
+        """
+        Get the singleton context.
+        """
+        global _default_context
+        return _default_context
+
+
+_default_context: DistributedContext = DistributedContext()
+
+
+@dataclass
 class GraphCaptureContext:
     stream: torch.cuda.Stream
 
@@ -235,6 +251,11 @@ def broadcast_tensor_dict(
      to broadcast the metadata of the dict (e.g. dict structure, tensor sizes,
      dtypes).
     """
+    ctx = DistributedContext.get_current()
+    if not ctx.communication_allowed:
+        raise RuntimeError(
+            "Control plane communication not allowed in current module")
+
     # Bypass the function if we are using only 1 GPU.
     if (not torch.distributed.is_initialized()
             or torch.distributed.get_world_size(group=group) == 1):

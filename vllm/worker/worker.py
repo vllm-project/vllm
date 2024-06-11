@@ -48,6 +48,7 @@ class Worker(WorkerBase):
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
+        self.model_config.dtype = torch.float16
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
