@@ -20,6 +20,7 @@ Here are some common issues that can cause hangs:
 - Hardware/driver setup is incorrect. GPU communication cannot be established. You can run a sanity check script below to see if the GPU communication is working correctly.
 
 .. code-block:: python
+
     # save it as `test.py`` , and run it with `NCCL_DEBUG=TRACE torchrun --nproc-per-node=8 test.py`
     # adjust `--nproc-per-node` to the number of GPUs you want to use.
     import torch
