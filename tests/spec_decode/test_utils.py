@@ -115,6 +115,11 @@ def test_all_non_zero_with_zero_filter(fake_sequence_group_metadata):
 
 @pytest.fixture
 def mock_spec_decode_sampler(request):
+    """
+    Returns either a RejectionSampler or TypicalAcceptanceSampler
+    object depending on wether value is 'rejection_sampler' or 
+    'typical_acceptance_sampler' respectively.
+    """
     def create_samplers(value):
         if value == "rejection_sampler":
             sampler = MagicMock(spec=RejectionSampler) 

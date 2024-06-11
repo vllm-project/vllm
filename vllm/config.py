@@ -810,8 +810,8 @@ class SpeculativeConfig:
                 respectively.
             typical_acceptance_sampler_posterior_threshold (Optional[float]):
                 A threshold value that sets a lower bound on the posterior
-                probability of a token in target model for it to be accepted.
-                This threshold is only used when we use a 
+                probability of a token in the target model for it to be
+                accepted. This threshold is used only when we use the 
                 TypicalAcceptanceSampler for token acceptance.
             typical_acceptance_sampler_posterior_alpha (Optional[float]):
                 A scaling factor for the entropy-based threshold in the

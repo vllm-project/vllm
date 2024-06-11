@@ -9,15 +9,17 @@ speculative decoding.
 Since speculative decoding with rejection sampling guarantees that the output
 distribution matches the target model's output distribution (up to hardware
 numerics, see https://arxiv.org/pdf/2302.01318.pdf), we can expect greedy
-equality. This gives us good coverage of temp=0. At temp=0, the
-TypicalAcceptanceSampler ensures that only the tokens with the highest
-probability in the target distribution are accepted. Therefore, we can 
+equality. This gives us good coverage of temp=0.
+
+At temp=0, the TypicalAcceptanceSampler ensures that only the tokens with the
+highest probability in the target distribution are accepted. Therefore, we can 
 expect greedy equality for the TypicalAcceptanceSampler at temp=0.
 
 For temp>0, we rely on unit tests on the rejection sampler to verify that the
 output distribution is the same with spec decode vs. no spec decode (this would
 be prohibitively expensive to run with a real model). Similary, for the
-TypicalAcceptance sampler, we rely on unit tests to validate temp>0 test cases.
+TypicalAcceptance sampler also, we rely on unit tests to validate temp>0
+test cases.
 
 NOTE: Speculative decoding's distribution equality requires that the measured
 distributions of the target model and proposal model be deterministic given the

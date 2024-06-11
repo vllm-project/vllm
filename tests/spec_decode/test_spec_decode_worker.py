@@ -223,6 +223,9 @@ def test_correctly_calls_spec_decode_sampler(
         target_token_probs.reshape(batch_size, k + 1, -1)[:, :-1])
     assert torch.equal(actual.draft_token_ids, proposal_token_ids)
     if isinstance(spec_decode_sampler, RejectionSampler):
+        # The draft probabilites is used only by the RejectionSampler.
+        # Ensure that if the sampler is a RejectionSampler then the
+        # draft probs are being passed.
         assert torch.equal(actual.draft_probs, proposal_probs)
 
 

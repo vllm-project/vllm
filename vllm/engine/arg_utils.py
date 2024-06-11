@@ -568,7 +568,7 @@ class EngineArgs:
             'Two types of samplers are supported: '
             '1) RejectionSampler which does not allow changing the '
             'acceptance rate of draft tokens, '
-            '2) TypicalAccpetanceSampler which is configurable, allowing for a higher '
+            '2) TypicalAcceptanceSampler which is configurable, allowing for a higher '
             'acceptance rate at the cost of lower quality, and vice versa.')
 
         parser.add_argument(
