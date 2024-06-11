@@ -55,7 +55,7 @@ def server():
     ])
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def client(server):
     return server.get_async_client()
 
