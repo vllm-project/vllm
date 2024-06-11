@@ -5,6 +5,7 @@ import gc
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -16,10 +17,12 @@ from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
                     Union)
 
+import numpy as np
 import psutil
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
@@ -146,12 +149,8 @@ def is_neuron() -> bool:
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
-    # NOTE: This import statement should be executed lazily since
-    # the Neuron-X backend does not have the `cuda_utils` module.
-    from vllm._C import cuda_utils
-
     max_shared_mem = (
-        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+        ops.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
     # will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
@@ -241,9 +240,11 @@ def merge_async_iterators(
                 yield item
         except (Exception, asyncio.CancelledError) as e:
             for task in _tasks:
-                # NOTE: Pass the error msg in cancel()
-                # when only Python 3.9+ is supported.
-                task.cancel()
+                if sys.version_info >= (3, 9):
+                    # msg parameter only supported in Python 3.9+
+                    task.cancel(e)
+                else:
+                    task.cancel()
             raise e
         await asyncio.gather(*_tasks)
 
@@ -292,7 +293,15 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 def get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
-        return port
+        while True:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("", port))
+                    return port
+            except OSError:
+                port += 1  # Increment port number if already in use
+                logger.info("Port %d is already in use, trying port %d",
+                            port - 1, port)
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -505,11 +514,6 @@ def str_to_int_tuple(s: str) -> Tuple[int, ...]:
             f"(e.g., 1, 2, 3). Given input: {s}") from e
 
 
-def pad_to_max_length(x: List[int], max_len: int, pad: int) -> List[int]:
-    assert len(x) <= max_len
-    return x + [pad] * (max_len - len(x))
-
-
 def make_tensor_with_pad(
     x: List[List[int]],
     max_len: int,
@@ -522,7 +526,10 @@ def make_tensor_with_pad(
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
     """
-    padded_x = [pad_to_max_length(x_i, max_len, pad) for x_i in x]
+    padded_x = np.zeros([len(x), max_len], dtype=np.int32) + pad
+    for ind, blocktb in enumerate(x):
+        assert len(blocktb) <= max_len
+        padded_x[ind, :len(blocktb)] = blocktb
     return torch.tensor(padded_x, dtype=dtype, device=device)
 
 

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
+    VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -99,6 +100,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
 
     # used in distributed environment to manually set the communication port
+    # Note: if VLLM_PORT is set, and some code asks for multiple ports, the
+    # VLLM_PORT will be used as the first port, and the rest will be generated
+    # by incrementing the VLLM_PORT value.
     # '0' is used to make mypy happy
     'VLLM_PORT':
     lambda: int(os.getenv('VLLM_PORT', '0'))
@@ -213,6 +217,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
     lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
+
+    # Timeout for fetching images when serving multimodal models
+    # Default is 5 seconds
+    "VLLM_IMAGE_FETCH_TIMEOUT":
+    lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
 }
 
 # end-env-vars-definition
