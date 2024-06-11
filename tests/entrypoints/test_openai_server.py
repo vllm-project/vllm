@@ -95,11 +95,7 @@ def server(zephyr_lora_files, ray_ctx):
         "bfloat16",
         "--max-model-len",
         "8192",
-        "--gpu-memory-utilization",
-        "0.45",
         "--enforce-eager",
-        "--gpu-memory-utilization",
-        "0.75",
         # lora config below
         "--enable-lora",
         "--lora-modules",

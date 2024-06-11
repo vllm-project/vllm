@@ -25,12 +25,8 @@ def embedding_server(ray_ctx):
         "--dtype",
         "bfloat16",
         "--enforce-eager",
-        "--gpu-memory-utilization",
-        "0.75",
         "--max-model-len",
         "8192",
-        "--gpu-memory-utilization",
-        "0.45",
         "--enforce-eager",
     ])
 
