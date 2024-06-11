@@ -264,7 +264,8 @@ class OpenAIServingCompletion(OpenAIServing):
                         )
                     else:
                         final_usage = None
-                    response_json = CompletionStreamResponse(
+
+                    chunk = CompletionStreamResponse(
                         id=request_id,
                         created=created_time,
                         model=model_name,
@@ -276,10 +277,27 @@ class OpenAIServingCompletion(OpenAIServing):
                                 finish_reason=finish_reason,
                                 stop_reason=stop_reason,
                             )
-                        ],
-                        usage=final_usage,
-                    ).model_dump_json(exclude_unset=True)
+                        ])
+                    if (request.stream_options
+                            and request.stream_options.include_usage):
+                        chunk.usage = None
+
+                    response_json = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"
+
+            if (request.stream_options
+                    and request.stream_options.include_usage):
+                final_usage_chunk = CompletionStreamResponse(
+                    id=request_id,
+                    created=created_time,
+                    model=model_name,
+                    choices=[],
+                    usage=final_usage,
+                )
+                final_usage_data = (final_usage_chunk.model_dump_json(
+                    exclude_unset=True, exclude_none=True))
+                yield f"data: {final_usage_data}\n\n"
+
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))
@@ -312,7 +330,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 elif request.echo and request.max_tokens > 0:
                     token_ids = prompt_token_ids + output.token_ids
                     top_logprobs = (prompt_logprobs + output.logprobs
-                                    if request.logprobs else None)
+                                    if request.logprobs is not None else None)
                     output_text = prompt_text + output.text
                 else:
                     token_ids = output.token_ids
