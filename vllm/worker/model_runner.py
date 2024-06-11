@@ -384,9 +384,14 @@ class ModelRunner:
                             block_table = block_table[
                                 -curr_sliding_window_blocks:]
                         if self.attn_backend.get_name() == "flashinfer":
-                            paged_kv_indices.extend(block_table)
+                            block_table_bound = seq_data.get_len(
+                            ) // self.block_size + 1 if seq_data.get_len(
+                            ) % self.block_size != 0 else seq_data.get_len(
+                            ) // self.block_size
+                            paged_kv_indices.extend(
+                                block_table[:block_table_bound])
                             paged_kv_indptr.append(paged_kv_indptr[-1] +
-                                                   len(block_table))
+                                                   block_table_bound)
                             last_page_len = seq_data.get_len(
                             ) % self.block_size
                             if last_page_len == 0:
