@@ -882,6 +882,11 @@ class ModelInput:
     device-specific data. Different worker backends may have different methods
     of converting from the global ExecuteModelRequest produced by the LLM
     engine to the worker-local ModelInput objects.
+
+    This base class contains metadata needed for the base model forward pass
+    but not metadata for possible additional steps, e.g., sampling. Model
+    runners that run additional steps should subclass this method to add
+    additional fields.
     """
     num_seq_groups: int = None
     blocks_to_swap_in: torch.Tensor = None
@@ -920,53 +925,41 @@ class ModelInput:
             )
 
     @classmethod
-    def _get_valid_kwargs(cls,
-            selected_token_indices: Optional[torch.Tensor] = None,
-            sampling_metadata: Optional["SamplingMetadata"] = None,
+    def _get_init_kwargs(cls,
             attn_backend: Optional["AttentionBackend"] = None,
             attn_metadata: Optional["AttentionMetadata"] = None, **kwargs) -> Dict[str, Any]:
-        from vllm.model_executor import SamplingMetadata
-        if sampling_metadata is None:
-            if selected_token_indices is not None:
-                # Workers do not perform sampling.
-                sampling_metadata = SamplingMetadata(
-                        seq_groups=None,
-                        selected_token_indices=selected_token_indices,
-                        categorized_sample_indices=None,
-                        num_prompts=0,
-                        )
-        kwargs["sampling_metadata"] = sampling_metadata
-
         if attn_metadata is None:
+            # Extract the fields used to create AttentionMetadata.
             if attn_backend is not None:
-
                 valid_attn_kwargs = {}
                 for field in dataclasses.fields(attn_backend.get_metadata_cls()):
-                    val = kwargs.get(field.name, None)
+                    val = kwargs.pop(field.name, None)
                     if val is not None:
                         valid_attn_kwargs[field.name] = val
 
                 attn_metadata = attn_backend.make_metadata(
                         **valid_attn_kwargs
                         )
-        kwargs["attn_metadata"] = attn_metadata
+        if attn_metadata is not None:
+            kwargs["attn_metadata"] = attn_metadata
 
-        # Drop extra kwargs that may have been used to initialize other
-        # values.
-        valid_kwargs = {}
-        for field in dataclasses.fields(cls):
-            val = kwargs.get(field.name, None)
-            if val is not None:
-                valid_kwargs[field.name] = val
-        return valid_kwargs
+        return kwargs
 
     @classmethod
-    def new(cls, **kwargs) -> "ModelInput":
-        valid_kwargs = cls._get_valid_kwargs(**kwargs)
-        return cls(**valid_kwargs)
+    def new(cls, clone: Optional["ModelInput"] = None, **kwargs) -> "ModelInput":
+        clone_kwargs = {}
+        if clone is not None:
+            for field in dataclasses.fields(clone):
+                val = getattr(clone, field.name)
+                if val is not None:
+                    clone_kwargs[field.name] = val
+            clone_kwargs = cls._get_init_kwargs(**clone_kwargs)
+
+        kwargs = cls._get_init_kwargs(**kwargs)
+        return cls(**clone_kwargs, **kwargs)
 
     def replace(self, **kwargs) -> "ModelInput":
-        valid_kwargs = self.__class__._get_valid_kwargs(**kwargs)
+        valid_kwargs = self.__class__._get_init_kwargs(**kwargs)
         return dataclasses.replace(self, **valid_kwargs)
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Union[int, torch.Tensor]]:

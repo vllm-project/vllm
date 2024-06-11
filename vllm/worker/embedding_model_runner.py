@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
 
 import torch
 
@@ -17,6 +18,10 @@ from vllm.worker.model_runner import ModelRunner
 
 logger = init_logger(__name__)
 
+
+@dataclass(frozen=True)
+class ModelInputWithPoolingMetadata(ModelInput):
+    pooling_metadata: Optional["SamplingMetadata"] = None
 
 class EmbeddingModelRunner(ModelRunner):
 
@@ -88,11 +93,12 @@ class EmbeddingModelRunner(ModelRunner):
     ) -> ModelInput:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(seq_group_metadata_list)
-        # Prepare PoolingMetadata
+        # Prepare PoolingMetadata.
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
                                                  model_input.seq_lens)
 
-        return model_input.replace(
+        return ModelInputWithPoolingMetadata.new(
+                clone=model_input,
                 pooling_metadata=pooling_metadata,
                 )
 

@@ -1,7 +1,8 @@
 import time
 import warnings
 from collections import defaultdict
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union, Any
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -38,37 +39,37 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 _NUM_WARMUP_ITERS = 2
 
 
-#class ModelInput(NamedTuple):
-#    input_tokens: torch.Tensor
-#    input_positions: torch.Tensor
-#    attn_metadata: Optional[AttentionMetadata]
-#    seq_lens: List[int]
-#    query_lens: List[int]
-#    lora_mapping: Optional[LoRAMapping]
-#    lora_requests: Set[LoRARequest]
-#    multi_modal_kwargs: Dict[str, torch.Tensor]
-#    slot_mapping: torch.Tensor
-#    num_prefill_tokens: int
-#    num_decode_tokens: int
-#    num_prefills: int
-#
-#    @classmethod
-#    def empty(cls, device):
-#        return ModelInput(
-#            input_tokens=torch.empty(0, device=device),
-#            input_positions=torch.empty(0, device=device),
-#            attn_metadata=None,
-#            seq_lens=[],
-#            query_lens=[],
-#            lora_mapping=None,
-#            lora_requests=set(),
-#            multi_modal_kwargs={},
-#            slot_mapping=torch.empty(0, device=device),
-#            num_prefill_tokens=0,
-#            num_decode_tokens=0,
-#            num_prefills=0,
-#        )
+@dataclass(frozen=True)
+class ModelInputWithSamplingMetadata(ModelInput):
+    # Metadata for sampling outputs.
+    sampling_metadata: Optional["SamplingMetadata"] = None
 
+    @classmethod
+    def _get_init_kwargs(cls,
+            selected_token_indices: Optional[torch.Tensor] = None,
+            sampling_metadata: Optional["SamplingMetadata"] = None,
+            **kwargs) -> Dict[str, Any]:
+        from vllm.model_executor import SamplingMetadata
+        if sampling_metadata is None:
+            if selected_token_indices is not None:
+                # Workers do not perform sampling.
+                sampling_metadata = SamplingMetadata(
+                        seq_groups=None,
+                        selected_token_indices=selected_token_indices,
+                        categorized_sample_indices=None,
+                        num_prompts=0,
+                        )
+        if sampling_metadata is not None:
+            kwargs["sampling_metadata"] = sampling_metadata
+        return super()._get_init_kwargs(**kwargs)
+
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Union[int, torch.Tensor]]:
+        tensor_dict = super().as_broadcastable_tensor_dict()
+
+        if self.sampling_metadata is not None:
+            tensor_dict["selected_token_indices"] = self.sampling_metadata.selected_token_indices
+
+        return tensor_dict
 
 class ModelRunner:
 
@@ -229,7 +230,9 @@ class ModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> ModelInput:
-        """Prepare the model input based on a given sequence group.
+        """Helper method to prepare the model input based on a given sequence
+        group. Prepares metadata needed for the base model forward pass but not
+        metadata for possible additional steps, e.g., sampling.
 
         The API assumes seq_group_metadata_list is sorted by prefill -> decode.
 
@@ -649,12 +652,27 @@ class ModelRunner:
     def prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> ModelInput:
-        model_input = self._prepare_model_input(seq_group_metadata_list)
+    ) -> ModelInputWithSamplingMetadata:
+        """Prepare the model input based on a given sequence group, including
+        metadata for the sampling step.
+
+        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
+
+        The result tensors and data structure also batches input in prefill
+        -> decode order. For example,
+
+        - input_tokens[:num_prefill_tokens] contains prefill tokens.
+        - input_tokens[num_prefill_tokens:] contains decode tokens.
+
+        If cuda graph is required, this API automatically pads inputs.
+        """
+        model_input = self._prepare_model_input_tensors(seq_group_metadata_list)
         sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list, seq_lens, query_lens, self.device,
-            self.pin_memory)
-        return model_input.replace(sampling_metadata=sampling_metadata)
+            seq_group_metadata_list, model_input.seq_lens,
+            model_input.query_lens, self.device, self.pin_memory)
+        return ModelInputWithSamplingMetadata.new(
+                clone=model_input,
+                sampling_metadata=sampling_metadata)
 
     @torch.inference_mode()
     def execute_model(
@@ -769,7 +787,7 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        model_input = self._prepare_model_input(seqs)
+        model_input = self.prepare_model_input_tensors(seqs)
         self.execute_model(model_input, kv_caches)
         torch.cuda.synchronize()
         return
