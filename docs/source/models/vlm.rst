@@ -22,7 +22,7 @@ The following :ref:`engine arguments <engine_args>` are specific to VLMs:
     * Only single image input is supported per text prompt.
     * Dynamic ``image_input_shape`` is not supported: the input image will be resized to the static ``image_input_shape``. This means model output might not exactly match the HuggingFace implementation.
 
-      We are continuously improving user & developer experience for VLMs. Please raise an issue on GitHub if you have any feedback or feature requests.
+    We are continuously improving user & developer experience for VLMs. Please raise an issue on GitHub if you have any feedback or feature requests.
 
 Offline Batched Inference
 -------------------------
