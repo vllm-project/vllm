@@ -1,7 +1,7 @@
 #include <cudaTypedefs.h>
 
 #include <c10/cuda/CUDAGuard.h>
-#include <torch/extension.h>
+#include <torch/all.h>
 
 void cutlass_scaled_mm_dq_sm75(torch::Tensor& c, torch::Tensor const& a,
                                torch::Tensor const& b,
