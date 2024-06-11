@@ -1,5 +1,5 @@
 import enum
-from abc import ABC, abstractmethod, abstractproperty
+from abc import ABC, abstractmethod
 from typing import OrderedDict, Tuple
 
 
@@ -46,7 +46,8 @@ class Evictor(ABC):
         """Remove a given block id from the cache."""
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def num_blocks(self) -> int:
         pass
 
