@@ -1,7 +1,7 @@
 #include <cstdint>
 #include <cstdio>
 
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAContextLight.h>
@@ -35,7 +35,7 @@
 #endif
 
 torch::Tensor fp8_gemm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& scaleA, torch::Tensor& scaleB,
-    torch::Tensor& scaleD, int algo_idx)
+    torch::Tensor& scaleD, int64_t algo_idx)
 {
     auto a_strides{a.strides()};
     auto b_strides{b.strides()};
@@ -153,7 +153,7 @@ torch::Tensor fp8_gemm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& scaleA
 }
 
 torch::Tensor fp8_gemm_16(
-    torch::Tensor& a, torch::Tensor& b, torch::Tensor& scaleA, torch::Tensor& scaleB, int algo_idx)
+    torch::Tensor& a, torch::Tensor& b, torch::Tensor& scaleA, torch::Tensor& scaleB, int64_t algo_idx)
 {
     auto a_strides{a.strides()};
     auto b_strides{b.strides()};

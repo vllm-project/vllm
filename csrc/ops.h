@@ -128,7 +128,7 @@ torch::Tensor fp8_gemm(
   torch::Tensor& scaleA,
   torch::Tensor& scaleB,
   torch::Tensor& scaleD,
-  int algo_idx
+  int64_t algo_idx
 );
 
 torch::Tensor fp8_gemm_16(
@@ -136,7 +136,7 @@ torch::Tensor fp8_gemm_16(
   torch::Tensor& b,
   torch::Tensor& scaleA,
   torch::Tensor& scaleB,
-  int algo_idx
+  int64_t algo_idx
 );
 #endif
 

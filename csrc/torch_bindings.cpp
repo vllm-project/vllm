@@ -169,11 +169,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
 #ifdef USE_ROCM
   ops.def("fp8_gemm(Tensor a, Tensor b, Tensor scaleA, Tensor scaleB, "
-          "Tensor scaleD, int algo_idx) -> Tensor",);
+          "Tensor scaleD, int64_t algo_idx) -> Tensor");
   ops.impl("fp8_gemm", torch::kCUDA, &fp8_gemm);
   
   ops.def("fp8_gemm_16(Tensor a, Tensor b, Tensor scaleA, Tensor scaleB, "
-          "int algo_idx) -> Tensor",);
+          "int64_t algo_idx) -> Tensor");
   ops.impl("fp8_gemm_16", torch::kCUDA, &fp8_gemm_16);
 #endif
 
