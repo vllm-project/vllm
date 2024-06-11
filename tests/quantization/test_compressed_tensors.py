@@ -80,7 +80,6 @@ def test_compressed_tensors_w4a16(vllm_runner, w4a16_args):
         assert qkv_proj.scheme.strategy == strategy
         assert qkv_proj.scheme.group_size == group
 
-
         assert qkv_proj.weight_packed.dtype is torch.int32
         assert qkv_proj.weight_scale.dtype is torch.float16
         assert qkv_proj.weight_packed.pack_factor == 8
