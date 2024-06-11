@@ -422,6 +422,8 @@ def is_in_the_same_node(pg: ProcessGroup):
                 shm = shared_memory.SharedMemory(name=name)
                 if shm.buf[:len(magic_message)] == magic_message:
                     is_in_the_same_node[rank] = 1
+    except Exception as e:
+        logger.error("Error ignored in is_in_the_same_node: %s", e)
     finally:
         if shm:
             shm.close()
