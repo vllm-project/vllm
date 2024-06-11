@@ -118,7 +118,7 @@ class SingleTpWorker(ProposerWorkerBase):
 
         ## Worker-side logic: skip
         if execute_model_req is None:
-            logger.info("Workers should not make proposals")
+            logger.info("Workers do not make proposals")
             return None
 
         ## Driver-side logic

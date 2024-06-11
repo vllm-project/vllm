@@ -5,8 +5,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.distributed import ProcessGroup
+from vllm.logger import init_logger
 
-from .parallel_state import (get_cpu_world_group, get_pp_pynccl_communicator,
+logger = init_logger(__name__)
+
+
+from .parallel_state import (get_world_group, get_cpu_world_group, get_pp_pynccl_communicator,
                              get_tensor_model_parallel_group,
                              get_tensor_model_parallel_rank,
                              get_tensor_model_parallel_world_size,
@@ -240,9 +244,10 @@ def broadcast_tensor_dict(
             or torch.distributed.get_world_size(group=group) == 1):
         return tensor_dict
 
-    group = group or torch.distributed.group.WORLD
+    group = group or get_world_group()
     metadata_group = metadata_group or get_cpu_world_group()
     ranks = torch.distributed.get_process_group_ranks(group)
+    logger.info(f"broadcast_tensor_dict. src: {src}, ranks: {ranks}")
     assert src in ranks, f"Invalid src rank ({src})"
 
     rank = torch.distributed.get_rank()
