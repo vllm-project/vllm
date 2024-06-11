@@ -58,8 +58,8 @@ InputProcessor = Callable[[InputContext, LLMInputs], LLMInputs]
 
 class InputRegistry:
     """
-    This registry is used by :class:`~vllm.LLMEngine` to dispatch data
-    processing according to the target model.
+    A registry to dispatch data processing
+    according to the target model.
     """
 
     def __init__(self) -> None:
