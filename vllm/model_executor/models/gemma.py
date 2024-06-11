@@ -41,7 +41,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
-from .lora_base import LoRASupportedModelBase
+from .interfaces import SupportsLoRA
 
 logger = init_logger(__name__)
 
@@ -290,7 +290,9 @@ class GemmaModel(nn.Module):
         return hidden_states
 
 
-class GemmaForCausalLM(LoRASupportedModelBase):
+class GemmaForCausalLM(nn.Module, SupportsLoRA):
+    supports_lora = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -321,7 +323,10 @@ class GemmaForCausalLM(LoRASupportedModelBase):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        super().__init__(config, lora_config)
+        super().__init__()
+
+        self.config = config
+        self.lora_config = lora_config
 
         self.quant_config = quant_config
         self.model = GemmaModel(config, cache_config, quant_config)

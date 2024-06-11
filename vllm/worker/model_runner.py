@@ -20,7 +20,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.lora_base import LoRASupportedModelBase
+from vllm.model_executor.models.interfaces import supports_lora
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
@@ -161,9 +161,7 @@ class ModelRunner:
                     self.model_memory_usage / float(2**30))
 
         if self.lora_config:
-            assert isinstance(
-                self.model,
-                LoRASupportedModelBase), "Model does not support LoRA"
+            assert supports_lora(self.model), "Model does not support LoRA"
 
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,

@@ -45,7 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
-from .lora_base import LoRASupportedModelBase
+from .interfaces import SupportsLoRA
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -294,7 +294,9 @@ class BaiChuanModel(nn.Module):
         return hidden_states
 
 
-class BaiChuanBaseForCausalLM(LoRASupportedModelBase):
+class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA):
+    supports_lora = True
+
     packed_modules_mapping = {
         "W_pack": ["W_pack"],
         "gate_up_proj": [
@@ -320,7 +322,10 @@ class BaiChuanBaseForCausalLM(LoRASupportedModelBase):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
-        super().__init__(config, lora_config)
+        super().__init__()
+
+        self.config = config
+        self.lora_config = lora_config
 
         self.quant_config = quant_config
         self.model = BaiChuanModel(config, position_embedding, cache_config,

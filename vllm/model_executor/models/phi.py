@@ -59,7 +59,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
-from .lora_base import LoRASupportedModelBase
+from .interfaces import SupportsLoRA
 
 
 class PhiAttention(nn.Module):
@@ -231,7 +231,9 @@ class PhiModel(nn.Module):
         return hidden_states
 
 
-class PhiForCausalLM(LoRASupportedModelBase):
+class PhiForCausalLM(nn.Module, SupportsLoRA):
+    supports_lora = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -257,7 +259,10 @@ class PhiForCausalLM(LoRASupportedModelBase):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
-        super().__init__(config, lora_config)
+        super().__init__()
+
+        self.config = config
+        self.lora_config = lora_config
 
         self.quant_config = quant_config
 

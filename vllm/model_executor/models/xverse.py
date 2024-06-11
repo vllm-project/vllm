@@ -45,7 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
-from .lora_base import LoRASupportedModelBase
+from .interfaces import SupportsLoRA
 
 
 class XverseMLP(nn.Module):
@@ -268,7 +268,9 @@ class XverseModel(nn.Module):
         return hidden_states
 
 
-class XverseForCausalLM(LoRASupportedModelBase):
+class XverseForCausalLM(nn.Module, SupportsLoRA):
+    supports_lora = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -303,7 +305,10 @@ class XverseForCausalLM(LoRASupportedModelBase):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        super().__init__(config, lora_config)
+        super().__init__()
+
+        self.config = config
+        self.lora_config = lora_config
 
         self.quant_config = quant_config
         self.model = XverseModel(config, cache_config, quant_config)

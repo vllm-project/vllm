@@ -52,7 +52,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 
-from .lora_base import LoRASupportedModelBase
+from .interfaces import SupportsLoRA
 
 
 class MiniCPMMoE(nn.Module):
@@ -391,7 +391,9 @@ class MiniCPMModel(nn.Module):
         return hidden_states
 
 
-class MiniCPMForCausalLM(LoRASupportedModelBase):
+class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
+    supports_lora = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -426,7 +428,10 @@ class MiniCPMForCausalLM(LoRASupportedModelBase):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        super().__init__(config, lora_config)
+        super().__init__()
+
+        self.config = config
+        self.lora_config = lora_config
 
         self.num_experts = getattr(self.config, "num_experts", 0)
         self.quant_config = quant_config

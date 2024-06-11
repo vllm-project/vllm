@@ -54,7 +54,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 
-from .lora_base import LoRASupportedModelBase
+from .interfaces import SupportsLoRA
 
 
 class MixtralMoE(nn.Module):
@@ -474,7 +474,9 @@ class MixtralModel(nn.Module):
         return hidden_states
 
 
-class MixtralForCausalLM(LoRASupportedModelBase):
+class MixtralForCausalLM(nn.Module, SupportsLoRA):
+    supports_lora = True
+
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -505,7 +507,10 @@ class MixtralForCausalLM(LoRASupportedModelBase):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        super().__init__(config, lora_config)
+        super().__init__()
+
+        self.config = config
+        self.lora_config = lora_config
 
         self.model = MixtralModel(config,
                                   cache_config,
