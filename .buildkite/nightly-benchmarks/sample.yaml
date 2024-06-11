@@ -43,7 +43,7 @@ steps:
         - .buildkite/nightly-benchmarks/run-vllm-benchmarks.sh
         mount-buildkite-agent: true
         propagate-environment: true
-        propagate-uid-gid: true
+        propagate-uid-gid: false
         ipc: host
         gpus: all
         environment:
