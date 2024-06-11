@@ -79,12 +79,6 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 RUN python3 check-wheel-size.py dist
 
-# the `vllm_nccl` package must be installed from source distribution
-# pip is too smart to store a wheel in the cache, and other CI jobs
-# will directly use the wheel from the cache, which is not what we want.
-# we need to remove it manually
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip cache remove vllm_nccl*
 #################### EXTENSION Build IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
