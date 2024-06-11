@@ -285,8 +285,11 @@ class CPUWorker(LoraNotSupportedWorkerBase):
     @torch.inference_mode()
     def prepare_model_input(
             self,
-            execute_model_req: Optional[ExecuteModelRequest] = None
+            execute_model_req: Optional[ExecuteModelRequest]
     ) -> ModelInput:
+        if self.parallel_config.tensor_parallel_size <= 1:
+            return self.prepare_model_input_local(execute_model_req)
+
         if self.is_driver_worker:
             if execute_model_req is None:
                 # This signals that there's no more requests to process for now.
@@ -311,9 +314,8 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         return model_input
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        model_input: ModelInput,
+    def execute_model_local(
+        self, model_input: ModelInput,
     ) -> List[SamplerOutput]:
         self.cache_copy(model_input.blocks_to_copy)
 

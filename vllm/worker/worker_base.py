@@ -55,12 +55,9 @@ class WorkerBase(ABC):
         See `stop_remote_worker_execution_loop` for more details.
         """
         while True:
-            model_input = self.prepare_model_input(execute_model_req=None)
-
-            if model_input is None:
-                return
-
-            self.execute_model(model_input)
+            output = self.execute_model(model_input)
+            if output is None:
+                return None
 
     @abstractmethod
     def prepare_model_input_local(
@@ -74,7 +71,7 @@ class WorkerBase(ABC):
     @abstractmethod
     def prepare_model_input(
             self,
-            execute_model_req: Optional[ExecuteModelRequest] = None
+            execute_model_req: Optional[ExecuteModelRequest]
     ) -> ModelInput:
         """
         Prepare a model execution request. Communication with other workers
@@ -84,9 +81,23 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def execute_model(self, model_input: ModelInput) -> List[SamplerOutput]:
+    def execute_model(self, execute_model_req: Optional[ExecuteModelRequest]) -> List[SamplerOutput]:
         """Executes at least one model step on the given sequences, unless no
-        sequences are provided."""
+        sequences are provided. Communication with other workers
+        may occur to produce the model input that should be passed to
+        the model runner."""
+        model_input = self.prepare_model_input(execute_model_req=execute_model_req)
+        if model_input is None:
+            return None
+
+        return self.execute_model_local(model_input)
+
+    @abstractmethod
+    def execute_model_local(self, model_input: ModelInput) -> List[SamplerOutput]:
+        """Executes at least one model step on the given sequences, unless no
+        sequences are provided. This method is not allowed to communciate with
+        other workers.
+        """
         raise NotImplementedError
 
     @abstractmethod

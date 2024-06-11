@@ -255,6 +255,9 @@ class Worker(WorkerBase):
             self,
             execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> ModelInput:
+        if self.parallel_config.tensor_parallel_size <= 1:
+            return self.prepare_model_input_local(execute_model_req)
+
         if self.is_driver_worker:
             if execute_model_req is None:
                 # This signals that there's no more requests to process for now.
@@ -279,10 +282,9 @@ class Worker(WorkerBase):
         return model_input
 
     @torch.inference_mode()
-    def execute_model(
+    def execute_model_local(
         self,
-        model_input: ModelInput,
-    ) -> List[Union[SamplerOutput, PoolerOutput]]:
+        model_input: ModelInput) -> List[Union[SamplerOutput, PoolerOutput]]:
         self.cache_swap(model_input.blocks_to_swap_in,
                         model_input.blocks_to_swap_out,
                         model_input.blocks_to_copy)
