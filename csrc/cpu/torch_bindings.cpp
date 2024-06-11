@@ -2,10 +2,18 @@
 #include "ops.h"
 #include "registration.h"
 
+#include <git.h>
 #include <torch/library.h>
+
+std::string githash() { return std::string{git::CommitSHA1()}; }
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
+
+  // git hash
+  // Show vllm git hash
+  ops.def("githash() -> ()");
+  ops.impl("githash", torch::kCPU, &githash);
 
   // Attention ops
   // Compute the attention between an input query and the cached keys/values

@@ -15,6 +15,7 @@ from vllm.sampling_params import SamplingParams
 __version__ = "0.5.0"
 
 __all__ = [
+    "githash",
     "LLM",
     "ModelRegistry",
     "PromptStrictInputs",
@@ -32,3 +33,7 @@ __all__ = [
     "initialize_ray_cluster",
     "PoolingParams",
 ]
+
+def githash():
+    import torch
+    return torch.ops._C.githash()

@@ -4,6 +4,7 @@
 #include "registration.h"
 
 #include <torch/library.h>
+#include <git.h>
 
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
@@ -15,8 +16,15 @@
 // https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
 // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
+std::string githash() { return std::string{git::CommitSHA1()}; }
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
+
+  // git hash
+  // Show vllm git hash
+  ops.def("githash() -> ()");
+  ops.impl("githash", torch::kCUDA, &githash);
 
   // Attention ops
   // Compute the attention between an input query and the cached

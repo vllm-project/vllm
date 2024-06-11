@@ -8,6 +8,7 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/dep.cmake)
 
 #
 # Supported python versions.  These versions will be searched in order, the
@@ -206,7 +207,8 @@ define_gpu_extension_target(
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
-  WITH_SOABI)
+  WITH_SOABI
+  LIBRARIES cmake_git_version_tracking)
 
 #
 # _moe_C extension
@@ -224,7 +226,8 @@ define_gpu_extension_target(
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   USE_SABI 3
-  WITH_SOABI)
+  WITH_SOABI
+  LIBRARIES cmake_git_version_tracking)
 
 #
 # _punica_C extension
@@ -276,7 +279,8 @@ if (VLLM_PUNICA_GPU_ARCHES)
     COMPILE_FLAGS ${VLLM_PUNICA_GPU_FLAGS}
     ARCHITECTURES ${VLLM_PUNICA_GPU_ARCHES}
     USE_SABI 3
-    WITH_SOABI)
+    WITH_SOABI
+    LIBRARIES cmake_git_version_tracking)
 else()
   message(WARNING "Unable to create _punica_C target because none of the "
     "requested architectures (${VLLM_GPU_ARCHES}) are supported, i.e. >= 8.0")
