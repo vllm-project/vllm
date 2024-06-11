@@ -92,7 +92,7 @@ autodoc_mock_imports = [
     "vllm._C",
     "PIL",
     "numpy",
-    'triton'
+    'triton',
     "tqdm",
     "tensorizer",
 ]
