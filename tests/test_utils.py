@@ -1,11 +1,13 @@
 import asyncio
+import os
+import socket
 import sys
 from typing import (TYPE_CHECKING, Any, AsyncIterator, Awaitable, Protocol,
                     Tuple, TypeVar)
 
 import pytest
 
-from vllm.utils import deprecate_kwargs, merge_async_iterators
+from vllm.utils import deprecate_kwargs, get_open_port, merge_async_iterators
 
 from .utils import error_on_warning
 
@@ -116,3 +118,15 @@ def test_deprecate_kwargs_additional_message():
 
     with pytest.warns(DeprecationWarning, match="abcd"):
         dummy(old_arg=1)
+
+
+def test_get_open_port():
+    os.environ["VLLM_PORT"] = "5678"
+    # make sure we can get multiple ports, even if the env var is set
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
+        s1.bind(("localhost", get_open_port()))
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+            s2.bind(("localhost", get_open_port()))
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
+                s3.bind(("localhost", get_open_port()))
+    os.environ.pop("VLLM_PORT")

@@ -32,28 +32,27 @@ def test_get_prompt_logprobs(
         max_num_batched_tokens = chunked_prefill_token_size
 
     max_tokens = 5
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_logprobs = hf_model.generate_greedy_logprobs(
-        example_prompts,
-        max_tokens=max_tokens,
-    )
-    del hf_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_logprobs = hf_model.generate_greedy_logprobs(
+            example_prompts,
+            max_tokens=max_tokens,
+        )
 
-    vllm_model = vllm_runner(
-        model,
-        dtype=dtype,
-        max_logprobs=num_top_logprobs,
-        enable_chunked_prefill=enable_chunked_prefill,
-        max_num_batched_tokens=max_num_batched_tokens,
-        max_num_seqs=max_num_seqs,
-    )
-    vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
-                                          logprobs=num_top_logprobs,
-                                          prompt_logprobs=num_top_logprobs,
-                                          temperature=0.0,
-                                          detokenize=detokenize)
-    vllm_results = vllm_model.model.generate(
-        example_prompts, sampling_params=vllm_sampling_params)
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            max_logprobs=num_top_logprobs,
+            enable_chunked_prefill=enable_chunked_prefill,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+    ) as vllm_model:
+        vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
+                                              logprobs=num_top_logprobs,
+                                              prompt_logprobs=num_top_logprobs,
+                                              temperature=0.0,
+                                              detokenize=detokenize)
+        vllm_results = vllm_model.model.generate(
+            example_prompts, sampling_params=vllm_sampling_params)
 
     # Test whether logprobs are included in the results.
     for result in vllm_results:
