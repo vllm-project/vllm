@@ -106,7 +106,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                                   ngram_prompt_lookup_max)
         else:
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
-            proposer_worker = SingleTpWorker.maybe_wrap_worker(proposer_worker, draft_worker_kwargs['parallel_config'], scorer_worker.parallel_config)
+            proposer_worker = SingleTpWorker.maybe_wrap_worker(proposer_worker, draft_worker_kwargs['parallel_config'], scorer_worker.parallel_config, scorer_worker.is_driver_worker)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))

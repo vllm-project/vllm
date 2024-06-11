@@ -30,7 +30,7 @@ class SingleTpWorker(ProposerWorkerBase):
 
     @classmethod
     def maybe_wrap_worker(cls, worker, draft_parallel_config: ParallelConfig,
-                          target_parallel_config: ParallelConfig):
+                          target_parallel_config: ParallelConfig, is_driver_worker: bool):
         """Wrap the worker in a SingleTpWorker if necessary.
         """
         draft_tp = draft_parallel_config.tensor_parallel_size
@@ -41,8 +41,12 @@ class SingleTpWorker(ProposerWorkerBase):
             raise ValueError("{cls} only supports tp=1, found "
                              f"{draft_tp=}")
 
-        logger.info(f"Wrapping {type(worker)} in {cls}")
-        return cls(worker)
+        if is_driver_worker:
+            logger.info(f"Wrapping {type(worker)} in {cls}")
+            return cls(worker)
+        else:
+            logger.info(f"None for non-driver workers")
+            return DummyProposerWorker()
 
     def __init__(
         self,
@@ -346,3 +350,54 @@ class SingleTpWorker(ProposerWorkerBase):
                 token_logprob = seq_output.logprobs[token_id]
 
                 seq.append_token_id(token_id, token_logprob.logprob)
+
+
+class DummyProposerWorker(ProposerWorkerBase):
+
+    def init_device(self):
+        pass
+
+    def set_include_gpu_probs_tensor(self):
+        pass
+
+    def load_model(self):
+        pass
+
+    def determine_num_available_blocks(self):
+        pass
+
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int):
+        pass
+
+    def sampler_output(
+        self,
+        execute_model_req: ExecuteModelRequest,
+        sample_len: int,
+    ) -> Tuple[List[SamplerOutput], bool]:
+        return None
+
+    def get_spec_proposals(
+        self,
+        execute_model_req: ExecuteModelRequest,
+    ) -> SpeculativeProposals:
+        return None
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        return None
+
+    def get_cache_block_size_bytes(self) -> int:
+        return 0
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        pass
+
+    def remove_lora(self, lora_id: int) -> bool:
+        pass
+
+    def list_loras(self) -> Set[int]:
+        pass
+
