@@ -183,7 +183,7 @@ The following is necessary to be present in the model's ``config.json``:
 
 Each quantized layer in the state_dict will have these tensors:
 
-* If the config has `"activation_scheme": "static"`:
+* If the config has ``"activation_scheme": "static"``:
 
 .. code-block:: text
 
@@ -191,7 +191,7 @@ Each quantized layer in the state_dict will have these tensors:
     model.layers.0.mlp.down_proj.input_scale         < F32
     model.layers.0.mlp.down_proj.weight_scale        < F32
 
-* If the config has `"activation_scheme": "dynamic"`:
+* If the config has ``"activation_scheme": "dynamic"``:
 
 .. code-block:: text
 
