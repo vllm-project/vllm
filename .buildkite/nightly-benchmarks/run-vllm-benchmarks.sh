@@ -113,6 +113,7 @@ upload_to_buildkite() {
   fi
   /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
   /workspace/buildkite-agent artifact upload "$RESULTS_FOLDER/*"
+  /workspace/buildkite-agent artifact upload "/tmp/vllm/*/*"
 }
 
 
@@ -143,6 +144,14 @@ run_latency_tests() {
     if [[ $gpu_count -lt $tp ]]; then
       echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
       continue
+    fi
+
+
+
+    ############## for debugging
+    if [[ $gpu-count -eq 8 ]]; then 
+      export VLLM_LOGGING_LEVEL=DEBUG
+      export VLLM_TRACE_FUNCTION=1
     fi
 
     latency_command="python3 benchmark_latency.py \
@@ -269,7 +278,7 @@ main() {
 
   # benchmarking
   run_latency_tests ../.buildkite/nightly-benchmarks/latency-tests.json
-  run_serving_tests ../.buildkite/nightly-benchmarks/serving-tests.json
+  # run_serving_tests ../.buildkite/nightly-benchmarks/serving-tests.json
 
   # postprocess benchmarking results
   pip install tabulate pandas
