@@ -545,8 +545,8 @@ class LLM:
                 total=num_requests,
                 desc="Processed prompts",
                 dynamic_ncols=True,
-                postfix=(f"Prefill Speed: {0:.2f} toks/s, "
-                         f"Generation Speed: {0:.2f} toks/s"),
+                postfix=(f"est. speed input: {0:.2f} toks/s, "
+                         f"output: {0:.2f} toks/s"),
             )
         # Run the engine.
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
@@ -567,8 +567,8 @@ class LLM:
                             out_spd = total_out_toks / pbar.format_dict[
                                 "elapsed"]
                             pbar.postfix = (
-                                f"Prefill Speed: {in_spd:.2f} toks/s, "
-                                f"Generation Speed: {out_spd:.2f} toks/s")
+                                f"est. speed input: {in_spd:.2f} toks/s, "
+                                f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
         if use_tqdm:
             pbar.close()
