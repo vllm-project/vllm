@@ -95,6 +95,7 @@ Documentation
    models/adding_model
    models/engine_args
    models/lora
+   models/spec_decode
    models/performance
 
 .. toctree::
