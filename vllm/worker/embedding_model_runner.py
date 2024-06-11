@@ -49,10 +49,13 @@ class EmbeddingModelRunner(ModelRunner):
                          is_driver_worker=is_driver_worker,
                          vision_language_config=vision_language_config)
 
+    def get_empty_model_input(self) -> ModelInputWithPoolingMetadata:
+        return ModelInputWithPoolingMetadata.new()
+
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: ModelInput,
+        model_input: ModelInputWithPoolingMetadata,
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         if self.lora_config:

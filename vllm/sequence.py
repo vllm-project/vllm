@@ -904,9 +904,7 @@ class ModelInput:
     num_prefill_tokens: int = None
     num_decode_tokens: int = None
     num_prefills: int = None
-    sampling_metadata: Optional["SamplingMetadata"] = None
     attn_metadata: Optional["AttentionMetadata"] = None
-    pooling_metadata: Optional["PoolingMetadata"] = None
 
     BROADCASTABLE_FIELDS: List[str] = (
             "num_seq_groups",
@@ -969,9 +967,42 @@ class ModelInput:
             if val is not None:
                 tensor_dict[field] = val
 
-        if self.sampling_metadata is not None:
-            tensor_dict["selected_token_indices"] = self.sampling_metadata.selected_token_indices
         if self.attn_metadata is not None:
             tensor_dict.update(self.attn_metadata.asdict_zerocopy())
 
         return tensor_dict
+
+
+@dataclass(frozen=True)
+class ModelInputWithSamplingMetadata(ModelInput):
+    # Metadata for sampling outputs.
+    sampling_metadata: Optional["SamplingMetadata"] = None
+
+    @classmethod
+    def _get_init_kwargs(cls,
+            selected_token_indices: Optional[torch.Tensor] = None,
+            sampling_metadata: Optional["SamplingMetadata"] = None,
+            **kwargs) -> Dict[str, Any]:
+        if sampling_metadata is None:
+            if selected_token_indices is not None:
+                from vllm.model_executor import SamplingMetadata
+
+                # Workers do not perform sampling.
+                sampling_metadata = SamplingMetadata(
+                        seq_groups=None,
+                        selected_token_indices=selected_token_indices,
+                        categorized_sample_indices=None,
+                        num_prompts=0,
+                        )
+        if sampling_metadata is not None:
+            kwargs["sampling_metadata"] = sampling_metadata
+        return super()._get_init_kwargs(**kwargs)
+
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Union[int, torch.Tensor]]:
+        tensor_dict = super().as_broadcastable_tensor_dict()
+
+        if self.sampling_metadata is not None:
+            tensor_dict["selected_token_indices"] = self.sampling_metadata.selected_token_indices
+
+        return tensor_dict
+

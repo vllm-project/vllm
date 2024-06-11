@@ -275,7 +275,8 @@ class Worker(WorkerBase):
             if not metadata_dict:
                 return None
 
-            model_input = ModelInput.new(
+            model_input = self.model_runner.get_empty_model_input()
+            model_input = model_input.new(
                     attn_backend=self.model_runner.attn_backend,
                     **metadata_dict)
         return model_input

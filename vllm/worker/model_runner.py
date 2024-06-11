@@ -22,7 +22,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata,  ModelInput
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata,  ModelInput, ModelInputWithSamplingMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 
@@ -38,38 +38,6 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 _NUM_WARMUP_ITERS = 2
 
-
-@dataclass(frozen=True)
-class ModelInputWithSamplingMetadata(ModelInput):
-    # Metadata for sampling outputs.
-    sampling_metadata: Optional["SamplingMetadata"] = None
-
-    @classmethod
-    def _get_init_kwargs(cls,
-            selected_token_indices: Optional[torch.Tensor] = None,
-            sampling_metadata: Optional["SamplingMetadata"] = None,
-            **kwargs) -> Dict[str, Any]:
-        from vllm.model_executor import SamplingMetadata
-        if sampling_metadata is None:
-            if selected_token_indices is not None:
-                # Workers do not perform sampling.
-                sampling_metadata = SamplingMetadata(
-                        seq_groups=None,
-                        selected_token_indices=selected_token_indices,
-                        categorized_sample_indices=None,
-                        num_prompts=0,
-                        )
-        if sampling_metadata is not None:
-            kwargs["sampling_metadata"] = sampling_metadata
-        return super()._get_init_kwargs(**kwargs)
-
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Union[int, torch.Tensor]]:
-        tensor_dict = super().as_broadcastable_tensor_dict()
-
-        if self.sampling_metadata is not None:
-            tensor_dict["selected_token_indices"] = self.sampling_metadata.selected_token_indices
-
-        return tensor_dict
 
 class ModelRunner:
 
@@ -674,10 +642,13 @@ class ModelRunner:
                 clone=model_input,
                 sampling_metadata=sampling_metadata)
 
+    def get_empty_model_input(self) -> ModelInputWithSamplingMetadata:
+        return ModelInputWithSamplingMetadata.new()
+
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: ModelInput,
+        model_input: ModelInputWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         if self.lora_config:
