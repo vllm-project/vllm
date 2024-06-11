@@ -119,7 +119,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 async def add_lora_module(request: LoraAddRequest, model_name: str):
     try:
         decoded_model_name = unquote(model_name)
-        results = await asyncio.wait_for(openai_serving_completion.add_lora_module(request, decoded_model_name), timeout=60)
+        results = await asyncio.wait_for(openai_serving_chat.add_lora_module(request, decoded_model_name), timeout=60)
     except asyncio.TimeoutError:
         return JSONResponse(
             status_code=408,
@@ -130,7 +130,7 @@ async def add_lora_module(request: LoraAddRequest, model_name: str):
             status_code=500,
             content={"error": {"type": "ServerError", "message": str(e)}},
         )
-    models = await openai_serving_completion.show_available_models()
+    models = await openai_serving_chat.show_available_models()
     if isinstance(results, LoraErrorResponse):
         # Use the status code from the first error response
         status_code = results.code
@@ -153,7 +153,7 @@ async def add_lora_module(request: LoraAddRequest, model_name: str):
 async def remove_lora_module(model_name: str):
     try:
         decoded_model_name = unquote(model_name)
-        results = await asyncio.wait_for(openai_serving_completion.remove_lora_module(decoded_model_name), timeout=60)
+        results = await asyncio.wait_for(openai_serving_chat.remove_lora_module(decoded_model_name), timeout=60)
     except asyncio.TimeoutError:
         return JSONResponse(
             status_code=408,
@@ -164,7 +164,7 @@ async def remove_lora_module(model_name: str):
             status_code=500,
             content={"error": {"type": "ServerError", "message": str(e)}},
         )
-    models = await openai_serving_completion.show_available_models()
+    models = await openai_serving_chat.show_available_models()
     if isinstance(results, LoraErrorResponse):
         status_code = results.code
         return JSONResponse(
