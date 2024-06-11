@@ -5,6 +5,7 @@ Run `pytest tests/test_attention_sinks.py`.
 from functools import lru_cache
 import os
 import pytest
+import torch
 from typing import List, Tuple
 
 from vllm import LLM, SamplingParams, RequestOutput
@@ -46,12 +47,16 @@ def test_attention_sinks(
     prompts = [prompt for _ in range(batch_size)]
     params = SamplingParams(min_tokens=min_tokens, max_tokens=max_tokens)
 
+    memory_stats("AT START")
+    
     normal_model = vllm_runner(
         model,
         max_model_len=max_model_len,
         dtype=dtype,
         enforce_eager=True
     )
+
+    memory_stats("AFTER LOADING MODEL")
     
     # bypass context length cap for normal generation
     # to compare w/ attention sinks, which generates past context length
@@ -63,6 +68,8 @@ def test_attention_sinks(
     
     normal_outputs = normal_model.generate_w_cum_logprobs(prompts, params)
     del normal_model
+
+    memory_stats("AFTER DELETING MODEL")
 
     sink_model = vllm_runner(
         model,
@@ -110,3 +117,9 @@ def _get_prompts_json():
     import json
     with open(_ATTN_SINKS_PROMPTS_FILEPATH, "r") as f:
         return json.load(f)
+
+
+def memory_stats(s):
+    print(s)
+    print(torch.cuda.memory_allocated()/1024**2)
+    print(torch.cuda.memory_cached()/1024**2)
