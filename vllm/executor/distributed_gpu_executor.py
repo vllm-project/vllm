@@ -79,7 +79,7 @@ class DistributedGPUExecutor(GPUExecutor):
         if self.parallel_worker_tasks is None:
             return
 
-        self._driver_execute_model()
+        self._driver_execute_model(execute_model_req=None)
         parallel_worker_tasks = self.parallel_worker_tasks
         self.parallel_worker_tasks = None
         # Ensure that workers exit model loop cleanly
@@ -117,7 +117,7 @@ class DistributedGPUExecutor(GPUExecutor):
     @abstractmethod
     def _driver_execute_model(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest]
     ) -> List[SamplerOutput]:
         """Run execute_model in the driver worker.
 

@@ -77,7 +77,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
     def _driver_execute_model(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest]
     ) -> List[SamplerOutput]:
         """Run execute_model in the driver worker.
 
@@ -85,6 +85,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         loop running in each of the remote workers.
         """
         model_input = self.driver_worker.prepare_model_input(execute_model_req)
+        if model_input is None:
+            return None
         return self.driver_worker.execute_model(model_input)
 
     def _run_workers(

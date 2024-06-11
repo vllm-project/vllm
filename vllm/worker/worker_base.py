@@ -60,7 +60,7 @@ class WorkerBase(ABC):
             if model_input is None:
                 return
 
-            return self.execute_model(model_input)
+            self.execute_model(model_input)
 
     @abstractmethod
     def prepare_model_input_local(self, execute_model_req: ExecuteModelRequest) -> ModelInput:

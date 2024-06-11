@@ -960,7 +960,6 @@ class ModelInput:
                 valid_kwargs[field.name] = val
         return valid_kwargs
 
-
     @classmethod
     def new(cls, **kwargs) -> "ModelInput":
         valid_kwargs = cls._get_valid_kwargs(**kwargs)
