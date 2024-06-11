@@ -359,13 +359,11 @@ class TPUModelRunner:
                                              padded_batch_size)
         return inputs + sample_inputs
 
-    def execute_model(
+    def _execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-    ) -> Optional[SamplerOutput]:
-        assert seq_group_metadata_list is not None
-
+    ) -> List[CompletionSequenceGroupOutput]:
         inputs = self.prepare_inputs(seq_group_metadata_list)
         next_token_ids = self.model(inputs[0], inputs[1], kv_caches,
                                     *inputs[2:])
@@ -384,6 +382,29 @@ class TPUModelRunner:
                 i += 1
             sampler_outputs.append(
                 CompletionSequenceGroupOutput(seq_outputs, None))
+        return sampler_outputs
+
+    def execute_model(
+        self,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+    ) -> SamplerOutput:
+        assert seq_group_metadata_list is not None
+        if seq_group_metadata_list[0].is_prompt:
+            # NOTE(woosuk): To reduce the compilation time, we only compile the
+            # prefill inputs with batch size 1. Because the scheduler is not
+            # aware of this limitation, we need to handle batch size > 1
+            # internally by calling the model multiple times and concatenating
+            # the outputs.
+            # FIXME(woosuk): This is a temporary hack to not change the existing
+            # scheduler. We need to fix this in the future.
+            sampler_outputs = []
+            for seq_group_metadata in seq_group_metadata_list:
+                sampler_outputs += self._execute_model([seq_group_metadata],
+                                                       kv_caches)
+        else:
+            sampler_outputs = self._execute_model(seq_group_metadata_list,
+                                                  kv_caches)
         return SamplerOutput(sampler_outputs)
 
 
