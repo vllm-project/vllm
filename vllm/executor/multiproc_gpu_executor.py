@@ -46,6 +46,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
         if world_size == 1:
             self.workers = []
+            self.worker_monitor = None
         else:
             result_handler = ResultHandler()
             self.workers = [
@@ -127,7 +128,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
     def check_health(self) -> None:
         """Raises an error if engine is unhealthy."""
-        if not self.worker_monitor.is_alive():
+        if self.worker_monitor is not None and not self.worker_monitor.is_alive(
+        ):
             raise RuntimeError("Worker processes are not running")
 
     def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
