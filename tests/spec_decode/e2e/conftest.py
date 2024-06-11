@@ -77,7 +77,11 @@ class AsyncLLM:
             swap_space=swap_space,
             enforce_eager=enforce_eager,
             max_seq_len_to_capture=max_seq_len_to_capture,
+            # For now use ray for the distributed back-end, since
+            # we rely on the use of engine_use_ray=True to avoid
+            # reinitializing CUDA in the same process (driver worker)
             engine_use_ray=True,
+            distributed_executor_backend="ray",
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )

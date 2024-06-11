@@ -322,9 +322,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
-            elif not 0 <= data["top_logprobs"] <= 20:
+            elif data["top_logprobs"] < 0:
                 raise ValueError(
-                    "`top_logprobs` must be a value in the interval [0, 20].")
+                    "`top_logprobs` must be a value a positive value.")
         return data
 
 
@@ -478,9 +478,8 @@ class CompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if "logprobs" in data and data[
-                "logprobs"] is not None and not 0 <= data["logprobs"] <= 5:
-            raise ValueError(("if passed, `logprobs` must be a value",
-                              " in the interval [0, 5]."))
+                "logprobs"] is not None and not data["logprobs"] >= 0:
+            raise ValueError("if passed, `logprobs` must be a positive value.")
         return data
 
     @model_validator(mode="before")
@@ -514,7 +513,8 @@ class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
-    top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
+    top_logprobs: List[Optional[Dict[str,
+                                     float]]] = Field(default_factory=list)
 
 
 class CompletionResponseChoice(OpenAIBaseModel):
@@ -613,7 +613,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
-    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
+    finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
 
 
@@ -636,7 +636,7 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     delta: DeltaMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
-    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
+    finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
 
 
