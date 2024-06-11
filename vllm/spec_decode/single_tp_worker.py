@@ -1,4 +1,5 @@
 import copy
+import weakref
 from typing import List, Tuple, Set, Optional, Union
 from datetime import timedelta
 
@@ -32,31 +33,39 @@ class SingleTpWorker(ProposerWorkerBase):
     @classmethod
     def maybe_wrap_worker(cls, worker, draft_parallel_config: ParallelConfig,
                           target_parallel_config: ParallelConfig,
-                          is_driver_worker: bool):
+                          rank: int):
         """Wrap the worker in a SingleTpWorker if necessary.
         """
         draft_tp = draft_parallel_config.tensor_parallel_size
-        if draft_tp == target_parallel_config.tensor_parallel_size:
+        target_tp = target_parallel_config.tensor_parallel_size
+        if draft_tp > target_tp:
+            raise ValueError("{cls} only supports draft_tp smaller than target_tp."
+                             f"{draft_tp=} {target_tp=}")
+
+        ranks = list(range(draft_tp))
+
+        if draft_tp == target_tp:
             return worker
 
-        if draft_tp != 1:
-            raise ValueError("{cls} only supports tp=1, found "
-                             f"{draft_tp=}")
-
-        if is_driver_worker:
+        logger.info(f"{rank=}, {ranks=}")
+        if rank in ranks:
             logger.info(f"Wrapping {type(worker)} in {cls}")
-            return cls(worker)
+            return cls(worker, ranks)
         else:
-            logger.info(f"dummy worker for non-driver")
+            logger.info(f"dummy worker that would not participate in draft generation")
             return DummyProposerWorker(worker)
 
     def __init__(
         self,
         worker: Union[Worker, ProposerWorkerBase],
+        ranks: List[int],
     ):
         self._worker = worker
-        self._single_tp_group = None
-        self._single_tp_cpu_group = None
+        self._ranks = ranks
+        self._tp_group = None
+        self._tp_cpu_group = None
+        self._tp_pynccl_comm = None #TODO: init&use
+        self._tp_ca_comm = None #TODO: init&use
 
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
@@ -67,22 +76,19 @@ class SingleTpWorker(ProposerWorkerBase):
         This also creates a single-rank process group containing only the
         self process.
         """
-        world_rank = torch.distributed.get_rank()
-        self._single_tp_group = torch.distributed.new_group(
-            ranks=[world_rank], timeout=timedelta(seconds=10))
-        self._single_tp_cpu_group = torch.distributed.new_group(
-            ranks=[world_rank], timeout=timedelta(seconds=10), backend="gloo")
+        self._tp_group = torch.distributed.new_group(
+            ranks=self._ranks, timeout=timedelta(seconds=10))
+        self._tp_cpu_group = torch.distributed.new_group(
+            ranks=self._ranks, timeout=timedelta(seconds=10), backend="gloo")
 
-        logger.info(
-            f"init_device. world_rank: {world_rank}, single_tp_group: {self._single_tp_group}, single_tp_cput_group: {self._single_tp_cpu_group}"
-        )
+        logger.info(f"init_device. ranks: {self._ranks}")
 
-        with patch_tensor_parallel_group(self._single_tp_group,
-                                         self._single_tp_cpu_group):
+        with patch_tensor_parallel_group(self._tp_group,
+                                         self._tp_cpu_group):
             self._worker.init_device()
 
         self._proposer = Top1Proposer(
-            self,
+            weakref.proxy(self),
             self._worker.device,
             self.vocab_size,
             max_proposal_len=self.max_model_len,
@@ -93,22 +99,22 @@ class SingleTpWorker(ProposerWorkerBase):
 
     def load_model(self):
         logger.info("SingleTPWorker.load_model()")
-        with patch_tensor_parallel_group(self._single_tp_group,
-                                         self._single_tp_cpu_group):
+        with patch_tensor_parallel_group(self._tp_group,
+                                         self._tp_cpu_group):
             self._worker.load_model()
 
     def determine_num_available_blocks(self):
         """Profile the model on all ranks.
         """
-        with patch_tensor_parallel_group(self._single_tp_group,
-                                         self._single_tp_cpu_group):
+        with patch_tensor_parallel_group(self._tp_group,
+                                         self._tp_cpu_group):
             return self._worker.determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int):
         """Initialize the cache engine on all ranks.
         """
-        with patch_tensor_parallel_group(self._single_tp_group,
-                                         self._single_tp_cpu_group):
+        with patch_tensor_parallel_group(self._tp_group,
+                                         self._tp_cpu_group):
             self._worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @torch.inference_mode()
@@ -125,10 +131,10 @@ class SingleTpWorker(ProposerWorkerBase):
         For multi step worker, this indicator shall be True.
         """
 
-        ## Worker-side logic: skip # TODO: REMOVE
+        ## Worker-side logic:
         if execute_model_req is None:
             logger.info("Workers do not make proposals")
-            return None
+            return [], True
 
         ## Driver-side logic
         self._raise_if_unsupported(execute_model_req)
@@ -167,8 +173,8 @@ class SingleTpWorker(ProposerWorkerBase):
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
-        with patch_tensor_parallel_group(self._single_tp_group,
-                                         self._single_tp_cpu_group):
+        with patch_tensor_parallel_group(self._tp_group,
+                                         self._tp_cpu_group):
             return self._proposer.get_spec_proposals(execute_model_req)
 
     @torch.inference_mode()
@@ -179,8 +185,8 @@ class SingleTpWorker(ProposerWorkerBase):
         if execute_model_req is None:  #if not self._worker.is_driver_worker:
             return []
 
-        with patch_tensor_parallel_group(self._single_tp_group,
-                                         self._single_tp_cpu_group):
+        with patch_tensor_parallel_group(self._tp_group,
+                                         self._tp_cpu_group):
             return self._execute_model_tp1(execute_model_req)
 
     def _execute_model_tp1(
