@@ -54,9 +54,8 @@ async def test_single_completion(client: openai.AsyncOpenAI):
                                                  temperature=0.0)
 
     assert completion.id is not None
-    assert completion.choices is not None and len(completion.choices) == 1
-    assert completion.choices[0].text is not None and len(
-        completion.choices[0].text) >= 5
+    assert len(completion.choices) == 1
+    assert len(completion.choices[0].text) >= 5
     assert completion.choices[0].finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
@@ -68,8 +67,7 @@ async def test_single_completion(client: openai.AsyncOpenAI):
         max_tokens=5,
         temperature=0.0,
     )
-    assert completion.choices[0].text is not None and len(
-        completion.choices[0].text) >= 5
+    assert len(completion.choices[0].text) >= 5
 
 
 @pytest.mark.asyncio
@@ -89,13 +87,14 @@ async def test_single_chat_session(client: openai.AsyncOpenAI):
                                                            logprobs=True,
                                                            top_logprobs=5)
     assert chat_completion.id is not None
-    assert chat_completion.choices is not None and len(
-        chat_completion.choices) == 1
-    assert chat_completion.choices[0].message is not None
-    assert chat_completion.choices[0].logprobs is not None
-    assert chat_completion.choices[0].logprobs.top_logprobs is not None
-    assert len(chat_completion.choices[0].logprobs.top_logprobs[0]) == 5
-    message = chat_completion.choices[0].message
+    assert len(chat_completion.choices) == 1
+
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "length"
+    assert chat_completion.usage == openai.types.CompletionUsage(
+        completion_tokens=10, prompt_tokens=13, total_tokens=23)
+
+    message = choice.message
     assert message.content is not None and len(message.content) >= 10
     assert message.role == "assistant"
     messages.append({"role": "assistant", "content": message.content})

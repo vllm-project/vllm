@@ -88,6 +88,7 @@ Documentation
    models/adding_model
    models/engine_args
    models/lora
+   models/vlm
    models/performance
 
 .. toctree::
@@ -95,21 +96,23 @@ Documentation
    :caption: Quantization
 
    quantization/auto_awq
+   quantization/fp8
    quantization/fp8_e5m2_kvcache
    quantization/fp8_e4m3_kvcache
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Developer Documentation
    
    dev/sampling_params
    dev/offline_inference/offline_index
    dev/engine/engine_index
    dev/kernel/paged_attention
+   dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Community
 
    community/meetups

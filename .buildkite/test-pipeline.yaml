@@ -45,7 +45,8 @@ steps:
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
-  - pytest -v -s spec_decode/e2e/test_integration_dist.py 
+  - pytest -v -s spec_decode/e2e/test_integration_dist.py
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
 
 - label: Distributed Tests (Multiple Groups)
   #mirror_hardwares: [amd]
@@ -62,7 +63,6 @@ steps:
   mirror_hardwares: [amd]
 
   commands:
-  - pytest -v -s test_inputs.py
   - pytest -v -s entrypoints -m llm
   - pytest -v -s entrypoints -m openai
 
@@ -79,6 +79,13 @@ steps:
     - python3 llava_example.py
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
 
+- label: Inputs Test
+  #mirror_hardwares: [amd]
+  commands:
+    - bash ../.buildkite/download-images.sh
+    - pytest -v -s test_inputs.py
+    - pytest -v -s multimodal
+
 - label: Kernels Test %N
   #mirror_hardwares: [amd]
   command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -87,14 +94,13 @@ steps:
 - label: Models Test
   #mirror_hardwares: [amd]
   commands:
-    - bash ../.buildkite/download-images.sh
-    - pytest -v -s models --ignore=models/test_llava.py
+    - pytest -v -s models -m \"not llava\"
 
 - label: Llava Test
   mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models/test_llava.py
+    - pytest -v -s models -m llava
 
 - label: Prefix Caching Test
   mirror_hardwares: [amd]
@@ -118,7 +124,10 @@ steps:
 
 - label: Speculative decoding tests
   #mirror_hardwares: [amd]
-  command: pytest -v -s spec_decode
+  commands:
+    # See https://github.com/vllm-project/vllm/issues/5152
+    - export VLLM_ATTENTION_BACKEND=XFORMERS
+    - pytest -v -s spec_decode
 
 - label: LoRA Test %N
   #mirror_hardwares: [amd]
@@ -130,14 +139,7 @@ steps:
   num_gpus: 4
   # This test runs llama 13B, so it is required to run on 4 GPUs.
   commands:
-    # Temporarily run this way because we cannot clean up GPU mem usage
-    # for multi GPU tests.
-    # TODO(sang): Fix it.
-    - pytest -v -s lora/test_long_context.py::test_rotary_emb_replaced
-    - pytest -v -s lora/test_long_context.py::test_batched_rope_kernel
-    - pytest -v -s lora/test_long_context.py::test_self_consistency
-    - pytest -v -s lora/test_long_context.py::test_quality
-    - pytest -v -s lora/test_long_context.py::test_max_len
+    - pytest -v -s -x lora/test_long_context.py
 
 - label: Tensorizer Test
   #mirror_hardwares: [amd]
