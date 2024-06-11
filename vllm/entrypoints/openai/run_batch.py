@@ -13,7 +13,8 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_vllm_version, random_uuid
+from vllm.utils import random_uuid
+from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
@@ -134,7 +135,7 @@ async def main(args):
 if __name__ == "__main__":
     args = parse_args()
 
-    logger.info("vLLM API server version %s", get_vllm_version())
+    logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
     asyncio.run(main(args))

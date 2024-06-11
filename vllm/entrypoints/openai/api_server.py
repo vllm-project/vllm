@@ -28,7 +28,7 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_vllm_version
+from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -93,7 +93,7 @@ async def show_available_models():
 
 @app.get("/version")
 async def show_version():
-    ver = {"version": get_vllm_version()}
+    ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
 
 
@@ -174,7 +174,7 @@ if __name__ == "__main__":
             raise ValueError(f"Invalid middleware {middleware}. "
                              f"Must be a function or a class.")
 
-    logger.info("vLLM API server version %s", get_vllm_version())
+    logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
     if args.served_model_name is not None:

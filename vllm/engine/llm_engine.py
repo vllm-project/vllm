@@ -36,7 +36,8 @@ from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, get_vllm_version
+from vllm.utils import Counter
+from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -168,7 +169,7 @@ class LLMEngine:
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, seed=%d, served_model_name=%s)",
-            get_vllm_version(),
+            VLLM_VERSION,
             model_config.model,
             speculative_config,
             model_config.tokenizer,
