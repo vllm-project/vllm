@@ -40,6 +40,9 @@ MAIN_CUDA_VERSION = "12.1"
 
 
 def is_sccache_available() -> bool:
+    print(which("sccache"))
+    print("Is schache available?")
+    print(which("sccache") is not None)
     return which("sccache") is not None
 
 
@@ -140,6 +143,7 @@ class cmake_build_ext(build_ext):
             cmake_args += [
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
+                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
             ]
         elif is_ccache_available():
             cmake_args += [
@@ -171,7 +175,8 @@ class cmake_build_ext(build_ext):
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
-
+        print("cmake args: ")
+        print(cmake_args)
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp)
@@ -222,7 +227,7 @@ def _is_neuron() -> bool:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
-    return torch_neuronx_installed or envs.VLLM_BUILD_WITH_NEURON
+    return torch_neuronx_installed or VLLM_TARGET_DEVICE == "neuron"
 
 
 def _is_cpu() -> bool:
