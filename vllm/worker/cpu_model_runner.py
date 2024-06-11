@@ -303,56 +303,6 @@ class CPUModelRunner:
                 sampling_metadata=sampling_metadata,
                 )
 
-#        if self.is_driver_worker:
-#            # NOTE: We assume that all sequences in the group are all prompts or
-#            # all decodes.
-#            is_prompt = seq_group_metadata_list[0].is_prompt
-#            # Prepare input tensors.
-#            if is_prompt:
-#                (input_tokens, input_positions, attn_metadata, seq_lens,
-#                 multi_modal_kwargs
-#                 ) = self._prepare_prompt(seq_group_metadata_list)
-#            else:
-#                (input_tokens, input_positions,
-#                 attn_metadata) = self._prepare_decode(seq_group_metadata_list)
-#                seq_lens = []
-#            sampling_metadata = SamplingMetadata.prepare(
-#                seq_group_metadata_list,
-#                seq_lens,
-#                # query_lens is not needed if chunked prefill is not
-#                # supported. Since CPU worker doesn't support chunked prefill
-#                # just use seq_lens instead.
-#                seq_lens,
-#                self.device,
-#                pin_memory=False)
-#            # Broadcast the metadata.
-#            metadata_dict = {
-#                "input_tokens": input_tokens,
-#                "input_positions": input_positions,
-#                "selected_token_indices":
-#                sampling_metadata.selected_token_indices,
-#            }
-#            metadata_dict.update(attn_metadata.asdict_zerocopy())
-#            broadcast_tensor_dict(metadata_dict, src=0)
-#        else:
-#            metadata_dict = broadcast_tensor_dict(src=0)
-#            input_tokens = metadata_dict.pop("input_tokens")
-#            input_positions = metadata_dict.pop("input_positions")
-#            selected_token_indices = metadata_dict.pop(
-#                "selected_token_indices")
-#            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
-#            sampling_metadata = SamplingMetadata(
-#                seq_groups=None,
-#                seq_data=None,
-#                seq_lens=None,
-#                selected_token_indices=selected_token_indices,
-#                categorized_sample_indices=None,
-#                generators=None,
-#            )
-#
-#        return (input_tokens, input_positions, attn_metadata,
-#                sampling_metadata, multi_modal_kwargs)
-#
     def get_empty_model_input(self) -> ModelInputWithSamplingMetadata:
         return ModelInputWithSamplingMetadata.new()
 
