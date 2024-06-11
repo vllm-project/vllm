@@ -442,10 +442,8 @@ class ModelWrapper(nn.Module):
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         logits = logits / t.unsqueeze(dim=1)
-        # NOTE(woosuk): Top-p sampling can be expensive especially for small
-        # models with a large vocab size like Gemma-2B. We can consider
-        # skipping it when all of the top-p values are 1.0.
-        logits = _apply_top_p(logits, p.unsqueeze(dim=1))
+        # FIXME(woosuk): Disabled top-p sampling since it's too slow.
+        # logits = _apply_top_p(logits, p.unsqueeze(dim=1))
         probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
         # FIXME(woosuk): best_of > 1 is not supported.
         next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(dim=1)
