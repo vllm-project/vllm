@@ -2,7 +2,7 @@ import torch
 from transformers import BertTokenizer, BertModel
 
 # Init BERT tokenizer and model
-# tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 model = BertModel.from_pretrained('bert-base-uncased')
 
 print("Model: ")
@@ -14,14 +14,15 @@ for name, weight in model.named_parameters():
 
 
 # sentence = "This is an example sentence."
+sentence = "Another sentence."
 
-# inputs = tokenizer(sentence, return_tensors='pt', truncation=True, padding='max_length', max_length=128)
+inputs = tokenizer(sentence, return_tensors='pt', truncation=True, padding='max_length', max_length=128)
 
-# with torch.no_grad():
-#     outputs = model(**inputs)
+with torch.no_grad():
+    outputs = model(**inputs)
 
-# # Get the sentence vector. Here use [CLS] token as the sentence vector.
-# sentence_vector = outputs.last_hidden_state[:, 0, :].squeeze()
+# Get the sentence vector. Here use [CLS] token as the sentence vector.
+sentence_vector = outputs.last_hidden_state[:, 0, :].squeeze()
 
-# print(sentence_vector)
+print(sentence_vector)
 # print(sentence_vector.shape)

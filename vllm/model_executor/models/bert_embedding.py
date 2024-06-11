@@ -62,6 +62,13 @@ class BertEmbeddingModel(nn.Module):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+
+        def _fix_key(key):
+            if "beta" in key:
+                return key.replace("beta", "bias")
+            if "gamma" in key:
+                return key.replace("gamma", "weight")
+            return key
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "query", "q"),
@@ -71,27 +78,34 @@ class BertEmbeddingModel(nn.Module):
         params_dict = dict(self.model.named_parameters())
         _prefix = f"{self.base_model_prefix}."
         for name, loaded_weight in weights:
+            # Skip the specific downstream task weight.
+            if name.startswith('cls.'):
+                continue
+
             name = name[len(_prefix) :] if name.startswith(_prefix) else name
+            name = _fix_key(name)
+
+            # use Pooler instead.
+            if name.startswith('pooler.'):
+                continue
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
 
-                # TODO: check
-                ## Skip loading extra bias for GPTQ models.
-                #if name.endswith(".bias") and name not in params_dict:
-                #    continue
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # TODO: check
-                # # Skip loading extra bias for GPTQ models.
-                # if name.endswith(".bias") and name not in params_dict:
-                #     continue
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
@@ -107,7 +121,7 @@ class BertModel(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.embedding = BertEmbedding(config)
+        self.embeddings = BertEmbedding(config)
         self.encoder = BertEncoder(config, cache_config, quant_config)
 
     def forward(
@@ -118,9 +132,9 @@ class BertModel(nn.Module):
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.embedding(input_ids=input_ids,
-                                       position_ids=position_ids,
-                                       inputs_embeds=inputs_embeds)
+        hidden_states = self.embeddings(input_ids=input_ids,
+                                        position_ids=position_ids,
+                                        inputs_embeds=inputs_embeds)
         output = self.encoder(hidden_states, kv_caches, attn_metadata)
         return output
 
@@ -137,7 +151,7 @@ class BertEmbedding(nn.Module):
                                                 config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size,
                                                   config.hidden_size)
-        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         self.position_embedding_type = config.position_embedding_type
@@ -179,7 +193,7 @@ class BertEmbedding(nn.Module):
 
         embeddings = inputs_embeds + token_type_embeddings
         embeddings += position_embeddings
-        embeddings = self.norm(embeddings)
+        embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
 
@@ -192,7 +206,7 @@ class BertEncoder(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.layers = nn.ModuleList([
+        self.layer = nn.ModuleList([
             BertLayer(config=config,
                       cache_config=cache_config,
                       quant_config=quant_config)
@@ -205,8 +219,8 @@ class BertEncoder(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        for i in range(len(self.layers)):
-            layer = self.layers[i]
+        for i in range(len(self.layer)):
+            layer = self.layer[i]
             hidden_states = layer(
                 hidden_states,
                 kv_caches[i],
@@ -258,7 +272,7 @@ class BertAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.self_attn = BertSelfAttention(config=config,
+        self.self = BertSelfAttention(config=config,
                                            cache_config=cache_config,
                                            quant_config=quant_config)
         self.output = BertSelfOutput(config)
@@ -269,7 +283,7 @@ class BertAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        self_outputs = self.self_attn(hidden_states, kv_cache, attn_metadata)
+        self_outputs = self.self(hidden_states, kv_cache, attn_metadata)
         attn_output = self.output(self_outputs[0], hidden_states)
         return attn_output
 
@@ -303,7 +317,7 @@ class BertSelfAttention(nn.Module):
 
         self.scaling = self.head_dim**-0.5
 
-        self.query_key_value = QKVParallelLinear(
+        self.qkv_proj = QKVParallelLinear(
             hidden_size=self.hidden_size,
             head_size=self.head_dim,
             total_num_heads=self.total_num_heads,
@@ -334,7 +348,7 @@ class BertSelfAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        qkv, _ = self.query_key_value(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         atten_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(atten_output)
@@ -345,13 +359,13 @@ class BertSelfOutput(nn.Module):
     def __init__(self, config: BertConfig):
         super(BertSelfOutput, self).__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, hidden_states, input_tensor):
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
-        hidden_states = self.norm(hidden_states + input_tensor)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
 
@@ -371,7 +385,7 @@ class BertOutput(nn.Module):
     def __init__(self, config: BertConfig):
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
@@ -381,5 +395,5 @@ class BertOutput(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
-        hidden_states = self.norm(hidden_states + input_tensor)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
