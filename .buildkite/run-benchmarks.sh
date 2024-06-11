@@ -54,7 +54,7 @@ tail -n 24 benchmark_serving.txt >> benchmark_results.md # last 24 lines
 echo '```' >> benchmark_results.md
 
 # if the agent binary is not found, skip uploading the results, exit 0
-if [ ! -f buildkite-agent ]; then
+if [ ! -f /usr/bin/buildkite-agent ]; then
     exit 0
 fi
 
