@@ -2,7 +2,7 @@ import torch
 from transformers import BertTokenizer, BertModel
 
 # Init BERT tokenizer and model
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+# tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 model = BertModel.from_pretrained('bert-base-uncased')
 
 print("Model: ")

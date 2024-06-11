@@ -34,6 +34,7 @@ class BertEmbeddingModel(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
+        self.base_model_prefix = "bert"
         self.model = BertModel(config=kwargs["config"],
                                cache_config=kwargs.get("cache_config", None),
                                quant_config=kwargs.get("quant_config", None))
@@ -68,7 +69,10 @@ class BertEmbeddingModel(nn.Module):
             ("qkv_proj", "value", "v"),
         ]
         params_dict = dict(self.model.named_parameters())
+        _prefix = f"{self.base_model_prefix}."
         for name, loaded_weight in weights:
+            name = name[len(_prefix) :] if name.startswith(_prefix) else name
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -88,6 +92,7 @@ class BertEmbeddingModel(nn.Module):
                 # # Skip loading extra bias for GPTQ models.
                 # if name.endswith(".bias") and name not in params_dict:
                 #     continue
+
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
