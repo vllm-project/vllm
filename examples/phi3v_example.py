@@ -2,7 +2,6 @@ import os
 import subprocess
 
 from PIL import Image
-from transformers import AutoProcessor
 
 from vllm import LLM, SamplingParams
 from vllm.multimodal.image import ImagePixelData
@@ -10,13 +9,12 @@ from vllm.multimodal.image import ImagePixelData
 
 def run_phi3v():
     model_path = "microsoft/Phi-3-vision-128k-instruct"
-    processor = AutoProcessor.from_pretrained(model_path,
-                                              trust_remote_code=True)
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
+        max_model_len=4096,
         image_input_type="pixel_values",
-        image_token_id=-1,
+        image_token_id=32044,
         image_input_shape="1,3,1008,1344",
         image_feature_size=1024,
         disable_image_processor=False,
@@ -29,14 +27,12 @@ def run_phi3v():
 
     # single-image prompt
     prompt = "What is shown in this image?"
-    prompt = f"{user_prompt}<|image_1|>\n{prompt}{suffix}{assistant_prompt}"
+    prompt = user_prompt+"<|image|>"*1921+f"<s>\n{prompt}{suffix}{assistant_prompt}"
 
-    inputs = processor(prompt, image, return_tensors="pt")
-    input_ids = inputs["input_ids"].squeeze(0).tolist()
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
 
     outputs = llm.generate({
-        "prompt_token_ids": input_ids,
+        "prompt": prompt,
         "sampling_params": sampling_params,
         "multi_modal_data": ImagePixelData(image),
     })

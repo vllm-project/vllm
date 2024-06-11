@@ -263,6 +263,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 class Phi3VImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
+    image_sizes: torch.Tensor
     """Shape: (batch_size, num_channels, height, width)"""
 
 
@@ -284,15 +285,38 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Phi3VImagePixelInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_sizes = kwargs.pop("image_sizes", None)
+
+        expected_input_type = self.vision_language_config.image_input_type
+        ImageInputType = VisionLanguageConfig.ImageInputType
+
+        if expected_input_type == ImageInputType.PIXEL_VALUES:
+            
+            if pixel_values is not None and image_sizes is not None:
+                return Phi3VImagePixelInputs(
+                    type="pixel_values",
+                    data=pixel_values,
+                    image_sizes=image_sizes
+                )
+
+        return None
+
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
-                image_input: Phi3VImagePixelInputs = None):
+                **kwargs: object):
+        image_input = kwargs.pop("image_input", None)
+
         if image_input is not None:
+            image_input = self._parse_and_validate_image_input(**image_input)
+            input_ids[input_ids==self.vision_language_config.image_token_id] = -1
             inputs_embeds = self.vision_embed_tokens(
-                input_ids, image_input["pixel_values"],
+                input_ids, image_input["data"],
                 image_input["image_sizes"])
 
             input_ids = None
