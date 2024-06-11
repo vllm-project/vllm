@@ -18,6 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import DummyImageDataFactories
 from vllm.sequence import SamplerOutput
 
@@ -84,8 +85,8 @@ class LlavaImageFeatureInputs(TypedDict):
 LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
 
 
-@INPUT_REGISTRY.MULTIMODAL.register_image_feature_input_mapper()
-@INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper()
+@MULTIMODAL_REGISTRY.register_image_feature_input_mapper()
+@MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(
     DummyImageDataFactories.for_model(LlavaConfig))
 class LlavaForConditionalGeneration(VisionLanguageModelBase):

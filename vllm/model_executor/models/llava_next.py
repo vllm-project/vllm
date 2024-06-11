@@ -23,6 +23,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import DummyImageDataFactories, ImagePixelData
 from vllm.sequence import SamplerOutput
 
@@ -79,12 +80,12 @@ def _pixel_mapper(ctx: InputContext,
 
         data.image = image.resize((w, h))
 
-    return INPUT_REGISTRY.MULTIMODAL._get_plugin_for_data_type(ImagePixelData) \
+    return MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
         ._default_input_mapper(ctx, data)
 
 
-@INPUT_REGISTRY.MULTIMODAL.register_image_feature_input_mapper()
-@INPUT_REGISTRY.MULTIMODAL.register_image_pixel_input_mapper(_pixel_mapper)
+@MULTIMODAL_REGISTRY.register_image_feature_input_mapper()
+@MULTIMODAL_REGISTRY.register_image_pixel_input_mapper(_pixel_mapper)
 @INPUT_REGISTRY.register_dummy_data(
     DummyImageDataFactories.for_model(LlavaNextConfig))
 class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
