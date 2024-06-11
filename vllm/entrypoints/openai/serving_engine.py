@@ -29,10 +29,13 @@ class LoRAModulePath:
 
 class OpenAIServing:
 
-    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
+    def __init__(self,
+                 engine: AsyncLLMEngine,
+                 model_config: ModelConfig,
                  served_model_names: List[str],
-                 logits_processor_plugins: Dict[str, LogitsProcessorPlugin],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+                 lora_modules: Optional[List[LoRAModulePath]],
+                 logits_processor_plugins: Optional[Dict[
+                     str, LogitsProcessorPlugin]] = None):
         super().__init__()
         self.engine = engine
         self.max_model_len = model_config.max_model_len
@@ -46,7 +49,7 @@ class OpenAIServing:
             truncation_side="left")
 
         self.served_model_names = served_model_names
-        self.logits_processor_plugins = logits_processor_plugins
+        self.logits_processor_plugins = logits_processor_plugins or {}
 
         if lora_modules is None:
             self.lora_requests = []

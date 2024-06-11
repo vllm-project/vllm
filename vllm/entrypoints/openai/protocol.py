@@ -200,8 +200,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         tokenizer, lp_parameters)
                     logits_processors.append(logits_processor)
                 except ValidationError as e:
-                    raise ValueError(f"Invalid parameters for logits processor "
-                                     f"{lp_name}: {e}") from e
+                    raise ValueError(
+                        f"Invalid parameters for logits processor "
+                        f"{lp_name}: {e}") from e
 
         return SamplingParams(
             n=self.n,

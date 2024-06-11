@@ -54,15 +54,18 @@ def parse_prompt_format(prompt) -> Tuple[bool, list]:
 
 class OpenAIServingCompletion(OpenAIServing):
 
-    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
+    def __init__(self,
+                 engine: AsyncLLMEngine,
+                 model_config: ModelConfig,
                  served_model_names: List[str],
-                 logits_processor_plugins: Dict[str, LogitsProcessorPlugin],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+                 lora_modules: Optional[List[LoRAModulePath]],
+                 logits_processor_plugins: Optional[Dict[
+                     str, LogitsProcessorPlugin]] = None):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         logits_processor_plugins=logits_processor_plugins,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         logits_processor_plugins=logits_processor_plugins)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):

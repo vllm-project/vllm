@@ -4,8 +4,8 @@ import inspect
 import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Optional, Set
 from importlib.metadata import entry_points
+from typing import Optional, Set
 
 import fastapi
 import uvicorn
@@ -204,15 +204,12 @@ if __name__ == "__main__":
         # When using single vLLM without engine_use_ray
         model_config = asyncio.run(engine.get_model_config())
 
-    openai_serving_chat = OpenAIServingChat(engine, model_config,
-                                            served_model_names,
-                                            args.response_role,
-                                            logits_processors_plugins,
-                                            args.lora_modules,
-                                            args.chat_template)
+    openai_serving_chat = OpenAIServingChat(
+        engine, model_config, served_model_names, args.response_role,
+        args.lora_modules, logits_processors_plugins, args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, model_config, served_model_names, logits_processors_plugins,
-        args.lora_modules)
+        engine, model_config, served_model_names, args.lora_modules,
+        logits_processors_plugins)
 
     app.root_path = args.root_path
     uvicorn.run(app,

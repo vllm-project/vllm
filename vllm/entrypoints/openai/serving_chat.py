@@ -39,14 +39,15 @@ class OpenAIServingChat(OpenAIServing):
                  model_config: ModelConfig,
                  served_model_names: List[str],
                  response_role: str,
-                 logits_processor_plugins: Dict[str, LogitsProcessorPlugin],
                  lora_modules: Optional[List[LoRAModulePath]] = None,
+                 logits_processor_plugins: Optional[Dict[
+                     str, LogitsProcessorPlugin]] = None,
                  chat_template: Optional[str] = None):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         logits_processor_plugins=logits_processor_plugins,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         logits_processor_plugins=logits_processor_plugins)
         self.response_role = response_role
         self._load_chat_template(chat_template)
 
