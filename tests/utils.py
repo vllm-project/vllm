@@ -31,8 +31,10 @@ class RemoteOpenAIServer:
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
             self.proc = subprocess.Popen(
-                [sys.executable, "-m", "vllm.entrypoints.openai.api_server"] \
-                    + cli_args,
+                [
+                    sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+                    *cli_args
+                ],
                 env=env,
                 stdout=sys.stdout,
                 stderr=sys.stderr,
