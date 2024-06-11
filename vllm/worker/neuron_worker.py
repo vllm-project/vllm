@@ -1,5 +1,5 @@
 """A Neuron worker class."""
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.distributed
@@ -7,7 +7,7 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.model_executor import set_random_seed
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, ModelInput, SamplerOutput
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
@@ -74,17 +74,26 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> List[SamplerOutput]:
-        num_seq_groups = len(seq_group_metadata_list)
+    def prepare_model_input_local(
+            self, execute_model_req: ExecuteModelRequest) -> ModelInput:
+        model_input = self.model_runner.prepare_model_input_tensors(
+            execute_model_req.seq_group_metadata_list)
+        return model_input
 
+    def prepare_model_input(
+            self,
+            execute_model_req: Optional[ExecuteModelRequest]) -> ModelInput:
+        assert execute_model_req is not None
+        return self.prepare_model_input_local(execute_model_req)
+
+    @torch.inference_mode()
+    def execute_model_local(self,
+                            model_input: ModelInput) -> List[SamplerOutput]:
         # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
+        if model_input.num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(seq_group_metadata_list)
+        output = self.model_runner.execute_model(model_input)
 
         # Neuron worker only supports single-step output. Wrap the output in a
         # list to conform to interface.
