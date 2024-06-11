@@ -10,7 +10,7 @@ from ..conftest import IMAGE_FILES
 pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = [
-    "caption es",
+    "caption",
     "What is in the picture?",
 ]
 
