@@ -13,7 +13,7 @@ from vllm.distributed import (broadcast_tensor_dict,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest, SamplerOutput, ModelInput
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.cpu_model_runner import CPUModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
@@ -263,43 +263,68 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             self.cache_engine.copy(blocks_to_copy)
 
     @torch.inference_mode()
+    def prepare_model_input_local(
+            self,
+            execute_model_req: ExecuteModelRequest) -> ModelInput:
+        assert execute_model_req is not None
+
+        model_input = self.model_runner.prepare_model_input_tensors(
+                execute_model_req.seq_group_metadata_list
+                )
+
+        num_seq_groups: int = len(execute_model_req.seq_group_metadata_list)
+        blocks_to_copy = execute_model_req.blocks_to_copy
+        blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                      device="cpu",
+                                      dtype=torch.int64).view(-1, 2)
+        assert len(execute_model_req.blocks_to_swap_in) == 0
+        assert len(execute_model_req.blocks_to_swap_out) == 0
+        return model_input.replace(
+                num_seq_groups=num_seq_groups,
+                blocks_to_copy=blocks_to_copy,
+                )
+
+    @torch.inference_mode()
+    def prepare_model_input(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> ModelInput:
+        if self.is_driver_worker:
+            if execute_model_req is None:
+                # This signals that there's no more requests to process for now.
+                # All workers are running infinite loop with broadcast_tensor_dict,
+                # and it stops the loop when the driver broadcasts an empty input.
+                # Send an empty input to notify all other workers to stop their
+                # execution loop.
+                broadcast_tensor_dict({}, src=0)
+                return None
+
+            model_input = self.prepare_model_input_local(execute_model_req)
+            metadata_dict = model_input.as_broadcastable_tensor_dict()
+            broadcast_tensor_dict(metadata_dict, src=0)
+        else:
+            metadata_dict = broadcast_tensor_dict(src=0)
+            if not metadata_dict:
+                return None
+
+            model_input = self.model_runner.get_empty_model_input()
+            model_input = model_input.new(
+                    attn_backend=self.model_runner.attn_backend,
+                    **metadata_dict)
+        return model_input
+
+    @torch.inference_mode()
     def execute_model(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None,
+        model_input: ModelInput,
     ) -> List[SamplerOutput]:
-
-        if execute_model_req is None:
-            seq_group_metadata_list = None
-        else:
-            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            num_seq_groups: int = len(seq_group_metadata_list)
-            assert execute_model_req is not None
-            blocks_to_copy = execute_model_req.blocks_to_copy
-            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
-                                          device="cpu",
-                                          dtype=torch.int64).view(-1, 2)
-            assert len(execute_model_req.blocks_to_swap_in) == 0
-            assert len(execute_model_req.blocks_to_swap_out) == 0
-            data: Dict[str, Any] = {
-                "num_seq_groups": num_seq_groups,
-                "blocks_to_copy": execute_model_req.blocks_to_copy,
-            }
-            broadcast_tensor_dict(data, src=0)
-        else:
-            data = broadcast_tensor_dict(src=0)
-            num_seq_groups = data["num_seq_groups"]
-            blocks_to_copy = data["blocks_to_copy"]
-
-        self.cache_copy(blocks_to_copy)
+        self.cache_copy(model_input.blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
+        if model_input.num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(seq_group_metadata_list,
+        output = self.model_runner.execute_model(model_input,
                                                  self.cpu_cache)
 
         # CPU worker only supports single-step execution.
