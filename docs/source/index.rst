@@ -90,6 +90,7 @@ Documentation
    models/engine_args
    models/lora
    models/vlm
+   models/spec_decode
    models/performance
 
 .. toctree::
