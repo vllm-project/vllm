@@ -5,7 +5,7 @@ import torch
 
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SamplerOutput, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceOutput)
+                           SequenceOutput)
 
 SeqId = int
 
@@ -63,7 +63,7 @@ def create_sequence_group_output(
     seq_id: SeqId,
     topk_token_ids: List[int],
     topk_logprobs: List[float],
-) -> SequenceGroupOutput:
+) -> CompletionSequenceGroupOutput:
     """Create a SequenceGroupOutput given the sampling results.
 
     Args:

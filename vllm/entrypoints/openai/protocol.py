@@ -322,9 +322,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
-            elif not 0 <= data["top_logprobs"] <= 20:
+            elif data["top_logprobs"] < 0:
                 raise ValueError(
-                    "`top_logprobs` must be a value in the interval [0, 20].")
+                    "`top_logprobs` must be a value a positive value.")
         return data
 
 
@@ -346,6 +346,7 @@ class CompletionRequest(OpenAIBaseModel):
                                 le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     suffix: Optional[str] = None
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
@@ -477,9 +478,16 @@ class CompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if "logprobs" in data and data[
-                "logprobs"] is not None and not 0 <= data["logprobs"] <= 5:
-            raise ValueError(("if passed, `logprobs` must be a value",
-                              " in the interval [0, 5]."))
+                "logprobs"] is not None and not data["logprobs"] >= 0:
+            raise ValueError("if passed, `logprobs` must be a positive value.")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_stream_options(cls, data):
+        if data.get("stream_options") and not data.get("stream"):
+            raise ValueError(
+                "Stream options can only be defined when stream is True.")
         return data
 
 
