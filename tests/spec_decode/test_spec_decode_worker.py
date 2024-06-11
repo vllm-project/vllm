@@ -33,8 +33,7 @@ def test_correctly_calls_draft_model(
     target_worker = mock_worker()
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              mock_sampler_factory[0],
-                              mock_sampler_factory[1], metrics_collector)
+                              mock_sampler_factory, metrics_collector)
     exception_secret = 'artificial stop'
     draft_worker.get_spec_proposals.side_effect = ValueError(exception_secret)
 
@@ -65,8 +64,6 @@ def test_correctly_calls_target_model(
     """
     draft_worker = mock_worker(cls=MultiStepWorker, use_spec=False)
     target_worker = mock_worker(use_spec=False)
-    rejection_sampler = MagicMock(spec=RejectionSampler)
-    rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     draft_worker.device = 'cuda'
@@ -75,8 +72,7 @@ def test_correctly_calls_target_model(
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              mock_sampler_factory[0],
-                              mock_sampler_factory[1],
+                              mock_sampler_factory,
                               metrics_collector)
     worker.init_device()
 
@@ -143,7 +139,7 @@ def test_correctly_calls_target_model(
 @pytest.mark.parametrize("mock_sampler_factory",
   ["rejection_sampler", "typical_acceptance_sampler"], indirect=True)
 @torch.inference_mode()
-def test_correctly_calls_rejection_sampler(
+def test_correctly_calls_verification_sampler(
     k: int, batch_size: int, mock_sampler_factory):
     """Verify SpecDecodeWorker calls the rejection sampler with
     correct inputs. Everything else is mocked out.
@@ -154,7 +150,7 @@ def test_correctly_calls_rejection_sampler(
                                vocab_size=vocab_size,
                                use_spec=False)
     target_worker = mock_worker(vocab_size=vocab_size, use_spec=False)
-    rejection_sampler, typical_acceptance_sampler = mock_sampler_factory
+    verification_sampler = mock_sampler_factory
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
@@ -162,8 +158,7 @@ def test_correctly_calls_rejection_sampler(
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              rejection_sampler,
-                              typical_acceptance_sampler, metrics_collector)
+                              verification_sampler, metrics_collector)
     worker.init_device()
 
     proposal_token_ids = torch.randint(low=0,
@@ -209,25 +204,17 @@ def test_correctly_calls_rejection_sampler(
     target_worker.execute_model.return_value = [target_output[0]]
 
     exception_secret = 'artificial stop'
-    if rejection_sampler:
-        rejection_sampler.side_effect = ValueError(exception_secret)
-    else:
-        typical_acceptance_sampler.side_effect = ValueError(
-            exception_secret)
+
+    verification_sampler.side_effect = ValueError(exception_secret)
 
     with pytest.raises(ValueError, match=exception_secret):
         worker.execute_model(execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
             num_lookahead_slots=k))
-    
-    if rejection_sampler:
-        assert len(rejection_sampler.call_args_list) == 1
-        _, kwargs = rejection_sampler.call_args_list[0]
-        actual = SimpleNamespace(**kwargs)
-    else:
-        assert len(typical_acceptance_sampler.call_args_list) == 1
-        _, kwargs = typical_acceptance_sampler.call_args_list[0]
-        actual = SimpleNamespace(**kwargs)
+
+    assert len(verification_sampler.call_args_list) == 1
+    _, kwargs = verification_sampler.call_args_list[0]
+    actual = SimpleNamespace(**kwargs)
 
     assert torch.equal(actual.bonus_token_ids,
                        target_token_ids.reshape(batch_size, k + 1)[:, -1:])
@@ -235,7 +222,7 @@ def test_correctly_calls_rejection_sampler(
         actual.target_probs,
         target_token_probs.reshape(batch_size, k + 1, -1)[:, :-1])
     assert torch.equal(actual.draft_token_ids, proposal_token_ids)
-    if rejection_sampler:
+    if isinstance(verification_sampler, RejectionSampler):
         assert torch.equal(actual.draft_probs, proposal_probs)
 
 
@@ -260,10 +247,9 @@ def test_correctly_formats_output(
     target_worker.device = 'cuda'
 
     set_random_seed(1)
-    rejection_sampler, typical_acceptance_sampler = mock_sampler_factory
+    verification_sampler = mock_sampler_factory
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              rejection_sampler,
-                              typical_acceptance_sampler,
+                              verification_sampler,
                               metrics_collector)
     worker.init_device()
 
@@ -318,10 +304,8 @@ def test_correctly_formats_output(
         minimum_accepted_tokens = 1
         sampler_output[i][
             -random.randint(minimum_accepted_tokens, k + 1):] = -1
-    if rejection_sampler:
-        rejection_sampler.return_value = sampler_output
-    else:
-       typical_acceptance_sampler.return_value = sampler_output
+    
+    verification_sampler.return_value = sampler_output
     output = worker.execute_model(execute_model_req=ExecuteModelRequest(
         seq_group_metadata_list=seq_group_metadata_list,
         num_lookahead_slots=k))
@@ -381,15 +365,15 @@ def test_collects_metrics(
                                vocab_size=vocab_size,
                                use_spec=False)
     target_worker = mock_worker(vocab_size=vocab_size, use_spec=False)
-    rejection_sampler, typical_acceptance_sampler = mock_sampler_factory
+    verification_sampler = mock_sampler_factory
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
     set_random_seed(1)
 
-    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                              typical_acceptance_sampler,
+    worker = SpecDecodeWorker(draft_worker, target_worker,
+                              verification_sampler,
                               metrics_collector)
     worker.init_device()
 
@@ -444,10 +428,7 @@ def test_collects_metrics(
         minimum_accepted_tokens = 1
         sampler_output[i][
             -random.randint(minimum_accepted_tokens, k + 1):] = -1
-    if rejection_sampler:
-        rejection_sampler.return_value = sampler_output
-    else:
-        typical_acceptance_sampler.return_value = sampler_output
+    verification_sampler.return_value = sampler_output
 
     mock_rejsample_metrics = MagicMock(
         spec=SpecDecodeWorkerMetrics) if returns_metrics else None
@@ -487,8 +468,7 @@ def test_k_equals_zero(k: int, batch_size: int, mock_sampler_factory):
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              mock_sampler_factory[0],
-                              mock_sampler_factory[1],
+                              mock_sampler_factory,
                               metrics_collector)
 
     seq_group_metadata_list, _, _ = create_batch(batch_size,
@@ -530,8 +510,7 @@ def test_empty_input_batch(k: int, batch_size: int, mock_sampler_factory):
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              mock_sampler_factory[0],
-                              mock_sampler_factory[1],
+                              mock_sampler_factory,
                               metrics_collector)
 
     seq_group_metadata_list, _, _ = create_batch(batch_size,
@@ -559,12 +538,11 @@ def test_init_device(mock_sampler_factory):
     """
     draft_worker = mock_worker(cls=MultiStepWorker, use_spec=False)
     target_worker = mock_worker(use_spec=False)
-    rejection_sampler, typical_acceptance_sampler = mock_sampler_factory
+    verification_sampler = mock_sampler_factory
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              rejection_sampler,
-                              typical_acceptance_sampler,
+                              verification_sampler,
                               metrics_collector)
 
     worker.init_device()
@@ -574,11 +552,7 @@ def test_init_device(mock_sampler_factory):
     target_worker.init_device.assert_called_once()
 
     metrics_collector.init_gpu_tensors.assert_called_once()
-    if rejection_sampler:
-        rejection_sampler.init_gpu_tensors.assert_called_once()
-    else:
-        typical_acceptance_sampler.init_gpu_tensors.assert_called_once()
-
+    verification_sampler.init_gpu_tensors.assert_called_once()
 
 @pytest.mark.parametrize("mock_sampler_factory",
   ["rejection_sampler", "typical_acceptance_sampler"], indirect=True)
@@ -592,8 +566,7 @@ def test_initialize_cache(mock_sampler_factory):
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              mock_sampler_factory[0],
-                              mock_sampler_factory[1],
+                              mock_sampler_factory,
                               metrics_collector)
 
     kwargs = {"num_gpu_blocks": 1024, "num_cpu_blocks": 1023}
@@ -632,8 +605,7 @@ def test_determine_num_available_blocks(available_gpu_blocks: int,
     draft_worker.get_cache_block_size_bytes.return_value = draft_kv_size_bytes
 
     worker = SpecDecodeWorker(draft_worker, target_worker,
-                              mock_sampler_factory[0],
-                              mock_sampler_factory[1],
+                              mock_sampler_factory,
                               metrics_collector)
 
     num_gpu_blocks, num_cpu_blocks = worker.determine_num_available_blocks()
