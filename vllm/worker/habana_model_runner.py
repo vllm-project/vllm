@@ -851,14 +851,14 @@ class HabanaModelRunner:
 
         htorch.core.mark_step()
         if self.is_driver_worker:
-            model_event_name = f'model_{base_event_name}_eager_bs{real_batch_size}'
+            model_event_name = f"model_{'prompt' if is_prompt else 'decode'}_bs{batch_size}_seq{seq_len}_graphs{'T' if use_graphs else 'F'}"
         else:
             model_event_name = 'model_executable'
         with self.profiler.record_event('internal', model_event_name):
             hidden_states = self.model.forward(**execute_model_kwargs, selected_token_indices=sampling_metadata.selected_token_indices, bypass_hpu_graphs=not use_graphs)
 
         # Compute the logits.
-        with self.profiler.record_event('internal', 'compute_logits'):
+        with self.profiler.record_event('internal', f'compute_logits_{"prompt" if is_prompt else "decode"}_bs{batch_size}_seq{seq_len}'):
             sampling_metadata.selected_token_indices = None
             logits = self.model.compute_logits(hidden_states, sampling_metadata)
         htorch.core.mark_step()
@@ -868,7 +868,7 @@ class HabanaModelRunner:
             return None
 
         # Sample the next token.
-        with self.profiler.record_event('internal', 'sample'):
+        with self.profiler.record_event('internal', f'sample_{"prompt" if is_prompt else "decode"}_bs{batch_size}_seq{seq_len}'):
             output = self.model.sample(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
