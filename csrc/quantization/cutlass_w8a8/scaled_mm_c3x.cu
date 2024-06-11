@@ -67,7 +67,7 @@ struct enable_sm90_or_later : Kernel {
 /*
    This epilogue function defines a quantized GEMM operation similar to
    torch.scaled_mm_.
-   
+
    A and B may be both either int8 or fp8_e4m3. A can be
    quantized per-tensor or per-row. B can be quantized per-tensor or per-column.
    Any combination of per-tensor and per-row or column is supported.
