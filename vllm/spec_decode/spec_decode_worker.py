@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from vllm.config import SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.spec_decode_base_sampler import SpecDecodeBaseSampler
@@ -33,7 +34,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     WorkerWrapper. It constructs a SpecDecodeWorker from the speculative config.
     """
     assert "speculative_config" in kwargs
-    speculative_config = kwargs.get("speculative_config")
+    speculative_config: SpeculativeConfig = kwargs.get("speculative_config")
     assert speculative_config is not None
 
     target_worker = Worker(*args, **kwargs)
@@ -130,7 +131,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     typical_acceptance_sampler_posterior_threshold,
                 posterior_alpha=typical_acceptance_sampler_posterior_alpha,
         )
-
+ 
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,

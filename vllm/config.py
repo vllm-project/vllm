@@ -93,6 +93,7 @@ class ModelConfig:
         revision: Optional[str] = None,
         code_revision: Optional[str] = None,
         rope_scaling: Optional[dict] = None,
+        rope_theta: Optional[float] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
@@ -100,7 +101,7 @@ class ModelConfig:
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: Optional[int] = None,
-        max_logprobs: int = 5,
+        max_logprobs: int = 20,
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
@@ -113,6 +114,7 @@ class ModelConfig:
         self.revision = revision
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
+        self.rope_theta = rope_theta
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
             self.tokenizer_revision = revision
@@ -132,7 +134,7 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling)
+                                    code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(
@@ -601,9 +603,25 @@ class ParallelConfig:
                                  f"'{self.distributed_executor_backend}'.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
+            # We use multiprocessing by default if world_size fits on the
+            # current node and we aren't in a ray placement group.
+            from torch.cuda import device_count
+
             from vllm.executor import ray_utils
+            backend = "mp"
             ray_found = ray_utils.ray is not None
-            self.distributed_executor_backend = "ray" if ray_found else "mp"
+            if device_count() < self.world_size:
+                if not ray_found:
+                    raise ValueError("Unable to load Ray which is "
+                                     "required for multi-node inference")
+                backend = "ray"
+            elif ray_found:
+                from ray.util import get_current_placement_group
+                if self.placement_group or get_current_placement_group():
+                    backend = "ray"
+            self.distributed_executor_backend = backend
+            logger.info("Defaulting to use %s for distributed inference",
+                        backend)
 
         self._verify_args()
 
