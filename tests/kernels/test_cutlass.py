@@ -51,11 +51,7 @@ def cutlass_fp8_gemm_helper(m: int,
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b * b.to(dtype=torch.float32)).to(out_dtype)
 
-    # Convert outputs to fp32, since allclose is not implemented for fp8_e4m3
-    assert torch.allclose(out.to(torch.float32),
-                          baseline.to(torch.float32),
-                          rtol=1e-2,
-                          atol=1e-1)
+    assert torch.allclose(out, baseline, rtol=1e-2, atol=1e-1)
 
 
 def cutlass_int8_gemm_helper(m: int,
@@ -79,8 +75,9 @@ def cutlass_int8_gemm_helper(m: int,
         (1, n_b_scales), device=device, dtype=torch.float32) / 10)
 
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
-    baseline = (scale_b * scale_a * torch.mm(a.to(dtype=torch.float32),
-                        b.to(dtype=torch.float32))).to(dtype=out_dtype)
+    baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
+                        scale_b *
+                        b.to(dtype=torch.float32)).to(dtype=out_dtype)
 
     assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
 
@@ -109,8 +106,7 @@ def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("out_dtype",
-                         [torch.bfloat16, torch.float16, torch.int8])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                         out_dtype: Type[torch.dtype]):
     cutlass_int8_gemm_helper(512, 512, 512, per_act_token, per_out_ch,
@@ -119,8 +115,7 @@ def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("out_dtype",
-                         [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
