@@ -5,7 +5,7 @@ Speculative decoding in vLLM
 
 .. warning::
     Please note that speculative decoding in vLLM is not yet optimized and does
-    not usually yield inter-token latency reductions for prompt datasets or sampling parameters. The work
+    not usually yield inter-token latency reductions for all prompt datasets or sampling parameters. The work
     to optimize it is ongoing and can be followed in `this issue. <https://github.com/vllm-project/vllm/issues/4630>`_
 
 This document shows how to use `Speculative Decoding <https://x.com/karpathy/status/1697318534555336961>`_ with vLLM.
