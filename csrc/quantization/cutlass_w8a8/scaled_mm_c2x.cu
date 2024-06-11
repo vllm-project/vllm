@@ -29,21 +29,14 @@
 using namespace cute;
 
 /*
-   This defines a quantized GEMM operation with dequantized output, similar to
-   torch._scaled_mm. It is defined using the CUTLASS 2.x API, and is used for
+   This file defines quantized GEMM operations using the CUTLASS 2.x API, for
    NVIDIA GPUs with SM versions prior to sm90 (Hopper).
 
-   A and B may be both either int8 or fp8_e4m3. A can be quantized per-tensor or
-   per-row. B can be quantized per-tensor or per-column.
-   Any combination of per-tensor and per-row or column is supported.
-   A and B must have symmetric quantization (zero point == 0).
-
-   So the GEMM operation is D = (a_scales * A) (b_scales * B), where the
-   scales are applied elementwise with numpy-style broadcasting.
-
-   ScaleA and ScaleB define the epilogue functions that apply the scales for
-   the A and B operands respectively. These scales may be either per-tensor or
-   per row or column.
+   Epilogue functions can be defined to post-process the output before it is
+   written to GPU memory.
+   Epilogues must contain a public type named EVTCompute of type Sm80EVT,
+   as well as a static prepare_args function that constructs an 
+   EVTCompute::Arguments struct.
 */
 
 namespace {
@@ -83,6 +76,22 @@ struct enable_sm89_to_sm90 : Kernel {
   }
 };
 
+/*
+   This epilogue function defines a quantized GEMM operation similar to
+   torch._scaled_mm.
+
+   A and B may be both either int8 or fp8_e4m3. A can be quantized per-tensor or
+   per-row. B can be quantized per-tensor or per-column.
+   Any combination of per-tensor and per-row or column is supported.
+   A and B must have symmetric quantization (zero point == 0).
+
+   So the GEMM operation is D = (a_scales * A) (b_scales * B), where the
+   scales are applied elementwise with numpy-style broadcasting.
+
+   ScaleA and ScaleB define the epilogue functions that apply the scales for
+   the A and B operands respectively. These scales may be either per-tensor or
+   per row or column.
+*/
 template <typename ElementD, typename OutputTileThreadMap>
 struct ScaledEpilogue {
  private:
