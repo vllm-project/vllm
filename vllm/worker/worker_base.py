@@ -63,7 +63,8 @@ class WorkerBase(ABC):
             self.execute_model(model_input)
 
     @abstractmethod
-    def prepare_model_input_local(self, execute_model_req: ExecuteModelRequest) -> ModelInput:
+    def prepare_model_input_local(
+            self, execute_model_req: ExecuteModelRequest) -> ModelInput:
         """
         Prepare a model execution request locally. This method is not allowed
         to communicate with external devices.
@@ -71,7 +72,10 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def prepare_model_input(self, execute_model_req: Optional[ExecuteModelRequest] = None) -> ModelInput:
+    def prepare_model_input(
+            self,
+            execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> ModelInput:
         """
         Prepare a model execution request. Communication with other workers
         may occur to produce the model input that should be passed to
@@ -80,9 +84,7 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def execute_model(
-            self,
-            model_input: ModelInput) -> List[SamplerOutput]:
+    def execute_model(self, model_input: ModelInput) -> List[SamplerOutput]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         raise NotImplementedError

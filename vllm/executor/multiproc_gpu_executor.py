@@ -76,9 +76,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             worker_monitor.close()
 
     def _driver_execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest]
-    ) -> List[SamplerOutput]:
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution

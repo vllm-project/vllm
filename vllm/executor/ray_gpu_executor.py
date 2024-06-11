@@ -174,17 +174,19 @@ class RayGPUExecutor(DistributedGPUExecutor):
                           max_parallel_loading_workers)
 
     def _driver_execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest]
-    ) -> List[SamplerOutput]:
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution
         loop running in each of the remote workers.
         """
-        model_input = self.driver_worker.execute_method("prepare_model_input", execute_model_req)
+        model_input = self.driver_worker.execute_method(
+            "prepare_model_input", execute_model_req)
+
         if model_input is None:
-            return
+            return None
+
         return self.driver_worker.execute_method("execute_model", model_input)
 
     def _run_workers(

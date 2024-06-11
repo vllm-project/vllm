@@ -22,7 +22,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata,  ModelInput, ModelInputWithSamplingMetadata
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata, ModelInput, ModelInputWithSamplingMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 
@@ -616,7 +616,6 @@ class ModelRunner:
             num_prefills=num_prefills,
         )
 
-
     def prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -634,13 +633,15 @@ class ModelRunner:
 
         If cuda graph is required, this API automatically pads inputs.
         """
-        model_input = self._prepare_model_input_tensors(seq_group_metadata_list)
-        sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list, model_input.seq_lens,
-            model_input.query_lens, self.device, self.pin_memory)
+        model_input = self._prepare_model_input_tensors(
+            seq_group_metadata_list)
+        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                     model_input.seq_lens,
+                                                     model_input.query_lens,
+                                                     self.device,
+                                                     self.pin_memory)
         return ModelInputWithSamplingMetadata.new(
-                clone=model_input,
-                sampling_metadata=sampling_metadata)
+            clone=model_input, sampling_metadata=sampling_metadata)
 
     def get_empty_model_input(self) -> ModelInputWithSamplingMetadata:
         return ModelInputWithSamplingMetadata.new()
@@ -652,7 +653,8 @@ class ModelRunner:
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         if self.lora_config:
-            self.set_active_loras(model_input.lora_requests, model_input.lora_mapping)
+            self.set_active_loras(model_input.lora_requests,
+                                  model_input.lora_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
         prefill_meta = model_input.attn_metadata.prefill_metadata
@@ -672,7 +674,8 @@ class ModelRunner:
         )
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, model_input.sampling_metadata)
+        logits = self.model.compute_logits(hidden_states,
+                                           model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:

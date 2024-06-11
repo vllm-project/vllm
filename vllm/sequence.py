@@ -876,6 +876,7 @@ class ExecuteModelRequest:
             running_queue_size=self.running_queue_size,
         )
 
+
 @dataclass(frozen=True)
 class ModelInput:
     """Local inputs to each worker's `execute_model` function. May contain
@@ -907,44 +908,46 @@ class ModelInput:
     attn_metadata: Optional["AttentionMetadata"] = None
 
     BROADCASTABLE_FIELDS: List[str] = (
-            "num_seq_groups",
-            "blocks_to_swap_in",
-            "blocks_to_swap_out",
-            "blocks_to_copy",
-            "input_tokens",
-            "input_positions",
-            "lora_requests",
-            "lora_mapping",
-            "multi_modal_kwargs",
-            "num_prefill_tokens",
-            "num_decode_tokens",
-            "slot_mapping",
-            "num_prefills",
-            )
+        "num_seq_groups",
+        "blocks_to_swap_in",
+        "blocks_to_swap_out",
+        "blocks_to_copy",
+        "input_tokens",
+        "input_positions",
+        "lora_requests",
+        "lora_mapping",
+        "multi_modal_kwargs",
+        "num_prefill_tokens",
+        "num_decode_tokens",
+        "slot_mapping",
+        "num_prefills",
+    )
 
     @classmethod
     def _get_init_kwargs(cls,
-            attn_backend: Optional["AttentionBackend"] = None,
-            attn_metadata: Optional["AttentionMetadata"] = None, **kwargs) -> Dict[str, Any]:
+                         attn_backend: Optional["AttentionBackend"] = None,
+                         attn_metadata: Optional["AttentionMetadata"] = None,
+                         **kwargs) -> Dict[str, Any]:
         if attn_metadata is None:
             # Extract the fields used to create AttentionMetadata.
             if attn_backend is not None:
                 valid_attn_kwargs = {}
-                for field in dataclasses.fields(attn_backend.get_metadata_cls()):
+                for field in dataclasses.fields(
+                        attn_backend.get_metadata_cls()):
                     val = kwargs.pop(field.name, None)
                     if val is not None:
                         valid_attn_kwargs[field.name] = val
 
-                attn_metadata = attn_backend.make_metadata(
-                        **valid_attn_kwargs
-                        )
+                attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
         if attn_metadata is not None:
             kwargs["attn_metadata"] = attn_metadata
 
         return kwargs
 
     @classmethod
-    def new(cls, clone: Optional["ModelInput"] = None, **kwargs) -> "ModelInput":
+    def new(cls,
+            clone: Optional["ModelInput"] = None,
+            **kwargs) -> "ModelInput":
         clone_kwargs = {}
         if clone is not None:
             for field in dataclasses.fields(clone):
@@ -960,7 +963,8 @@ class ModelInput:
         valid_kwargs = self.__class__._get_init_kwargs(**kwargs)
         return dataclasses.replace(self, **valid_kwargs)
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Union[int, torch.Tensor]]:
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
         tensor_dict = {}
         for field in self.BROADCASTABLE_FIELDS:
             val = getattr(self, field, None)
@@ -979,7 +983,8 @@ class ModelInputWithSamplingMetadata(ModelInput):
     sampling_metadata: Optional["SamplingMetadata"] = None
 
     @classmethod
-    def _get_init_kwargs(cls,
+    def _get_init_kwargs(
+            cls,
             selected_token_indices: Optional[torch.Tensor] = None,
             sampling_metadata: Optional["SamplingMetadata"] = None,
             **kwargs) -> Dict[str, Any]:
@@ -989,20 +994,21 @@ class ModelInputWithSamplingMetadata(ModelInput):
 
                 # Workers do not perform sampling.
                 sampling_metadata = SamplingMetadata(
-                        seq_groups=None,
-                        selected_token_indices=selected_token_indices,
-                        categorized_sample_indices=None,
-                        num_prompts=0,
-                        )
+                    seq_groups=None,
+                    selected_token_indices=selected_token_indices,
+                    categorized_sample_indices=None,
+                    num_prompts=0,
+                )
         if sampling_metadata is not None:
             kwargs["sampling_metadata"] = sampling_metadata
         return super()._get_init_kwargs(**kwargs)
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Union[int, torch.Tensor]]:
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
         tensor_dict = super().as_broadcastable_tensor_dict()
 
         if self.sampling_metadata is not None:
-            tensor_dict["selected_token_indices"] = self.sampling_metadata.selected_token_indices
+            tensor_dict[
+                "selected_token_indices"] = self.sampling_metadata.selected_token_indices
 
         return tensor_dict
-

@@ -75,7 +75,8 @@ class CPUExecutor(ExecutorBase):
     def execute_model(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        model_input = self.driver_worker.prepare_model_input_local(execute_model_req)
+        model_input = self.driver_worker.prepare_model_input_local(
+            execute_model_req)
         output = self.driver_worker.execute_model(model_input)
         return output
 

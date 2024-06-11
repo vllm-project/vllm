@@ -116,13 +116,13 @@ class DistributedGPUExecutor(GPUExecutor):
 
     @abstractmethod
     def _driver_execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest]
-    ) -> List[SamplerOutput]:
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
-        Passing None will cause the driver to stop the model execution
-        loop running in each of the remote workers.
+        Passing None will cause the driver to stop the model execution loop
+        running in each of the remote workers. In this case, this method
+        returns None. Otherwise, this method returns the model output.
         """
         raise NotImplementedError
 

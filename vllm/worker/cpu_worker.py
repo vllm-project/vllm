@@ -264,13 +264,11 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
     @torch.inference_mode()
     def prepare_model_input_local(
-            self,
-            execute_model_req: ExecuteModelRequest) -> ModelInput:
+            self, execute_model_req: ExecuteModelRequest) -> ModelInput:
         assert execute_model_req is not None
 
         model_input = self.model_runner.prepare_model_input_tensors(
-                execute_model_req.seq_group_metadata_list
-                )
+            execute_model_req.seq_group_metadata_list)
 
         num_seq_groups: int = len(execute_model_req.seq_group_metadata_list)
         blocks_to_copy = execute_model_req.blocks_to_copy
@@ -280,14 +278,14 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         assert len(execute_model_req.blocks_to_swap_in) == 0
         assert len(execute_model_req.blocks_to_swap_out) == 0
         return model_input.replace(
-                num_seq_groups=num_seq_groups,
-                blocks_to_copy=blocks_to_copy,
-                )
+            num_seq_groups=num_seq_groups,
+            blocks_to_copy=blocks_to_copy,
+        )
 
     @torch.inference_mode()
     def prepare_model_input(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+            self,
+            execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> ModelInput:
         if self.is_driver_worker:
             if execute_model_req is None:
@@ -309,8 +307,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
             model_input = self.model_runner.get_empty_model_input()
             model_input = model_input.new(
-                    attn_backend=self.model_runner.attn_backend,
-                    **metadata_dict)
+                attn_backend=self.model_runner.attn_backend, **metadata_dict)
         return model_input
 
     @torch.inference_mode()
@@ -324,8 +321,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         if model_input.num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(model_input,
-                                                 self.cpu_cache)
+        output = self.model_runner.execute_model(model_input, self.cpu_cache)
 
         # CPU worker only supports single-step execution.
         return [output]

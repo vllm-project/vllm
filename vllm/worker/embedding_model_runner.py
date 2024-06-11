@@ -23,6 +23,7 @@ logger = init_logger(__name__)
 class ModelInputWithPoolingMetadata(ModelInput):
     pooling_metadata: Optional["SamplingMetadata"] = None
 
+
 class EmbeddingModelRunner(ModelRunner):
 
     def __init__(
@@ -59,7 +60,8 @@ class EmbeddingModelRunner(ModelRunner):
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         if self.lora_config:
-            self.set_active_loras(model_input.lora_requests, model_input.lora_mapping)
+            self.set_active_loras(model_input.lora_requests,
+                                  model_input.lora_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
         prefill_meta = model_input.attn_metadata.prefill_metadata
@@ -80,7 +82,8 @@ class EmbeddingModelRunner(ModelRunner):
             "attn_metadata": model_input.attn_metadata,
         }
         if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": model_input.multi_modal_input})
+            execute_model_kwargs.update(
+                {"image_input": model_input.multi_modal_input})
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.
@@ -95,15 +98,16 @@ class EmbeddingModelRunner(ModelRunner):
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> ModelInput:
         assert seq_group_metadata_list is not None
-        model_input = self._prepare_model_input_tensors(seq_group_metadata_list)
+        model_input = self._prepare_model_input_tensors(
+            seq_group_metadata_list)
         # Prepare PoolingMetadata.
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
                                                  model_input.seq_lens)
 
         return ModelInputWithPoolingMetadata.new(
-                clone=model_input,
-                pooling_metadata=pooling_metadata,
-                )
+            clone=model_input,
+            pooling_metadata=pooling_metadata,
+        )
 
     def _prepare_pooling(
         self,

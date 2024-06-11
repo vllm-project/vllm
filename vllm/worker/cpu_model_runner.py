@@ -297,11 +297,11 @@ class CPUModelRunner:
             self.device,
             pin_memory=False)
         return ModelInputWithSamplingMetadata.new(
-                input_tokens=input_tokens,
-                input_positions=input_positions,
-                attn_metadata=attn_metadata,
-                sampling_metadata=sampling_metadata,
-                )
+            input_tokens=input_tokens,
+            input_positions=input_positions,
+            attn_metadata=attn_metadata,
+            sampling_metadata=sampling_metadata,
+        )
 
     def get_empty_model_input(self) -> ModelInputWithSamplingMetadata:
         return ModelInputWithSamplingMetadata.new()
@@ -320,12 +320,14 @@ class CPUModelRunner:
             "attn_metadata": model_input.attn_metadata,
         }
         if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": mmodel_input.multi_modal_input})
+            execute_model_kwargs.update(
+                {"image_input": mmodel_input.multi_modal_input})
 
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, model_input.sampling_metadata)
+        logits = self.model.compute_logits(hidden_states,
+                                           model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
