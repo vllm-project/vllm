@@ -28,7 +28,7 @@ COPY ./requirements-neuron.txt /app/vllm/requirements-neuron.txt
 RUN cd /app/vllm \
     && python3 -m pip install -U -r requirements-neuron.txt
 
-ENV VLLM_BUILD_WITH_NEURON 1
+ENV VLLM_TARGET_DEVICE neuron
 RUN cd /app/vllm \
     && pip install -e . \
     && cd ..
