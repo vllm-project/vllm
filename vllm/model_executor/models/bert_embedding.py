@@ -8,8 +8,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -69,6 +68,7 @@ class BertEmbeddingModel(nn.Module):
             if "gamma" in key:
                 return key.replace("gamma", "weight")
             return key
+
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "query", "q"),
@@ -82,7 +82,7 @@ class BertEmbeddingModel(nn.Module):
             if name.startswith('cls.'):
                 continue
 
-            name = name[len(_prefix) :] if name.startswith(_prefix) else name
+            name = name[len(_prefix):] if name.startswith(_prefix) else name
             name = _fix_key(name)
 
             # use Pooler instead.
@@ -114,6 +114,7 @@ class BertEmbeddingModel(nn.Module):
 
 
 class BertModel(nn.Module):
+
     def __init__(
         self,
         config: BertConfig,
@@ -140,6 +141,7 @@ class BertModel(nn.Module):
 
 
 class BertEmbedding(nn.Module):
+
     def __init__(self, config: BertConfig):
         super().__init__()
         self.size = config.hidden_size
@@ -151,7 +153,8 @@ class BertEmbedding(nn.Module):
                                                 config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size,
                                                   config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         self.position_embedding_type = config.position_embedding_type
@@ -180,14 +183,16 @@ class BertEmbedding(nn.Module):
 
         # position embeddings
         if position_ids is None:
-            position_ids = torch.arange(seq_length, dtype=torch.long,
+            position_ids = torch.arange(seq_length,
+                                        dtype=torch.long,
                                         device=device)
             position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
         position_embeddings = self.position_embeddings(position_ids)
 
         # token type embeddings
         if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape, dtype=torch.long,
+            token_type_ids = torch.zeros(input_shape,
+                                         dtype=torch.long,
                                          device=device)
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
@@ -199,6 +204,7 @@ class BertEmbedding(nn.Module):
 
 
 class BertEncoder(nn.Module):
+
     def __init__(
         self,
         config: BertConfig,
@@ -230,6 +236,7 @@ class BertEncoder(nn.Module):
 
 
 class BertLayer(nn.Module):
+
     def __init__(
         self,
         config: BertConfig,
@@ -265,6 +272,7 @@ class BertLayer(nn.Module):
 
 
 class BertAttention(nn.Module):
+
     def __init__(
         self,
         config: BertConfig,
@@ -319,8 +327,7 @@ class BertSelfAttention(nn.Module):
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
             bias=True,
-            quant_config=quant_config
-        )
+            quant_config=quant_config)
 
         self.attn = Attention(
             num_heads=self.num_heads,
@@ -344,10 +351,12 @@ class BertSelfAttention(nn.Module):
 
 
 class BertSelfOutput(nn.Module):
+
     def __init__(self, config: BertConfig):
         super(BertSelfOutput, self).__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, hidden_states, input_tensor):
@@ -358,6 +367,7 @@ class BertSelfOutput(nn.Module):
 
 
 class BertIntermediate(nn.Module):
+
     def __init__(self, config: BertConfig):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
@@ -370,10 +380,12 @@ class BertIntermediate(nn.Module):
 
 
 class BertOutput(nn.Module):
+
     def __init__(self, config: BertConfig):
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
