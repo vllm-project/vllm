@@ -69,6 +69,9 @@ async def async_request_tgi(
                         if not chunk_bytes:
                             continue
                         chunk_bytes = chunk_bytes.decode("utf-8")
+
+                        #NOTE: Sometimes TGI returns a ping response without
+                        # any data, we should skip it.
                         if chunk_bytes.startswith(":"):
                             continue
                         chunk = remove_prefix(chunk_bytes, "data:")
