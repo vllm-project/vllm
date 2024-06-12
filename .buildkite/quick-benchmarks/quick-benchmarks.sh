@@ -248,7 +248,7 @@ run_serving_tests() {
     client_params=$(echo "$params" | jq -r '.client_parameters')
     server_args=$(json2args "$server_params")
     client_args=$(json2args "$client_params")
-    qps_list=$(json2args "$qps_list")
+    qps_list=$(echo "$params" | jq -r '.qps_list')
 
     # check if there is enough GPU to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
@@ -277,10 +277,12 @@ run_serving_tests() {
     # wait until the server is alive
     wait_for_server
     if [ $? -eq 0 ]; then
+      echo ""
       echo "vllm server is up and running."
       # run the client
       eval "$client_command"
     else
+      echo ""
       echo "vllm failed to start within the timeout period."
     fi
 
