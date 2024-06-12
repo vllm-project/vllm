@@ -3,9 +3,9 @@
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
+from contextlib import contextmanager
 from typing import List, Optional
 
-import contextlib
 import torch
 from torch.distributed import ProcessGroup
 
@@ -261,7 +261,7 @@ def model_parallel_is_initialized():
 
 OVERRIDE_TP_STATE = False
 
-@contextlib.contextmanager
+@contextmanager
 def patch_tensor_parallel_group(group,
                                 cpu_group,
                                 pynccl_comm=None,

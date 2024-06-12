@@ -35,7 +35,6 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         """
         draft_tp = draft_parallel_config.tensor_parallel_size
         target_tp = target_parallel_config.tensor_parallel_size
-        logger.info(f"{target_tp=}, {draft_tp=}")
 
         if draft_tp == target_tp:
             return worker
@@ -49,7 +48,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         ranks = list(range(draft_tp))
 
         if rank in ranks:
-            logger.info(f"Wrapping {type(worker)} in {cls}")
+            logger.info("Wrapping {%s} in {%s}", type(worker), cls)
             return cls(worker, ranks, local_rank)
         else:
             # for workers not participating in the draft generation
