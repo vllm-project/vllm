@@ -113,6 +113,8 @@ do
     # need to be run with specific options
     if [[ "${TEST}" == *"kernels"* || "${TEST}" == *"samplers"* ]]; then
         CUDA_VISIBLE_DEVICES=0,1 pytest ${CC_PYTEST_FLAGS} --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+    elif [[ "${TEST}" == *"distributed/test_same_node"* ]]; then
+        VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 ${TEST} || LOCAL_SUCCESS=$?
     elif [[ "${TEST}" == *"distributed"* ]]; then
         CUDA_VISIBLE_DEVICES=0,1 pytest ${CC_PYTEST_FLAGS} --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     elif [[ "${TEST}" == *"test_models_logprobs"* ]]; then
