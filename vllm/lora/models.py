@@ -675,7 +675,7 @@ class LoRAModelManager:
     def _find_attn_modules(self):
         self._attn_modules = {}
         for name, module in self.model.named_modules(remove_duplicate=False):
-            if module.__name__.endswith("Attention"):
+            if module.__class__.__name__.endswith("Attention"):
                 self._attn_modules[name] = module
 
     def _match_target_modules(self, module_name: str, module: nn.Module):
