@@ -48,11 +48,11 @@ class BertEmbeddingModel(nn.Module):
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.model.forward(input_ids=input_ids,
-                                  position_ids=positions,
-                                  kv_caches=kv_caches,
-                                  inputs_embeds=inputs_embeds,
-                                  attn_metadata=attn_metadata)
+        return self.model(input_ids=input_ids,
+                          position_ids=positions,
+                          kv_caches=kv_caches,
+                          inputs_embeds=inputs_embeds,
+                          attn_metadata=attn_metadata)
 
     def pooler(
         self,
@@ -273,8 +273,8 @@ class BertAttention(nn.Module):
     ):
         super().__init__()
         self.self = BertSelfAttention(config=config,
-                                           cache_config=cache_config,
-                                           quant_config=quant_config)
+                                      cache_config=cache_config,
+                                      quant_config=quant_config)
         self.output = BertSelfOutput(config)
 
     def forward(
@@ -322,7 +322,7 @@ class BertSelfAttention(nn.Module):
             head_size=self.head_dim,
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
-            bias=False,
+            bias=True,
             quant_config=quant_config
         )
 
