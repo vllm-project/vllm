@@ -184,10 +184,10 @@ def symbolic_trace(
         cf(*list_args)
         return t.mod.graph
     else:
-        return torch.fx.symbolic_trace(fn, concrete_args).graph
+        return torch.fx.symbolic_trace(fn).graph
 
 
-def replacement_pattern_junk()
+def replacement_pattern_junk():
     #replace_graph = symbolic_trace(replace3, {'x':x, 'w': w, 'x_scale':x_scale, 'w_scale':w_scale, 'x_type': x_type})
     #replace_graph = symbolic_trace(replace3, {'x':x, 'w': w, 'x_type': x_type})
 
@@ -254,7 +254,7 @@ def rewrite_quantized_gemms(
     pattern_graph = symbolic_trace(pattern3)
     print(f"Pattern graph:\n{graph_print_tabular(pattern_graph)}\n")
 
-    replace_graph = symbolic_trace(replace4(xsf), [x, w, w_scale, x_type])
+    replace_graph = symbolic_trace(replace4(x_scale), [x, w, w_scale, x_type])
     print(f"Replace graph:\n{graph_print_tabular(replace_graph)}\n")
 
     # See https://github.com/pytorch/pytorch/issues/93002
@@ -269,11 +269,10 @@ def rewrite_quantized_gemms(
         logger.debug(
             f"Rewritten module {mod}:\n{graph_print_tabular(mod.graph)}")
         print(f"Rewritten module {mod}:\n{graph_print_tabular(mod.graph)}")
-        #return mod
 
-    llama_mlp_pattern_graph = symbolic_trace(llama_mlp_pattern)
-    matcher = SubgraphMatcher(llama_mlp_pattern_graph, ignore_literals=True)
-    matches = matcher.match(mod.graph)
-    print(f"LLAMA MATCHES {matches}")
+    #llama_mlp_pattern_graph = symbolic_trace(llama_mlp_pattern)
+    #matcher = SubgraphMatcher(llama_mlp_pattern_graph, ignore_literals=True)
+    #matches = matcher.match(mod.graph)
+    #print(f"LLAMA MATCHES {matches}")
 
     return mod
