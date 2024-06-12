@@ -40,9 +40,9 @@ class ModelConfig:
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
         seed: Random seed for reproducibility.
-        revision: The specific model version to use. It can be a branch name,
-            a tag name, or a commit id. If unspecified, will use the default
-            version.
+        weight_revision: The specific revision to use for the model weights. 
+            It can be a branch name, a tag name, or a commit id. 
+            If unspecified, will use the default version.
         code_revision: The specific revision to use for the model code on
             Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
@@ -90,7 +90,7 @@ class ModelConfig:
         trust_remote_code: bool,
         dtype: Union[str, torch.dtype],
         seed: int,
-        revision: Optional[str] = None,
+        weights_revision: Optional[str] = None,
         code_revision: Optional[str] = None,
         rope_scaling: Optional[dict] = None,
         tokenizer_revision: Optional[str] = None,
@@ -110,12 +110,12 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
         self.seed = seed
-        self.revision = revision
+        self.weights_revision = weights_revision
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
-            self.tokenizer_revision = revision
+            self.tokenizer_revision = weights_revision
         else:
             self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
@@ -131,7 +131,7 @@ class ModelConfig:
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
 
-        self.hf_config = get_config(self.model, trust_remote_code, revision,
+        self.hf_config = get_config(self.model, trust_remote_code, weights_revision,
                                     code_revision, rope_scaling)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -867,7 +867,7 @@ class SpeculativeConfig:
                 trust_remote_code=target_model_config.trust_remote_code,
                 dtype=target_model_config.dtype,
                 seed=target_model_config.seed,
-                revision=draft_revision,
+                weights_revision=draft_revision,
                 code_revision=draft_code_revision,
                 tokenizer_revision=target_model_config.tokenizer_revision,
                 max_model_len=None,

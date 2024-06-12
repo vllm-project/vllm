@@ -21,7 +21,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
 
 def get_config(model: str,
                trust_remote_code: bool,
-               revision: Optional[str] = None,
+               weights_revision: Optional[str] = None,
                code_revision: Optional[str] = None,
                rope_scaling: Optional[dict] = None) -> PretrainedConfig:
     try:
@@ -32,7 +32,7 @@ def get_config(model: str,
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
-            revision=revision,
+            revision=weights_revision,
             code_revision=code_revision)
     except ValueError as e:
         if (not trust_remote_code and
@@ -48,7 +48,7 @@ def get_config(model: str,
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model,
-                                              revision=revision,
+                                              revision=weights_revision,
                                               code_revision=code_revision)
     if rope_scaling is not None:
         logger.info("Updating rope_scaling from %r to %r",
