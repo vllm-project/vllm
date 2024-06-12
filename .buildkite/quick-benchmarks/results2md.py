@@ -153,4 +153,3 @@ with open(results_folder / "benchmark_results.md", "w") as f:
         f.write("## Serving tests\n")
         f.write(serving_md_table)
         f.write("\n")
-        
