@@ -13,9 +13,6 @@ from .parallel_state import (get_world_group, get_cpu_world_group,
                              get_tensor_model_parallel_world_size,
                              get_tp_ca_communicator,
                              get_tp_pynccl_communicator)
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 @dataclass
@@ -247,7 +244,6 @@ def broadcast_tensor_dict(
     group = group or get_world_group()
     metadata_group = metadata_group or get_cpu_world_group()
     ranks = torch.distributed.get_process_group_ranks(group)
-    logger.info(f"broadcast_tensor_dict. src: {src}, ranks: {ranks}")
     assert src in ranks, f"Invalid src rank ({src})"
 
     rank = torch.distributed.get_rank()

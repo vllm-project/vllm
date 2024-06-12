@@ -124,8 +124,6 @@ def init_distributed_environment(
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         del data
-    else:
-        logger.info("torch.distributed has already been initialized")
 
 
 def initialize_model_parallel(

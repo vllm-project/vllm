@@ -892,7 +892,7 @@ class SpeculativeConfig:
         draft_parallel_config = (
                 SpeculativeConfig.create_draft_parallel_config(
                     target_parallel_config, speculative_tensor_parallel_size))
-        
+
         return SpeculativeConfig(
             draft_model_config,
             draft_parallel_config,
@@ -943,7 +943,7 @@ class SpeculativeConfig:
             speculative_tensor_parallel_size: Optional[int]) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
-        This is mostly a copy of the target parallel config.
+        This is mostly a copy of the target parallel config, except the tp_size.
         """
 
         speculative_tensor_parallel_size = (
