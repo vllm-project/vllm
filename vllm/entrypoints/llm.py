@@ -53,8 +53,9 @@ class LLM:
             model config file. If that is None, we assume the model weights are
             not quantized and use `dtype` to determine the data type of
             the weights.
-        revision: The specific model version to use. It can be a branch name,
-            a tag name, or a commit id.
+        weights_revision: The specific revision to use for the model weights.
+            It can be a branch name, a tag name, or a commit id. 
+            If unspecified, will use the default version.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id.
         seed: The seed to initialize the random number generator for sampling.
@@ -108,7 +109,7 @@ class LLM:
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
         quantization: Optional[str] = None,
-        revision: Optional[str] = None,
+        weights_revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
@@ -130,7 +131,7 @@ class LLM:
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             quantization=quantization,
-            revision=revision,
+            weights_revision=weights_revision,
             tokenizer_revision=tokenizer_revision,
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
