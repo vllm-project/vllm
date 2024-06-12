@@ -31,6 +31,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
                     Union)
 from unittest.mock import patch
 
+import flux
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
@@ -204,6 +205,10 @@ class GroupCoordinator:
         self.use_tpu_communicator = use_tpu_communicator
         self.use_hpu_communicator = use_hpu_communicator
         self.use_xpu_communicator = use_xpu_communicator
+
+        # Initialize pynvshmem
+        if torch.distributed.get_world_size(self.device_group) > 1:
+            flux.init_flux_shm(self.device_group)
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
