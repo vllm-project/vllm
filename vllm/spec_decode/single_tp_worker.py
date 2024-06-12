@@ -38,6 +38,7 @@ class SingleTpWorker(ProposerWorkerBase):
         """
         draft_tp = draft_parallel_config.tensor_parallel_size
         target_tp = target_parallel_config.tensor_parallel_size
+        logger.info(f"{target_tp=}, {draft_tp=}")
         if draft_tp > target_tp:
             raise ValueError("{cls} only supports draft_tp smaller than target_tp."
                              f"{draft_tp=} {target_tp=}")

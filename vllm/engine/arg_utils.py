@@ -97,8 +97,8 @@ class EngineArgs:
     num_speculative_tokens: Optional[int] = None
     speculative_max_model_len: Optional[int] = None
     speculative_disable_by_batch_size: Optional[int] = None
-    ngram_prompt_lookup_max: Optional[int] = None
-    ngram_prompt_lookup_min: Optional[int] = None
+    ngram_prompt_lookup_max: Optional[int] = 4
+    ngram_prompt_lookup_min: Optional[int] = 3
 
     qlora_adapter_name_or_path: Optional[str] = None
 

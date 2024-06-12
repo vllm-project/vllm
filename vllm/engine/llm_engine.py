@@ -355,6 +355,8 @@ class LLMEngine:
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
 
+        logger.info(f"engine_config.to_dict(): {engine_config.to_dict()}")
+
         # Create the LLM engine.
         engine = cls(
             **engine_config.to_dict(),
