@@ -470,6 +470,7 @@ class VllmRunner:
                                           sampling_params=sampling_params)
         outputs: List[Tuple[str, float]] = []
         for req_output in req_outputs:
+            assert len(req_output.outputs) == 1
             compl_output = req_output.outputs[0]
             output_str = compl_output.text
             output_logprob = compl_output.cumulative_logprob

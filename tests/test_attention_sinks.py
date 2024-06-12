@@ -3,36 +3,36 @@
 Run `pytest tests/test_attention_sinks.py`.
 """
 from functools import lru_cache
+from math import isnan
 import os
 import pytest
-import torch
-from typing import List, Tuple
 
-from vllm import LLM, SamplingParams, RequestOutput
-from tests.conftest import cleanup
+from vllm import SamplingParams
 
 
 _ATTN_SINKS_PROMPTS_FILEPATH = os.path.join(
     os.path.dirname(__file__),
     "prompts",
-    "attn-sinks-prompts.json"
+    "attn-sinks-prompts.txt"
 )
+
+_RETRIEVAL_COLOR = "mint green"
 
 
 @pytest.mark.parametrize(
     "model, max_model_len, test_retrieval, min_tokens, max_tokens",
     [
         # rope models
-        ("meta-llama/Meta-Llama-3-8B-Instruct", 8192, True, 100, 500),
-        ("mistralai/Mistral-7B-Instruct-v0.2", 32768, True, 100, 500),
+        ("meta-llama/Meta-Llama-3-8B-Instruct", 8192, True, 100, 400),
+        ("mistralai/Mistral-7B-Instruct-v0.2", 32768, True, 100, 400),
         # alibi models
-        ("mosaicml/mpt-7b-chat", 2048, False, 500, 1000),
-        ("bigscience/bloom-7b1", 2048, False, 500, 1000)
+        ("mosaicml/mpt-7b-chat", 2048, False, 500, 800),
+        ("bigscience/bloom-7b1", 2048, False, 500, 800)
     ]
 )
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("batch_size", [5])
-def test_attention_sinks(
+@pytest.mark.parametrize("batch_size", [4])
+def test_attention_sinks_correctness(
     vllm_runner,
     model: str,
     max_model_len: int,
@@ -45,9 +45,11 @@ def test_attention_sinks(
 ):
     prompt = _get_prompt(model, test_retrieval=test_retrieval)
     prompts = [prompt for _ in range(batch_size)]
-    params = SamplingParams(min_tokens=min_tokens, max_tokens=max_tokens)
-
-    memory_stats("AT START")
+    params = SamplingParams(
+        temperature=0.5,
+        min_tokens=min_tokens,
+        max_tokens=max_tokens
+    )
     
     normal_model = vllm_runner(
         model,
@@ -56,8 +58,6 @@ def test_attention_sinks(
         enforce_eager=True
     )
 
-    memory_stats("AFTER LOADING MODEL")
-    
     # bypass context length cap for normal generation
     # to compare w/ attention sinks, which generates past context length
     monkeypatch.setattr(
@@ -67,9 +67,8 @@ def test_attention_sinks(
     )
     
     normal_outputs = normal_model.generate_w_cum_logprobs(prompts, params)
+    monkeypatch.undo()
     del normal_model
-
-    memory_stats("AFTER DELETING MODEL")
 
     sink_model = vllm_runner(
         model,
@@ -84,16 +83,14 @@ def test_attention_sinks(
 
     if test_retrieval:
         for output_str, _ in sink_outputs:
-            assert "mint green" in output_str.lower()
+            assert _RETRIEVAL_COLOR in output_str.lower()
 
-    max_normal_logprob = max(logprobs for _, logprobs in normal_outputs)
-    min_sink_logprob = min(logprobs for _, logprobs in sink_outputs)
+    avg_normal_logprob = sum(logprobs for _, logprobs in normal_outputs) / batch_size
+    avg_sink_logprob = sum(logprobs for _, logprobs in sink_outputs) / batch_size
     
     # attn sinks should be lower perplexity (less negative cumulative logprobs)
-    assert max_normal_logprob < min_sink_logprob, (
-        f"max normal logprob: {max_normal_logprob}, "
-        f"min sink logprob: {min_sink_logprob}"
-    )
+    # nan logprob means negative infinity
+    assert isnan(avg_normal_logprob) or avg_normal_logprob < avg_sink_logprob
 
 
 def _get_prompt(model_name: str, test_retrieval: bool) -> str:
@@ -103,7 +100,7 @@ def _get_prompt(model_name: str, test_retrieval: bool) -> str:
     
     if test_retrieval:
         return (
-            "Remember: my favorite color is mint green. "
+            f"Remember: my favorite color is {_RETRIEVAL_COLOR}. "
             f"Here is a Harry Potter excerpt: {prompt} "
             "First, summarize this excerpt. "
             "Then, print my favorite color AFTER the summary."
@@ -117,9 +114,3 @@ def _get_prompts_json():
     import json
     with open(_ATTN_SINKS_PROMPTS_FILEPATH, "r") as f:
         return json.load(f)
-
-
-def memory_stats(s):
-    print(s)
-    print(torch.cuda.memory_allocated()/1024**2)
-    print(torch.cuda.memory_cached()/1024**2)

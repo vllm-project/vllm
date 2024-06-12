@@ -500,7 +500,7 @@ class EngineArgs:
                             default=EngineArgs.device,
                             choices=["auto", "cuda", "neuron", "cpu"],
                             help='Device type for vLLM execution.')
-        parser.add_argument('--use-attention_sinks',
+        parser.add_argument('--use-attention-sinks',
                             action='store_true',
                             help=('If True, allow the model to use '
                             'attention sinks and exceed its context '

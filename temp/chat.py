@@ -1,4 +1,5 @@
 import json
+import math
 from typing import List, Tuple
 import os
 from transformers import AutoTokenizer
@@ -29,7 +30,7 @@ def get_prompt(model, file_path="./prompts.json", magic_word=True) -> List[Tuple
             "Here is a Harry Potter excerpt: " + prompt + 
             " First, summarize this excerpt. Then, print my favorite color AFTER the summary."
         )
-    return [(prompt, SamplingParams(min_tokens=100, max_tokens=500)) ]
+    return [(prompt, SamplingParams(min_tokens=100, max_tokens=500)) for _ in range(5)]
 
 
 def get_long_prompt(file_path="./paxos-paper.txt", count=1) -> Tuple[str, SamplingParams]:
@@ -68,7 +69,7 @@ def process_requests(engine: LLMEngine,
                 num_tokens = len(out.token_ids)
                 print(f"\nOUTPUT: ({num_tokens} tokens)")
                 print(out.text, "\n")
-                print(out.cumulative_logprob, out.finish_reason)
+                print("isnan:", math.isnan(out.cumulative_logprob), out.cumulative_logprob, out.finish_reason)
 
 
 def main():
@@ -78,8 +79,8 @@ def main():
     model = "lmsys/vicuna-7b-v1.5"
     model = "mosaicml/mpt-7b-chat"
     model = "bigscience/bloom-7b1"
-    model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
     model = "meta-llama/Meta-Llama-3-8B-Instruct"
+    model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
     args = EngineArgs(
         model=model,
         enforce_eager=True,
