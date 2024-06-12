@@ -117,6 +117,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         with self._patch_tensor_parallel_group():
             self._worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
+    @torch.inference_mode()
     def sampler_output(
         self,
         execute_model_req: ExecuteModelRequest,
