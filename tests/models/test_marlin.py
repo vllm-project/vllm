@@ -13,10 +13,19 @@ Run `pytest tests/models/test_marlin.py`.
 from dataclasses import dataclass
 
 import pytest
+import torch
 
-from tests.quantization.utils import is_quant_method_supported
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 from .utils import check_logprobs_close
+
+marlin_not_supported = True
+
+if torch.cuda.is_available():
+    capability = torch.cuda.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    marlin_not_supported = (
+        capability < QUANTIZATION_METHODS["marlin"].get_min_capability())
 
 
 @dataclass
@@ -36,7 +45,7 @@ model_pairs = [
 
 
 @pytest.mark.flaky(reruns=2)
-@pytest.mark.skipif(not is_quant_method_supported("marlin"),
+@pytest.mark.skipif(marlin_not_supported,
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model_pair", model_pairs)
 @pytest.mark.parametrize("dtype", ["half"])
