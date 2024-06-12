@@ -34,6 +34,7 @@ from vllm.worker.model_runner import (_PAD_SLOT_ID, LORA_WARMUP_RANK,
                                       _is_encoder_decoder_model)
 from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
                                    STR_NOT_IMPL_ENC_DEC_SWA)
+from vllm.attention.backends.utils import STR
 
 logger = init_logger(__name__)
 
