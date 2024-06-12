@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
-    tensorizer_weights_iterator)
+    serialize_vllm_model, tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -392,6 +392,12 @@ class TensorizerLoader(BaseModelLoader):
                    cache_config: CacheConfig) -> nn.Module:
         self._verify_config(model_config, parallel_config)
 
+        if parallel_config.tensor_parallel_size > 1:
+            from vllm.distributed import get_tensor_model_parallel_rank
+            self.tensorizer_config.tensorizer_uri = \
+                self.tensorizer_config.tensorizer_uri \
+                    % get_tensor_model_parallel_rank()
+
         if is_vllm_tensorized(self.tensorizer_config):
             return self._load_model_serialized(model_config, device_config,
                                                lora_config,
@@ -401,6 +407,16 @@ class TensorizerLoader(BaseModelLoader):
                                                lora_config,
                                                vision_language_config,
                                                cache_config)
+
+    @staticmethod
+    def save_model(
+        model: torch.nn.Module,
+        tensorizer_config: TensorizerConfig,
+    ) -> None:
+        serialize_vllm_model(
+            model=model,
+            tensorizer_config=tensorizer_config,
+        )
 
 
 class ShardedStateLoader(BaseModelLoader):

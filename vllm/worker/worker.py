@@ -15,6 +15,7 @@ from vllm.distributed import (broadcast_tensor_dict,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
@@ -131,6 +132,13 @@ class Worker(WorkerBase):
             pattern=pattern,
             max_size=max_size,
         )
+
+    def save_tensorized_model(
+        self,
+        tensorizer_config: TensorizerConfig,
+    ) -> None:
+        self.model_runner.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
