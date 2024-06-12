@@ -179,7 +179,6 @@ class OpenAIServingChat(OpenAIServing):
     ) -> ChatMessageParseResult:
         role = message["role"]
         content = message.get("content")
-
         if content is None:
             return ChatMessageParseResult(messages=[], image_futures=[])
         if isinstance(content, str):
@@ -210,12 +209,7 @@ class OpenAIServingChat(OpenAIServing):
         try:
             conversation: List[ConversationMessage] = []
             image_futures: List[Awaitable[ImagePixelData]] = []
-
-            raw_msgs = request.messages
-            if request.tools:
-                print("==================tools====================")
-                tools = [t.model_dump() for t in request.tools]
-                raw_msgs = preprocess_input(msgs=raw_msgs, tools=tools)
+            print("==================create chat completion====================")
             
             for msg in request.messages:
                 chat_parsed_result = self._parse_chat_message_content(msg)
@@ -223,7 +217,12 @@ class OpenAIServingChat(OpenAIServing):
                 conversation.extend(chat_parsed_result.messages)
                 image_futures.extend(chat_parsed_result.image_futures)
             
-            conversation = raw_msgs
+            
+            if request.tools:
+                raw_msgs = request.messages
+                tools = [t.model_dump() for t in request.tools]
+                raw_msgs = preprocess_input(msgs=raw_msgs, tools=tools)
+                conversation = raw_msgs
 
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
