@@ -456,7 +456,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 # Attention sinks logic
                 if len(block_table) > self.max_blocks:
                     # 0th block is attention sink
-                    # print("ATTN SINKS: FREE", block_table[1])
                     self.gpu_allocator.free(block_table[1])
                     seq.logical_token_blocks = [logical_blocks[0]] + logical_blocks[2:]
                     self.block_tables[seq.seq_id] = [block_table[0]] + block_table[2:]

@@ -277,7 +277,7 @@ class Scheduler:
         if self.cache_config.use_attention_sinks:
             maybe_attn_sink_context_len["attn_sink_context_len"] = \
                 self.scheduler_config.max_model_len
-        
+
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,

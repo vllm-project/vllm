@@ -69,7 +69,7 @@ class StreamingAttentionSink(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        # q k v all have shape [num_tokens, num_heads * head_size] i.e. [1, 4096] for decode
+        # q, k, v all have shape [num_tokens, num_heads * head_size]
         if kv_cache is not None:
             if self.attn_backend == _Backend.FLASH_ATTN:
             # key cache shape: [num_blocks, block_size, num_heads, head_size]

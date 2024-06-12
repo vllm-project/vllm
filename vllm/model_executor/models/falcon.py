@@ -141,7 +141,11 @@ class FalconAttention(nn.Module):
         assert not (self.use_rotary and self.use_alibi), (
             "Rotary and alibi are mutually exclusive.")
 
-        self.use_attention_sinks = cache_config.use_attention_sinks
+        if cache_config:
+            self.use_attention_sinks = cache_config.use_attention_sinks
+        else:
+            self.use_attention_sinks = False
+
         if self.use_rotary:
             rope_theta = getattr(config, "rope_theta", 10000)
             max_position_embeddings = getattr(config,
@@ -180,7 +184,7 @@ class FalconAttention(nn.Module):
                                   num_kv_heads=self.num_kv_heads,
                                   cache_config=cache_config,
                                   quant_config=quant_config)
-        
+
         if self.use_attention_sinks:
             self.attention_sink = get_attention_sink(
                 self,

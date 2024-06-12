@@ -158,12 +158,16 @@ class LLMEngine:
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> None:
+        if model_config.use_attention_sinks and not model_config.enforce_eager:
+            raise NotImplementedError("Attention sinks are not supported "
+                                      "with CUDA graphs currently, please use "
+                                      "enforce_eager=True.")
         if model_config.use_attention_sinks and speculative_config:
-            raise NotImplementedError('Attention sinks are not supported '
-                                      'with speculative decoding currently.')
+            raise NotImplementedError("Attention sinks are not supported "
+                                      "with speculative decoding currently.")
         if model_config.use_attention_sinks and cache_config.enable_prefix_caching:
-            raise NotImplementedError('Attention sinks are not supported '
-                                      'with prefix caching currently.')
+            raise NotImplementedError("Attention sinks are not supported "
+                                      "with prefix caching currently.")
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "

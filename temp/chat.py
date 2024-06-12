@@ -71,7 +71,7 @@ def process_requests(engine: LLMEngine,
                 avg_logprob = cum_logprob / num_tokens
                 print(f"\nOUTPUT: ({num_tokens} tokens)")
                 print(out.text, "\n")
-                print("Output stats:", cum_logprob, avg_logprob, out.finish_reason, "isnan:", math.isnan(cum_logprob))
+                print("Output stats:", cum_logprob, avg_logprob, out.finish_reason, f"isnan={math.isnan(cum_logprob)}")
 
 
 def main():

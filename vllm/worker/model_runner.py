@@ -470,9 +470,12 @@ class ModelRunner:
                     # to save memory.
                     start_idx = max(0, query_len - self.sliding_window)
 
+                # Numbers for attention sinks logic
                 max_model_len = self.model_config.max_model_len
-                start_logic_bnum = (seq_len - max_model_len - 1) // self.block_size + 2
-                evicted_end = start_logic_bnum * self.block_size
+                block_size = self.block_size
+                num_evicted_tokens = ((seq_len - max_model_len - 1)
+                                      // block_size + 1) * block_size
+                window_start_pos = block_size + num_evicted_tokens
                 for i in range(context_len, seq_len):
                     if i < start_idx:
                         slot_mapping.append(_PAD_SLOT_ID)
@@ -482,12 +485,14 @@ class ModelRunner:
                     #                  back when past max model length
                     if (self.model_config.use_attention_sinks
                         and seq_len > max_model_len):
-                        if self.block_size <= i < evicted_end: continue
-                        else: i -= evicted_end - self.block_size
+                        if block_size <= i < window_start_pos:
+                            continue  # skip over evicted tokens
+                        else:
+                            i -= num_evicted_tokens
                     
-                    block_number = block_table[i // self.block_size]
-                    block_offset = i % self.block_size
-                    slot = block_number * self.block_size + block_offset
+                    block_number = block_table[i // block_size]
+                    block_offset = i % block_size
+                    slot = block_number * block_size + block_offset
                     slot_mapping.append(slot)
 
         batch_size = len(input_tokens)
@@ -730,8 +735,6 @@ class ModelRunner:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_kwargs
          ) = self.prepare_input_tensors(seq_group_metadata_list)
-
-        # print(f"\texecute_model: token id: {input_tokens}, positions: {input_positions}")
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)

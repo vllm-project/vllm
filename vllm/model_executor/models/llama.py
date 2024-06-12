@@ -148,8 +148,12 @@ class LlamaAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
-        
-        self.use_attention_sinks = cache_config.use_attention_sinks
+
+        if cache_config:
+            self.use_attention_sinks = cache_config.use_attention_sinks
+        else:
+            self.use_attention_sinks = False
+
         if self.use_attention_sinks:
             self.attention_sink = get_attention_sink(
                 self,
