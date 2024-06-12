@@ -143,7 +143,7 @@ class tracer:
         return gm.forward
 
 
-def symbolic_trace(
+def symbolic_trace_old(
         fn: Union[torch.nn.Module, Callable[..., Any]],
         concrete_args: Optional[Dict[str, Any]] = None,
         list_args: Optional[List[Any]] = None
@@ -173,51 +173,21 @@ def symbolic_trace(
     else:
         return torch.fx.symbolic_trace(fn, concrete_args).graph
 
-from pytorch_symbolic import Input, SymbolicModel
 
-# registering dynamic shapes
-# See: https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
-
-
-def rewrite_quantized_gemms(
-        mod: torch.fx.GraphModule,
-        example_inputs: List[torch.Tensor]) -> torch.fx.GraphModule:
-
-    #x = torch.empty((16,16), dtype=torch.float16)
-    #x_scale = torch.empty((1,1), dtype=torch.float32, device='cuda')
-
-    #w = torch.empty((x.size(0),16), dtype=torch.int8, device='cuda')
-    #w_scale = torch.empty((w.size(1),), dtype=torch.float32, device='cuda')
-
-    x_type = torch.float16
-
-    from torch.fx.experimental.symbolic_shapes import ShapeEnv
-    from torch._dynamo.source import SyntheticLocalSource, EphemeralSource
-
-    if True:
-        m, n, k = 512, 512, 512
+def symbolic_trace(
+        fn: Union[torch.nn.Module, Callable[..., Any]],
+        list_args: Optional[List[Any]] = None
+):
+    if list_args is not None:
+        t = tracer()
+        cf = torch.compile(fn, backend=t)
+        cf(*list_args)
+        return t.mod.graph
     else:
-        senv = ShapeEnv()
-        src = EphemeralSource("junk")
-        m = senv.create_unspecified_symbol(senv.create_unbacked_symint(), src)
-        n = senv.create_unspecified_symbol(senv.create_unbacked_symint(), src)
-        k = senv.create_unspecified_symbol(senv.create_unbacked_symint(), src)
+        return torch.fx.symbolic_trace(fn, concrete_args).graph
 
-    if True:
-        x = torch.empty((m, k), device="cuda", dtype=torch.float16)
-        x_scale = torch.empty((1, 1), device="cuda", dtype=torch.float32)
-        w = torch.empty((n, k), device="cuda", dtype=torch.int8).transpose(1, 0)
-        w_scale = torch.empty((1, n), device="cuda", dtype=torch.float32)
-    else:
-        x = Input((m, k), dtype=torch.float16)
-        x_scale = Input((1, 1), dtype=torch.float32)
-        w = Input((k, n), dtype=torch.int8)
-        w_scale = Input((1, n), dtype=torch.float32)
 
-    #pattern_graph = symbolic_trace(pattern3, {'x_scale':x_scale}, [x, w, w_scale, x_type])
-    pattern_graph = torch.fx.symbolic_trace(pattern3).graph
-    print(f"Pattern graph:\n{graph_print_tabular(pattern_graph)}\n")
-
+def replacement_pattern_junk()
     #replace_graph = symbolic_trace(replace3, {'x':x, 'w': w, 'x_scale':x_scale, 'w_scale':w_scale, 'x_type': x_type})
     #replace_graph = symbolic_trace(replace3, {'x':x, 'w': w, 'x_type': x_type})
 
@@ -245,16 +215,53 @@ def rewrite_quantized_gemms(
         replace_graph = symbolic_trace(replace4(xsf), {'x':xf, 'w': wf, 'x_type': x_type}, [x, w, w_scale, x_type])
         #replace_graph = symbolic_trace(replace4(xsf), {'x_type': x_type})
 
+    if False:
+        replacement = replacement_class()
+        replace_graph = symbolic_trace(replacement)
 
+# registering dynamic shapes
+# See: https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
+
+
+def rewrite_quantized_gemms(
+        mod: torch.fx.GraphModule,
+        example_inputs: List[torch.Tensor]) -> torch.fx.GraphModule:
+
+    #
+    # setup sample/fake inputs
+    #
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+    from torch._dynamo.source import SyntheticLocalSource, EphemeralSource
+
+    if True:
+        m, n, k = 512, 512, 512
+    else:
+        senv = ShapeEnv()
+        src = EphemeralSource("junk")
+        m = senv.create_unspecified_symbol(senv.create_unbacked_symint(), src)
+        n = senv.create_unspecified_symbol(senv.create_unbacked_symint(), src)
+        k = senv.create_unspecified_symbol(senv.create_unbacked_symint(), src)
+
+    x = torch.empty((m, k), device="cuda", dtype=torch.float16)
+    x_scale = torch.empty((1, 1), device="cuda", dtype=torch.float32)
+    w = torch.empty((n, k), device="cuda", dtype=torch.int8).transpose(1, 0)
+    w_scale = torch.empty((1, n), device="cuda", dtype=torch.float32)
+    x_type = torch.float16
+
+    #
+    # Generate patterns
+    #
+    pattern_graph = symbolic_trace(pattern3)
+    print(f"Pattern graph:\n{graph_print_tabular(pattern_graph)}\n")
+
+    replace_graph = symbolic_trace(replace4(xsf), [x, w, w_scale, x_type])
     print(f"Replace graph:\n{graph_print_tabular(replace_graph)}\n")
 
     # See https://github.com/pytorch/pytorch/issues/93002
     # https://github.com/pytorch/pytorch/issues/120124
     #with torch._C.DisableTorchFunction():
-    if False:
-        replacement = replacement_class()
-        replace_graph = symbolic_trace(replacement)
 
+    # might need to do this in two steps (match, figure out inputs, generate replacement)
     rep_matches = replace_pattern(mod, pattern_graph, replace_graph)
     print(f"root MATCHES {rep_matches}")
 
@@ -262,15 +269,11 @@ def rewrite_quantized_gemms(
         logger.debug(
             f"Rewritten module {mod}:\n{graph_print_tabular(mod.graph)}")
         print(f"Rewritten module {mod}:\n{graph_print_tabular(mod.graph)}")
-        return mod
+        #return mod
 
     llama_mlp_pattern_graph = symbolic_trace(llama_mlp_pattern)
     matcher = SubgraphMatcher(llama_mlp_pattern_graph, ignore_literals=True)
     matches = matcher.match(mod.graph)
     print(f"LLAMA MATCHES {matches}")
-
-    #    for name, subm in mod.named_modules():
-    #        matches = matcher.match(subm.graph)
-    #        print(f"sub {name} MATCHES {matches}")
 
     return mod
