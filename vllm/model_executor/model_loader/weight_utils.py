@@ -144,7 +144,7 @@ def get_quant_config(model_config: ModelConfig,
         with get_lock(model_name_or_path, load_config.download_dir):
             hf_folder = snapshot_download(
                 model_name_or_path,
-                revision=model_config.revision,
+                revision=model_config.weights_revision,
                 allow_patterns="*.json",
                 cache_dir=load_config.download_dir,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
