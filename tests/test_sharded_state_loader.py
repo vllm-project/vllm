@@ -39,7 +39,7 @@ def test_filter_subtensors():
     filtered_state_dict = ShardedStateLoader._filter_subtensors(state_dict)
     assert tuple(filtered_state_dict.keys()) == ("a", "b", "c")
     for key, tensor in filtered_state_dict.items():
-        # NOTE: don't use `euqal` here, as the tensor might contain NaNs
+        # NOTE: don't use `equal` here, as the tensor might contain NaNs
         assert tensor is state_dict[key]
 
 

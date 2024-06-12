@@ -149,7 +149,7 @@ def test_complex():
     # Only the first seq group has a new token appended.
     append_new_token(running[0], 1)
 
-    # Add 2 more requsets.
+    # Add 2 more requests.
     for i in range(2, 4):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
         scheduler.add_seq_group(seq_group)
