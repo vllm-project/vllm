@@ -9,11 +9,13 @@ This benchmark will be *triggered* upon:
 - A PR being merged into vllm.
 - Every commit for those PRs with `perf-benchmarks` label.
 
-This benchmark covers latency, throughput and fix-qps serving on A100 (the support for more GPUs is comming later), with different models. The estimated runtime is about 40 minutes.
+**Benchmarking coverage**: latency, throughput and fix-qps serving on A100 (the support for more GPUs is comming later), with different models.
+
+**Benchmarking ETA**: 40 minutes
 
 ## Configuring the workload for the quick benchmark
 
-The workload of the quick benchmark contains two parts: latency tests in `latency-tests.json`, and throughput tests in `serving-tests.json`. 
+The workload of the quick benchmark contains two parts: latency tests in `latency-tests.json`, throughput tests in `throughput-tests.json` and serving tests in `serving-tests.json`. 
 
 ### Latency test
 
@@ -40,12 +42,16 @@ In this example:
 -  The `test_name` attributes is a unique identifier for the test. In `latency-tests.json`, it must start with `latency_`.
 -  The `parameters` attribute control the command line arguments to be used for `benchmark_latency.py`. Note that please use underline `_` instead of the dash `-` when specifying the command line arguments, and `quick-benchmark.sh` will convert the underline to dash when feeding the arguments to `benchmark_latency.py`. For example, the corresponding command line arguments for `benchmark_latency.py` will be `--model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 1 --load-format dummy --num-iters-warmup 5 --num-iters 15`
 
+The number of this test is stable -- a slight change on the value of this number says something.
+
 WARNING: The benchmarking script will save json results by itself, so please do not configure `--output-json` parameter in the json file.
 
 
 ### Throughput test
 
 The tests are specified in `throughput-tests.json`. The syntax is similar to `latency-tests.json`, except for that the parameters will be fed forward to `benchmark_throughput.py`.
+
+The number of this test is also stable -- a slight change on the value of this number says something.
 
 ### Serving test
 
@@ -84,8 +90,22 @@ Inside this example:
 - The `client-parameters` includes the command line arguments for `benchmark_serving.py`. 
 - The `qps_list` controls the list of qps for test. It will be used to configure the `--request-rate` parameter in `benchmark_serving.py`
 
+The number of this test is less stable compared to the delay and latency benchmarks (due to randomized sharegpt dataset sampling inside `benchmark_serving.py`), but a large change on this number (e.g. 5% change) still says something.
+
+WARNING: The benchmarking script will save json results by itself, so please do not configure `--save-results` or other results-saving-related parameters in `serving-tests.json`.
+
+
+## JSON files for debugging
+
+We provide a debugging version for json file, which covers much less test cases but is sufficient to test if the benchmark is written in the right way. Feel free to use it when you contribute to this benchmark -- it will make your iteration cycles go much faster.
+
 
 ## Visualizing the results
 
-The `results2md.py` helps you put the benchmarking results inside a markdown table.
-Need example images.
+The `results2md.py` helps you put the benchmarking results inside a markdown table. To see this table, scroll to very bottom of your PR:
+![PR position](./imgs/position.jpg)
+
+Then find the `performance-benchmark` column, click details, and you will see the benchmarking tables
+![Benchmarking results](./imgs/results.jpg)
+
+If you do not see the table, please wait till the benchmark finish running.
