@@ -67,6 +67,10 @@ class SingleTpWorker(ProposerWorkerBase):
         self._tp_pynccl_comm = None #TODO: init&use
         self._tp_ca_comm = None #TODO: init&use
 
+    def _patch_tensor_parallel_group(self):
+        return patch_tensor_parallel_group(self._tp_group, self._tp_cpu_group,
+                                    self._tp_pynccl_comm, self._tp_ca_comm)
+
     def init_device(self):
         """Initialize the model on all ranks.
 
@@ -80,8 +84,7 @@ class SingleTpWorker(ProposerWorkerBase):
 
         logger.info(f"init_device. ranks: {self._ranks}")
 
-        with patch_tensor_parallel_group(self._tp_group,
-                                         self._tp_cpu_group):
+        with self._patch_tensor_parallel_group():
             self._worker.init_device()
 
     def set_include_gpu_probs_tensor(self):
@@ -89,22 +92,19 @@ class SingleTpWorker(ProposerWorkerBase):
 
     def load_model(self):
         logger.info("SingleTPWorker.load_model()")
-        with patch_tensor_parallel_group(self._tp_group,
-                                         self._tp_cpu_group):
+        with self._patch_tensor_parallel_group():
             self._worker.load_model()
 
     def determine_num_available_blocks(self):
         """Profile the model on all ranks.
         """
-        with patch_tensor_parallel_group(self._tp_group,
-                                         self._tp_cpu_group):
+        with self._patch_tensor_parallel_group():
             return self._worker.determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int):
         """Initialize the cache engine on all ranks.
         """
-        with patch_tensor_parallel_group(self._tp_group,
-                                         self._tp_cpu_group):
+        with self._patch_tensor_parallel_group():
             self._worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @torch.inference_mode()
@@ -122,8 +122,7 @@ class SingleTpWorker(ProposerWorkerBase):
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
-        with patch_tensor_parallel_group(self._tp_group,
-                                         self._tp_cpu_group):
+        with self._patch_tensor_parallel_group():
             return self._worker.get_spec_proposals(execute_model_req)
 
     @torch.inference_mode()
@@ -131,8 +130,7 @@ class SingleTpWorker(ProposerWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        with patch_tensor_parallel_group(self._tp_group,
-                                         self._tp_cpu_group):
+        with self._patch_tensor_parallel_group():
             return self._worker.execute_model(execute_model_req)
 
     def get_cache_block_size_bytes(self) -> int:
