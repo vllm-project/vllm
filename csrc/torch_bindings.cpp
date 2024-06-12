@@ -23,7 +23,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // git hash
   // Show vllm git hash
-  ops.def("githash() -> ()");
+  ops.def("githash", &githash);
   ops.impl("githash", torch::kCUDA, &githash);
 
   // Attention ops
