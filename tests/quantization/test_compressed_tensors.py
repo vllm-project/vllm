@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW8A8DynamicToken, CompressedTensorsW8A8StaticTensor)
 
 
+
 @skipIfRocm
 def test_compressed_tensors_w8a8_static_setup(vllm_runner):
     model_path = "nm-testing/tinyllama-oneshot-w8a8-static-v2"
