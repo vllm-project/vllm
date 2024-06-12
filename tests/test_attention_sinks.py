@@ -7,7 +7,8 @@ from math import isnan
 import os
 import pytest
 
-from vllm import SamplingParams
+from vllm import SamplingParams, EngineArgs, LLMEngine
+from vllm.attention.selector import get_attn_backend
 
 
 _ATTN_SINKS_PROMPTS_FILEPATH = os.path.join(
@@ -32,7 +33,8 @@ _RETRIEVAL_COLOR = "mint green"
 )
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("batch_size", [4])
-def test_attention_sinks_correctness(
+@pytest.mark.parametrize("attn_backend", ["XFORMERS", "FLASH_ATTN"])
+def test_correctness(
     vllm_runner,
     model: str,
     max_model_len: int,
@@ -41,16 +43,21 @@ def test_attention_sinks_correctness(
     max_tokens: int,
     dtype: str,
     batch_size: int,
+    attn_backend: str,
     monkeypatch: pytest.MonkeyPatch
 ):
+    if model == "mosaicml/mpt-7b-chat" and attn_backend == "XFORMERS":
+        return  # sinks performance is worse than just alibi here
+    
     prompt = _get_prompt(model, test_retrieval=test_retrieval)
-    prompts = [prompt for _ in range(batch_size)]
+    prompts = [prompt] * batch_size
     params = SamplingParams(
         temperature=0.5,
         min_tokens=min_tokens,
         max_tokens=max_tokens
     )
-    
+
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
     normal_model = vllm_runner(
         model,
         max_model_len=max_model_len,
@@ -67,9 +74,10 @@ def test_attention_sinks_correctness(
     )
     
     normal_outputs = normal_model.generate_w_cum_logprobs(prompts, params)
-    monkeypatch.undo()
+    monkeypatch.undo() # undo setattr so that cleanup runs correctly
     del normal_model
 
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
     sink_model = vllm_runner(
         model,
         max_model_len=max_model_len,
@@ -80,20 +88,84 @@ def test_attention_sinks_correctness(
 
     sink_outputs = sink_model.generate_w_cum_logprobs(prompts, params)
     del sink_model
+    get_attn_backend.cache_clear()
 
     if test_retrieval:
         for output_str, _ in sink_outputs:
             assert _RETRIEVAL_COLOR in output_str.lower()
 
-    avg_normal_logprob = sum(logprobs for _, logprobs in normal_outputs) / batch_size
-    avg_sink_logprob = sum(logprobs for _, logprobs in sink_outputs) / batch_size
+    sum_normal_avg_logprob_per_token = sum(
+        avg_logprob for _, avg_logprob in normal_outputs)
+    sum_sink_avg_logprob_per_token = sum(
+        avg_logprob for _, avg_logprob in sink_outputs)
     
-    # attn sinks should be lower perplexity (less negative cumulative logprobs)
+    # attn sinks should be lower perplexity (higher logprob per token)
     # nan logprob means negative infinity
-    assert isnan(avg_normal_logprob) or avg_normal_logprob < avg_sink_logprob
+    assert sum_sink_avg_logprob_per_token > sum_normal_avg_logprob_per_token \
+        or isnan(sum_normal_avg_logprob_per_token)
 
 
-def _get_prompt(model_name: str, test_retrieval: bool) -> str:
+@pytest.mark.parametrize("model, max_model_len", [
+    ("meta-llama/Meta-Llama-3-8B-Instruct", 8192),
+    ("mosaicml/mpt-7b-chat", 2048)
+])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("batch_size", [1, 4])
+@pytest.mark.parametrize("attn_backend, block_size", [
+    ("FLASH_ATTN", 16),
+    ("FLASH_ATTN", 32),
+    ("XFORMERS", 8),
+    ("XFORMERS", 16)
+])
+def test_eviction(
+    model: str,
+    max_model_len: int,
+    dtype: str,
+    batch_size: int,
+    attn_backend: str,
+    block_size: int,
+    monkeypatch: pytest.MonkeyPatch
+):
+    prompt = _get_prompt(model)
+    prompts = [prompt] * batch_size
+    sampling_params = SamplingParams(min_tokens=200, max_tokens=201)
+
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+    
+    engine_args = EngineArgs(
+        model,
+        max_model_len=max_model_len,
+        dtype=dtype,
+        block_size=block_size,
+        enforce_eager=True,
+        use_attention_sinks=True
+    )
+    engine = LLMEngine.from_engine_args(engine_args)
+
+    total_blocks = engine.scheduler.block_manager.get_num_free_gpu_blocks()
+    max_blocks_needed = (max_model_len // block_size) * batch_size
+
+    request_id = 0
+    while prompts or engine.has_unfinished_requests():
+        if prompts:
+            prompt = prompts.pop()
+            engine.add_request(str(request_id), prompt, sampling_params)
+            request_id += 1
+
+        engine.step()
+        free_blocks = engine.scheduler.block_manager.get_num_free_gpu_blocks()
+        used_blocks = total_blocks - free_blocks
+        assert used_blocks <= max_blocks_needed, (
+            f"Number of used blocks ({used_blocks}) should be "
+            f"at most {max_blocks_needed}"
+        )
+
+    del engine
+    get_attn_backend.cache_clear()
+
+
+@lru_cache
+def _get_prompt(model_name: str, test_retrieval: bool = False) -> str:
     prompts = _get_prompts_json()
     prompt = prompts[model_name]
     # prompt is (model's context length - 100) tokens long

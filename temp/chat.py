@@ -30,7 +30,7 @@ def get_prompt(model, file_path="./prompts.json", magic_word=True) -> List[Tuple
             "Here is a Harry Potter excerpt: " + prompt + 
             " First, summarize this excerpt. Then, print my favorite color AFTER the summary."
         )
-    return [(prompt, SamplingParams(min_tokens=100, max_tokens=500)) for _ in range(5)]
+    return [(prompt, SamplingParams(min_tokens=100, max_tokens=500, temperature=0.5)) for _ in range(4)]
 
 
 def get_long_prompt(file_path="./paxos-paper.txt", count=1) -> Tuple[str, SamplingParams]:
@@ -67,9 +67,11 @@ def process_requests(engine: LLMEngine,
 
                 out = request_output.outputs[0]
                 num_tokens = len(out.token_ids)
+                cum_logprob = out.cumulative_logprob
+                avg_logprob = cum_logprob / num_tokens
                 print(f"\nOUTPUT: ({num_tokens} tokens)")
                 print(out.text, "\n")
-                print("isnan:", math.isnan(out.cumulative_logprob), out.cumulative_logprob, out.finish_reason)
+                print("Output stats:", cum_logprob, avg_logprob, out.finish_reason, "isnan:", math.isnan(cum_logprob))
 
 
 def main():
@@ -79,8 +81,8 @@ def main():
     model = "lmsys/vicuna-7b-v1.5"
     model = "mosaicml/mpt-7b-chat"
     model = "bigscience/bloom-7b1"
-    model = "meta-llama/Meta-Llama-3-8B-Instruct"
     model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
+    model = "meta-llama/Meta-Llama-3-8B-Instruct"
     args = EngineArgs(
         model=model,
         enforce_eager=True,

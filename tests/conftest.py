@@ -470,11 +470,13 @@ class VllmRunner:
                                           sampling_params=sampling_params)
         outputs: List[Tuple[str, float]] = []
         for req_output in req_outputs:
-            assert len(req_output.outputs) == 1
+            assert len(req_output.outputs) == 1, \
+                "This method expects only one CompletionOutput per request."
             compl_output = req_output.outputs[0]
             output_str = compl_output.text
             output_logprob = compl_output.cumulative_logprob
-            outputs.append((output_str, output_logprob))
+            output_avg_logprob = output_logprob / len(compl_output.token_ids)
+            outputs.append((output_str, output_avg_logprob))
         return outputs
     
     def generate_greedy(
