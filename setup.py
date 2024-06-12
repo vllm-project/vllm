@@ -40,9 +40,6 @@ MAIN_CUDA_VERSION = "12.1"
 
 
 def is_sccache_available() -> bool:
-    print(which("sccache"))
-    print("Is schache available?")
-    print(which("sccache") is not None)
     return which("sccache") is not None
 
 
@@ -175,8 +172,6 @@ class cmake_build_ext(build_ext):
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
-        print("cmake args: ")
-        print(cmake_args)
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp)
