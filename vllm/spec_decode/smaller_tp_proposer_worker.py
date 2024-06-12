@@ -29,8 +29,8 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
     @classmethod
     def maybe_wrap_worker(cls, worker, draft_parallel_config: ParallelConfig,
-                          target_parallel_config: ParallelConfig,
-                          rank: int, local_rank: int):
+                          target_parallel_config: ParallelConfig, rank: int,
+                          local_rank: int):
         """Wrap the worker in a SmallerTpProposerWorker if necessary.
         """
         draft_tp = draft_parallel_config.tensor_parallel_size
@@ -55,12 +55,8 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             logger.info("Returning dummy worker")
             return DummyProposerWorker(worker)
 
-    def __init__(
-        self,
-        worker: Union[Worker, ProposerWorkerBase],
-        ranks: List[int],
-        local_rank: int
-    ):
+    def __init__(self, worker: Union[Worker, ProposerWorkerBase],
+                 ranks: List[int], local_rank: int):
         self._worker = worker
         self._ranks = ranks
         self._local_rank = local_rank
@@ -71,7 +67,8 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
     def _patch_tensor_parallel_group(self):
         return patch_tensor_parallel_group(self._tp_group, self._tp_cpu_group,
-                                    self._tp_pynccl_comm, self._tp_ca_comm)
+                                           self._tp_pynccl_comm,
+                                           self._tp_ca_comm)
 
     def init_device(self):
         """Initialize the device.

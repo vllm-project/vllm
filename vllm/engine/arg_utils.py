@@ -535,12 +535,13 @@ class EngineArgs:
             default=EngineArgs.num_speculative_tokens,
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding.')
-        parser.add_argument('--speculative-tensor-parallel-size',
-                            '-spec-tp',
-                            type=int,
-                            default=EngineArgs.speculative_tensor_parallel_size,
-                            help='Number of tensor parallel replicas for '
-                            'the draft model in speculative decoding.')
+        parser.add_argument(
+            '--speculative-tensor-parallel-size',
+            '-spec-tp',
+            type=int,
+            default=EngineArgs.speculative_tensor_parallel_size,
+            help='Number of tensor parallel replicas for '
+            'the draft model in speculative decoding.')
 
         parser.add_argument(
             '--speculative-max-model-len',

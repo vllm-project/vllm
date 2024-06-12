@@ -6,13 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 from torch.distributed import ProcessGroup
 
-from .parallel_state import (get_world_group, get_cpu_world_group,
-                             get_pp_pynccl_communicator,
-                             get_tensor_model_parallel_group,
-                             get_tensor_model_parallel_rank,
-                             get_tensor_model_parallel_world_size,
-                             get_tp_ca_communicator,
-                             get_tp_pynccl_communicator)
+from .parallel_state import (
+    get_world_group, get_cpu_world_group, get_pp_pynccl_communicator,
+    get_tensor_model_parallel_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size, get_tp_ca_communicator,
+    get_tp_pynccl_communicator)
 
 
 @dataclass

@@ -904,8 +904,8 @@ class SpeculativeConfig:
                 ))
 
         draft_parallel_config = (
-                SpeculativeConfig.create_draft_parallel_config(
-                    target_parallel_config, speculative_tensor_parallel_size))
+            SpeculativeConfig.create_draft_parallel_config(
+                target_parallel_config, speculative_tensor_parallel_size))
 
         return SpeculativeConfig(
             draft_model_config,
@@ -962,18 +962,17 @@ class SpeculativeConfig:
 
         speculative_tensor_parallel_size = (
             speculative_tensor_parallel_size
-            or target_parallel_config.tensor_parallel_size
-        )
+            or target_parallel_config.tensor_parallel_size)
 
         if speculative_tensor_parallel_size > \
             target_parallel_config.tensor_parallel_size:
             raise ValueError(
                 f"{speculative_tensor_parallel_size=} cannot be"
-                f"larger than {target_parallel_config.tensor_parallel_size}"
-            )
+                f"larger than {target_parallel_config.tensor_parallel_size}")
 
         draft_parallel_config = ParallelConfig(
-            pipeline_parallel_size=target_parallel_config.pipeline_parallel_size,
+            pipeline_parallel_size=target_parallel_config.
+            pipeline_parallel_size,
             tensor_parallel_size=speculative_tensor_parallel_size,
             distributed_executor_backend=target_parallel_config.
             distributed_executor_backend,
