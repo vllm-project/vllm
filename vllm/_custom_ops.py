@@ -1,4 +1,5 @@
 import contextlib
+import functools
 from typing import List, Optional, Tuple, Type
 
 import torch
@@ -21,6 +22,24 @@ with contextlib.suppress(ImportError):
 def is_custom_op_supported(op_name: str) -> bool:
     op, overloads = torch._C._jit_get_operation(op_name)
     return op is not None
+
+
+def hint_on_error(fn):
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except AttributeError as e:
+            msg = (
+                "Error in calling custom op %s: %s\n"
+                "Possibly you have built or installed an obsolete version of vllm.\n"
+                "Please try a clean build and install of vllm,"
+                "or remove old built files such as vllm/*.so and build/ .")
+            logger.error(msg, fn.__name__, e)
+            raise e
+
+    return wrapper
 
 
 # activation ops
@@ -459,3 +478,15 @@ def dispatch_bgmv_low_level(
         h_out,
         y_offset,
     )
+
+
+names_and_values = globals()
+names_and_values_to_update = {}
+for k, v in names_and_values.items():
+    # if `v` is a function with tensor argument (use type annotation to check), then wrap it with `hint_on_error`
+    if callable(v) and any(arg is torch.Tensor
+                           for arg in v.__annotations__.values()):
+        names_and_values_to_update[k] = hint_on_error(v)
+
+names_and_values.update(names_and_values_to_update)
+del names_and_values_to_update, names_and_values, v, k
