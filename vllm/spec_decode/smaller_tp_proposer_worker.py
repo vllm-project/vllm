@@ -88,8 +88,8 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
                 device=self._local_rank,
             )
         if _ENABLE_CUSTOM_ALL_REDUCE:
-            from vllm.distributed.device_communicators.custom_all_reduce import (
-                CustomAllreduce)
+            from vllm.distributed.device_communicators.custom_all_reduce \
+                import CustomAllreduce
             self._tp_ca_comm = CustomAllreduce(
                 group=self._tp_cpu_group,
                 device=self._local_rank,
