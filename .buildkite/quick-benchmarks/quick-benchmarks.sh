@@ -249,6 +249,8 @@ run_serving_tests() {
     server_args=$(json2args "$server_params")
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
+    qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
+    echo "Running over qps list $qps_list"
 
     # check if there is enough GPU to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
