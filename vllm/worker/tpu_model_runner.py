@@ -199,6 +199,7 @@ class TPUModelRunner:
             seq_id = seq_ids[0]
 
             seq_data = seq_group_metadata.seq_data[seq_id]
+            # Could include output tokens when a request is preempted.
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
@@ -218,9 +219,14 @@ class TPUModelRunner:
         assert len(prompt_lens) > 0
         num_prefills = len(prompt_lens)
         num_prefill_tokens = sum(prompt_lens)
-        max_prompt_len = max(prompt_lens)
-        max_prompt_len = _get_padded_prefill_len(max_prompt_len)
 
+        # Add paddings to make the shape [batch_size, max_prompt_len] where
+        # max_prompt_len is smallest power of 2 that is greater than or equal
+        # to the maximum prompt length.
+        # We need the 2D input shape because the Pallas FlashAttention kernel
+        # does not support packed 1D inputs.
+        # We pad the seq_len to powers of 2 to reduce the compilation overhead.
+        max_prompt_len = _get_padded_prefill_len(max(prompt_lens))
         input_tokens = make_tensor_with_pad(input_tokens,
                                             max_prompt_len,
                                             pad=0,
@@ -424,7 +430,20 @@ class ModelWrapper(nn.Module):
         t: torch.Tensor,
         p: torch.Tensor,
     ) -> torch.Tensor:
+        """Executes the forward pass of the model and samples the next token.
+
+        Args:
+            token_ids: The input token IDs of shape [batch_size, seq_len].
+            position_ids: The input position IDs of shape [batch_size, seq_len].
+            kv_caches: The key and value caches. They can be None during the
+                memory profiling at initialization.
+            attn_metadata: The Pallas attention metadata.
+            input_lens: The actual input lengths of shape [batch_size].
+            t: The sampling temperature of shape [batch_size].
+            p: The top-p probability of shape [batch_size].
+        """
         batch_size, seq_len = token_ids.shape
+        # Calculate the positions to sample from.
         base_indicies = torch.arange(
             batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
         logits_indices = base_indicies + input_lens - 1
@@ -438,7 +457,13 @@ class ModelWrapper(nn.Module):
             num_prompts=attn_metadata.num_prefills,
         )
 
+        # Skip this in memory profiling at initialization.
         if kv_caches[0][0] is not None:
+            # index_copy_(slot_mapping) only works when the inserted dimension
+            # is 0. However, the KV cache in the Pallas backend has the shape
+            # [num_kv_heads, num_blocks, block_size, head_size]. To make it
+            # work, we need to flatten the first three dimensions and modify
+            # the slot_mapping accordingly.
             num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
             slot_mapping = attn_metadata.slot_mapping
             slot_mapping = slot_mapping.flatten()

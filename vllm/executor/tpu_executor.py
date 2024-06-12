@@ -15,8 +15,10 @@ logger = init_logger(__name__)
 class TPUExecutor(ExecutorBase):
 
     def _init_executor(self) -> None:
+        assert not self.scheduler_config.chunked_prefill_enabled, (
+            "Chunked prefill is not yet supported for TPU backend")
         assert not self.speculative_config, (
-            "Speculative decoding not yet supported for TPU backend")
+            "Speculative decoding is not yet supported for TPU backend")
         if self.model_config.dtype in (torch.float16, torch.float32):
             logger.warning(
                 "The TPU backend currently does not support %s. "

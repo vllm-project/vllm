@@ -82,7 +82,10 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         set_random_seed(self.model_config.seed)
         xm.set_rng_state(self.model_config.seed, self.device)
 
-        # Increase the cache size limit.
+        # Increase the cache size limit, which is the maximum number of
+        # dynamo graphs that can be compiled.
+        # NOTE(woosuk): Usually, we compile 10-15 graphs for prefill and
+        # 30-40 graphs for decode. 128 is an arbitrary safe number.
         torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): This does not completely eliminate the recompilation
@@ -105,6 +108,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             kv_caches=kv_caches,
             is_prompt=True,
         )
+        # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
 
         m = xm.get_memory_info(self.device)
@@ -146,9 +150,16 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self._warmup_model()
 
     def _warmup_model(self) -> None:
-        # FIXME(woosuk): Here we are abusing `enforce-eager` which is defined
+        # FIXME(woosuk): Here we are abusing `enforce_eager` which is defined
         # for CUDA graphs. We should refactor this part.
         if not self.model_config.enforce_eager:
+            # Warm up the model with all possible input shapes so that
+            # compilation never happens during the actual execution.
+            # This may take ~30 mins for the first run and ~20 mins for the
+            # subsequent runs.
+            # If `enforce_eager` is True, the ahead-of-time compilation is
+            # skipped and the compilation happens during the actual execution,
+            # which is bad for performance but useful for development.
             self.model_runner.warmup_model(self.tpu_cache)
 
     def get_cache_block_size_bytes(self) -> int:
@@ -176,8 +187,10 @@ class TPUWorker(LoraNotSupportedWorkerBase):
 
         # Currently, TPUWorker does not support swapping.
         # TODO(woosuk): Support block copying.
-        assert len(execute_model_req.blocks_to_swap_in) == 0
-        assert len(execute_model_req.blocks_to_swap_out) == 0
+        assert len(execute_model_req.blocks_to_swap_in) == 0, (
+            "Swapping is not supported for the TPU backend.")
+        assert len(execute_model_req.blocks_to_swap_out) == 0, (
+            "Swapping is not supported for the TPU backend.")
         assert len(execute_model_req.blocks_to_copy) == 0
 
         output = self.model_runner.execute_model(seq_group_metadata_list,

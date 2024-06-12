@@ -58,6 +58,7 @@ class PallasMetadata(AttentionMetadata):
         if self.num_prefills == 0:
             return None
 
+        assert self.num_decode_tokens == 0
         assert self.block_tables is None
         assert self.context_lens is None
         return self
@@ -152,7 +153,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         query = query * self.scale
         if attn_metadata.num_prefills > 0:
-            assert seq_len % 16 == 0
+            assert seq_len % 16 == 0, (
+                "Pallas FlashAttention kernel requires seq_len to be a "
+                f"multiple of 16 but got {seq_len}")
 
             # Handle GQA/MQA.
             if self.num_kv_heads != self.num_heads:
@@ -163,6 +166,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
                                                 dim=-2)
                 value = value.view(batch_size, seq_len, self.num_heads,
                                    self.head_size)
+            # FlashAttention requires [batch_size, num_heads, seq_len, d_model]
+            # while the input is [batch_size, seq_len, num_heads, d_model].
+            # Permute the input to match the required format.
             output = torch.ops.xla.flash_attention(
                 query.permute(0, 2, 1, 3),
                 key.permute(0, 2, 1, 3),
