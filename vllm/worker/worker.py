@@ -9,7 +9,7 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict,
+from vllm.distributed import (broadcast_tensor_dict, disable_communication,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -224,6 +224,7 @@ class Worker(WorkerBase):
             self.cache_engine.copy(blocks_to_copy)
 
     @torch.inference_mode()
+    @disable_communication
     def prepare_model_input_local(
             self, execute_model_req: ExecuteModelRequest) -> ModelInput:
         model_input = self.model_runner.prepare_model_input_tensors(
@@ -284,6 +285,7 @@ class Worker(WorkerBase):
         return model_input
 
     @torch.inference_mode()
+    @disable_communication
     def execute_model_local(
             self, model_input: ModelInput
     ) -> List[Union[SamplerOutput, PoolerOutput]]:

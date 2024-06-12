@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 
-from vllm.distributed import DistributedContext
+from vllm.distributed import disable_communication
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, ModelInput, SamplerOutput
@@ -62,6 +62,7 @@ class WorkerBase(ABC):
                 return None
 
     @abstractmethod
+    @disable_communication
     def prepare_model_input_local(
             self, execute_model_req: ExecuteModelRequest) -> ModelInput:
         """
@@ -93,17 +94,10 @@ class WorkerBase(ABC):
         if model_input is None:
             return None
 
-        # Disallow control plane communication in worker-local code.
-        comm_ctx = DistributedContext.get_current()
-        comm_allowed = comm_ctx.communication_allowed
-        comm_ctx.communication_allowed = False
-        try:
-            return_val = self.execute_model_local(model_input)
-        finally:
-            comm_ctx.communication_allowed = comm_allowed
-        return return_val
+        return self.execute_model_local(model_input)
 
     @abstractmethod
+    @disable_communication
     def execute_model_local(self,
                             model_input: ModelInput) -> List[SamplerOutput]:
         """Executes at least one model step on the given sequences, unless no

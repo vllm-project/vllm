@@ -6,6 +6,7 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
+from vllm.distributed import disable_communication
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, ModelInput, SamplerOutput
 from vllm.worker.neuron_model_runner import NeuronModelRunner
@@ -74,6 +75,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     @torch.inference_mode()
+    @disable_communication
     def prepare_model_input_local(
             self, execute_model_req: ExecuteModelRequest) -> ModelInput:
         model_input = self.model_runner.prepare_model_input_tensors(
@@ -87,6 +89,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         return self.prepare_model_input_local(execute_model_req)
 
     @torch.inference_mode()
+    @disable_communication
     def execute_model_local(self,
                             model_input: ModelInput) -> List[SamplerOutput]:
         # If there is no input, we don't need to execute the model.

@@ -8,7 +8,7 @@ from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict,
+from vllm.distributed import (broadcast_tensor_dict, disable_communication,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -263,6 +263,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             self.cache_engine.copy(blocks_to_copy)
 
     @torch.inference_mode()
+    @disable_communication
     def prepare_model_input_local(
             self, execute_model_req: ExecuteModelRequest) -> ModelInput:
         assert execute_model_req is not None
@@ -313,6 +314,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         return model_input
 
     @torch.inference_mode()
+    @disable_communication
     def execute_model_local(
         self,
         model_input: ModelInput,

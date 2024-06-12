@@ -30,6 +30,27 @@ class DistributedContext:
 _default_context: DistributedContext = DistributedContext()
 
 
+def disable_communication(fn):
+    """
+    Helper decorator to disable control plane communication, i.e.
+    calling broadcast_tensor_dict will throw a RuntimeError. This can be used
+    to ensure that decorated code stays worker-local.
+    """
+
+    def wrapper(*args, **kwargs):
+        # Disallow control plane communication.
+        comm_ctx = DistributedContext.get_current()
+        original_comm_allowed = comm_ctx.communication_allowed
+        comm_ctx.communication_allowed = False
+
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            comm_ctx.communication_allowed = original_comm_allowed
+
+    return wrapper
+
+
 @dataclass
 class GraphCaptureContext:
     stream: torch.cuda.Stream
@@ -254,7 +275,8 @@ def broadcast_tensor_dict(
     ctx = DistributedContext.get_current()
     if not ctx.communication_allowed:
         raise RuntimeError(
-            "Control plane communication not allowed in current module")
+            "Control plane communication not allowed in functions decorated "
+            "with @disable_communication")
 
     # Bypass the function if we are using only 1 GPU.
     if (not torch.distributed.is_initialized()
