@@ -296,6 +296,7 @@ run_serving_tests() {
         echo "qps was $qps"
         qps="inf"
         echo "now qps is $qps"
+      fi
 
       new_test_name=$test_name"_qps_"$qps
 
