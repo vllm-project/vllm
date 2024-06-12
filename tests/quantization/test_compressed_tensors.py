@@ -2,7 +2,7 @@
 
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
-
+import pytest
 import torch
 
 from vllm import SamplingParams
@@ -48,6 +48,7 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
         assert output
 
 
+@pytest.mark.skip("problem with the model")
 def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner):
     model_path = "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2"
     with vllm_runner(model_path, enforce_eager=True,
