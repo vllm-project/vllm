@@ -140,6 +140,7 @@ class cmake_build_ext(build_ext):
             cmake_args += [
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
+                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
             ]
         elif is_ccache_available():
             cmake_args += [
