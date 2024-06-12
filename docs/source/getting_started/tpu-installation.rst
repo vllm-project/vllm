@@ -64,6 +64,9 @@ First, install the dependencies:
     $ pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
     $ pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
+    $ # Install other build dependencies.
+    $ pip install packaging aiohttp
+
 
 Next, build vLLM from source. This will only take a few seconds:
 
