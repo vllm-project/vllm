@@ -6,7 +6,7 @@ import torch
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
+from vllm.sequence import (ExecuteModelRequest, ModelInput, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
@@ -231,6 +231,29 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                             num_cpu_blocks=num_cpu_blocks)
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
+
+    @torch.inference_mode()
+    def prepare_model_input_local(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        raise NotImplementedError(
+            "SpecDecodeWorker does not allow direct calls to "
+            "prepare_model_input_local")
+
+    @torch.inference_mode()
+    def prepare_model_input(
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> List[SamplerOutput]:
+        raise NotImplementedError(
+            "SpecDecodeWorker does not allow direct calls to "
+            "prepare_model_input")
+
+    @torch.inference_mode()
+    def execute_model_local(self,
+                            model_input: ModelInput) -> List[SamplerOutput]:
+        raise NotImplementedError(
+            "SpecDecodeWorker does not allow direct calls to "
+            "execute_model_local")
 
     @torch.inference_mode()
     def execute_model(

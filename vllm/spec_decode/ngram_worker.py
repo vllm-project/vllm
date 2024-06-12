@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest, ModelInput, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
@@ -161,3 +161,23 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
                 execute_model_req.seq_group_metadata_list):
             raise NotImplementedError(
                 "NGramWorker does not support beam search.")
+
+    @torch.inference_mode()
+    def prepare_model_input_local(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        raise NotImplementedError("NGramWorker does not allow direct calls to "
+                                  "prepare_model_input_local")
+
+    @torch.inference_mode()
+    def prepare_model_input(
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> List[SamplerOutput]:
+        raise NotImplementedError("NGramWorker does not allow direct calls to "
+                                  "prepare_model_input")
+
+    @torch.inference_mode()
+    def execute_model_local(self,
+                            model_input: ModelInput) -> List[SamplerOutput]:
+        raise NotImplementedError("NGramWorker does not allow direct calls to "
+                                  "execute_model_local")

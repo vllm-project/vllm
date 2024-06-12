@@ -258,22 +258,21 @@ class Worker(WorkerBase):
             self,
             execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> ModelInput:
-        if self.parallel_config.tensor_parallel_size <= 1:
-            return self.prepare_model_input_local(execute_model_req)
-
         if self.is_driver_worker:
             if execute_model_req is None:
-                # This signals that there's no more requests to process for
-                # now.  All workers are running infinite loop with
-                # broadcast_tensor_dict, and it stops the loop when the driver
-                # broadcasts an empty input.  Send an empty input to notify all
-                # other workers to stop their execution loop.
-                broadcast_tensor_dict({}, src=0)
+                if self.parallel_config.tensor_parallel_size > 1:
+                    # This signals that there's no more requests to process for
+                    # now. All workers are running infinite loop with
+                    # broadcast_tensor_dict, and it stops the loop when the
+                    # driver broadcasts an empty input. Send an empty input to
+                    # notify all other workers to stop their execution loop.
+                    broadcast_tensor_dict({}, src=0)
                 return None
 
             model_input = self.prepare_model_input_local(execute_model_req)
-            metadata_dict = model_input.as_broadcastable_tensor_dict()
-            broadcast_tensor_dict(metadata_dict, src=0)
+            if self.parallel_config.tensor_parallel_size > 1:
+                metadata_dict = model_input.as_broadcastable_tensor_dict()
+                broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
             if not metadata_dict:
