@@ -106,11 +106,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if blocksparse_params is not None:
             raise NotImplementedError("Blocksparse is not supported.")
 
-        self.megacore_mode = None
         if torch_xla.tpu.version() < 4:
             raise NotImplementedError("TPU version must be 4 or higher.")
-        if torch_xla.tpu.version() == 4:
-            # FIXME: Support TPUv5p.
+
+        self.megacore_mode = None
+        tpu_type = torch_xla.tpu.get_tpu_env()["TYPE"].lower()
+        if not tpu_type.endswith("lite"):
             if self.num_kv_heads % 2 == 0:
                 self.megacore_mode = "kv_head"
             else:
