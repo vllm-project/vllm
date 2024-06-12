@@ -341,6 +341,9 @@ class LLMEngine:
         if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
+        elif engine_config.device_config.device_type == "tpu":
+            from vllm.executor.tpu_executor import TPUExecutor
+            executor_class = TPUExecutor
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor
