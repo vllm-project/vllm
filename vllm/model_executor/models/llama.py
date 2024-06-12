@@ -31,7 +31,8 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -69,6 +70,7 @@ class LlamaMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         prefix: str = "",
+        last_layer: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -77,13 +79,15 @@ class LlamaMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
-        )
+            fuse_ag_gemm=True)
+
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
+            fuse_gemm_rs=(not last_layer),
         )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -105,6 +109,7 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        first_layer: bool,
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
@@ -146,14 +151,14 @@ class LlamaAttention(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
-        )
-
+            fuse_ag_gemm=(not first_layer))
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            fuse_gemm_rs=True,
         )
 
         is_neox_style = True
@@ -197,6 +202,11 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(
         self,
         config: LlamaConfig,
+        # Hack: pass in whether this is the first/last layer
+        # so we know if we can rewrite AllReduce -> ReduceScatter + AllGather,
+        # and then propagate the AllGather to the next layer.
+        first_layer: bool,
+        last_layer: bool,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -221,6 +231,7 @@ class LlamaDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=getattr(config, "num_key_value_heads",
                                  config.num_attention_heads),
+            first_layer=first_layer,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
@@ -236,11 +247,15 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
+            last_layer=last_layer,
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
+
+        self.first_layer = first_layer
+        self.last_layer = last_layer
 
     def forward(
         self,
@@ -255,17 +270,37 @@ class LlamaDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
+            assert (hidden_states.shape == residual.shape)
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states,
-                                       kv_cache=kv_cache,
-                                       attn_metadata=attn_metadata)
+
+        # Partition residual
+        if self.first_layer:
+            n_slices = get_tensor_model_parallel_world_size()
+            residual_slices = torch.chunk(residual, n_slices, dim=0)
+            my_residual = residual_slices[get_tensor_model_parallel_rank()]
+        else:
+            my_residual = residual
+
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+        )
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        assert (hidden_states.shape == my_residual.shape)
+        hidden_states, my_residual = self.post_attention_layernorm(
+            hidden_states, my_residual)
         hidden_states = self.mlp(hidden_states)
+
+        if self.last_layer:
+            residual = tensor_model_parallel_all_gather(my_residual, 0)
+        else:
+            residual = my_residual
+
+        assert (hidden_states.shape == residual.shape)
         return hidden_states, residual
 
 
@@ -299,10 +334,13 @@ class LlamaModel(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: LlamaDecoderLayer(config=config,
-                                             cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=prefix),
+            lambda prefix, first_layer, last_layer: LlamaDecoderLayer(
+                config=config,
+                first_layer=first_layer,
+                last_layer=last_layer,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:

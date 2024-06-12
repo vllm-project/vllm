@@ -502,14 +502,32 @@ def make_layers(
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
     """
+    import inspect
+
     from vllm.distributed.parallel_state import get_pp_group
     from vllm.distributed.utils import get_pp_indices
     start_layer, end_layer = get_pp_indices(num_hidden_layers,
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
+
+    # Determine if layer_fn accepts first/last args by inspecting its signature
+    sig = inspect.signature(layer_fn)
+    has_firstlast_args = ('first_layer'
+                          in sig.parameters) and ('last_layer'
+                                                  in sig.parameters)
+
+    def make_one_layer(idx, start_layer, end_layer):
+        if has_firstlast_args:
+            return maybe_offload_to_cpu(
+                layer_fn(prefix=f"{prefix}.{idx}",
+                         first_layer=(idx == start_layer),
+                         last_layer=(idx == end_layer - 1)))
+        else:
+            return maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
+
     modules = torch.nn.ModuleList(
         [PPMissingLayer() for _ in range(start_layer)] + [
-            maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
+            make_one_layer(idx, start_layer, end_layer)
             for idx in range(start_layer, end_layer)
         ] + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
     return start_layer, end_layer, modules
