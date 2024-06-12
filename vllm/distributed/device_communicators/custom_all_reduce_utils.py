@@ -161,8 +161,8 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         f"{VLLM_CONFIG_ROOT}/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json"
     )
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    from vllm.distributed.parallel_state import get_world
-    if ((not is_distributed or get_world().local_rank == 0)
+    from vllm.distributed.parallel_state import get_world_group
+    if ((not is_distributed or get_world_group().local_rank == 0)
             and (not os.path.exists(path))):
         # only the local master process (with local_rank == 0) can
         #  enter this block to calculate the cache
@@ -174,7 +174,7 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         with open(path, "w") as f:
             json.dump(cache, f, indent=4)
     if is_distributed:
-        get_world().barrier()
+        get_world_group().barrier()
     logger.info("reading GPU P2P access cache from %s", path)
     with open(path, "r") as f:
         cache = json.load(f)

@@ -447,7 +447,7 @@ class GroupCoordinator:
 _WORLD: Optional[GroupCoordinator] = None
 
 
-def get_world() -> GroupCoordinator:
+def get_world_group() -> GroupCoordinator:
     assert _WORLD is not None, ("world group is not initialized")
     return _WORLD
 
@@ -455,25 +455,25 @@ def get_world() -> GroupCoordinator:
 _TP: Optional[GroupCoordinator] = None
 
 
-def get_tp() -> GroupCoordinator:
+def get_tp_group() -> GroupCoordinator:
     assert _TP is not None, ("tensor model parallel group is not initialized")
     return _TP
 
 
 # kept for backward compatibility
-get_tensor_model_parallel_group = get_tp
+get_tensor_model_parallel_group = get_tp_group
 
 _PP: Optional[GroupCoordinator] = None
 
 
-def get_pp() -> GroupCoordinator:
+def get_pp_group() -> GroupCoordinator:
     assert _PP is not None, (
         "pipeline model parallel group is not initialized")
     return _PP
 
 
 # kept for backward compatibility
-get_pipeline_model_parallel_group = get_pp
+get_pipeline_model_parallel_group = get_pp_group
 
 
 @contextmanager
@@ -491,7 +491,8 @@ def graph_capture():
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
-    with get_tp().graph_capture() as context, get_pp().graph_capture(context):
+    with get_tp_group().graph_capture() as context, get_pp_group(
+    ).graph_capture(context):
         yield context
 
 
@@ -582,7 +583,7 @@ def initialize_model_parallel(
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(
-        get_world().device_group)
+        get_world_group().device_group)
 
     if (world_size !=
             tensor_model_parallel_size * pipeline_model_parallel_size):
@@ -604,7 +605,7 @@ def initialize_model_parallel(
         group_ranks.append(ranks)
     _TP = GroupCoordinator(
         group_ranks=group_ranks,
-        local_rank=get_world().local_rank,
+        local_rank=get_world_group().local_rank,
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
@@ -622,7 +623,7 @@ def initialize_model_parallel(
         group_ranks.append(ranks)
     _PP = GroupCoordinator(
         group_ranks=group_ranks,
-        local_rank=get_world().local_rank,
+        local_rank=get_world_group().local_rank,
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
@@ -639,7 +640,7 @@ def ensure_model_parallel_initialized(
     values if the model parallel groups are initialized.
     """
     backend = backend or torch.distributed.get_backend(
-        get_world().device_group)
+        get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
                                   pipeline_model_parallel_size, backend)
@@ -650,7 +651,7 @@ def ensure_model_parallel_initialized(
     ), ("tensor parallel group already initialized, but of unexpected size: "
         f"{get_tensor_model_parallel_world_size()=} vs. "
         f"{tensor_model_parallel_size=}")
-    pp_world_size = get_pp().world_size
+    pp_world_size = get_pp_group().world_size
     assert (pp_world_size == pipeline_model_parallel_size), (
         "pipeline parallel group already initialized, but of unexpected size: "
         f"{pp_world_size=} vs. "
@@ -664,12 +665,12 @@ def model_parallel_is_initialized():
 
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
-    return get_tp().world_size
+    return get_tp_group().world_size
 
 
 def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
-    return get_tp().rank_in_group
+    return get_tp_group().rank_in_group
 
 
 def destroy_model_parallel():
