@@ -11,7 +11,7 @@ steps:
           # TODO(simon): check latest main branch or use the PR image.
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
             command:
-            - bash .buildkite/nightly-benchmarks/run-vllm-benchmarks.sh
+            - bash .buildkite/quick-benchmarks/quick-benchmarks.sh
             resources:
               limits:
                 nvidia.com/gpu: 8
@@ -32,21 +32,21 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  - label: "H100: NVIDIA SMI"
-    agents:
-      queue: H100
-    plugins:
-    - docker#v5.11.0:
-        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
-        command:
-        - bash
-        - .buildkite/nightly-benchmarks/run-vllm-benchmarks.sh
-        mount-buildkite-agent: true
-        propagate-environment: true
-        propagate-uid-gid: false
-        ipc: host
-        gpus: all
-        environment:
-        - VLLM_USAGE_SOURCE
-        - HF_TOKEN
+  # - label: "H100: NVIDIA SMI"
+  #   agents:
+  #     queue: H100
+  #   plugins:
+  #   - docker#v5.11.0:
+  #       image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
+  #       command:
+  #       - bash
+  #       - .buildkite/quick-benchmarks/quick-benchmarks.sh
+  #       mount-buildkite-agent: true
+  #       propagate-environment: true
+  #       propagate-uid-gid: false
+  #       ipc: host
+  #       gpus: all
+  #       environment:
+  #       - VLLM_USAGE_SOURCE
+  #       - HF_TOKEN
 
