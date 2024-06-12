@@ -38,6 +38,8 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 _NUM_WARMUP_ITERS = 2
 
+# Error message if ModelRunner is used with an encoder/decoder model
+STR_MR_ENCODER_DECODER_UNSUPPORTED = "Encoder/decoder model must be executed using EncoderDecoderModelRunner"
 
 class ModelInput(NamedTuple):
     input_tokens: torch.Tensor
@@ -141,6 +143,14 @@ class ModelRunner:
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+
+        if self._am_not_child() and self._is_encoder_decoder_model():
+            # Fail if ModelRunner is constructed for an
+            # encoder/decoder model
+            #
+            # Bypass this check if this constructor is being invoked by a child
+            # class (i.e. type(self) is not ModelRunner)
+            raise AttributeError(STR_MR_ENCODER_DECODER_UNSUPPORTED)
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -859,6 +869,22 @@ class ModelRunner:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
+
+    def _is_encoder_decoder_model(self):
+        '''
+        Identify encoder/decoder models using the is_encoder_decoder
+        field of the HF config, if this field is present; otherwise
+        return False.
+        '''
+        return False if self.model_config is None else \
+                getattr(self.model_config.hf_config, "is_encoder_decoder", False)
+
+    def _am_not_child(self):
+        '''
+        True if self is an instance of the ModelRunner
+        base class, False otherwise (i.e. child class)
+        '''
+        return type(self) is not ModelRunner
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[torch.Tensor]) -> None:

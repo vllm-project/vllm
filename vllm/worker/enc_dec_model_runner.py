@@ -25,15 +25,25 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
-from vllm.worker.model_runner import (_PAD_SLOT_ID,
-                                      LORA_WARMUP_RANK,
+from vllm.worker.model_runner import (_PAD_SLOT_ID, LORA_WARMUP_RANK,
                                       _BATCH_SIZE_ALIGNMENT,
                                       _BATCH_SIZES_TO_CAPTURE,
-                                      _NUM_WARMUP_ITERS,
-                                      ModelInput,
-                                      ModelRunner)
+                                      _NUM_WARMUP_ITERS, ModelInput,
+                                      ModelRunner, _is_block_tables_empty,
+                                      _get_graph_batch_size, CUDAGraphRunner,
+                                      _is_encoder_decoder_model)
+from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
+                                   STR_NOT_IMPL_ENC_DEC_SWA)
 
 logger = init_logger(__name__)
+
+# Error message if EncoderDecoderModelRunner is used with 
+# a non-encoder/decoder model (i.e. decoder-only)
+STR_ENCDECMR_ENCODER_DECODER_REQUIRED = "Only encoder/decoder models may be executed using EncoderDecoderModelRunner"
+
+# Error message if EncoderDecoderModelRunner is used with 
+# CUDAGraph
+STR_ENCDECMR_CUDAGRAPH_UNSUPPORTED = "Currently CUDAGraph is not supported for encoder/decoder models"
 
 class EncoderDecoderModelInput(ModelInput):
     input_tokens: torch.Tensor
@@ -67,7 +77,7 @@ class EncoderDecoderModelInput(ModelInput):
         )
 
 
-class EncoderDecoderModelRunner:
+class EncoderDecoderModelRunner(ModelRunner):
 
     def __init__(
         self,
@@ -82,145 +92,18 @@ class EncoderDecoderModelRunner:
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
     ):
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.load_config = load_config
-        self.is_driver_worker = is_driver_worker
-        self.vision_language_config = vision_language_config
+        super().__init__(model_config, parallel_config, scheduler_config,
+                         device_config, cache_config, load_config, lora_config,
+                         kv_cache_dtype, is_driver_worker,
+                         vision_language_config)
 
-        self.device = self.device_config.device
-        self.pin_memory = is_pin_memory_available()
+        if not self._is_encoder_decoder_model():
+            # Fail if EncoderDecoderModelRunner is constructed for a
+            # non-encoder/decoder model i.e. decoder-only
+            raise AttributeError(STR_ENCDECMR_ENCODER_DECODER_REQUIRED)
 
-        self.kv_cache_dtype = kv_cache_dtype
-        self.sliding_window = model_config.get_sliding_window()
-        self.block_size = cache_config.block_size
-        self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
-        self.graph_runners: Dict[int, CUDAGraphRunner] = {}
-        self.graph_memory_pool: Optional[Tuple[
-            int, int]] = None  # Set during graph capture.
-        # When using CUDA graph, the input block tables must be padded to
-        # max_seq_len_to_capture. However, creating the block table in
-        # Python can be expensive. To optimize this, we cache the block table
-        # in numpy and only copy the actual input content at every iteration.
-        # The shape of the cached block table will be
-        # (max batch size to capture, max context len to capture / block size).
-        self.graph_block_tables = np.zeros(
-            (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
-            dtype=np.int32)
-        self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
-            self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
-            self.model_config.get_sliding_window(),
-            self.model_config.dtype,
-            self.kv_cache_dtype,
-            self.block_size,
-        )
-
-        # Create processor for multi-modal data
-        if self.vision_language_config is not None:
-            self.multi_modal_input_processor = MULTIMODAL_REGISTRY \
-                .create_input_processor(
-                    self.model_config,
-                    self.vision_language_config,
-                )
-        else:
-            self.multi_modal_input_processor = None
-
-        # Lazy initialization
-        self.model: nn.Module  # Set after load_model
-        # Set if the backend is flashinfer.
-        self.flashinfer_workspace_buffer: torch.Tensor
-        # Set after load_model.
-        self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
-
-    def load_model(self) -> None:
-        with CudaMemoryProfiler() as m:
-            self.model = get_model(
-                model_config=self.model_config,
-                device_config=self.device_config,
-                load_config=self.load_config,
-                lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-                cache_config=self.cache_config,
-            )
-
-        self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
-                    self.model_memory_usage / float(2**30))
-
-        if self.lora_config:
-            assert hasattr(self.model, "supported_lora_modules"
-                           ) and self.model.supported_lora_modules, (
-                               "Model does not support LoRA")
-            assert hasattr(
-                self.model,
-                "embedding_modules"), "Model does not have embedding_modules"
-            assert hasattr(self.model, "embedding_padding_modules"
-                           ), "Model does not have embedding_padding_modules"
-            self.lora_manager = LRUCacheWorkerLoRAManager(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens,
-                self.vocab_size,
-                self.lora_config,
-                self.device,
-                self.model.embedding_modules,
-                self.model.embedding_padding_modules,
-                max_position_embeddings=self.model.config.
-                max_position_embeddings,
-            )
-            self.model = self.lora_manager.create_lora_manager(self.model)
-
-        if self.kv_cache_dtype == "fp8" and is_hip():
-            # Currently only ROCm accepts kv-cache scaling factors
-            # via quantization_param_path and this will be deprecated
-            # in the future.
-            if self.model_config.quantization_param_path is not None:
-                if callable(getattr(self.model, "load_kv_cache_scales", None)):
-                    warnings.warn(
-                        "Loading kv cache scaling factor from JSON is "
-                        "deprecated and will be removed. Please include "
-                        "kv cache scaling factors in the model checkpoint.",
-                        FutureWarning,
-                        stacklevel=2)
-                    self.model.load_kv_cache_scales(
-                        self.model_config.quantization_param_path)
-                    logger.info("Loaded KV cache scaling factors from %s",
-                                self.model_config.quantization_param_path)
-                else:
-                    raise RuntimeError(
-                        "Using FP8 KV cache and scaling factors provided but "
-                        "model %s does not support loading scaling factors.",
-                        self.model.__class__)
-            else:
-                logger.warning(
-                    "Using FP8 KV cache but no scaling factors "
-                    "provided. Defaulting to scaling factors of 1.0. "
-                    "This may lead to less accurate results!")
-
-    def save_sharded_state(
-        self,
-        path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
-    ) -> None:
-        from vllm.model_executor.model_loader.loader import ShardedStateLoader
-        ShardedStateLoader.save_model(
-            self.model,
-            path,
-            pattern=pattern,
-            max_size=max_size,
-        )
-
-    def get_max_block_per_batch(self) -> int:
-        block_size = self.block_size
-        return (self.max_seq_len_to_capture + block_size - 1) // block_size
+        if self.scheduler_config.chunked_prefill_enabled:
+            raise NotImplementedError()
 
     def _prepare_model_input(
         self,
@@ -830,125 +713,6 @@ class EncoderDecoderModelRunner:
         torch.cuda.synchronize()
         return
 
-    def remove_all_loras(self):
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        self.lora_manager.remove_all_loras()
-
-    def set_active_loras(self, lora_requests: Set[LoRARequest],
-                         lora_mapping: LoRAMapping) -> None:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        self.lora_manager.set_active_loras(lora_requests, lora_mapping)
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.add_lora(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.remove_lora(lora_id)
-
-    def list_loras(self) -> Set[int]:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.list_loras()
-
     @torch.inference_mode()
-    def capture_model(self, kv_caches: List[torch.Tensor]) -> None:
-        """Cuda graph capture a model.
-
-        Note that CUDA graph's performance gain is negligible if number
-        of batched tokens are larger than 200. And since CUDA graph
-        requires fixed sized tensors, supporting large/variable batch
-        size requires high GPU memory overhead. Thus, vLLM only captures
-        decoding requests. Mixed batch (chunked prefill + decoding) or
-        prefill requests are not captured.
-
-        Since it is used for decoding-only, it assumes there's only 1 token
-        per sequence in the batch.
-        """
-        assert not self.model_config.enforce_eager
-        logger.info("Capturing the model for CUDA graphs. This may lead to "
-                    "unexpected consequences if the model is not static. To "
-                    "run the model in eager mode, set 'enforce_eager=True' or "
-                    "use '--enforce-eager' in the CLI.")
-        logger.info("CUDA graphs can take additional 1~3 GiB memory per GPU. "
-                    "If you are running out of memory, consider decreasing "
-                    "`gpu_memory_utilization` or enforcing eager mode. "
-                    "You can also reduce the `max_num_seqs` as needed "
-                    "to decrease memory usage.")
-        start_time = time.perf_counter()
-
-        # Prepare dummy inputs. These will be reused for all batch sizes.
-        max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
-        slot_mapping.fill_(_PAD_SLOT_ID)
-        seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
-        block_tables = torch.from_numpy(self.graph_block_tables).cuda()
-
-        # Prepare buffer for outputs. These will be reused for all batch sizes.
-        # It will be filled after the first graph capture.
-        hidden_states: Optional[torch.Tensor] = None
-
-        graph_batch_size = _get_graph_batch_size(
-            self.scheduler_config.max_num_seqs)
-        batch_size_capture_list = [
-            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
-        ]
-
-        with graph_capture() as graph_capture_context:
-            # NOTE: Capturing the largest batch size first may help reduce the
-            # memory usage of CUDA graph.
-            for batch_size in reversed(batch_size_capture_list):
-                # Create dummy attn_metadata.
-                attn_metadata = self.attn_backend.make_metadata(
-                    num_prefills=0,
-                    num_prefill_tokens=0,
-                    num_decode_tokens=batch_size,
-                    slot_mapping=slot_mapping[:batch_size],
-                    seq_lens=None,
-                    seq_lens_tensor=seq_lens[:batch_size],
-                    max_query_len=None,
-                    max_prefill_seq_len=0,
-                    max_decode_seq_len=self.max_seq_len_to_capture,
-                    query_start_loc=None,
-                    seq_start_loc=None,
-                    context_lens_tensor=None,
-                    block_tables=block_tables[:batch_size],
-                    use_cuda_graph=True,
-                )
-
-                if self.lora_config:
-                    lora_mapping = LoRAMapping(
-                        [0] * batch_size,
-                        [0] * batch_size,
-                    )
-                    self.set_active_loras(set(), lora_mapping)
-
-                graph_runner = CUDAGraphRunner(self.model)
-                hidden_states = graph_runner.capture(
-                    input_tokens[:batch_size],
-                    input_positions[:batch_size],
-                    hidden_states[:batch_size]
-                    if hidden_states is not None else None,
-                    kv_caches,
-                    attn_metadata,
-                    memory_pool=self.graph_memory_pool,
-                    stream=graph_capture_context.stream,
-                )
-                self.graph_memory_pool = graph_runner.graph.pool()
-                self.graph_runners[batch_size] = graph_runner
-
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        # This usually takes < 10 seconds.
-        logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
-
-    @property
-    def vocab_size(self) -> int:
-        return self.model_config.get_vocab_size()
+    def capture_model(self, _: List[torch.Tensor]) -> None:
+        raise NotImplementedError(STR_ENCDECMR_CUDAGRAPH_UNSUPPORTED)
