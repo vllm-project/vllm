@@ -4,7 +4,9 @@
         "parameters": {
             "model": "meta-llama/Meta-Llama-3-8B",
             "tensor_parallel_size": 1,
-            "load_format": "dummy"
+            "load_format": "dummy",
+            "num-iters-warmup": 5,
+            "num-iters": 15
         }
     },
     {
@@ -12,7 +14,9 @@
         "parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
             "tensor_parallel_size": 4,
-            "load_format": "dummy"
+            "load_format": "dummy",
+            "num-iters-warmup": 5,
+            "num-iters": 15
         }
     },
     {
@@ -20,7 +24,9 @@
         "parameters": {
             "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
             "tensor_parallel_size": 2,
-            "load_format": "dummy"
+            "load_format": "dummy",
+            "num-iters-warmup": 5,
+            "num-iters": 15
         }
     }
 ]

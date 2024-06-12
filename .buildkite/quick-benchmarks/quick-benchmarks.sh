@@ -347,6 +347,8 @@ main() {
 
   # get the current IP address, required by benchmark_serving.py
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
+  # turn of the reporting of the status of each request, to clean up the terminal output
+  export VLLM_LOG_LEVEL="WARNING"
 
   # prepare for benchmarking
   cd benchmarks || exit 1
@@ -356,9 +358,9 @@ main() {
   QUICK_BENCHMARK_ROOT=../.buildkite/quick-benchmarks/
 
   # benchmarking
-  run_serving_tests $QUICK_BENCHMARK_ROOT/serving-tests-for-debugging.json
-  run_latency_tests $QUICK_BENCHMARK_ROOT/latency-tests-for-debugging.json
-  run_throughput_tests $QUICK_BENCHMARK_ROOT/throughput-tests-for-debugging.json
+  run_serving_tests $QUICK_BENCHMARK_ROOT/serving-tests.json
+  run_latency_tests $QUICK_BENCHMARK_ROOT/latency-tests.json
+  run_throughput_tests $QUICK_BENCHMARK_ROOT/throughput-tests.json
   
 
   # postprocess benchmarking results
