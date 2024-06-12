@@ -88,7 +88,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     @classmethod
     def create_worker(
         cls,
-        scorer_worker: Worker,
+        scorer_worker: WorkerBase,
         draft_worker_kwargs: Dict[str, Any],
         disable_by_batch_size: Optional[int],
     ) -> "SpecDecodeWorker":
@@ -292,10 +292,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         if num_lookahead_slots == 0 or len(
                 execute_model_req.seq_group_metadata_list
         ) == 0 or disable_all_speculation:
-            logger.info("prefill step")
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
-        logger.info("decoding step")
         return self._run_speculative_decoding_step(execute_model_req,
                                                    num_lookahead_slots)
 
