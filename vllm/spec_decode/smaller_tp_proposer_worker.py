@@ -1,19 +1,18 @@
-from typing import List, Tuple, Set, Optional, Union
 from datetime import timedelta
+from typing import List, Optional, Set, Tuple, Union
 
 import torch
 import torch.distributed
 
+from vllm.config import ParallelConfig
+from vllm.distributed.parallel_state import (_ENABLE_CUSTOM_ALL_REDUCE,
+                                             patch_tensor_parallel_group)
+from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.worker.worker import Worker
-from vllm.lora.request import LoRARequest
-
-from vllm.distributed.parallel_state import (patch_tensor_parallel_group,
-                                             _ENABLE_CUSTOM_ALL_REDUCE)
-from vllm.config import ParallelConfig
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -82,15 +81,15 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             ranks=self._ranks, timeout=timedelta(seconds=10), backend="gloo")
 
         if len(self._ranks) > 1:
-            from vllm.distributed.device_communicators.pynccl \
-                import PyNcclCommunicator
+            from vllm.distributed.device_communicators.pynccl import (
+                PyNcclCommunicator)
             self._tp_pynccl_comm = PyNcclCommunicator(
                 group=self._tp_cpu_group,
                 device=self._local_rank,
             )
         if _ENABLE_CUSTOM_ALL_REDUCE:
-            from vllm.distributed.device_communicators.custom_all_reduce \
-                import CustomAllreduce
+            from vllm.distributed.device_communicators.custom_all_reduce import (
+                CustomAllreduce)
             self._tp_ca_comm = CustomAllreduce(
                 group=self._tp_cpu_group,
                 device=self._local_rank,

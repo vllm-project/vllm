@@ -188,8 +188,7 @@ def initialize_model_parallel(
             _TP_DEVICE_GROUP = group
             _TP_CPU_GROUP = cpu_group
 
-    from vllm.distributed.device_communicators.pynccl \
-        import PyNcclCommunicator
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     if tensor_model_parallel_size > 1:
         _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
             group=_TP_CPU_GROUP,
@@ -198,8 +197,8 @@ def initialize_model_parallel(
 
     # Initialize a custom fast all-reduce implementation.
     if _ENABLE_CUSTOM_ALL_REDUCE:
-        from vllm.distributed.device_communicators.custom_all_reduce \
-            import CustomAllreduce
+        from vllm.distributed.device_communicators.custom_all_reduce import (
+            CustomAllreduce)
         _TP_CA_COMMUNICATOR = CustomAllreduce(
             group=_TP_CPU_GROUP,
             device=_LOCAL_RANK,
