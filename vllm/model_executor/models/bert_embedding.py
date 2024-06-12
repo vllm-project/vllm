@@ -302,6 +302,7 @@ class BertSelfAttention(nn.Module):
 
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
+
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = self.total_num_heads
         self.head_dim = self.hidden_size // self.total_num_heads
@@ -309,14 +310,9 @@ class BertSelfAttention(nn.Module):
 
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
 
-        self.postition_embedding = config.position_embedding_type
-        self.max_position_embeddings = config.max_position_embeddings
-
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-
         self.scaling = self.head_dim**-0.5
-
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.hidden_size,
             head_size=self.head_dim,
