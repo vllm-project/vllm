@@ -66,6 +66,7 @@ Documentation
    getting_started/neuron-installation
    getting_started/cpu-installation
    getting_started/quickstart
+   getting_started/debugging
    getting_started/examples/examples_index
 
 .. toctree::
@@ -89,6 +90,7 @@ Documentation
    models/engine_args
    models/lora
    models/vlm
+   models/spec_decode
    models/performance
 
 .. toctree::
@@ -102,8 +104,14 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
+   :caption: Automatic Prefix Caching
+
+   automatic_prefix_caching/apc
+   automatic_prefix_caching/details
+
+.. toctree::
    :caption: Developer Documentation
-   
+
    dev/sampling_params
    dev/offline_inference/offline_index
    dev/engine/engine_index
