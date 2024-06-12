@@ -3,7 +3,7 @@
 Loading Models with CoreWeave's Tensorizer
 ================
 vLLM supports loading models with `CoreWeave's Tensorizer <https://github.com/coreweave/tensorizer>`_.
-vLLM model tensors serialized to disk, an HTTP/HTTPS or S3 endpoint can be deserialized
+vLLM model tensors serialized to a HTTP/HTTPS endpoint, a S3 endpoint, or disk, can be deserialized
 at runtime extremely quickly and directly to the GPU, allowing for significantly
 shorter pod startup time and CPU memory usage. Tensor encryption is also supported.
 
