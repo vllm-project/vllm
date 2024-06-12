@@ -1,6 +1,7 @@
 from abc import abstractmethod
 from typing import Dict, List, Optional, Tuple
 
+import flux
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
@@ -10,6 +11,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -800,6 +802,133 @@ class RowParallelLinear(LinearBase):
         else:
             output = output_
             output_bias = self.bias
+        return output, output_bias
+
+    def extra_repr(self) -> str:
+        s = f"input_features={self.input_size_per_partition}"
+        s += f", output_features={self.output_size}"
+        s += f", bias={self.bias is not None}"
+        s += f", tp_size={self.tp_size}"
+        s += f", reduce_results={self.reduce_results}"
+        return s
+
+
+# TODO: Just for a prototype, this is copy-pasted from RowParallelLinear
+class FluxRowParallelLinear(LinearBase):
+
+    def __init__(self,
+                 input_size: int,
+                 output_size: int,
+                 bias: bool = True,
+                 input_is_parallel: bool = True,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 reduce_results: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None):
+        super().__init__(input_size, output_size, skip_bias_add, params_dtype,
+                         quant_config)
+
+        # Flux only supports fp16 and bf16
+        assert (quant_config is None)
+
+        self.input_is_parallel = input_is_parallel
+        self.reduce_results = reduce_results
+
+        self.tp_size = get_tensor_model_parallel_world_size()
+
+        # Create flux operation
+        self.gemm_rs_op = flux.GemmRS(
+            get_tp_group().device_group,
+            1,  # One node
+            8192,  # Max M. TODO: Pass in correctly.
+            output_size,  # N
+            # TODO: Pass in input dtype correctly.
+            # TODO: It would be nicer to modify flux to dispatch based on dtype
+            # at run time, but I don't know what the downside would be.
+            # Similar comment for max m.
+            torch.float16,
+            # Note: transpose_weight=False means that B is transposed
+            transpose_weight=False,
+            # Note: bfloat16 requires fuse_reduction=False.
+            # When fuse_reduction=False, I encounter illegal memory accesses in
+            # the kernel, which are hard to track down.
+            fuse_reduction=True,
+        )
+
+        # Divide the weight matrix along the last dimension.
+        self.input_size_per_partition = divide(input_size, self.tp_size)
+        assert self.quant_method is not None
+        self.quant_method.create_weights(
+            layer=self,
+            input_size_per_partition=self.input_size_per_partition,
+            output_partition_sizes=[self.output_size],
+            input_size=self.input_size,
+            output_size=self.output_size,
+            params_dtype=self.params_dtype,
+            weight_loader=self.weight_loader)
+        if not reduce_results and (bias and not skip_bias_add):
+            raise ValueError("When not reduce the results, adding bias to the "
+                             "results can lead to incorrect results")
+
+        if bias:
+            self.bias = Parameter(
+                torch.empty(self.output_size, dtype=params_dtype))
+            set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "weight_loader": self.weight_loader,
+            })
+        else:
+            self.register_parameter("bias", None)
+
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        # Special case for Fp8 scales.
+        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
+                                           None)
+
+        tp_rank = get_tensor_model_parallel_rank()
+        input_dim = getattr(param, "input_dim", None)
+        param_data = param.data
+        if input_dim is not None:
+            shard_size = param_data.shape[input_dim]
+            start_idx = tp_rank * shard_size
+            loaded_weight = loaded_weight.narrow(input_dim, start_idx,
+                                                 shard_size)
+
+        # Special case for Fp8 scales.
+        elif fp8_scales_shard_indexer is not None:
+            param_data, loaded_weight = fp8_scales_shard_indexer(param_data,
+                                                                 loaded_weight,
+                                                                 shard_id=0)
+
+        if fp8_scales_shard_indexer is None and len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
+
+        assert param_data.shape == loaded_weight.shape
+        param_data.copy_(loaded_weight)
+
+    def forward(self, input_):
+        # Set up backprop all-reduce.
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            tp_rank = get_tensor_model_parallel_rank()
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[tp_rank].contiguous()
+
+        if not self.skip_bias_add:
+            output_bias = None
+            bias = self.bias
+        else:
+            output_bias = self.bias
+            bias = None
+
+        scattered_output = self.gemm_rs_op.forward(input_parallel,
+                                                   self.weight,
+                                                   bias=bias)
+        scattered_output = torch.squeeze(scattered_output, 0)
+        output = tensor_model_parallel_all_gather(scattered_output, 0)
+
         return output, output_bias
 
     def extra_repr(self) -> str:

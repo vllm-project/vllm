@@ -30,6 +30,7 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed
+from flux import pynvshmem
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
@@ -160,6 +161,10 @@ class GroupCoordinator:
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
+
+        # Initialize pynvshmem
+        if torch.distributed.get_world_size(self.device_group) > 1:
+            pynvshmem.init_with_c10d_pg(self.device_group)
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
