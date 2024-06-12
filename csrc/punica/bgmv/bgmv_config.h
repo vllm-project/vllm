@@ -31,6 +31,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 3328) \
     f(in_T, out_T, W_T, narrow, 3456) \
     f(in_T, out_T, W_T, narrow, 3584) \
+    f(in_T, out_T, W_T, narrow, 3712) \
     f(in_T, out_T, W_T, narrow, 4096) \
     f(in_T, out_T, W_T, narrow, 4608) \
     f(in_T, out_T, W_T, narrow, 5120) \
@@ -41,6 +42,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 6848) \
     f(in_T, out_T, W_T, narrow, 6912) \
     f(in_T, out_T, W_T, narrow, 7168) \
+    f(in_T, out_T, W_T, narrow, 7424) \
     f(in_T, out_T, W_T, narrow, 8192) \
     f(in_T, out_T, W_T, narrow, 9216) \
     f(in_T, out_T, W_T, narrow, 10240) \
@@ -49,6 +51,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 13696) \
     f(in_T, out_T, W_T, narrow, 13824) \
     f(in_T, out_T, W_T, narrow, 14336) \
+    f(in_T, out_T, W_T, narrow, 14848) \
     f(in_T, out_T, W_T, narrow, 15360) \
     f(in_T, out_T, W_T, narrow, 16384) \
     f(in_T, out_T, W_T, narrow, 20480) \
@@ -57,6 +60,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 27392) \
     f(in_T, out_T, W_T, narrow, 27648) \
     f(in_T, out_T, W_T, narrow, 28672) \
+    f(in_T, out_T, W_T, narrow, 29696) \
     f(in_T, out_T, W_T, narrow, 32000) \
     f(in_T, out_T, W_T, narrow, 32256) \
     f(in_T, out_T, W_T, narrow, 32512) \
@@ -77,9 +81,9 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
 // Keep above in sync with vllm/lora/layers::LogitsProcessorWithLoRA
 // and vllm/tests/lora/test_punica.py
 
-// Used for defining kernels going from the variety of 
+// Used for defining kernels going from the variety of
 // dim in to the narrow dim out
-    // Using it for the fully sharded column 
+    // Using it for the fully sharded column
     // parallel LoRA A which splits the rank dim
 #define FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, narrow) \
     f(in_T, out_T, W_T, 128, narrow) \
@@ -102,6 +106,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 3328, narrow) \
     f(in_T, out_T, W_T, 3456, narrow) \
     f(in_T, out_T, W_T, 3584, narrow) \
+    f(in_T, out_T, W_T, 3712, narrow) \
     f(in_T, out_T, W_T, 4096, narrow) \
     f(in_T, out_T, W_T, 4608, narrow) \
     f(in_T, out_T, W_T, 5120, narrow) \
@@ -112,6 +117,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 6848, narrow) \
     f(in_T, out_T, W_T, 6912, narrow) \
     f(in_T, out_T, W_T, 7168, narrow) \
+    f(in_T, out_T, W_T, 7424, narrow) \
     f(in_T, out_T, W_T, 8192, narrow) \
     f(in_T, out_T, W_T, 9216, narrow) \
     f(in_T, out_T, W_T, 10240, narrow) \
@@ -120,6 +126,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 13696, narrow) \
     f(in_T, out_T, W_T, 13824, narrow) \
     f(in_T, out_T, W_T, 14336, narrow) \
+    f(in_T, out_T, W_T, 14848, narrow) \
     f(in_T, out_T, W_T, 15360, narrow) \
     f(in_T, out_T, W_T, 16384, narrow) \
     f(in_T, out_T, W_T, 20480, narrow) \
@@ -128,6 +135,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 27392, narrow) \
     f(in_T, out_T, W_T, 27648, narrow) \
     f(in_T, out_T, W_T, 28672, narrow) \
+    f(in_T, out_T, W_T, 29696, narrow) \
     f(in_T, out_T, W_T, 32000, narrow) \
     f(in_T, out_T, W_T, 32256, narrow) \
     f(in_T, out_T, W_T, 32512, narrow) \
