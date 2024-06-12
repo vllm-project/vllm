@@ -249,7 +249,7 @@ run_serving_tests() {
     server_args=$(json2args "$server_params")
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
-    qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
+    qps_list=$(echo "$qps_list" | jq -r '.[] | @sh') | tr -d \'
     echo "Running over qps list $qps_list"
 
     # check if there is enough GPU to run the test
@@ -315,7 +315,7 @@ run_serving_tests() {
           client_command: $client,
           gpu_type: $gpu
         }')
-      echo "$jq_output" > "$RESULTS_FOLDER/$new_test_name.commands"
+      echo "$jq_output" > "$RESULTS_FOLDER/${new_test_name}.commands"
 
     done
 
