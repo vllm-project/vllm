@@ -4,7 +4,6 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
 from typing import List, Optional
-from datetime import timedelta
 
 import contextlib
 import torch
@@ -190,7 +189,8 @@ def initialize_model_parallel(
             _TP_DEVICE_GROUP = group
             _TP_CPU_GROUP = cpu_group
 
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.distributed.device_communicators.pynccl \
+        import PyNcclCommunicator
     if tensor_model_parallel_size > 1:
         _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
             group=_TP_CPU_GROUP,
@@ -199,8 +199,8 @@ def initialize_model_parallel(
 
         # Initialize a custom fast all-reduce implementation.
         if _ENABLE_CUSTOM_ALL_REDUCE:
-            from vllm.distributed.device_communicators.custom_all_reduce import (
-                CustomAllreduce)
+            from vllm.distributed.device_communicators.custom_all_reduce \
+                import CustomAllreduce
             _TP_CA_COMMUNICATOR = CustomAllreduce(
                 group=_TP_CPU_GROUP,
                 device=_LOCAL_RANK,
@@ -261,13 +261,13 @@ def model_parallel_is_initialized():
     return (_TP_DEVICE_GROUP is not None and _PP_DEVICE_GROUP is not None)
 
 
-override = False
+OVERRIDE_TP_STATE = False
 
 @contextlib.contextmanager
 def patch_tensor_parallel_group(group, cpu_group, pynccl_comm=None, ca_comm=None):
-    global override
-    assert not override, "should not override during override"
-    override = True
+    global OVERRIDE_TP_STATE
+    assert not OVERRIDE_TP_STATE, "should not override during override"
+    OVERRIDE_TP_STATE = True
     old_world_group = get_world_group()
     old_world_cpu_group = get_cpu_world_group()
     old_tp_group = get_tensor_model_parallel_group()
@@ -285,7 +285,7 @@ def patch_tensor_parallel_group(group, cpu_group, pynccl_comm=None, ca_comm=None
     try:
         yield
     finally:
-        override = False
+        OVERRIDE_TP_STATE = False
         _DEVICE_WORLD_GROUP = old_world_group
         _CPU_WORLD_GROUP = old_world_cpu_group
         _TP_DEVICE_GROUP = old_tp_group

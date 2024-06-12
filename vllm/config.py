@@ -1,4 +1,3 @@
-import copy
 import enum
 import json
 from dataclasses import dataclass, field, fields

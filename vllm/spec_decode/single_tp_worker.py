@@ -85,7 +85,7 @@ class SingleTpWorker(ProposerWorkerBase):
 
         if len(self._ranks) > 1:
             from vllm.distributed.device_communicators.pynccl \
-                  import PyNcclCommunicator
+                import PyNcclCommunicator
             self._tp_pynccl_comm = PyNcclCommunicator(
                 group=self._tp_cpu_group,
                 device=self._local_rank,

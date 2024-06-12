@@ -75,7 +75,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                                      sample_len)
 
         # Run model sample_len times.
-        model_outputs = []
+        model_outputs: List[SamplerOutput] = []
         for i in range(sample_len):
             logger.info(f"Driver runs multiple draft steps. {i+1}/{sample_len}")
             model_output = super().execute_model(
