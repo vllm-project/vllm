@@ -108,7 +108,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
         
         #TODO: support NGramWorker
-        proposer_worker = SingleTpWorker.maybe_wrap_worker(proposer_worker, draft_worker_kwargs['parallel_config'], scorer_worker.parallel_config, scorer_worker.rank)
+        proposer_worker = SingleTpWorker.maybe_wrap_worker(proposer_worker, draft_worker_kwargs['parallel_config'], scorer_worker.parallel_config, scorer_worker.rank, scorer_worker.local_rank)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))

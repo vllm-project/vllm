@@ -14,7 +14,7 @@ from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
 from vllm.lora.request import LoRARequest
 
-from vllm.distributed.parallel_state import patch_tensor_parallel_group
+from vllm.distributed.parallel_state import patch_tensor_parallel_group, _ENABLE_CUSTOM_ALL_REDUCE
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 
@@ -33,7 +33,7 @@ class SingleTpWorker(ProposerWorkerBase):
     @classmethod
     def maybe_wrap_worker(cls, worker, draft_parallel_config: ParallelConfig,
                           target_parallel_config: ParallelConfig,
-                          rank: int):
+                          rank: int, local_rank: int):
         """Wrap the worker in a SingleTpWorker if necessary.
         """
         draft_tp = draft_parallel_config.tensor_parallel_size
@@ -50,7 +50,7 @@ class SingleTpWorker(ProposerWorkerBase):
         logger.info(f"{rank=}, {ranks=}")
         if rank in ranks:
             logger.info(f"Wrapping {type(worker)} in {cls}")
-            return cls(worker, ranks)
+            return cls(worker, ranks, local_rank)
         else:
             logger.info(f"dummy worker that would not participate in draft generation")
             return DummyProposerWorker(worker)
@@ -59,13 +59,15 @@ class SingleTpWorker(ProposerWorkerBase):
         self,
         worker: Union[Worker, ProposerWorkerBase],
         ranks: List[int],
+        local_rank: int
     ):
         self._worker = worker
         self._ranks = ranks
+        self._local_rank = local_rank
         self._tp_group = None
         self._tp_cpu_group = None
-        self._tp_pynccl_comm = None #TODO: init&use
-        self._tp_ca_comm = None #TODO: init&use
+        self._tp_pynccl_comm = None
+        self._tp_ca_comm = None
 
     def _patch_tensor_parallel_group(self):
         return patch_tensor_parallel_group(self._tp_group, self._tp_cpu_group,
@@ -81,6 +83,20 @@ class SingleTpWorker(ProposerWorkerBase):
             ranks=self._ranks, timeout=timedelta(seconds=10))
         self._tp_cpu_group = torch.distributed.new_group(
             ranks=self._ranks, timeout=timedelta(seconds=10), backend="gloo")
+
+        if len(self._ranks) > 1:
+            from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+            self._tp_pynccl_comm = PyNcclCommunicator(
+                group=self._tp_cpu_group,
+                device=self._local_rank,
+            )
+            if _ENABLE_CUSTOM_ALL_REDUCE:
+                from vllm.distributed.device_communicators.custom_all_reduce import (
+                CustomAllreduce)
+                self._tp_ca_comm = CustomAllreduce(
+                    group=self._tp_cpu_group,
+                    device=self._local_rank,
+                )
 
         logger.info(f"init_device. ranks: {self._ranks}")
 
