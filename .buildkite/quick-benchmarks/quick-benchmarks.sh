@@ -303,6 +303,8 @@ run_serving_tests() {
       echo "Running test case $test_name with qps $qps"
       echo "Client command: $client_command"
 
+      eval "$client_command"
+
       # record the benchmarking commands
       jq_output=$(jq -n \
         --arg server "$server_command" \
