@@ -17,6 +17,8 @@ import os
 import pytest
 import torch
 
+from vllm.utils import is_hip
+
 MODELS = [
     os.environ["TEST_DIST_MODEL"],
 ]
@@ -40,7 +42,8 @@ def test_models(
     distributed_executor_backend = os.getenv(DISTRIBUTED_EXECUTOR_BACKEND)
 
     backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
-    enforce_eager = backend_by_env_var == "FLASHINFER"
+    # TODO revisit after hipgraph is fully supported on multi-gpus
+    enforce_eager = is_hip() or backend_by_env_var == "FLASHINFER"
 
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
