@@ -4,17 +4,8 @@ Run `pytest tests/models/test_aqlm.py`.
 """
 
 import pytest
-import torch
 
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-
-aqlm_not_supported = True
-
-if torch.cuda.is_available():
-    capability = torch.cuda.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
-    aqlm_not_supported = (capability <
-                          QUANTIZATION_METHODS["aqlm"].get_min_capability())
+from tests.quantization.utils import is_quant_method_supported
 
 # In this test we hardcode prompts and generations for the model so we don't
 # need to require the AQLM package as a dependency
@@ -67,7 +58,7 @@ ground_truth_generations = [
 ]
 
 
-@pytest.mark.skipif(aqlm_not_supported,
+@pytest.mark.skipif(not is_quant_method_supported("aqlm"),
                     reason="AQLM is not supported on this GPU type.")
 @pytest.mark.parametrize("model", ["ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf"])
 @pytest.mark.parametrize("dtype", ["half"])
