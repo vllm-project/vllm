@@ -4,7 +4,10 @@ from .data import (LLMInputs, ParsedText, ParsedTokens, PromptInputs,
 from .registry import InputRegistry
 
 INPUT_REGISTRY = InputRegistry()
-"""The global :class:`~InputRegistry` which is used by model runners."""
+"""
+The global :class:`~InputRegistry` which is used by :class:`~vllm.LLMEngine`
+to dispatch data processing according to the target model.
+"""
 
 __all__ = [
     "ParsedText", "ParsedTokens", "parse_and_batch_prompt", "TextPrompt",

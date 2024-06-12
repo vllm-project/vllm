@@ -92,7 +92,12 @@ def _get_llava_next_image_feature_size(
 
 
 class DummyImageDataFactories:
-    """Contains factories for dummy image data factories."""
+    """
+    Contains factories for dummy image data factories.
+
+    See Also:
+        :data:`vllm.inputs.registry.DummyDataFactory`
+    """
 
     @classmethod
     def _dummy_seq_data_for_clip(
@@ -252,9 +257,9 @@ class ImagePixelData(MultiModalData):
     """
     The pixel data of an image. Can be one of:
 
-    - :class:``PIL.Image``: An image object. Requires that a HuggingFace
+    - :class:`PIL.Image.Image`: An image object. Requires that a HuggingFace
       processor is available to the model.
-    - :class:``torch.Tensor``: The raw pixel data which is passed to the model
+    - :class:`torch.Tensor`: The raw pixel data which is passed to the model
       without additional pre-processing.
     """
 

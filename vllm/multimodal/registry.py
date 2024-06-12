@@ -18,7 +18,7 @@ N = TypeVar("N", bound=Type[nn.Module])
 
 class MultiModalRegistry:
     """
-    This registry is used by model runners to dispatch data processing
+    A registry to dispatch data processing
     according to its modality and the target model.
     """
 

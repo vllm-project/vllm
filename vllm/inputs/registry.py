@@ -22,9 +22,22 @@ C = TypeVar("C", bound=PretrainedConfig)
 
 @dataclass(frozen=True)
 class InputContext:
+    """
+    Contains information about the model which may be used to
+    modify the inputs.
+    """
+
     model_config: "ModelConfig"
+    """The configuration of the model."""
 
     def get_multimodal_config(self) -> "VisionLanguageConfig":
+        """
+        Get the multimodal configuration of the model.
+
+        Raises:
+            ValueError: If the model is not multimodal.
+        """
+
         multimodal_config = self.model_config.multimodal_config
         if multimodal_config is None:
             raise ValueError("No multimodal config found")
@@ -32,6 +45,15 @@ class InputContext:
         return multimodal_config
 
     def get_hf_config(self, hf_config_type: Type[C]) -> C:
+        """
+        Get the HuggingFace configuration
+        (:class:`transformers.PretrainedConfig`) of the model,
+        additionally checking its type.
+
+        Raises:
+            ValueError: If the model is not of the specified type.
+        """
+
         hf_config = self.model_config.hf_config
         if not isinstance(hf_config, hf_config_type):
             raise TypeError("Invalid type of HuggingFace config. "
@@ -58,8 +80,8 @@ InputProcessor = Callable[[InputContext, LLMInputs], LLMInputs]
 
 class InputRegistry:
     """
-    This registry is used by model runners to dispatch data processing
-    according to its modality and the target model.
+    A registry to dispatch data processing
+    according to the target model.
     """
 
     def __init__(self) -> None:

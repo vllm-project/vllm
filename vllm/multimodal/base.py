@@ -35,7 +35,7 @@ N = TypeVar("N", bound=Type["nn.Module"])
 
 MultiModalInputMapper = Callable[[InputContext, D], Dict[str, "torch.Tensor"]]
 """Return a dictionary to be passed as keyword arguments to
-:meth:`torch.nn.Module.forward`. This is similar in concept to tokenizers
+:meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
 and processors in HuggingFace Transformers."""
 
 
@@ -66,7 +66,7 @@ class MultiModalPlugin(ABC, Generic[D]):
     def _default_input_mapper(self, ctx: InputContext,
                               data: D) -> Dict[str, "torch.Tensor"]:
         """Return a dictionary to be passed as keyword arguments to
-        :meth:`torch.nn.Module.forward`. This is similar in concept to
+        :meth:`~torch.nn.Module.forward`. This is similar in concept to
         tokenizers and processors in HuggingFace Transformers.
         """
         raise NotImplementedError
