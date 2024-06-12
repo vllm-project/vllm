@@ -1,14 +1,7 @@
 #include "registration.h"
 #include "punica_ops.h"
 
-#include <git.h>
-
-std::string githash() { return std::string{git::CommitSHA1()}; }
-
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
-  m.def("githash() -> ()");
-  m.impl("githash", torch::kCUDA, &githash);
-
   m.def(
       "dispatch_bgmv(Tensor! y, Tensor x, Tensor w, Tensor indicies, int "
       "layer_idx, float scale) -> ()");
