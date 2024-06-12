@@ -27,7 +27,7 @@ on:
       nvcc_threads:
         description: "number of threads nvcc build threads"
         type: string
-        default: "4"
+        default: "8"
       # test related parameters
       test_label_solo:
         description: "requested runner label (specifies instance)"
