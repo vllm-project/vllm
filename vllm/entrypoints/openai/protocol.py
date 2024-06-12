@@ -41,6 +41,10 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     same role.
     """
 
+    tool_calls : Optional[list]
+
+    tool_call_id : str
+
 
 ChatCompletionMessageParam = Union[
     openai.types.chat.ChatCompletionMessageParam,
@@ -129,8 +133,7 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    # messages: List[ChatCompletionMessageParam] # TODO: figure out why
-    messages: List[dict]
+    messages: List[ChatCompletionMessageParam]
     model: str
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
