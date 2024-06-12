@@ -21,7 +21,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu, lazy_num_gpus_available
+from vllm.utils import is_cpu, get_num_gpus_available_isolated
 
 logger = init_logger(__name__)
 
@@ -537,4 +537,4 @@ def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
 
-    return lazy_num_gpus_available()
+    return get_num_gpus_available_isolated()
