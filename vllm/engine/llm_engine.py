@@ -47,7 +47,7 @@ def _load_generation_config_dict(model_config: ModelConfig):
     try:
         return GenerationConfig.from_pretrained(
             model_config.model,
-            revision=model_config.revision,
+            revision=model_config.weights_revision,
         ).to_diff_dict()
     except OSError:
         # Not found.
@@ -175,7 +175,7 @@ class LLMEngine:
             model_config.tokenizer,
             model_config.skip_tokenizer_init,
             model_config.tokenizer_mode,
-            model_config.revision,
+            model_config.weights_revision,
             model_config.rope_scaling,
             model_config.tokenizer_revision,
             model_config.trust_remote_code,
