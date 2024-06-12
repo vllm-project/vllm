@@ -145,7 +145,7 @@ run_latency_tests() {
     fi
 
     latency_command="python3 benchmark_latency.py \
-    --output-json $RESULTS_FOLDER/${test_name}.json
+    --output-json $RESULTS_FOLDER/${test_name}.json \
     $latency_args"
 
     echo "Running test case $test_name"
@@ -200,7 +200,7 @@ run_throughput_tests() {
     fi
 
     throughput_command="python3 benchmark_throughput.py \
-    --output-json $RESULTS_FOLDER/${test_name}.json
+    --output-json $RESULTS_FOLDER/${test_name}.json \
     $throughput_args"
 
     echo "Running test case $test_name"
