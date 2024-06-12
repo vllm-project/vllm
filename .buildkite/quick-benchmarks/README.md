@@ -1,22 +1,15 @@
 
-# Performance benchmark
+# Quick benchmark
 
 ## Introduction
 
-This directory contains performance benchmarking CIs for vllm and for other inference engines.
+This directory contains a quick performance benchmarking CI for vllm. The goal is to help developers know the impact of their PRs on the performance of vllm. 
 
-The high-level goal is to provide two benchmark suites:
-- A quick benchmark (`quick_benchmarks.sh`). 
-  - *Goal*: help developers know the impact of their PRs on the performance of vllm. 
-  - This benchmark will be *triggered* upon:
-    - A PR being merged into vllm.
-    - Every commit for those PRs with `perf-benchmarks` label.
-  - Coverage: latency, throughput and fix-qps serving on A100, with different models
-  - *Runtime*: 40 minutes
-- A comprehensive benchmark (TBD)
-  - *Goal*: compare vllm against a wide range of alternatives on a wide range of workloads.
-  - This benchmark will be *triggered nightly*.
-  - *Runtime*: TBD
+This benchmark will be *triggered* upon:
+- A PR being merged into vllm.
+- Every commit for those PRs with `perf-benchmarks` label.
+
+This benchmark covers latency, throughput and fix-qps serving on A100 (the support for more GPUs is comming later), with different models. The estimated runtime is about 40 minutes.
 
 ## Configuring the workload for the quick benchmark
 
@@ -45,7 +38,7 @@ In this example:
 -  The `test_name` attributes is a unique identifier for the test. In `latency-tests.json`, it must start with `latency_`.
 -  The `parameters` attribute control the command line arguments to be used for `benchmark_latency.py`. Note that please use underline `_` instead of the dash `-` when specifying the command line arguments, and `quick-benchmark.sh` will convert the underline to dash when feeding the arguments to `benchmark_latency.py`. For example, the corresponding command line arguments for `benchmark_latency.py` will be `--model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 1 --load-format dummy`
 
-### Throughput test
+### Serving test
 
 
 We test the throughput by using `benchmark_serving.py` with request rate = inf to cover the online serving overhead. The corresponding parameters are in `serving-tests.json`, and here is an example:
