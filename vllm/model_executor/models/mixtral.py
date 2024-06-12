@@ -52,6 +52,10 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 import intel_extension_for_pytorch as ipex
+from intel_extension_for_pytorch.cpu._auto_kernel_selection import (
+    _enable_tpp,
+    _disable_tpp,
+)
 class _IPEXlinearMOECPU(nn.Module):
     def __init__(self, W13, W2, W3=None, tpp=False, woq=False):
         super().__init__()
@@ -64,16 +68,16 @@ class _IPEXlinearMOECPU(nn.Module):
         linear_list = []
         for i in range(W2.shape[0]):
             if W3 is not None:
-                W1 = W13[i]
+                _W1 = W13[i]
             else:
-                W1 = W13[i][0 : self.intermediate_size, :]
-                W3 = W13[i][self.intermediate_size : 2 * self.intermediate_size, :]
-            linear1 = nn.Linear(self.intermediate_size, self.hidden_size)
-            linear1.weight = nn.Parameter(W1)
-            linear2 = nn.Linear(self.intermediate_size, self.hidden_size)
+                _W1 = W13[i][0 : self.intermediate_size, :]
+                _W3 = W13[i][self.intermediate_size : 2 * self.intermediate_size, :]
+            linear1 = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+            linear1.weight = nn.Parameter(_W1)
+            linear2 = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
             linear2.weight = nn.Parameter(W2[i])
-            linear3 = nn.Linear(self.hidden_size, self.intermediate_size)
-            linear3.weight = nn.Parameter(W3)
+            linear3 = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+            linear3.weight = nn.Parameter(_W3)
             linear_per_expert = nn.ModuleList([linear1, linear2, linear3])
             linear_list.append(linear_per_expert)
         self.linear_module_list = nn.ModuleList([linear_list[i] for i in range(W2.shape[0])])
@@ -118,9 +122,9 @@ class _IPEXlinearMOECPU(nn.Module):
                     hidden_states,
                     top_x,
                     idx,
-                    self.linear_module_list[expert_idx][0].weight,
-                    self.linear_module_list[expert_idx][2].weight,
-                    self.linear_module_list[expert_idx][1].weight,
+                    self.linear_module_list[expert_idx][0].weight.detach(),
+                    self.linear_module_list[expert_idx][2].weight.detach(),
+                    self.linear_module_list[expert_idx][1].weight.detach(),
                     (
                         self.linear_module_list[expert_idx][0].tpp_fallback
                         if hasattr(
@@ -307,8 +311,10 @@ class MixtralMoE(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         if not hasattr(self, "ipex_moe"):
             self.ipex_moe = _IPEXlinearMOECPU(self.w13_weight, self.w2_weight)
+            _disable_tpp()
+            if hidden_states.dtype is torch.bfloat16:
+                _enable_tpp()
             self.ipex_moe = ipex.optimize(self.ipex_moe.eval(), dtype=hidden_states.dtype, inplace=True)
-            breakpoint()
         final_hidden_states = self.ipex_moe(hidden_states, router_logits, self.top_k)
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
