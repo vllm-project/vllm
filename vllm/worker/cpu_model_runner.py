@@ -343,8 +343,8 @@ class CPUModelRunner:
             "kv_caches": kv_caches,
             "attn_metadata": attn_metadata,
         }
-        if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": multi_modal_input})
+        if self.vision_language_config and multi_modal_input is not None:
+            execute_model_kwargs.update(multi_modal_input)
 
         hidden_states = model_executable(**execute_model_kwargs)
 
