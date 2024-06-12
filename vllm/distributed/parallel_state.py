@@ -118,6 +118,7 @@ def init_distributed_environment(
 
         if world_size == 1:
             # Avoid to warmup if world size is 1, to be compatible with vGPU.
+            # See https://github.com/vllm-project/vllm/issues/4587 for details.
             return
 
         # A small all_reduce for warmup.
