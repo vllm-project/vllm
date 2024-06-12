@@ -23,6 +23,8 @@ LLM Engine Inputs
 Registry
 --------
 
+.. autodata:: vllm.inputs.INPUT_REGISTRY
+
 .. automodule:: vllm.inputs.registry
     :members:
     :show-inheritance:
