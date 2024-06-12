@@ -240,7 +240,6 @@ class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
         """
         return torch.finfo(self.probs_dtype).tiny
 
-
 # torch.multinomial forces a GPU<->CPU sync.
 # Therefore, we use an optimized implementation instead that skips the sync.
 # Note that we always sample with replacement.
