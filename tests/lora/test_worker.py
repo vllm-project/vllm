@@ -20,7 +20,7 @@ def test_worker_apply_lora(sql_lora_files):
             trust_remote_code=False,
             seed=0,
             dtype="float16",
-            revision=None,
+            weights_revision=None,
         ),
         load_config=LoadConfig(
             download_dir=None,

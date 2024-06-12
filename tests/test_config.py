@@ -19,7 +19,7 @@ def test_disable_sliding_window(model_id_expected):
         trust_remote_code=False,
         seed=0,
         dtype="float16",
-        revision=None,
+        weights_revision=None,
         disable_sliding_window=True,
     )
     assert model_config.max_model_len == expected
@@ -37,7 +37,7 @@ def test_get_sliding_window():
         trust_remote_code=False,
         seed=0,
         dtype="float16",
-        revision=None,
+        weights_revision=None,
     )
 
     qwen2_model_config.hf_config.use_sliding_window = False
@@ -54,7 +54,7 @@ def test_get_sliding_window():
         trust_remote_code=False,
         seed=0,
         dtype="float16",
-        revision=None,
+        weights_revision=None,
     )
     mistral_model_config.hf_config.sliding_window = None
     assert mistral_model_config.get_sliding_window() is None

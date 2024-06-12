@@ -24,7 +24,7 @@ def test_clip_image_processor(hf_images, dtype):
         trust_remote_code=False,
         seed=0,
         dtype=dtype,
-        revision=None,
+        weights_revision=None,
     )
     vlm_config = VisionLanguageConfig(
         image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
@@ -73,7 +73,7 @@ def test_llava_next_image_processor(hf_images, dtype):
         trust_remote_code=False,
         seed=0,
         dtype=dtype,
-        revision=None,
+        weights_revision=None,
     )
     vlm_config = VisionLanguageConfig(
         image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
@@ -118,7 +118,7 @@ def test_image_pixel_types(hf_images, vllm_image_tensors, dtype):
         trust_remote_code=False,
         seed=0,
         dtype=dtype,
-        revision=None,
+        weights_revision=None,
     )
     vlm_config = VisionLanguageConfig(
         image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,

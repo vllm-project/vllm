@@ -61,7 +61,7 @@ def test_auto_gptq(model_arg_exptype: str) -> None:
                                    trust_remote_code=False,
                                    seed=0,
                                    dtype="float16",
-                                   revision=None,
+                                   weights_revision=None,
                                    quantization=quantization_arg)
         found_quantization_type = model_config.quantization
     except ValueError:
