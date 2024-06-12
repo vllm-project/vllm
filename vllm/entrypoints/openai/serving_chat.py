@@ -10,7 +10,7 @@ from fastapi import Request
 from openai.types.chat import (ChatCompletionContentPartImageParam,
                                ChatCompletionContentPartTextParam)
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionContentPartParam, ChatCompletionLogProb,
@@ -27,8 +27,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.multimodal.image import ImagePixelData
-from vllm.multimodal.utils import (async_get_and_parse_image,
-                                   get_full_image_text_prompt)
+from vllm.multimodal.utils import async_get_and_parse_image
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
@@ -103,10 +102,6 @@ class OpenAIServingChat(OpenAIServing):
         texts: List[str] = []
         image_futures: List[Awaitable[ImagePixelData]] = []
 
-        vlm_config: Optional[VisionLanguageConfig] = getattr(
-            self.engine.engine, "vision_language_config", None)
-        model_config = getattr(self.engine.engine, "model_config", None)
-
         for part in parts:
             part_type = part["type"]
             if part_type == "text":
@@ -114,7 +109,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 texts.append(text)
             elif part_type == "image_url":
-                if vlm_config is None:
+                if self.model_config.multimodal_config is None:
                     raise ValueError(
                         "'image_url' input is not supported as the loaded "
                         "model is not multimodal.")
@@ -141,33 +136,7 @@ class OpenAIServingChat(OpenAIServing):
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 
         text_prompt = "\n".join(texts)
-
-        if vlm_config is not None and len(image_futures):
-
-            (image_token_prompt,
-             image_token_str) = vlm_config.get_image_token_text(self.tokenizer)
-
-            # NOTE: If image token string (e.g, <image>) is already present
-            # in the text prompt, we assume it follows the same format required
-            # by the engine.
-            if image_token_str in text_prompt:
-                logger.warning(
-                    "Detected image token string in the text prompt. "
-                    "Skipping prompt formatting.")
-                messages = [
-                    ConversationMessage(role=role, content=text_prompt)
-                ]
-
-            else:
-                full_prompt = get_full_image_text_prompt(
-                    image_prompt=image_token_prompt,
-                    text_prompt=text_prompt,
-                    config=model_config)
-                messages = [
-                    ConversationMessage(role=role, content=full_prompt)
-                ]
-        else:
-            messages = [ConversationMessage(role=role, content=text_prompt)]
+        messages = [ConversationMessage(role=role, content=text_prompt)]
 
         return ChatMessageParseResult(messages=messages,
                                       image_futures=image_futures)

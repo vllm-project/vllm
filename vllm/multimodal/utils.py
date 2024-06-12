@@ -5,7 +5,6 @@ from typing import Optional, Union
 import aiohttp
 from PIL import Image
 
-from vllm.config import ModelConfig
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.image import ImagePixelData
 
@@ -68,18 +67,3 @@ def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:
 def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     """Load image from base64 format."""
     return Image.open(BytesIO(base64.b64decode(image)))
-
-
-# TODO(ywang96): move this to a model registry for preprocessing vision
-# language prompts based on the model type.
-def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
-                               config: ModelConfig) -> str:
-    """Combine image and text prompts for vision language model depending on
-    the model architecture."""
-
-    if config.hf_config.model_type in ("llava", "llava_next"):
-        full_prompt = f"{image_prompt}\n{text_prompt}"
-    else:
-        raise ValueError(
-            f"Unsupported model type: {config.hf_config.model_type}")
-    return full_prompt
