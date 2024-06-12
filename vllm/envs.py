@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
-    VLLM_BUILD_WITH_NEURON: bool = False
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_INSTALL_PUNICA_KERNELS: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
@@ -62,10 +61,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, `MAX_JOBS` will be reduced to avoid oversubscribing the CPU.
     "NVCC_THREADS":
     lambda: os.getenv("NVCC_THREADS", None),
-
-    # If set, vllm will build with Neuron support
-    "VLLM_BUILD_WITH_NEURON":
-    lambda: bool(os.environ.get("VLLM_BUILD_WITH_NEURON", False)),
 
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
