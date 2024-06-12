@@ -119,13 +119,16 @@ Compile a module with the given backend.
 
 def backend_compile(gm: torch.fx.GraphModule,
                     example_inputs: List[torch.Tensor],
-                    backend: str = 'inductor') -> Callable:
+                    backend: Optional[str] = 'inductor') -> Callable:
+    if not backend:
+        return gm.forward
+
     try:
         backend = lookup_backend(backend)
-        logger.debug(f"attempting {backend} on {gm.name}")
+        #logger.debug(f"attempting {backend} on {gm.name}")  # TODO can have no name
         backend_compiled = backend(gm, example_inputs)
         if backend_compiled is not None:
-            logger.debug(f"{backend} compiled {gm.name}.")
+            #logger.debug(f"{backend} compiled {gm.name}.")
             return backend_compiled
     except Exception as ex:
         logger.warning(f"backend_compile failed: {ex}")
@@ -167,8 +170,10 @@ class backend_class:
 
     def __call__(self, gm: torch.fx.GraphModule,
                  example_inputs: List[torch.Tensor]) -> Callable:
+
         # Nop for baseline testing
-        return gm.forward
+        #return backend_compile(gm, example_inputs, backend=self.backend)
+
 
         #logger.info("BACKEND")
 
@@ -200,9 +205,9 @@ class backend_class:
         if False:  # functionalize
             gm = make_fx(functionalize(gm,
                                        remove='mutations'))(*example_inputs)
-            print(
-                f"Functionalized module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}"
-            )
+            #print(
+            #    f"Functionalized module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}"
+            #)
             logger.debug(
                 f"Functionalized module {gm}:\n{graph_print_tabular(gm.graph)}"
             )

@@ -16,6 +16,15 @@
 // https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
 // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
+namespace
+{
+
+void garbage(torch::Tensor& out, torch::Tensor const& x, torch::Tensor const& x_scale)
+{
+}
+
+}
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
@@ -267,6 +276,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale) -> "
       "()");
   ops.impl("static_scaled_int8_quant", torch::kCUDA, &static_scaled_int8_quant);
+
+  // This is useless
+  //ops.impl("static_scaled_int8_quant", torch::kMeta, &garbage);
 #endif
 
   // Compute int8 quantized tensor and scaling factor
