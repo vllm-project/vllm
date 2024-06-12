@@ -947,7 +947,10 @@ class SpeculativeConfig:
         This is mostly a copy of the target parallel config.
         """
 
-        _speculative_tensor_parallel_size = speculative_tensor_parallel_size or target_parallel_config.tensor_parallel_size
+        _speculative_tensor_parallel_size = (
+            speculative_tensor_parallel_size
+            or target_parallel_config.tensor_parallel_size
+        )
 
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=target_parallel_config.pipeline_parallel_size,

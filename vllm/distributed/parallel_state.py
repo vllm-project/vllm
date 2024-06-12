@@ -99,13 +99,11 @@ def init_distributed_environment(
             backend=backend,
             init_method=distributed_init_method,
             world_size=world_size,
-            timeout=timedelta(seconds=10),
             rank=rank)
         global _DEVICE_WORLD_GROUP, _CPU_WORLD_GROUP
         _DEVICE_WORLD_GROUP = torch.distributed.group.WORLD
         ranks = list(range(torch.distributed.get_world_size()))
         _CPU_WORLD_GROUP = torch.distributed.new_group(ranks=ranks,
-                                                       timeout=timedelta(seconds=10),
                                                        backend="gloo")
         # set the local rank
         # local_rank is not available in torch ProcessGroup,
@@ -186,8 +184,8 @@ def initialize_model_parallel(
         ranks = list(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
-        group = torch.distributed.new_group(ranks, backend=backend, timeout=timedelta(seconds=10))
-        cpu_group = torch.distributed.new_group(ranks, backend="gloo", timeout=timedelta(seconds=10))
+        group = torch.distributed.new_group(ranks, backend=backend)
+        cpu_group = torch.distributed.new_group(ranks, backend="gloo")
         if rank in ranks:
             _TP_DEVICE_GROUP = group
             _TP_CPU_GROUP = cpu_group
@@ -216,8 +214,8 @@ def initialize_model_parallel(
         "pipeline model parallel group is already initialized")
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
-        group = torch.distributed.new_group(ranks, backend=backend, timeout=timedelta(seconds=10))
-        cpu_group = torch.distributed.new_group(ranks, backend="gloo", timeout=timedelta(seconds=10))
+        group = torch.distributed.new_group(ranks, backend=backend)
+        cpu_group = torch.distributed.new_group(ranks, backend="gloo")
         if rank in ranks:
             _PP_DEVICE_GROUP = group
             _PP_CPU_GROUP = cpu_group
@@ -276,7 +274,8 @@ def patch_tensor_parallel_group(group, cpu_group, pynccl_comm=None, ca_comm=None
     old_tp_cpu_group = get_tensor_model_parallel_cpu_group()
     old_tp_pynccl_comm = get_tp_pynccl_communicator()
     old_tp_ca_comm = get_tp_ca_communicator()
-    global _DEVICE_WORLD_GROUP, _CPU_WORLD_GROUP, _TP_DEVICE_GROUP, _TP_CPU_GROUP, _TP_PYNCCL_COMMUNICATOR, _TP_CA_COMMUNICATOR
+    global _DEVICE_WORLD_GROUP, _CPU_WORLD_GROUP, _TP_DEVICE_GROUP, \
+     _TP_CPU_GROUP, _TP_PYNCCL_COMMUNICATOR, _TP_CA_COMMUNICATOR
     _DEVICE_WORLD_GROUP = group
     _CPU_WORLD_GROUP = cpu_group
     _TP_DEVICE_GROUP = group

@@ -32,7 +32,6 @@ class GPUExecutor(ExecutorBase):
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(
                 get_ip(), get_open_port())
-        logger.info(f"spec_tp: {self.speculative_config.draft_parallel_config.tensor_parallel_size}")
         return dict(
             model_config=self.model_config,
             parallel_config=self.parallel_config,

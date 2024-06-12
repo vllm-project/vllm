@@ -1,4 +1,3 @@
-import copy
 import argparse
 import dataclasses
 import json
@@ -676,7 +675,8 @@ class EngineArgs:
             target_parallel_config=parallel_config,
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
-            speculative_tensor_parallel_size = self.speculative_tensor_parallel_size,
+            speculative_tensor_parallel_size = \
+                self.speculative_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
             speculative_disable_by_batch_size=self.
             speculative_disable_by_batch_size,

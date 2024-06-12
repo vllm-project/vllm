@@ -47,8 +47,6 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         #load_config=load_config,
     )
 
-    logger.info(f"spec_tp: {speculative_config.draft_parallel_config.tensor_parallel_size}")
-
     spec_decode_worker = SpecDecodeWorker.create_worker(
         scorer_worker=target_worker,
         draft_worker_kwargs=draft_worker_kwargs,
@@ -108,9 +106,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                                   ngram_prompt_lookup_max)
         else:
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
-        
-        #TODO: support NGramWorker
-        proposer_worker = SingleTpWorker.maybe_wrap_worker(proposer_worker, draft_worker_kwargs['parallel_config'], scorer_worker.parallel_config, scorer_worker.rank, scorer_worker.local_rank)
+
+        proposer_worker = SingleTpWorker.maybe_wrap_worker(
+            proposer_worker, draft_worker_kwargs['parallel_config'],
+            scorer_worker.parallel_config,
+            scorer_worker.rank, scorer_worker.local_rank
+        )
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))

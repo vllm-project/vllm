@@ -6,7 +6,8 @@ import torch
 
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
-from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeProposer
+from vllm.spec_decode.interfaces import (SpeculativeProposals,
+                                         SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker

@@ -1,20 +1,17 @@
-import copy
-import weakref
 from typing import List, Tuple, Set, Optional, Union
 from datetime import timedelta
 
 import torch
 import torch.distributed
 
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
-from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeProposer
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
-from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
 from vllm.lora.request import LoRARequest
 
-from vllm.distributed.parallel_state import patch_tensor_parallel_group, _ENABLE_CUSTOM_ALL_REDUCE
+from vllm.distributed.parallel_state import (patch_tensor_parallel_group,
+                                             _ENABLE_CUSTOM_ALL_REDUCE)
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 
@@ -40,8 +37,9 @@ class SingleTpWorker(ProposerWorkerBase):
         target_tp = target_parallel_config.tensor_parallel_size
         logger.info(f"{target_tp=}, {draft_tp=}")
         if draft_tp > target_tp:
-            raise ValueError("{cls} only supports draft_tp smaller than target_tp."
-                             f"{draft_tp=} {target_tp=}")
+            raise ValueError(
+                f"{cls} only supports draft_tp smaller than target_tp."
+                f"{draft_tp=} {target_tp=}")
 
         ranks = list(range(draft_tp))
 
@@ -53,7 +51,7 @@ class SingleTpWorker(ProposerWorkerBase):
             logger.info(f"Wrapping {type(worker)} in {cls}")
             return cls(worker, ranks, local_rank)
         else:
-            logger.info(f"dummy worker that would not participate in draft generation")
+            logger.info(f"Returning dummy worker")
             return DummyProposerWorker(worker)
 
     def __init__(
@@ -86,14 +84,15 @@ class SingleTpWorker(ProposerWorkerBase):
             ranks=self._ranks, timeout=timedelta(seconds=10), backend="gloo")
 
         if len(self._ranks) > 1:
-            from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+            from vllm.distributed.device_communicators.pynccl \
+                  import PyNcclCommunicator
             self._tp_pynccl_comm = PyNcclCommunicator(
                 group=self._tp_cpu_group,
                 device=self._local_rank,
             )
             if _ENABLE_CUSTOM_ALL_REDUCE:
-                from vllm.distributed.device_communicators.custom_all_reduce import (
-                CustomAllreduce)
+                from vllm.distributed.device_communicators.custom_all_reduce \
+                    import CustomAllreduce
                 self._tp_ca_comm = CustomAllreduce(
                     group=self._tp_cpu_group,
                     device=self._local_rank,
