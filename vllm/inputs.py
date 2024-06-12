@@ -4,7 +4,7 @@ from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
 from typing_extensions import NotRequired
 
 if TYPE_CHECKING:
-    from vllm.sequence import MultiModalData
+    from vllm.multimodal import MultiModalData
 
 
 class ParsedText(TypedDict):
