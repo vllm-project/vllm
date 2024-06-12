@@ -201,31 +201,31 @@ class DummyProposerWorker(ProposerWorkerBase):
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
     ) -> Tuple[List[SamplerOutput], bool]:
-        return None
+        return [], True
 
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> SpeculativeProposals:
-        return None
+        return SpeculativeProposals(None, None, None)
 
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        return None
+        return []
 
     def get_cache_block_size_bytes(self) -> int:
         return 0
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        pass
+        return False
 
     def remove_lora(self, lora_id: int) -> bool:
-        pass
+        return False
 
     def list_loras(self) -> Set[int]:
-        pass
+        return set()
 
     @property
     def max_model_len(self) -> int:
