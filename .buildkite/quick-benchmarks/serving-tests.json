@@ -49,5 +49,5 @@
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
             "num_prompts": 1000
         }
-    },
+    }
 ]

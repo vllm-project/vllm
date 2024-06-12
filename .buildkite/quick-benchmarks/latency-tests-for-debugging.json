@@ -4,7 +4,9 @@
         "parameters": {
             "model": "meta-llama/Meta-Llama-3-8B",
             "tensor_parallel_size": 1,
-            "load_format": "dummy"
+            "load_format": "dummy",
+            "num-iters-warmup": 5,
+            "num-iters": 15
         }
     }
 ]

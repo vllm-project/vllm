@@ -1,6 +1,7 @@
 [
     {
         "test_name": "serving_llama8B_tp1_sharegpt",
+        "qps_list": [1, 4, 16, "inf"],
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B",
             "tensor_parallel_size": 1,
@@ -11,9 +12,10 @@
         },
         "client_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B",
+            "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 1000
+            "num_prompts": 200
         }
     }
 ]

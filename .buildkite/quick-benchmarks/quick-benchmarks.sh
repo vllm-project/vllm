@@ -180,7 +180,7 @@ run_serving_tests() {
   jq -c '.[]' $serving_test_file | while read -r params; do
 
     # get the test name, and append the GPU type back to it.
-    test_name=$(echo $params | jq -r '.test_name')_${gpu_type}
+    test_name=$(echo $params | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^serving_ ]]; then
       echo "In serving-test.json, test_name must start with \"serving_\"."
       exit 1
