@@ -19,6 +19,34 @@ steps:
           limit: 5
   - wait
 
+  - group: "AMD Tests"
+    depends_on: ~
+    steps:
+    {% for step in steps %}
+    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
+      - label: "AMD: {{ step.label }}"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" ; ")) | safe }}"
+        env:
+          DOCKER_BUILDKIT: "1"
+        soft_fail: true
+    {% endif %}
+    {% endfor %}
+
+  - label: "Neuron Test"
+    depends_on: ~
+    agents:
+      queue: neuron
+    command: bash .buildkite/run-neuron-test.sh
+    soft_fail: false
+
+  - label: "Intel Test"
+    depends_on: ~
+    agents:
+      queue: intel
+    command: bash .buildkite/run-cpu-test.sh
+
   {% for step in steps %}
   - label: "{{ step.label }}"
     agents:
@@ -31,7 +59,7 @@ steps:
       {% else %}
       queue: gpu_1_queue
       {% endif %}
-    soft_fail: true
+    soft_fail: {{ step.soft_fail or false }}
     {% if step.parallelism %}
     parallelism: {{ step.parallelism }}
     {% endif %}
