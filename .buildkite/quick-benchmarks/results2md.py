@@ -27,7 +27,15 @@ serving_column_mapping = {
     "input_throughput": "Input Tput (tok/s)",
     "output_throughput": "Output Tput (tok/s)",
     "mean_ttft_ms": "Mean TTFT (ms)",
+    # do not say TTFT again to avoid the table getting too wide
+    "median_ttft_ms": "Median",
+    "p99_ttft_ms": "P99",
     "mean_tpot_ms": "Mean TPOT (ms)",
+    "median_tpot_ms": "Median",
+    "p99_tpot_ms": "P99",
+    "mean_itl_ms": "Mean ITL (ms)",
+    "median_itl_ms": "Median",
+    "p99_itl_ms": "P99",
 }
 
 for test_file in results_folder.glob("*.json"):
@@ -100,6 +108,6 @@ with open(results_folder / "benchmark_results.md", "w") as f:
         f.write(latency_md_table)
         f.write("\n")
     if not serving_results.empty:
-        f.write("## Online serving tests\n")
+        f.write("## Throughput tests\n")
         f.write(serving_md_table)
         f.write("\n")
