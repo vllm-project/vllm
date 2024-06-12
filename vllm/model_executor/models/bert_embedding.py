@@ -326,13 +326,6 @@ class BertSelfAttention(nn.Module):
             quant_config=quant_config
         )
 
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-        )
-
         self.attn = Attention(
             num_heads=self.num_heads,
             head_size=self.head_dim,
@@ -350,8 +343,7 @@ class BertSelfAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        atten_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        output, _ = self.o_proj(atten_output)
+        output = self.attn(q, k, v, kv_cache, attn_metadata)
         return output
 
 
