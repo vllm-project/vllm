@@ -18,39 +18,42 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class SingleTpWorker(ProposerWorkerBase):
-    """Class which allows a speculative draft model to run with tensor parallel
-    degree of 1, while target model runs with larger tensor parallel degree.
-    This reduces the overhead of small draft models.
+class SmallerTpProposerWorker(ProposerWorkerBase):
+    """Class which allows a speculative draft model to run with smaller tensor
+    parallel degree than target model.
+    This reduces the communication overhead of small draft models.
 
     This is implemented by changing vLLM's tensor parallel group to a group of
-    size 1 during forward passes.
+    size temporarily during forward passes of draft models.
     """
 
     @classmethod
     def maybe_wrap_worker(cls, worker, draft_parallel_config: ParallelConfig,
                           target_parallel_config: ParallelConfig,
                           rank: int, local_rank: int):
-        """Wrap the worker in a SingleTpWorker if necessary.
+        """Wrap the worker in a SmallerTpProposerWorker if necessary.
         """
         draft_tp = draft_parallel_config.tensor_parallel_size
         target_tp = target_parallel_config.tensor_parallel_size
         logger.info(f"{target_tp=}, {draft_tp=}")
+
+        if draft_tp == target_tp:
+            return worker
+
         if draft_tp > target_tp:
             raise ValueError(
                 f"{cls} only supports draft_tp smaller than target_tp."
                 f"{draft_tp=} {target_tp=}")
 
+        # gpu ranks that will generate draft tokens together
         ranks = list(range(draft_tp))
-
-        if draft_tp == target_tp:
-            return worker
 
         logger.info(f"{rank=}, {ranks=}")
         if rank in ranks:
             logger.info(f"Wrapping {type(worker)} in {cls}")
             return cls(worker, ranks, local_rank)
         else:
+            # for workers not participating in the draft generation
             logger.info(f"Returning dummy worker")
             return DummyProposerWorker(worker)
 
@@ -73,10 +76,10 @@ class SingleTpWorker(ProposerWorkerBase):
                                     self._tp_pynccl_comm, self._tp_ca_comm)
 
     def init_device(self):
-        """Initialize the model on all ranks.
+        """Initialize the device.
 
-        This also creates a single-rank process group containing only the
-        self process.
+        This also creates an additional tensor-parallel process group containing
+        only a subset of the whole ranks.
         """
         self._tp_group = torch.distributed.new_group(
             ranks=self._ranks, timeout=timedelta(seconds=10))
@@ -107,37 +110,29 @@ class SingleTpWorker(ProposerWorkerBase):
         self._worker.set_include_gpu_probs_tensor()
 
     def load_model(self):
-        logger.info("SingleTPWorker.load_model()")
         with self._patch_tensor_parallel_group():
             self._worker.load_model()
 
     def determine_num_available_blocks(self):
-        """Profile the model on all ranks.
-        """
         with self._patch_tensor_parallel_group():
             return self._worker.determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int):
-        """Initialize the cache engine on all ranks.
-        """
         with self._patch_tensor_parallel_group():
             self._worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
-    @torch.inference_mode()
     def sampler_output(
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
     ) -> Tuple[List[SamplerOutput], bool]:
+        # it's called after tp_group has already been overriden
         return self._worker.sampler_output(execute_model_req, sample_len)
 
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> SpeculativeProposals:
-        """Produce speculations given an input batch of sequences. The number of
-        speculative tokens per sequence is determined by max_proposal_len.
-        """
         with self._patch_tensor_parallel_group():
             return self._worker.get_spec_proposals(execute_model_req)
 

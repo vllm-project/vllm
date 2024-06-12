@@ -266,7 +266,9 @@ OVERRIDE_TP_STATE = False
 @contextlib.contextmanager
 def patch_tensor_parallel_group(group, cpu_group, pynccl_comm=None, ca_comm=None):
     global OVERRIDE_TP_STATE
-    assert not OVERRIDE_TP_STATE, "should not override during override"
+    if OVERRIDE_TP_STATE:
+        return
+
     OVERRIDE_TP_STATE = True
     old_world_group = get_world_group()
     old_world_cpu_group = get_cpu_world_group()
