@@ -67,6 +67,16 @@ def _split_tensor_dict(
 
 
 class GroupCoordinator:
+    """
+    PyTorch ProcessGroup wrapper for a group of processes.
+    PyTorch ProcessGroup is bound to one specific communication backend,
+        e.g. NCCL, Gloo, MPI, etc.
+    GroupCoordinator takes charge of all the communication operations among
+        the processes in the group. It can route the communication to
+        a specific implementation (e.g. switch allreduce implementation
+        based on the tensor size and cuda graph mode).
+    """
+
     # available attributes:
     rank: int  # global rank
     ranks: List[int]  # global ranks in the group
