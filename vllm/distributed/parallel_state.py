@@ -113,12 +113,11 @@ def init_distributed_environment(
                 local_rank = envs.LOCAL_RANK
             else:
                 local_rank = rank
-
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
 
         if world_size == 1:
-            # No need to warmup if world size is 1.
+            # Avoid to warmup if world size is 1, to be compatible with vGPU.
             return
 
         # A small all_reduce for warmup.
