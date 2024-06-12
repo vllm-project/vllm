@@ -1,5 +1,4 @@
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -8,20 +7,12 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.model_input import GPUModelInputWithPoolingMetadata
 from vllm.pooling_params import PoolingParams
-from vllm.sequence import (ModelInput, PoolerOutput, SequenceData,
-                           SequenceGroupMetadata)
+from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
 
-if TYPE_CHECKING:
-    from vllm.model_executor import SamplingMetadata
-
 logger = init_logger(__name__)
-
-
-@dataclass(frozen=True)
-class ModelInputWithPoolingMetadata(ModelInput):
-    pooling_metadata: Optional["SamplingMetadata"] = None
 
 
 class EmbeddingModelRunner(ModelRunner):
@@ -50,13 +41,13 @@ class EmbeddingModelRunner(ModelRunner):
                          is_driver_worker=is_driver_worker,
                          vision_language_config=vision_language_config)
 
-    def get_empty_model_input(self) -> ModelInputWithPoolingMetadata:
-        return ModelInputWithPoolingMetadata.new()
+    def get_empty_model_input(self) -> GPUModelInputWithPoolingMetadata:
+        return GPUModelInputWithPoolingMetadata.new()
 
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: ModelInputWithPoolingMetadata,
+        model_input: GPUModelInputWithPoolingMetadata,
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         if self.lora_config:
@@ -96,7 +87,7 @@ class EmbeddingModelRunner(ModelRunner):
     def prepare_model_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> ModelInput:
+    ) -> GPUModelInputWithPoolingMetadata:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list)
@@ -104,7 +95,7 @@ class EmbeddingModelRunner(ModelRunner):
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
                                                  model_input.seq_lens)
 
-        return ModelInputWithPoolingMetadata.new(
+        return GPUModelInputWithPoolingMetadata.new(
             clone=model_input,
             pooling_metadata=pooling_metadata,
         )

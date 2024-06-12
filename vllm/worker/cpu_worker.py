@@ -13,7 +13,8 @@ from vllm.distributed import (broadcast_tensor_dict, disable_communication,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, ModelInput, SamplerOutput
+from vllm.model_input import CPUModelInput
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.cpu_model_runner import CPUModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
@@ -265,7 +266,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
     @torch.inference_mode()
     @disable_communication
     def prepare_model_input_local(
-            self, execute_model_req: ExecuteModelRequest) -> ModelInput:
+            self, execute_model_req: ExecuteModelRequest) -> CPUModelInput:
         assert execute_model_req is not None
 
         model_input = self.model_runner.prepare_model_input_tensors(
@@ -286,7 +287,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
     @torch.inference_mode()
     def prepare_model_input(
             self,
-            execute_model_req: Optional[ExecuteModelRequest]) -> ModelInput:
+            execute_model_req: Optional[ExecuteModelRequest]) -> CPUModelInput:
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.parallel_config.tensor_parallel_size > 1:
@@ -316,7 +317,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
     @disable_communication
     def execute_model_local(
         self,
-        model_input: ModelInput,
+        model_input: CPUModelInput,
     ) -> List[SamplerOutput]:
         self.cache_copy(model_input.blocks_to_copy)
 

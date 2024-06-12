@@ -1,4 +1,3 @@
-import dataclasses
 from typing import List, Optional, Tuple
 
 import torch
@@ -9,20 +8,11 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
-from vllm.sequence import (ModelInputWithSamplingMetadata, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.model_input import ModelInputForNeuron
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 
 logger = init_logger(__name__)
-
-
-@dataclasses.dataclass(frozen=True)
-class ModelInputForNeuron(ModelInputWithSamplingMetadata):
-    input_block_ids: Optional[torch.Tensor] = None
-
-    BROADCASTABLE_FIELDS = (
-        ModelInputWithSamplingMetadata.BROADCASTABLE_FIELDS +
-        ("input_block_ids", ))
 
 
 class NeuronModelRunner:

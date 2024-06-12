@@ -15,8 +15,8 @@ from vllm.distributed import (broadcast_tensor_dict, disable_communication,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.sequence import (ExecuteModelRequest, ModelInput, PoolerOutput,
-                           SamplerOutput)
+from vllm.model_input import GPUModelInput
+from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import ModelRunner
@@ -226,7 +226,7 @@ class Worker(WorkerBase):
     @torch.inference_mode()
     @disable_communication
     def prepare_model_input_local(
-            self, execute_model_req: ExecuteModelRequest) -> ModelInput:
+            self, execute_model_req: ExecuteModelRequest) -> GPUModelInput:
         model_input = self.model_runner.prepare_model_input_tensors(
             execute_model_req.seq_group_metadata_list)
 
@@ -255,9 +255,9 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def prepare_model_input(
-            self,
-            execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> ModelInput:
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> GPUModelInput:
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.parallel_config.tensor_parallel_size > 1:
@@ -286,7 +286,7 @@ class Worker(WorkerBase):
     @torch.inference_mode()
     @disable_communication
     def execute_model_local(
-            self, model_input: ModelInput
+        self, model_input: GPUModelInput
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
         self.cache_swap(model_input.blocks_to_swap_in,
                         model_input.blocks_to_swap_out,

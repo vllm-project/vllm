@@ -66,8 +66,10 @@ class WorkerBase(ABC):
     def prepare_model_input_local(
             self, execute_model_req: ExecuteModelRequest) -> ModelInput:
         """
-        Prepare a model execution request locally. This method is not allowed
-        to communicate with external devices.
+        Prepare a model execution request locally. This method may move data to
+        the worker's local device. It is not allowed to communicate with
+        other workers or devices. Subclasses should keep the
+        @disable_communication decorator to enforce this.
         """
         raise NotImplementedError
 
@@ -101,8 +103,9 @@ class WorkerBase(ABC):
     def execute_model_local(self,
                             model_input: ModelInput) -> List[SamplerOutput]:
         """Executes at least one model step on the given sequences, unless no
-        sequences are provided. This method is not allowed to communciate with
-        other workers.
+        sequences are provided. This method is not allowed to communciate
+        metadata to other workers. Subclasses should keep the
+        @disable_communication decorator to enforce this.
         """
         raise NotImplementedError
 

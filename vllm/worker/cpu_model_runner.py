@@ -11,9 +11,9 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
+from vllm.model_input import CPUModelInput
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import (ModelInputWithSamplingMetadata, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
@@ -273,7 +273,7 @@ class CPUModelRunner:
     def prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> ModelInputWithSamplingMetadata:
+    ) -> CPUModelInput:
         multi_modal_kwargs = None
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
@@ -296,20 +296,20 @@ class CPUModelRunner:
             seq_lens,
             self.device,
             pin_memory=False)
-        return ModelInputWithSamplingMetadata.new(
+        return CPUModelInput.new(
             input_tokens=input_tokens,
             input_positions=input_positions,
             attn_metadata=attn_metadata,
             sampling_metadata=sampling_metadata,
         )
 
-    def get_empty_model_input(self) -> ModelInputWithSamplingMetadata:
-        return ModelInputWithSamplingMetadata.new()
+    def get_empty_model_input(self) -> CPUModelInput:
+        return CPUModelInput.new()
 
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: ModelInputWithSamplingMetadata,
+        model_input: CPUModelInput,
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         model_executable = self.model

@@ -8,7 +8,8 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.distributed import disable_communication
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, ModelInput, SamplerOutput
+from vllm.model_input import ModelInputForNeuron
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
@@ -77,21 +78,22 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
     @torch.inference_mode()
     @disable_communication
     def prepare_model_input_local(
-            self, execute_model_req: ExecuteModelRequest) -> ModelInput:
+            self,
+            execute_model_req: ExecuteModelRequest) -> ModelInputForNeuron:
         model_input = self.model_runner.prepare_model_input_tensors(
             execute_model_req.seq_group_metadata_list)
         return model_input
 
     def prepare_model_input(
-            self,
-            execute_model_req: Optional[ExecuteModelRequest]) -> ModelInput:
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> ModelInputForNeuron:
         assert execute_model_req is not None
         return self.prepare_model_input_local(execute_model_req)
 
     @torch.inference_mode()
     @disable_communication
-    def execute_model_local(self,
-                            model_input: ModelInput) -> List[SamplerOutput]:
+    def execute_model_local(
+            self, model_input: ModelInputForNeuron) -> List[SamplerOutput]:
         # If there is no input, we don't need to execute the model.
         if model_input.num_seq_groups == 0:
             return []

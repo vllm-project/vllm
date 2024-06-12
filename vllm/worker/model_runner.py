@@ -18,10 +18,11 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
+from vllm.model_input import GPUModelInput
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (ModelInput, ModelInputWithSamplingMetadata,
-                           SamplerOutput, SequenceData, SequenceGroupMetadata)
+from vllm.sequence import (ModelInputWithSamplingMetadata, SamplerOutput,
+                           SequenceData, SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 
@@ -196,7 +197,7 @@ class ModelRunner:
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> ModelInput:
+    ) -> GPUModelInput:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
         metadata for possible additional steps, e.g., sampling.
@@ -250,7 +251,7 @@ class ModelRunner:
         paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
-            return ModelInput()
+            return GPUModelInput()
 
         if self.sliding_window is not None:
             sliding_window_blocks = (self.sliding_window + self.block_size -
@@ -600,7 +601,7 @@ class ModelRunner:
             for k, v in multi_modal_kwargs_list.items()
         }
 
-        return ModelInput.new(
+        return GPUModelInput.new(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
             attn_metadata=attn_metadata,
@@ -609,10 +610,6 @@ class ModelRunner:
             lora_mapping=lora_mapping,
             lora_requests=lora_requests,
             multi_modal_kwargs=multi_modal_kwargs,
-            slot_mapping=slot_mapping_tensor,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            num_prefills=num_prefills,
         )
 
     def prepare_model_input_tensors(
