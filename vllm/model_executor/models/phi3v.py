@@ -310,10 +310,9 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
                 **kwargs: object):
-        image_input = kwargs.pop("image_input", None)
+        image_input = self._parse_and_validate_image_input(**kwargs)
 
         if image_input is not None:
-            image_input = self._parse_and_validate_image_input(**image_input)
             input_ids[input_ids==self.vision_language_config.image_token_id] = -1
             inputs_embeds = self.vision_embed_tokens(
                 input_ids, image_input["data"],
