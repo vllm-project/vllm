@@ -4,11 +4,13 @@ from typing import List, Optional, Tuple, Type
 
 import torch
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 try:
     import vllm._C
 except ImportError as e:
-    from vllm.logger import init_logger
-    logger = init_logger(__name__)
     logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
@@ -480,13 +482,23 @@ def dispatch_bgmv_low_level(
     )
 
 
+# temporary fix for https://github.com/vllm-project/vllm/issues/5456
+# TODO: remove this in v0.6.0
 names_and_values = globals()
 names_and_values_to_update = {}
+# prepare variables to avoid dict size change during iteration
+k, v, arg = None, None, None
+fn_type = type(lambda x: x)
 for k, v in names_and_values.items():
-    # if `v` is a function with tensor argument (use type annotation to check), then wrap it with `hint_on_error`
-    if callable(v) and any(arg is torch.Tensor
-                           for arg in v.__annotations__.values()):
+    # find functions that are defined in this file and have torch.Tensor
+    # in their annotations. `arg == "torch.Tensor"` is used to handle
+    # the case when users use `import __annotations__` to turn type
+    # hints into strings.
+    if isinstance(v, fn_type) \
+        and v.__code__.co_filename == __file__ \
+        and any(arg is torch.Tensor or arg == "torch.Tensor"
+                   for arg in v.__annotations__.values()):
         names_and_values_to_update[k] = hint_on_error(v)
 
 names_and_values.update(names_and_values_to_update)
-del names_and_values_to_update, names_and_values, v, k
+del names_and_values_to_update, names_and_values, v, k, fn_type
