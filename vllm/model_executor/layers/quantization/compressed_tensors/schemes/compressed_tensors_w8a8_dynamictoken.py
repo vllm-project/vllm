@@ -61,20 +61,29 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
                            requires_grad=False)
 
         layer.register_parameter("weight", weight)
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
-        set_weight_attrs(weight, {"weight_loader": weight_loader})
-        set_weight_attrs(weight, {"logical_widths": output_partition_sizes})
+        set_weight_attrs(weight, {
+            "input_dim": 1, 
+            "output_dim": 0,
+            "weight_loader": weight_loader,
+            "logical_widths": output_partition_sizes
+        })
 
         layer.register_parameter("weight_scale", weight_scale)
-        set_weight_attrs(weight_scale, {"weight_loader": weight_loader})
         set_weight_attrs(
             weight_scale, {
+                "weight_loader": weight_loader,
                 "shard_splitter": self.scales_shard_splitter,
+                "logical_widths": output_partition_sizes,
                 "logical_widths": output_partition_sizes
             })
 
         layer.register_parameter("weight_zero_point", weight_zero_point)
-        set_weight_attrs(weight_zero_point, {"weight_loader": weight_loader})
+        set_weight_attrs(
+            weight_zero_point, {
+                "weight_loader": weight_loader,
+                "logical_widths": output_partition_sizes,
+            })
+        
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         weight = layer.weight
