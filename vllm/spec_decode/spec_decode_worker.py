@@ -13,7 +13,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
-from vllm.spec_decode.single_tp_worker import SmallerTpProposerWorker
+from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.util import (create_sequence_group_output,
