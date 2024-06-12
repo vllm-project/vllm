@@ -50,7 +50,7 @@ class EngineArgs:
     max_num_seqs: int = 256
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
-    revision: Optional[str] = None
+    weights_revision: Optional[str] = None
     code_revision: Optional[str] = None
     rope_scaling: Optional[dict] = None
     tokenizer_revision: Optional[str] = None
@@ -173,12 +173,12 @@ class EngineArgs:
             action='store_true',
             help='Skip initialization of tokenizer and detokenizer')
         parser.add_argument(
-            '--revision',
+            '--weights-revision',
             type=nullable_str,
             default=None,
-            help='The specific model version to use. It can be a branch '
-            'name, a tag name, or a commit id. If unspecified, will use '
-            'the default version.')
+            help='The specific revision to use for the model weights. '
+            'It can be a branch name, a tag name, or a commit id. '
+            'If unspecified, will use the default version.')
         parser.add_argument(
             '--code-revision',
             type=nullable_str,
@@ -627,7 +627,7 @@ class EngineArgs:
             trust_remote_code=self.trust_remote_code,
             dtype=self.dtype,
             seed=self.seed,
-            revision=self.revision,
+            weights_revision=self.weights_revision,
             code_revision=self.code_revision,
             rope_scaling=self.rope_scaling,
             tokenizer_revision=self.tokenizer_revision,
