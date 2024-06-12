@@ -705,13 +705,16 @@ def get_num_gpus_available_isolated() -> int:
     value."""
 
     try:
-        out = subprocess.run([
-            sys.executable, "-c",
-            "import torch; print(torch.cuda.device_count())"
-        ],
-                             capture_output=True,
-                             check=True,
-                             text=True)
+        out = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import torch; print(torch.cuda.device_count())",
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
     except subprocess.CalledProcessError as e:
         logger.warning("Failed to get number of GPUs.", exc_info=e)
         return 0
