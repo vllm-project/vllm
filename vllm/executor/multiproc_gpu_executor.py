@@ -10,7 +10,7 @@ from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        get_vllm_instance_id, make_async)
+                        get_vllm_instance_id, make_async, get_num_gpus_available_isolated)
 
 logger = init_logger(__name__)
 
@@ -33,8 +33,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
-        from torch.cuda import device_count
-        assert world_size <= device_count(), (
+        assert world_size <= get_num_gpus_available_isolated(), (
             "please set tensor_parallel_size to less than max local gpu count")
 
         distributed_init_method = get_distributed_init_method(

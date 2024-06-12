@@ -21,7 +21,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu
+from vllm.utils import is_cpu, lazy_num_gpus_available
 
 logger = init_logger(__name__)
 
@@ -537,15 +537,4 @@ def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
 
-    try:
-        out = subprocess.run([
-            sys.executable, "-c",
-            "import torch; print(torch.cuda.device_count())"
-        ],
-                             capture_output=True,
-                             check=True,
-                             text=True)
-    except subprocess.CalledProcessError as e:
-        logger.warning("Failed to get number of GPUs.", exc_info=e)
-        return 0
-    return int(out.stdout.strip())
+    return lazy_num_gpus_available()

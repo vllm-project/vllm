@@ -693,3 +693,26 @@ def deprecate_kwargs(
         return inner  # type: ignore
 
     return wrapper
+
+
+@lru_cache(maxsize=None)
+def get_num_gpus_available_isolated() -> int:
+    """Get number of GPUs without initializing the CUDA context
+    in current process.
+    
+    This should be used instead of torch.cuda.device_count()
+    unless CUDA_VISIBLE_DEVICES has already been set to the desired
+    value."""
+
+    try:
+        out = subprocess.run([
+            sys.executable, "-c",
+            "import torch; print(torch.cuda.device_count())"
+        ],
+                             capture_output=True,
+                             check=True,
+                             text=True)
+    except subprocess.CalledProcessError as e:
+        logger.warning("Failed to get number of GPUs.", exc_info=e)
+        return 0
+    return int(out.stdout.strip())
