@@ -1,5 +1,6 @@
 /*
- * Adapted from https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention_template.hpp
+ * Adapted from
+ * https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention_template.hpp
  * Copyright (c) 2023, The vLLM team.
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -26,7 +27,7 @@
 namespace vllm {
 
 // Q*K^T operation.
-template<int THREAD_GROUP_SIZE, typename Vec, int N>
+template <int THREAD_GROUP_SIZE, typename Vec, int N>
 inline __device__ float qk_dot_(const Vec (&q)[N], const Vec (&k)[N]) {
   using A_vec = typename FloatVec<Vec>::Type;
   // Compute the parallel products for Q*K^T (treat vector lanes separately).
@@ -45,12 +46,12 @@ inline __device__ float qk_dot_(const Vec (&q)[N], const Vec (&k)[N]) {
   return qk;
 }
 
-template<typename T, int THREAD_GROUP_SIZE>
+template <typename T, int THREAD_GROUP_SIZE>
 struct Qk_dot {
-  template<typename Vec, int N>
+  template <typename Vec, int N>
   static inline __device__ float dot(const Vec (&q)[N], const Vec (&k)[N]) {
     return qk_dot_<THREAD_GROUP_SIZE>(q, k);
   }
 };
 
-} // namespace vllm
+}  // namespace vllm

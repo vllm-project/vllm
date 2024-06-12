@@ -2,10 +2,11 @@
 import copy
 from enum import IntEnum
 from functools import cached_property
-from typing import Callable, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
-from pydantic import conint
+from pydantic import Field
+from typing_extensions import Annotated
 
 _SAMPLING_EPS = 1e-5
 
@@ -17,10 +18,14 @@ class SamplingType(IntEnum):
     BEAM = 3
 
 
-LogitsProcessor = Callable[[List[int], torch.Tensor], torch.Tensor]
-"""LogitsProcessor is a function that takes a list of previously generated
-tokens and a tensor of the logits for the next token, and returns a modified
-tensor of logits to sample from."""
+LogitsProcessor = Union[Callable[[List[int], torch.Tensor], torch.Tensor],
+                        Callable[[List[int], List[int], torch.Tensor],
+                                 torch.Tensor]]
+"""LogitsProcessor is a function that takes a list
+of previously generated tokens, the logits tensor
+for the next token and, optionally, prompt tokens as a
+first argument, and returns a modified tensor of logits
+to sample from."""
 
 
 class SamplingParams:
@@ -94,7 +99,8 @@ class SamplingParams:
         spaces_between_special_tokens: Whether to add spaces between special
             tokens in the output.  Defaults to True.
         logits_processors: List of functions that modify logits based on
-            previously generated tokens.
+            previously generated tokens, and optionally prompt tokens as
+            a first argument.
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
@@ -127,7 +133,7 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
-        truncate_prompt_tokens: Optional[conint(ge=1)] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -138,7 +144,10 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
-        self.seed = seed
+        if seed == -1:
+            self.seed = None
+        else:
+            self.seed = seed
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
@@ -166,6 +175,13 @@ class SamplingParams:
         self.logits_processors = logits_processors
         self.include_stop_str_in_output = include_stop_str_in_output
         self.truncate_prompt_tokens = truncate_prompt_tokens
+        # Number of characters to hold back for stop string evaluation
+        # until sequence is finished.
+        if self.stop and not include_stop_str_in_output:
+            self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
+        else:
+            self.output_text_buffer_length = 0
+
         self._verify_args()
         if self.use_beam_search:
             self._verify_beam_search()
@@ -177,8 +193,8 @@ class SamplingParams:
                 self.top_k = -1
                 self.min_p = 0.0
                 self._verify_greedy_sampling()
-        # injected by the engine
-        self.eos_token_id = None
+        # eos_token_id is added to this by the engine
+        self.all_stop_token_ids = set(self.stop_token_ids)
 
     def _verify_args(self) -> None:
         if self.n < 1:
@@ -226,6 +242,8 @@ class SamplingParams:
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "
                              f"got {self.truncate_prompt_tokens}")
+        if any(not stop_str for stop_str in self.stop):
+            raise ValueError("stop cannot contain an empty string.")
         if self.stop and not self.detokenize:
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
@@ -260,6 +278,19 @@ class SamplingParams:
         if self.best_of > 1:
             raise ValueError("best_of must be 1 when using greedy sampling."
                              f"Got {self.best_of}.")
+
+    def update_from_generation_config(
+            self, generation_config: Dict[str, Any]) -> None:
+        """Update if there are non-default values from generation_config"""
+        # Update eos_token_id for generation
+        if (not self.ignore_eos) and (eos_ids :=
+                                      generation_config.get("eos_token_id")):
+            # it can be either int or list of int
+            if isinstance(eos_ids, int):
+                eos_ids = [eos_ids]
+            original_stop_token_ids = set(self.stop_token_ids)
+            original_stop_token_ids.update(eos_ids)
+            self.stop_token_ids = list(original_stop_token_ids)
 
     @cached_property
     def sampling_type(self) -> SamplingType:

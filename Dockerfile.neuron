@@ -1,0 +1,36 @@
+# default base image
+ARG BASE_IMAGE="763104351884.dkr.ecr.us-west-2.amazonaws.com/pytorch-inference-neuronx:2.1.1-neuronx-py310-sdk2.17.0-ubuntu20.04"
+
+FROM $BASE_IMAGE
+
+RUN echo "Base image is $BASE_IMAGE"
+
+# Install some basic utilities
+RUN apt-get update && apt-get install python3 python3-pip -y
+
+### Mount Point ###
+# When launching the container, mount the code directory to /app
+ARG APP_MOUNT=/app
+VOLUME [ ${APP_MOUNT} ]
+WORKDIR ${APP_MOUNT}
+
+RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers pandas
+RUN python3 -m pip install sentencepiece transformers==4.36.2 -U
+RUN python3 -m pip install transformers-neuronx --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
+RUN python3 -m pip install --pre neuronx-cc==2.12.* --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
+
+COPY ./vllm /app/vllm/vllm
+COPY ./setup.py /app/vllm/setup.py
+COPY ./requirements-common.txt /app/vllm/requirements-common.txt
+COPY ./requirements-neuron.txt /app/vllm/requirements-neuron.txt
+
+RUN cd /app/vllm \
+    && python3 -m pip install -U -r requirements-neuron.txt
+
+ENV VLLM_BUILD_WITH_NEURON 1
+RUN cd /app/vllm \
+    && pip install -e . \
+    && cd ..
+
+CMD ["/bin/bash"]

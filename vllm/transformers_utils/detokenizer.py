@@ -87,12 +87,15 @@ class Detokenizer:
                 prev_tokens.extend(next_iter_tokens)
 
     def decode_sequence_inplace(self, seq: Sequence,
-                                prms: SamplingParams) -> None:
+                                prms: SamplingParams) -> int:
         """Decodes the new token for a sequence. In-place operation.
 
         Args:
             seq: The sequence to decode.
             prms: The sampling parameters used to generate the sequence.
+
+        Returns:
+            The number of characters added to the output text.
         """
         all_input_ids = seq.get_token_ids()
         token_id_generated_this_iteration = all_input_ids[-1]
@@ -151,6 +154,8 @@ class Detokenizer:
         seq.read_offset = read_offset
         seq.output_text += new_decoded_token_text
 
+        return len(new_decoded_token_text)
+
 
 def _convert_tokens_to_string_with_added_encoders(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
@@ -163,8 +168,8 @@ def _convert_tokens_to_string_with_added_encoders(
     # NOTE(woosuk): The following code is slow because it runs a for loop over
     # the output_tokens. In Python, running a for loop over a list can be slow
     # even when the loop body is very simple.
-    sub_texts = []
-    current_sub_text = []
+    sub_texts: List[str] = []
+    current_sub_text: List[str] = []
     all_special_tokens = set(tokenizer.all_special_tokens)
     for token in output_tokens:
         if skip_special_tokens and token in all_special_tokens:
@@ -258,6 +263,7 @@ def detokenize_incrementally(
              tokenizer,
              all_input_ids[:-1],
              skip_special_tokens=skip_special_tokens)
+    assert prev_tokens is not None
 
     # If the new token id is out of bounds, return an empty string.
     if new_token_id >= len(tokenizer):
@@ -266,6 +272,8 @@ def detokenize_incrementally(
         # Put new_token_id in a list so skip_special_tokens is respected
         new_tokens = tokenizer.convert_ids_to_tokens(
             [new_token_id], skip_special_tokens=skip_special_tokens)
+        if isinstance(new_tokens, str):
+            new_tokens = [new_tokens]
     output_tokens = prev_tokens + new_tokens
 
     # If this is the first iteration, return all tokens.

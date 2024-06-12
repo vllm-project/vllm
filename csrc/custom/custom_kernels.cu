@@ -7,20 +7,20 @@ constexpr int WARP_SIZE = 64;
 
 template <typename T>
 __device__ __forceinline__ T loadnt(T* addr) {
-          return __builtin_nontemporal_load(addr);
+  return __builtin_nontemporal_load(addr);
 }
 
 __device__ __forceinline__ float4 load_ntmprl(const float4* addr) {
-          auto addr_alias = reinterpret_cast<const float*>(addr);
-          auto dat0 = loadnt(addr_alias);
-          auto dat1 = loadnt(addr_alias + 1);
-          auto dat2 = loadnt(addr_alias + 2);
-          auto dat3 = loadnt(addr_alias + 3);
-          //auto dat0 = *(addr_alias);
-          //auto dat1 = *(addr_alias+1);
-          //auto dat2 = *(addr_alias+2);
-          //auto dat3 = *(addr_alias+3);
-          return make_float4(dat0,dat1,dat2,dat3);
+  auto addr_alias = reinterpret_cast<const float*>(addr);
+  auto dat0 = loadnt(addr_alias);
+  auto dat1 = loadnt(addr_alias + 1);
+  auto dat2 = loadnt(addr_alias + 2);
+  auto dat3 = loadnt(addr_alias + 3);
+  // auto dat0 = *(addr_alias);
+  // auto dat1 = *(addr_alias+1);
+  // auto dat2 = *(addr_alias+2);
+  // auto dat3 = *(addr_alias+3);
+  return make_float4(dat0, dat1, dat2, dat3);
 }
 
 //TBlock fetches entire rows of A, and entire col of B (K dimension); assume N=1 for time being
@@ -143,170 +143,165 @@ void LLGemm1(void *in_a, void *in_b, void *out_c, const int M, const int K, cuda
         LLGemm1_kernel<4><<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(af4, bf4, c, K);
       }
 
-        cudaError_t err = cudaGetLastError();
-          if (cudaSuccess != err)
-                  throw std::runtime_error("CUDA kernel failed : " + std::to_string(err));
+  cudaError_t err = cudaGetLastError();
+  if (cudaSuccess != err)
+    throw std::runtime_error("CUDA kernel failed : " + std::to_string(err));
 }
 
 // instantiate the kernel template for T=float:
-//template void AddGPUKernel<float>(float *in_a, float *in_b, float *out_c, const int M, const int K, cudaStream_t stream);
+// template void AddGPUKernel<float>(float *in_a, float *in_b, float *out_c,
+// const int M, const int K, cudaStream_t stream);
 
 const unsigned int TILE_WIDTH = 32;
 
 // Compute C = A * B
-__global__ void matrixMultiplyShared(float *A, float *B, float *C,
-                                     int numARows, int numAColumns,
-                                     int numBRows, int numBColumns,
-                                     int numCRows, int numCColumns) {
-        __shared__ float sA[TILE_WIDTH][TILE_WIDTH];   // Tile size of 32x32
-        __shared__ float sB[TILE_WIDTH][TILE_WIDTH];
+__global__ void matrixMultiplyShared(float* A, float* B, float* C, int numARows,
+                                     int numAColumns, int numBRows,
+                                     int numBColumns, int numCRows,
+                                     int numCColumns) {
+  __shared__ float sA[TILE_WIDTH][TILE_WIDTH];  // Tile size of 32x32
+  __shared__ float sB[TILE_WIDTH][TILE_WIDTH];
 
-        int Row = blockDim.y * blockIdx.y + threadIdx.y;
-        int Col = blockDim.x * blockIdx.x + threadIdx.x;
-        float Cvalue = 0.0;
-        sA[threadIdx.y][threadIdx.x] = 0.0;
-        sB[threadIdx.y][threadIdx.x] = 0.0;
+  int Row = blockDim.y * blockIdx.y + threadIdx.y;
+  int Col = blockDim.x * blockIdx.x + threadIdx.x;
+  float Cvalue = 0.0;
+  sA[threadIdx.y][threadIdx.x] = 0.0;
+  sB[threadIdx.y][threadIdx.x] = 0.0;
 
-        for (int ph = 0; ph < (((numAColumns - 1) / TILE_WIDTH) + 1); ph++) {
-            if ((Row < numARows) && (threadIdx.x + (ph * TILE_WIDTH)) < numAColumns) {
-                sA[threadIdx.y][threadIdx.x] = A[(Row * numAColumns) + threadIdx.x + (ph * TILE_WIDTH)];
-            } else {
-                sA[threadIdx.y][threadIdx.x] = 0.0;
-            }
-            if (Col < numBColumns && (threadIdx.y + ph * TILE_WIDTH) < numBRows) {
-                sB[threadIdx.y][threadIdx.x] = B[(threadIdx.y + ph * TILE_WIDTH) * numBColumns + Col];
-            } else {
-                sB[threadIdx.y][threadIdx.x] = 0.0;
-            }
-            __syncthreads();
-            for (int j = 0; j < TILE_WIDTH; ++j) {
-                Cvalue += sA[threadIdx.y][j] * sB[j][threadIdx.x];
-            }
-        }
-        if (Row < numCRows && Col < numCColumns) {
-            C[Row * numCColumns + Col] = Cvalue;
-        }
+  for (int ph = 0; ph < (((numAColumns - 1) / TILE_WIDTH) + 1); ph++) {
+    if ((Row < numARows) && (threadIdx.x + (ph * TILE_WIDTH)) < numAColumns) {
+      sA[threadIdx.y][threadIdx.x] =
+          A[(Row * numAColumns) + threadIdx.x + (ph * TILE_WIDTH)];
+    } else {
+      sA[threadIdx.y][threadIdx.x] = 0.0;
+    }
+    if (Col < numBColumns && (threadIdx.y + ph * TILE_WIDTH) < numBRows) {
+      sB[threadIdx.y][threadIdx.x] =
+          B[(threadIdx.y + ph * TILE_WIDTH) * numBColumns + Col];
+    } else {
+      sB[threadIdx.y][threadIdx.x] = 0.0;
+    }
+    __syncthreads();
+    for (int j = 0; j < TILE_WIDTH; ++j) {
+      Cvalue += sA[threadIdx.y][j] * sB[j][threadIdx.x];
+    }
+  }
+  if (Row < numCRows && Col < numCColumns) {
+    C[Row * numCColumns + Col] = Cvalue;
+  }
 }
 
+void MMGPUKernel(float* in_a, float* in_b, float* out_c, int numARows,
+                 int numAColumns, int numBRows, int numBColumns, int numCRows,
+                 int numCColumns, cudaStream_t stream) {
+  // Initialize the grid and block dimensions
+  dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+  dim3 dimGrid((numCColumns / TILE_WIDTH) + 1, (numCRows / TILE_WIDTH) + 1, 1);
+  //@@ Launch the GPU Kernel here
+  matrixMultiplyShared<<<dimGrid, dimBlock>>>(
+      in_a, in_b, out_c, numARows, numAColumns, numBRows, numBColumns, numCRows,
+      numCColumns);
 
-void MMGPUKernel(float *in_a, float *in_b, float *out_c, 
-        int numARows, int numAColumns,
-        int numBRows, int numBColumns,
-        int numCRows, int numCColumns, 
-        cudaStream_t stream) {
-
-            // Initialize the grid and block dimensions 
-        dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
-            dim3 dimGrid((numCColumns / TILE_WIDTH) + 1, (numCRows / TILE_WIDTH) + 1, 1);
-            //@@ Launch the GPU Kernel here
-                matrixMultiplyShared <<<dimGrid, dimBlock>>>
-                                                           (in_a, in_b, out_c, numARows, numAColumns, numBRows, numBColumns, numCRows, numCColumns);
-
-        cudaError_t err = cudaGetLastError();
-          if (cudaSuccess != err)
-                  throw std::runtime_error("CUDA kernel failed : " + std::to_string(err));
+  cudaError_t err = cudaGetLastError();
+  if (cudaSuccess != err)
+    throw std::runtime_error("CUDA kernel failed : " + std::to_string(err));
 }
 
-
-
-template<int nThreads_per_row, int CTA, int MT0, int MT1>
-__global__
-__launch_bounds__(512)
-void HGEMV_WFPerRow(int m, int n, const _Float16 *A, int lda, const _Float16 *x, _Float16 *y)
-{
+template <int nThreads_per_row, int CTA, int MT0, int MT1>
+__global__ __launch_bounds__(512) void HGEMV_WFPerRow(
+    int m, int n, const _Float16* A, int lda, const _Float16* x, _Float16* y) {
   int num_row_per_block = CTA / nThreads_per_row;
-  int row_id = (blockIdx.x*num_row_per_block+threadIdx.y)*MT0;
-  int inc = (gridDim.x * num_row_per_block)*MT0;
+  int row_id = (blockIdx.x * num_row_per_block + threadIdx.y) * MT0;
+  int inc = (gridDim.x * num_row_per_block) * MT0;
 
   while (row_id < m) {
     float2 sum2[MT0];
 
 #pragma unroll
-    for (int i = 0; i < MT0; ++i)
-    {
-       sum2[i] = {0.0,0.0};
+    for (int i = 0; i < MT0; ++i) {
+      sum2[i] = {0.0, 0.0};
     }
 
-    for (int j = threadIdx.x; j < n; j += (nThreads_per_row*MT1)){
-        bool is_active = j < n;
-        if (is_active) {
-            float2 x2[MT1>>1];
+    for (int j = threadIdx.x; j < n; j += (nThreads_per_row * MT1)) {
+      bool is_active = j < n;
+      if (is_active) {
+        float2 x2[MT1 >> 1];
 #pragma unroll
-	    for(int offset = 0; offset < MT1; offset += 2)
-	    {
-            	x2[offset>>1] = {x[j+nThreads_per_row*offset], x[j+nThreads_per_row*(offset+1)]};
-	    }
-	    float2 a2[MT0][MT1>>1];
-#pragma unroll
-	    for (int i = 0; i < MT0; i++)
-	    {
-#pragma unroll
-	    	for (int offset = 0; offset < MT1; offset += 2)
-	    	{
-            	    a2[i][offset>>1] = {A[(row_id+i)*n+j+nThreads_per_row*offset], A[(row_id+i)*n+j+nThreads_per_row*(offset+1)]};
-	    	}
-	    }
-
-#pragma unroll
-	    for (int i = 0; i < MT0; i++)
-	    {
-#pragma unroll
-	    	for (int offset = 0; offset < (MT1>>1); offset++)
-	    	{
-	  		sum2[i] += a2[i][offset]*x2[offset];
-		}
-	    }
-
+        for (int offset = 0; offset < MT1; offset += 2) {
+          x2[offset >> 1] = {x[j + nThreads_per_row * offset],
+                             x[j + nThreads_per_row * (offset + 1)]};
         }
+        float2 a2[MT0][MT1 >> 1];
+#pragma unroll
+        for (int i = 0; i < MT0; i++) {
+#pragma unroll
+          for (int offset = 0; offset < MT1; offset += 2) {
+            a2[i][offset >> 1] = {
+                A[(row_id + i) * n + j + nThreads_per_row * offset],
+                A[(row_id + i) * n + j + nThreads_per_row * (offset + 1)]};
+          }
+        }
+
+#pragma unroll
+        for (int i = 0; i < MT0; i++) {
+#pragma unroll
+          for (int offset = 0; offset < (MT1 >> 1); offset++) {
+            sum2[i] += a2[i][offset] * x2[offset];
+          }
+        }
+      }
     }
     float sum[MT0];
 #pragma unroll
-    for (int i = 0; i < MT0; i++)
-    {
-    	sum[i] = sum2[i].x+sum2[i].y;
+    for (int i = 0; i < MT0; i++) {
+      sum[i] = sum2[i].x + sum2[i].y;
     }
 
 #pragma unroll
-    for (int i = 0; i < MT0; i++)
-    {
-#pragma unroll 
-    	for (int offset = nThreads_per_row  >> 1; offset >= 1; offset = offset >> 1) {
-            sum[i] += __shfl_down(sum[i], offset, nThreads_per_row);
-	}
-    }
-    if (threadIdx.x == 0) 
-    {
+    for (int i = 0; i < MT0; i++) {
 #pragma unroll
-	for (int i = 0; i < MT0; i++)
-	{	
-           y[row_id+i] = sum[i];
-	}
+      for (int offset = nThreads_per_row >> 1; offset >= 1;
+           offset = offset >> 1) {
+        sum[i] += __shfl_down(sum[i], offset, nThreads_per_row);
+      }
+    }
+    if (threadIdx.x == 0) {
+#pragma unroll
+      for (int i = 0; i < MT0; i++) {
+        y[row_id + i] = sum[i];
+      }
     }
     row_id += inc;
   }
 }
 
-void LLGemmZZ(void *in_a, void *in_b, void *out_c, const int M, const int K, cudaStream_t stream, const int solidx=0) {
-      //m -> M, n-> K
-      dim3 grid(1024);
-      dim3 block(64, 8); 
-      if (solidx==0) {
-        HGEMV_WFPerRow<64, 512, 4, 8><<<grid, block,0,stream>>>(M, K, reinterpret_cast<const _Float16*>(in_a), K, 
-              reinterpret_cast<const _Float16*>(in_b),reinterpret_cast<_Float16*>(out_c));
-      }
-      else if (solidx==1) {
-        HGEMV_WFPerRow<64, 512, 2, 8><<<grid, block,0,stream>>>(M, K, reinterpret_cast<const _Float16*>(in_a), K, 
-              reinterpret_cast<const _Float16*>(in_b),reinterpret_cast<_Float16*>(out_c));
-      }
-      else if (solidx==2) {
-        HGEMV_WFPerRow<64, 512, 1, 8><<<grid, block,0,stream>>>(M, K, reinterpret_cast<const _Float16*>(in_a), K, 
-              reinterpret_cast<const _Float16*>(in_b),reinterpret_cast<_Float16*>(out_c));
-      }
-      else {
-        HGEMV_WFPerRow<64, 512, 4, 8><<<grid, block,0,stream>>>(M, K, reinterpret_cast<const _Float16*>(in_a), K, 
-              reinterpret_cast<const _Float16*>(in_b),reinterpret_cast<_Float16*>(out_c));
-      }
-        cudaError_t err = cudaGetLastError();
-          if (cudaSuccess != err)
-                  throw std::runtime_error("CUDA kernel failed : " + std::to_string(err));
+void LLGemmZZ(void* in_a, void* in_b, void* out_c, const int M, const int K,
+              cudaStream_t stream, const int solidx = 0) {
+  // m -> M, n-> K
+  dim3 grid(1024);
+  dim3 block(64, 8);
+  if (solidx == 0) {
+    HGEMV_WFPerRow<64, 512, 4, 8><<<grid, block, 0, stream>>>(
+        M, K, reinterpret_cast<const _Float16*>(in_a), K,
+        reinterpret_cast<const _Float16*>(in_b),
+        reinterpret_cast<_Float16*>(out_c));
+  } else if (solidx == 1) {
+    HGEMV_WFPerRow<64, 512, 2, 8><<<grid, block, 0, stream>>>(
+        M, K, reinterpret_cast<const _Float16*>(in_a), K,
+        reinterpret_cast<const _Float16*>(in_b),
+        reinterpret_cast<_Float16*>(out_c));
+  } else if (solidx == 2) {
+    HGEMV_WFPerRow<64, 512, 1, 8><<<grid, block, 0, stream>>>(
+        M, K, reinterpret_cast<const _Float16*>(in_a), K,
+        reinterpret_cast<const _Float16*>(in_b),
+        reinterpret_cast<_Float16*>(out_c));
+  } else {
+    HGEMV_WFPerRow<64, 512, 4, 8><<<grid, block, 0, stream>>>(
+        M, K, reinterpret_cast<const _Float16*>(in_a), K,
+        reinterpret_cast<const _Float16*>(in_b),
+        reinterpret_cast<_Float16*>(out_c));
+  }
+  cudaError_t err = cudaGetLastError();
+  if (cudaSuccess != err)
+    throw std::runtime_error("CUDA kernel failed : " + std::to_string(err));
 }
