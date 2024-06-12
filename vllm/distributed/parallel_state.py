@@ -88,7 +88,7 @@ def init_distributed_environment(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
         distributed_init_method, backend)
-    if world_size > 1 and not torch.distributed.is_initialized():
+    if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
             "distributed environment")
@@ -117,6 +117,10 @@ def init_distributed_environment(
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
 
+        if world_size == 1:
+            # No need to warmup if world size is 1.
+            return
+
         # A small all_reduce for warmup.
         data = torch.zeros(1)
         if torch.cuda.is_available():
@@ -125,11 +129,6 @@ def init_distributed_environment(
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         del data
-    else:
-        if local_rank == -1:
-            local_rank = 0
-        global _LOCAL_RANK
-        _LOCAL_RANK = local_rank
 
 
 def initialize_model_parallel(
