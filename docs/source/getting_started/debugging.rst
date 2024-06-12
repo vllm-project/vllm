@@ -17,7 +17,10 @@ If you have already taken care of the above issues, but the vLLM instance still 
 - Set the environment variable ``export VLLM_LOGGING_LEVEL=DEBUG`` to turn on more logging.
 - Set the environment variable ``export CUDA_LAUNCH_BLOCKING=1`` to know exactly which CUDA kernel is causing the trouble.
 - Set the environment variable ``export NCCL_DEBUG=TRACE`` to turn on more logging for NCCL.
-- Set the environment variable ``export VLLM_TRACE_FUNCTION=1`` . All the function calls in vLLM will be recorded. Inspect these log files, and tell which function crashes or hangs. **Note: This will generate a lot of logs and slow down the system. Only use it for debugging purposes.**
+- Set the environment variable ``export VLLM_TRACE_FUNCTION=1``. All the function calls in vLLM will be recorded. Inspect these log files, and tell which function crashes or hangs.
+
+  .. warning::
+    vLLM function tracing will generate a lot of logs and slow down the system. Only use it for debugging purposes.
 
 With more logging, hopefully you can find the root cause of the issue.
 
