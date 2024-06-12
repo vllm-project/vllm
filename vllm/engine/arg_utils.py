@@ -67,6 +67,7 @@ class EngineArgs:
     max_loras: int = 1
     max_lora_rank: int = 16
     fully_sharded_loras: bool = False
+    linear_lora_attn_only: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
     lora_dtype: str = 'auto'
@@ -501,6 +502,12 @@ class EngineArgs:
                   'Enabling this will use the fully sharded layers. '
                   'At high sequence length, max rank or '
                   'tensor parallel size, this is likely faster.'))
+        parser.add_argument(
+            '--linear-lora-attn-only',
+            action='store_true',
+            help=('By default, vLLM create LoRA modules for all linear modules. '
+                  'When enabling this, vLLM would not create LoRA modules for linear modules '
+                  'that is not in attention module.'))
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
@@ -703,6 +710,7 @@ class EngineArgs:
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
             fully_sharded_loras=self.fully_sharded_loras,
+            linear_lora_attn_only=self.linear_lora_attn_only,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             long_lora_scaling_factors=self.long_lora_scaling_factors,
             lora_dtype=self.lora_dtype,
