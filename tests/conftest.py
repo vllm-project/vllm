@@ -361,6 +361,7 @@ class HfRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         del self.model
+        cleanup()
 
 
 @pytest.fixture
