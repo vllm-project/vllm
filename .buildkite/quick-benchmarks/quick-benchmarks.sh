@@ -281,8 +281,6 @@ run_serving_tests() {
     if [ $? -eq 0 ]; then
       echo ""
       echo "vllm server is up and running."
-      # run the client
-      eval "$client_command"
     else
       echo ""
       echo "vllm failed to start within the timeout period."
