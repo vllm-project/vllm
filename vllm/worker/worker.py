@@ -15,8 +15,8 @@ from vllm.distributed import (broadcast_tensor_dict, disable_communication,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.model_input import GPUModelInput
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.model_input import GPUModelInput
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
