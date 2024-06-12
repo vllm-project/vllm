@@ -23,8 +23,8 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
 
 template <typename scalar_t>
 __device__ __forceinline__ c10::Float8_e4m3fn scaled_fp8_conversion(
-    const scalar_t val, const float scale) {
-  float x = static_cast<float>(val) / scale;
+    const scalar_t val, const float inverted_scale) {
+  float x = static_cast<float>(val) * inverted_scale;
   float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
   return static_cast<c10::Float8_e4m3fn>(r);
 }
@@ -72,14 +72,55 @@ __global__ void segmented_max_reduction(float* __restrict__ scale,
 }
 
 template <typename scalar_t>
+struct __align__(8) vec4_t {
+  scalar_t x;
+  scalar_t y;
+  scalar_t z;
+  scalar_t w;
+};
+
+typedef struct __align__(4) {
+  c10::Float8_e4m3fn x;
+  c10::Float8_e4m3fn y;
+  c10::Float8_e4m3fn z;
+  c10::Float8_e4m3fn w;
+}
+float8x4_t;
+
+template <typename scalar_t>
 __global__ void scaled_fp8_quant_kernel(c10::Float8_e4m3fn* __restrict__ out,
                                         const scalar_t* __restrict__ input,
                                         const float* __restrict__ scale,
                                         int64_t num_elems) {
-  int i = blockDim.x * blockIdx.x + threadIdx.x;
-  while (i < num_elems) {
-    out[i] = scaled_fp8_conversion(input[i], *scale);
-    i += blockDim.x * gridDim.x;
+  int tid = blockDim.x * blockIdx.x + threadIdx.x;
+
+  // Invert the scale so that we can use multiplications to avoid expensive
+  // division.
+  const float inverted_scale = 1.0f / (*scale);
+
+  // Vectorized input/output to better utilize memory bandwidth.
+  const vec4_t<scalar_t>* vectorized_in =
+      reinterpret_cast<const vec4_t<scalar_t>*>(input);
+  float8x4_t* vectorized_out = reinterpret_cast<float8x4_t*>(out);
+
+  int num_vec_elems = num_elems >> 2;
+
+#pragma unroll 4
+  for (int i = tid; i < num_vec_elems; i += blockDim.x * gridDim.x) {
+    vec4_t<scalar_t> in_vec = vectorized_in[i];
+    float8x4_t out_vec;
+
+    out_vec.x = scaled_fp8_conversion(in_vec.x, inverted_scale);
+    out_vec.y = scaled_fp8_conversion(in_vec.y, inverted_scale);
+    out_vec.z = scaled_fp8_conversion(in_vec.z, inverted_scale);
+    out_vec.w = scaled_fp8_conversion(in_vec.w, inverted_scale);
+    vectorized_out[i] = out_vec;
+  }
+
+  // Handle the remaining elements if num_elems is not divisible by 4
+  for (int i = num_vec_elems * 4 + tid; i < num_elems;
+       i += blockDim.x * gridDim.x) {
+    out[i] = scaled_fp8_conversion(input[i], inverted_scale);
   }
 }
 
