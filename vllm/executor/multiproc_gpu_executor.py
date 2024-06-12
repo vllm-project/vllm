@@ -9,8 +9,9 @@ from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        get_vllm_instance_id, make_async, get_num_gpus_available_isolated)
+from vllm.utils import (get_distributed_init_method, get_ip,
+                        get_num_gpus_available_isolated, get_open_port,
+                        get_vllm_instance_id, make_async)
 
 logger = init_logger(__name__)
 

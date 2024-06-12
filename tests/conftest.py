@@ -1,8 +1,6 @@
 import contextlib
 import gc
 import os
-import subprocess
-import sys
 from typing import Any, Dict, List, Optional, Tuple, TypeVar
 
 import pytest
@@ -21,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu, get_num_gpus_available_isolated
+from vllm.utils import get_num_gpus_available_isolated, is_cpu
 
 logger = init_logger(__name__)
 

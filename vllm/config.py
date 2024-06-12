@@ -11,7 +11,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron, is_tpu, get_num_gpus_available_isolated
+from vllm.utils import (get_cpu_memory, get_num_gpus_available_isolated,
+                        is_cpu, is_hip, is_neuron, is_tpu)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
