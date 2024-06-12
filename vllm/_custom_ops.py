@@ -413,8 +413,6 @@ def scaled_fp8_quant(
 
     return output, scale
 
-#torch.fx.wrap(torch.ops._C.static_scaled_int8_quant)
-torch.fx.wrap('_C.static_scaled_int8_quant')
 
 # int8
 def scaled_int8_quant(

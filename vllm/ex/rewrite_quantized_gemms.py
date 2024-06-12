@@ -130,7 +130,7 @@ def llama_mlp_pattern(l_x_, weight, weight_1):
     x_1 = torch._C._nn.linear(input_parallel, weight_1, None)
     return x_1
 
-torch.fx.wrap(torch.ops._C.static_scaled_int8_quant)
+#torch.fx.wrap(torch.ops._C.static_scaled_int8_quant)
 #torch.fx.wrap('_C.cutlass_scaled_mm_dq')
 
 class tracer:
@@ -214,7 +214,8 @@ def rewrite_quantized_gemms(
         w = Input((k, n), dtype=torch.int8)
         w_scale = Input((1, n), dtype=torch.float32)
 
-    pattern_graph = symbolic_trace(pattern3, {'x_scale':x_scale}, [x, w, w_scale, x_type])
+    #pattern_graph = symbolic_trace(pattern3, {'x_scale':x_scale}, [x, w, w_scale, x_type])
+    pattern_graph = torch.fx.symbolic_trace(pattern3).graph
     print(f"Pattern graph:\n{graph_print_tabular(pattern_graph)}\n")
 
     #replace_graph = symbolic_trace(replace3, {'x':x, 'w': w, 'x_scale':x_scale, 'w_scale':w_scale, 'x_type': x_type})
