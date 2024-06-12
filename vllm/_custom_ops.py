@@ -37,7 +37,8 @@ def hint_on_error(fn):
                 "Error in calling custom op %s: %s\n"
                 "Possibly you have built or installed an obsolete version of vllm.\n"
                 "Please try a clean build and install of vllm,"
-                "or remove old built files such as vllm/*.so and build/ .")
+                "or remove old built files such as vllm/*cpython*.so and build/ ."
+            )
             logger.error(msg, fn.__name__, e)
             raise e
 
