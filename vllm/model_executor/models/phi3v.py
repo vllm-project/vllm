@@ -293,14 +293,13 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
         expected_input_type = self.vision_language_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
-        if expected_input_type == ImageInputType.PIXEL_VALUES:
-            
-            if pixel_values is not None and image_sizes is not None:
-                return Phi3VImagePixelInputs(
-                    type="pixel_values",
-                    data=pixel_values,
-                    image_sizes=image_sizes
-                )
+        if expected_input_type != ImageInputType.PIXEL_VALUES:
+            return None
+
+        if pixel_values is not None and image_sizes is not None:
+            return Phi3VImagePixelInputs(type="pixel_values",
+                                         data=pixel_values,
+                                         image_sizes=image_sizes)
 
         return None
 
