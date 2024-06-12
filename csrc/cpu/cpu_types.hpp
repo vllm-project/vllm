@@ -5,6 +5,10 @@
 #include <immintrin.h>
 #include <torch/all.h>
 
+#ifndef __AVX2__
+static_assert(false, "AVX2 must be supported for the current implementation.");
+#endif
+
 namespace vec_op {
 
 // FIXME: FP16 is not fully supported in Torch-CPU
