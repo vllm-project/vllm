@@ -272,7 +272,7 @@ class OpenAIServing:
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
-                None, self.engine.engine.model_executor.driver_worker.model_runner.add_lora, lora_request
+                None, self.engine.engine.model_executor.add_lora, lora_request
             )
         except RuntimeError as e:
             self._remove_lora(lora_request.lora_name)
@@ -308,7 +308,7 @@ class OpenAIServing:
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
-                None, self.engine.engine.model_executor.driver_worker.model_runner.remove_lora, lora_id
+                None, self.engine.engine.model_executor.remove_lora, lora_id
             )
         except Exception:
             return self.create_lora_error_response(
