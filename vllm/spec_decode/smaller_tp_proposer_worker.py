@@ -219,9 +219,5 @@ class DummyProposerWorker(ProposerWorkerBase):
         return set()
 
     @property
-    def max_model_len(self) -> int:
-        return self._worker.max_model_len
-
-    @property
     def vocab_size(self) -> int:
         return self._worker.vocab_size
