@@ -48,13 +48,12 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         # gpu ranks that will generate draft tokens together
         ranks = list(range(draft_tp))
 
-        logger.info(f"{rank=}, {ranks=}")
         if rank in ranks:
             logger.info(f"Wrapping {type(worker)} in {cls}")
             return cls(worker, ranks, local_rank)
         else:
             # for workers not participating in the draft generation
-            logger.info(f"Returning dummy worker")
+            logger.info("Returning dummy worker")
             return DummyProposerWorker(worker)
 
     def __init__(
@@ -177,9 +176,6 @@ class DummyProposerWorker(ProposerWorkerBase):
         self._worker = worker
 
     def init_device(self):
-        pass
-
-    def set_include_gpu_probs_tensor(self):
         pass
 
     def load_model(self):

@@ -88,7 +88,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     @classmethod
     def create_worker(
         cls,
-        scorer_worker: WorkerBase,
+        scorer_worker: Worker,
         draft_worker_kwargs: Dict[str, Any],
         disable_by_batch_size: Optional[int],
     ) -> "SpecDecodeWorker":
