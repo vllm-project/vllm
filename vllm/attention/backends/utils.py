@@ -76,6 +76,13 @@ def assert_no_encdec_chunked_prefill_assuming_supported_backend(
         # scenarios.
         return
 
+    if attn_metadata.num_prefill_tokens is None or \
+        attn_metadata.num_decode_tokens is None:
+        # The metadata which would be
+        # indicative of chunked prefill is unset;
+        # this may be the case for encoder-only models
+        return
+
     if attn_metadata.num_prefill_tokens > 0 and \
             attn_metadata.num_decode_tokens > 0:
         # Encoder/decoder models are currently incompatible

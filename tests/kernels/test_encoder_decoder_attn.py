@@ -680,6 +680,59 @@ def _run_encoder_decoder_cross_attention_test(
     return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query, key,
                         value, kv_cache, attn_metadata)
 
+@pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("max_dec_seq_len", MAX_DEC_SEQ_LENS)
+@pytest.mark.parametrize("max_enc_seq_len", MAX_ENC_SEQ_LENS)
+def test_encoder_only(num_heads: int, head_size: int, backend_name: str,
+                      batch_size: int, block_size: int,
+                      max_dec_seq_len: int, max_enc_seq_len: int,
+                      monkeypatch):
+    
+    # Force Attention wrapper backend
+    override_backend_env_variable(monkeypatch, backend_name)
+
+    # Note: KV cache size of 4096 is arbitrary & chosen intentionally
+    # to be more than necessary, since exceeding the kv cache size
+    # is not part of this test
+    test_pt = TestPoint(num_heads, head_size, backend_name, batch_size,
+                        block_size, max_dec_seq_len, max_enc_seq_len, 4096)
+
+    # Attention scale factor, attention backend instance, attention wrapper
+    # instance, KV cache init
+    test_rsrcs = _make_test_resources(test_pt)
+
+    # Construct encoder attention test params (only used
+    # during prefill)
+
+    enc_test_params = _encoder_attn_setup(test_pt, test_rsrcs)
+
+    # Shared prefill metadata structure
+
+    prephase_attn_metadata: AttentionMetadata = make_test_metadata(
+        test_rsrcs.attn_backend,
+        True,
+        None,
+        decoder_test_params=None,
+        encoder_test_params=enc_test_params,
+        cross_test_params=None,
+        default_attn_type=AttentionType.ENCODER,
+        device=CUDA_DEVICE)
+
+    # PREFILL: encoder attention
+
+    enc_pckd_act_out: torch.Tensor = \
+      _run_encoder_attention_test(
+        test_rsrcs.attn,
+        enc_test_params,
+        prephase_attn_metadata)
+
+    # - Is encoder attention result correct?
+    assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)

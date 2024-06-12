@@ -733,15 +733,28 @@ def make_test_metadata(
     * AttentionMetadata structure
     '''
 
-    kv_mmap = decoder_test_params.kv_mmap
+    # Decoder self-attention memory mapping
+    # decoder_test_params is None signals encoder-only
+    # scenario, so kv_mmap is None
+    kv_mmap = None if decoder_test_params is None else \
+                decoder_test_params.kv_mmap
 
-    num_prefills_or_decodes = len(seq_lens)
+    # This function constructs metadata assuming no chunked prefill,
+    # i.e. 100% prefill tokens or 100% decode tokens
+    #
+    # - If is_prompt, num_prefills_or_decodes is the number of prefills
+    #   and num_prefill_or_decode_tokens is the number of prefill tokens
+    # - If not is_prompt, num_prefills_or_decodes is the number of decodes
+    #   and num_prefill_or_decode_tokens is the number of decode tokens
+    #
+    # seq_lens is None signals encoder-only
+    # scenario, in which case num_prefills_or_decodes and
+    # num_prefill_or_decode_tokens are unused
+    num_prefills_or_decodes = None if seq_lens is None else \
+                                len(seq_lens)
 
-    # Prefill: operate on total num. of prompt
-    # tokens
-    # Decode: operate on one token per seq
-    num_prefill_or_decode_tokens = \
-        sum(seq_lens) if is_prompt else len(seq_lens)
+    num_prefill_or_decode_tokens = None if seq_lens is None else \
+        (sum(seq_lens) if is_prompt else len(seq_lens))
 
     # Seems for non-prefix-caching scenarios context_lens
     # is never needed
@@ -750,14 +763,14 @@ def make_test_metadata(
     if encoder_test_params is None:
         encoder_seq_lens = None
     else:
-        # Encoder/decoder models only:
+        # Encoder/decoder or encoder-only models only:
         # * Extract encoder input sequence lengths
         encoder_seq_lens = encoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
 
     if cross_test_params is None:
         cross_kv_mmap = None
     else:
-        # Encoder/decoder models only:
+        # Encoder/decoder or encoder-only models only:
         # * Extract *cross-attention* slot_mapping and block table
         #   (kv_mmap)
         cross_kv_mmap = cross_test_params.kv_mmap
@@ -782,7 +795,8 @@ def make_test_metadata(
 
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
-            slot_mapping=kv_mmap.slot_mapping,
+            slot_mapping=None if kv_mmap is None else \
+                            kv_mmap.slot_mapping,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -790,7 +804,8 @@ def make_test_metadata(
             max_prefill_seq_len=None if seq_lens is None else max(seq_lens),
             max_decode_seq_len=0,
             context_lens_tensor=context_lens_tensor,
-            block_tables=kv_mmap.block_tables,
+            block_tables=None if kv_mmap is None else \
+                            kv_mmap.block_tables,
             use_cuda_graph=False,
             _attn_type=default_attn_type,
             encoder_seq_lens=encoder_seq_lens,
