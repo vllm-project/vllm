@@ -249,7 +249,7 @@ run_serving_tests() {
     server_args=$(json2args "$server_params")
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
-    qps_list=$(echo "$qps_list" | jq -r '.[] | @sh') | tr -d \'
+    qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
     echo "Running over qps list $qps_list"
 
     # check if there is enough GPU to run the test
@@ -290,6 +290,12 @@ run_serving_tests() {
 
     # iterate over different QPS
     for qps in $qps_list; do
+
+      # remove the surrounding single quote from qps
+      if [[ "$qps" == *"inf"* ]]; then
+        echo "qps was $qps"
+        qps="inf"
+        echo "now qps is $qps"
 
       new_test_name=$test_name"_qps_"$qps
 
