@@ -88,7 +88,7 @@ Option 2: Build from source
 - `Pytorch <https://pytorch.org/>`_
 - `hipBLAS <https://rocm.docs.amd.com/projects/hipBLAS/en/latest/install.html>`_
 
-For installing PyTorch, you can start from a fresh docker image, e.g, `rocm6.1.1_ubuntu20.04_py3.9_pytorch_staging`, `rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1`, `rocm/pytorch-nightly`.
+For installing PyTorch, you can start from a fresh docker image, e.g, `rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging`, `rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1`, `rocm/pytorch-nightly`.
 
 Alternatively, you can install pytorch using pytorch wheels. You can check Pytorch installation guild in Pytorch `Getting Started <https://pytorch.org/get-started/locally/>`_
 

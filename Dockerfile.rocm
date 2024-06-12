@@ -1,10 +1,10 @@
 # Default ROCm 6.1 base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.1.1_ubuntu20.04_py3.9_pytorch_staging"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging"
 
 # Tested and supported base rocm/pytorch images
 ARG ROCm_5_7_BASE="rocm/pytorch:rocm5.7_ubuntu20.04_py3.9_pytorch_2.0.1" \
     ROCm_6_0_BASE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" \
-    ROCM_6_1_BASE="rocm/pytorch:rocm6.1.1_ubuntu20.04_py3.9_pytorch_staging"
+    ROCM_6_1_BASE="rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging"
 
 # Default ROCm ARCHes to build vLLM for.
 ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
@@ -131,12 +131,14 @@ RUN case "$(which python3)" in \
         *) ;; esac
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade numba
+    pip install --upgrade numba scipy
 
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 # Workaround for ray >= 2.10.0
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+# Silences the HF Tokenizers warning
+ENV TOKENIZERS_PARALLELISM=false
 
 RUN --mount=type=cache,target=${CCACHE_DIR} \
     --mount=type=cache,target=/root/.cache/pip \
@@ -147,6 +149,28 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
         *"rocm-6.1"*) \
             cp rocm_patch/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6;; \
         *) ;; esac \
+    && python3 setup.py clean --all \
     && python3 setup.py develop
 
+# Copy triton wheel(s) if any
+RUN --mount=type=bind,from=build_triton,src=/install,target=/install \
+    mkdir -p libs \
+    && if ls /install/*.whl; then \
+        cp /install/*.whl libs \
+        # Preemptively uninstall to avoid same-version no-installs
+        && pip uninstall -y triton; fi
+
+# Copy flash-attn wheel(s) if any
+RUN --mount=type=bind,from=build_fa,src=/install,target=/install \
+    mkdir -p libs \
+    && if ls /install/*.whl; then \
+        cp /install/*.whl libs \
+        # Preemptively uninstall to avoid same-version no-installs
+        && pip uninstall -y flash-attn; fi
+
+# Install any dependencies that were built
+RUN if ls libs/*.whl; then \
+    pip install libs/*.whl; fi
+
 CMD ["/bin/bash"]
+

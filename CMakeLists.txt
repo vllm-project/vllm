@@ -111,7 +111,7 @@ elseif(HIP_FOUND)
       ROCM_VERSION_DEV_MINOR EQUAL 0 AND
       NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_60})
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_60} "
-      "expected for ROCMm 6.0 build, saw ${Torch_VERSION} instead.")
+      "expected for ROCm 6.0 build, saw ${Torch_VERSION} instead.")
   endif()
 
   # ROCm 6.1
@@ -119,7 +119,7 @@ elseif(HIP_FOUND)
       ROCM_VERSION_DEV_MINOR EQUAL 1 AND
       NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_61})
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_61} "
-      "expected for ROCMm 6.1 build, saw ${Torch_VERSION} instead.")
+      "expected for ROCm 6.1 build, saw ${Torch_VERSION} instead.")
   endif()
 else()
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")
