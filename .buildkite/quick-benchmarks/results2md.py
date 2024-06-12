@@ -19,7 +19,6 @@ latency_column_mapping = {
     "P90": "P90 (s)",
 }
 
-
 # thoughput tests and the keys that will be printed into markdown
 throughput_results = []
 throughput_results_column_mapping = {
@@ -92,7 +91,7 @@ for test_file in results_folder.glob("*.json"):
         # add the result to raw_result
         latency_results.append(raw_result)
         continue
-    
+
     elif "throughput" in f.name:
         # this result is generated via `benchmark_throughput.py`
 
@@ -123,7 +122,8 @@ if not serving_results.empty:
         serving_column_mapping.keys())].rename(columns=serving_column_mapping)
 if not throughput_results.empty:
     throughput_results = throughput_results[list(
-        throughput_results_column_mapping.keys())].rename(columns=throughput_results_column_mapping)
+        throughput_results_column_mapping.keys())].rename(
+            columns=throughput_results_column_mapping)
 
 # get markdown tables
 latency_md_table = tabulate(latency_results,
@@ -135,9 +135,9 @@ serving_md_table = tabulate(serving_results,
                             tablefmt='pipe',
                             showindex=False)
 throughput_md_table = tabulate(throughput_results,
-                            headers='keys',
-                            tablefmt='pipe',
-                            showindex=False)
+                               headers='keys',
+                               tablefmt='pipe',
+                               showindex=False)
 
 # document the result
 with open(results_folder / "benchmark_results.md", "w") as f:
@@ -153,4 +153,4 @@ with open(results_folder / "benchmark_results.md", "w") as f:
         f.write("## Serving tests\n")
         f.write(serving_md_table)
         f.write("\n")
-    
+        
