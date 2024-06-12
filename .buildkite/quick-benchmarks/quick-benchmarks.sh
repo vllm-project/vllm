@@ -79,7 +79,7 @@ kill_gpu_processes() {
       echo "No GPU processes found."
   else
       for pid in $pids; do
-          kill -9 $pid
+          kill -9 "$pid"
           echo "Killed process with PID: $pid"
       done
 
@@ -124,42 +124,99 @@ run_latency_tests() {
   latency_test_file=$1
 
   # Iterate over latency tests
-  jq -c '.[]' $latency_test_file | while read -r params; do
+  jq -c '.[]' "$latency_test_file" | while read -r params; do
 
     # get the test name, and append the GPU type back to it.
-    test_name=$(echo $params | jq -r '.test_name')_${gpu_type}
+    test_name=$(echo "$params" | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^latency_ ]]; then
       echo "In latency-test.json, test_name must start with \"latency_\"."
       exit 1
     fi
 
-    # get client and server arguments
-    latency_params=$(echo $params | jq -r '.parameters')
+    # get arguments
+    latency_params=$(echo "$params" | jq -r '.parameters')
     latency_args=$(json2args "$latency_params")
 
     # check if there is enough GPU to run the test
-    tp=$(echo $latency_params | jq -r '.tensor_parallel_size')
+    tp=$(echo "$latency_params" | jq -r '.tensor_parallel_size')
     if [[ $gpu_count -lt $tp ]]; then
       echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
       continue
     fi
 
     latency_command="python3 benchmark_latency.py \
-      --output-json $RESULTS_FOLDER/${test_name}.json $latency_args"
+    --output-json $RESULTS_FOLDER/${test_name}.json
+    $latency_args"
 
     echo "Running test case $test_name"
     echo "Latency command: $latency_command"
-    # record the benchmarking commands
-    echo $(
-      jq -n \
-        --arg latency "$latency_command" \
-        '{
-          latency_command: $latency,
-        }'
-    ) > $RESULTS_FOLDER/$test_name.commands
+
+    # recoding benchmarking command ang GPU command
+    jq_output=$(jq -n \
+      --arg latency "$latency_command" \
+      --arg gpu "$gpu_type" \
+      '{
+        latency_command: $latency,
+        gpu_type: $gpu
+      }')
+    echo "$jq_output" > "$RESULTS_FOLDER/$test_name.commands"
 
     # run the benchmark
-    eval $latency_command
+    eval "$latency_command"
+
+    kill_gpu_processes
+
+  done
+
+}
+
+
+run_throughput_tests() {
+  # run throughput tests using `benchmark_throughput.py`
+  # $1: a json file specifying throughput test cases
+
+  local throughput_test_file
+  throughput_test_file=$1
+
+  # Iterate over throughput tests
+  jq -c '.[]' "$throughput_test_file" | while read -r params; do
+
+    # get the test name, and append the GPU type back to it.
+    test_name=$(echo "$params" | jq -r '.test_name')
+    if [[ ! "$test_name" =~ ^throughput_ ]]; then
+      echo "In throughput-test.json, test_name must start with \"throughput_\"."
+      exit 1
+    fi
+
+    # get arguments
+    throughput_params=$(echo "$params" | jq -r '.parameters')
+    throughput_args=$(json2args "$throughput_params")
+
+    # check if there is enough GPU to run the test
+    tp=$(echo $throughput_params | jq -r '.tensor_parallel_size')
+    if [[ $gpu_count -lt $tp ]]; then
+      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
+      continue
+    fi
+
+    throughput_command="python3 benchmark_throughput.py \
+    --output-json $RESULTS_FOLDER/${test_name}.json
+    $throughput_args"
+
+    echo "Running test case $test_name"
+    echo "Throughput command: $throughput_command"
+    # recoding benchmarking command ang GPU command
+    jq_output=$(jq -n \
+      --arg command "$throughput_command" \
+      --arg gpu "$gpu_type" \
+      '{
+        throughput_command: $command,
+        gpu_type: $gpu
+      }')
+    echo "$jq_output" > "$RESULTS_FOLDER/$test_name.commands"
+
+    # run the benchmark
+    eval "$throughput_command"
 
     kill_gpu_processes
 
@@ -177,25 +234,34 @@ run_serving_tests() {
   serving_test_file=$1
 
   # Iterate over serving tests
-  jq -c '.[]' $serving_test_file | while read -r params; do
+  jq -c '.[]' "$serving_test_file" | while read -r params; do
 
     # get the test name, and append the GPU type back to it.
-    test_name=$(echo $params | jq -r '.test_name')
+    test_name=$(echo "$params" | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^serving_ ]]; then
       echo "In serving-test.json, test_name must start with \"serving_\"."
       exit 1
     fi
 
     # get client and server arguments
-    server_params=$(echo $params | jq -r '.server_parameters')
-    client_params=$(echo $params | jq -r '.client_parameters')
+    server_params=$(echo "$params" | jq -r '.server_parameters')
+    client_params=$(echo "$params" | jq -r '.client_parameters')
     server_args=$(json2args "$server_params")
     client_args=$(json2args "$client_params")
+    qps_list=$(json2args "$qps_list")
 
     # check if there is enough GPU to run the test
-    tp=$(echo $server_params | jq -r '.tensor_parallel_size')
+    tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
     if [[ $gpu_count -lt $tp ]]; then
       echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
+      continue
+    fi
+
+    # check if server model and client model is aligned
+    server_model=$(echo "$server_params" | jq -r '.model')
+    client_model=$(echo "$client_params" | jq -r '.model')
+    if [[ $server_model != "$client_model" ]]; then
+      echo "Server model and client model must be the same. Skip testcase $testname."
       continue
     fi
 
@@ -203,40 +269,49 @@ run_serving_tests() {
       -m vllm.entrypoints.openai.api_server \
       $server_args"
 
-    client_command="python3 benchmark_serving.py \
-      --backend vllm \
-      --save-result \
-      --result-dir $RESULTS_FOLDER \
-      --result-filename ${test_name}.json \
-      $client_args"
-
+    # run the server
     echo "Running test case $test_name"
     echo "Server command: $server_command"
-    echo "Client command: $client_command"
-    # record the benchmarking commands
-    echo $(
-      jq -n \
-        --arg server "$server_command" \
-        --arg client "$client_command" \
-        '{
-          server_command: $server,
-          client_command: $client
-        }'
-    ) > $RESULTS_FOLDER/$test_name.commands
-
-    # run the server
-    eval $server_command &
-    server_pid=$!
+    eval "$server_command" &
 
     # wait until the server is alive
     wait_for_server
     if [ $? -eq 0 ]; then
       echo "vllm server is up and running."
       # run the client
-      eval $client_command
+      eval "$client_command"
     else
       echo "vllm failed to start within the timeout period."
     fi
+
+    # iterate over different QPS
+    for qps in $qps_list; do
+
+      new_test_name=$test_name"_qps_"$qps
+
+      client_command="python3 benchmark_serving.py \
+        --save-result \
+        --result-dir $RESULTS_FOLDER \
+        --result-filename ${new_test_name}.json \
+        --request-rate $qps \
+        $client_args"
+
+      echo "Running test case $test_name with qps $qps"
+      echo "Client command: $client_command"
+
+      # record the benchmarking commands
+      jq_output=$(jq -n \
+        --arg server "$server_command" \
+        --arg client "$client_command" \
+        --arg gpu "$gpu_type" \
+        '{
+          server_command: $server,
+          client_command: $client,
+          gpu_type: $gpu
+        }')
+      echo "$jq_output" > "$RESULTS_FOLDER/$new_test_name.commands"
+
+    done
 
     # clean up
     kill_gpu_processes
@@ -261,18 +336,21 @@ main() {
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
   # prepare for benchmarking
-  cd benchmarks
+  cd benchmarks || exit 1
   wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
+  QUICK_BENCHMARK_ROOT=../.buildkite/quick-benchmarks/
 
   # benchmarking
-  run_latency_tests ../.buildkite/nightly-benchmarks/latency-tests.json
-  run_serving_tests ../.buildkite/nightly-benchmarks/serving-tests.json
+  run_serving_tests $QUICK_BENCHMARK_ROOT/serving-tests-for-debugging.json
+  run_latency_tests $QUICK_BENCHMARK_ROOT/latency-tests-for-debugging.json
+  run_throughput_tests $QUICK_BENCHMARK_ROOT/throughput-tests-for-debugging.json
+  
 
   # postprocess benchmarking results
   pip install tabulate pandas
-  python3 ../.buildkite/nightly-benchmarks/results2md.py
+  python3 $QUICK_BENCHMARK_ROOT/results2md.py
 
   upload_to_buildkite
 
