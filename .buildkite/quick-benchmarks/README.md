@@ -27,7 +27,9 @@ Here is an example of one test inside `latency-tests.json`:
         "parameters": {
             "model": "meta-llama/Meta-Llama-3-8B",
             "tensor_parallel_size": 1,
-            "load_format": "dummy"
+            "load_format": "dummy",
+            "num_iters_warmup": 5,
+            "num_iters": 15
         }
     },
     ...
@@ -36,7 +38,14 @@ Here is an example of one test inside `latency-tests.json`:
 
 In this example:
 -  The `test_name` attributes is a unique identifier for the test. In `latency-tests.json`, it must start with `latency_`.
--  The `parameters` attribute control the command line arguments to be used for `benchmark_latency.py`. Note that please use underline `_` instead of the dash `-` when specifying the command line arguments, and `quick-benchmark.sh` will convert the underline to dash when feeding the arguments to `benchmark_latency.py`. For example, the corresponding command line arguments for `benchmark_latency.py` will be `--model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 1 --load-format dummy`
+-  The `parameters` attribute control the command line arguments to be used for `benchmark_latency.py`. Note that please use underline `_` instead of the dash `-` when specifying the command line arguments, and `quick-benchmark.sh` will convert the underline to dash when feeding the arguments to `benchmark_latency.py`. For example, the corresponding command line arguments for `benchmark_latency.py` will be `--model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 1 --load-format dummy --num-iters-warmup 5 --num-iters 15`
+
+WARNING: The benchmarking script will save json results by itself, so please do not configure `--output-json` parameter in the json file.
+
+
+### Throughput test
+
+The tests are specified in `throughput-tests.json`. The syntax is similar to `latency-tests.json`, except for that the parameters will be fed forward to `benchmark_throughput.py`.
 
 ### Serving test
 
@@ -48,6 +57,7 @@ We test the throughput by using `benchmark_serving.py` with request rate = inf t
     ...
     {
         "test_name": "serving_llama8B_tp1_sharegpt",
+        "qps_list": [1, 4, 16, "inf"],
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B",
             "tensor_parallel_size": 1,
@@ -58,9 +68,10 @@ We test the throughput by using `benchmark_serving.py` with request rate = inf t
         },
         "client_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B",
+            "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 1000
+            "num_prompts": 200
         }
     },
     ...
@@ -71,8 +82,10 @@ Inside this example:
 - The `test_name` attribute is also a unique identifier for the test. It must start with `serving_`.
 - The `server-parameters` includes the command line arguments for vllm server. 
 - The `client-parameters` includes the command line arguments for `benchmark_serving.py`. 
+- The `qps_list` controls the list of qps for test. It will be used to configure the `--request-rate` parameter in `benchmark_serving.py`
 
 
 ## Visualizing the results
 
-The `results2md.py` helps you put the benchmarking results inside a markdown table. To access it, in your PR page, scroll down
+The `results2md.py` helps you put the benchmarking results inside a markdown table.
+Need example images.
