@@ -18,12 +18,16 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 768) \
     f(in_T, out_T, W_T, narrow, 1024) \
     f(in_T, out_T, W_T, narrow, 1152) \
+    f(in_T, out_T, W_T, narrow, 1216) \
     f(in_T, out_T, W_T, narrow, 1280) \
     f(in_T, out_T, W_T, narrow, 1536) \
     f(in_T, out_T, W_T, narrow, 1728) \
     f(in_T, out_T, W_T, narrow, 1792) \
     f(in_T, out_T, W_T, narrow, 2048) \
+    f(in_T, out_T, W_T, narrow, 2240) \
     f(in_T, out_T, W_T, narrow, 2304) \
+    f(in_T, out_T, W_T, narrow, 2368) \
+    f(in_T, out_T, W_T, narrow, 2432) \
     f(in_T, out_T, W_T, narrow, 2560) \
     f(in_T, out_T, W_T, narrow, 2752) \
     f(in_T, out_T, W_T, narrow, 2816) \
@@ -33,7 +37,10 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 3584) \
     f(in_T, out_T, W_T, narrow, 3712) \
     f(in_T, out_T, W_T, narrow, 4096) \
+    f(in_T, out_T, W_T, narrow, 4480) \
     f(in_T, out_T, W_T, narrow, 4608) \
+    f(in_T, out_T, W_T, narrow, 4736) \
+    f(in_T, out_T, W_T, narrow, 4864) \
     f(in_T, out_T, W_T, narrow, 5120) \
     f(in_T, out_T, W_T, narrow, 5504) \
     f(in_T, out_T, W_T, narrow, 5632) \
@@ -44,22 +51,27 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 7168) \
     f(in_T, out_T, W_T, narrow, 7424) \
     f(in_T, out_T, W_T, narrow, 8192) \
+    f(in_T, out_T, W_T, narrow, 8960) \
     f(in_T, out_T, W_T, narrow, 9216) \
+    f(in_T, out_T, W_T, narrow, 9472) \
     f(in_T, out_T, W_T, narrow, 10240) \
     f(in_T, out_T, W_T, narrow, 11008) \
     f(in_T, out_T, W_T, narrow, 12288) \
     f(in_T, out_T, W_T, narrow, 13696) \
     f(in_T, out_T, W_T, narrow, 13824) \
     f(in_T, out_T, W_T, narrow, 14336) \
+    f(in_T, out_T, W_T, narrow, 14784) \
     f(in_T, out_T, W_T, narrow, 14848) \
     f(in_T, out_T, W_T, narrow, 15360) \
     f(in_T, out_T, W_T, narrow, 16384) \
+    f(in_T, out_T, W_T, narrow, 18944) \
     f(in_T, out_T, W_T, narrow, 20480) \
     f(in_T, out_T, W_T, narrow, 22016) \
     f(in_T, out_T, W_T, narrow, 24576) \
     f(in_T, out_T, W_T, narrow, 27392) \
     f(in_T, out_T, W_T, narrow, 27648) \
     f(in_T, out_T, W_T, narrow, 28672) \
+    f(in_T, out_T, W_T, narrow, 29568) \
     f(in_T, out_T, W_T, narrow, 29696) \
     f(in_T, out_T, W_T, narrow, 32000) \
     f(in_T, out_T, W_T, narrow, 32256) \
@@ -93,12 +105,16 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 768, narrow) \
     f(in_T, out_T, W_T, 1024, narrow) \
     f(in_T, out_T, W_T, 1152, narrow) \
+    f(in_T, out_T, W_T, 1216, narrow) \
     f(in_T, out_T, W_T, 1280, narrow) \
     f(in_T, out_T, W_T, 1536, narrow) \
     f(in_T, out_T, W_T, 1728, narrow) \
     f(in_T, out_T, W_T, 1792, narrow) \
     f(in_T, out_T, W_T, 2048, narrow) \
+    f(in_T, out_T, W_T, 2240, narrow) \
     f(in_T, out_T, W_T, 2304, narrow) \
+    f(in_T, out_T, W_T, 2368, narrow) \
+    f(in_T, out_T, W_T, 2432, narrow) \
     f(in_T, out_T, W_T, 2560, narrow) \
     f(in_T, out_T, W_T, 2752, narrow) \
     f(in_T, out_T, W_T, 2816, narrow) \
@@ -108,7 +124,10 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 3584, narrow) \
     f(in_T, out_T, W_T, 3712, narrow) \
     f(in_T, out_T, W_T, 4096, narrow) \
+    f(in_T, out_T, W_T, 4480, narrow) \
     f(in_T, out_T, W_T, 4608, narrow) \
+    f(in_T, out_T, W_T, 4736, narrow) \
+    f(in_T, out_T, W_T, 4864, narrow) \
     f(in_T, out_T, W_T, 5120, narrow) \
     f(in_T, out_T, W_T, 5504, narrow) \
     f(in_T, out_T, W_T, 5632, narrow) \
@@ -119,22 +138,27 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 7168, narrow) \
     f(in_T, out_T, W_T, 7424, narrow) \
     f(in_T, out_T, W_T, 8192, narrow) \
+    f(in_T, out_T, W_T, 8960, narrow) \
     f(in_T, out_T, W_T, 9216, narrow) \
+    f(in_T, out_T, W_T, 9472, narrow) \
     f(in_T, out_T, W_T, 10240, narrow) \
     f(in_T, out_T, W_T, 11008, narrow) \
     f(in_T, out_T, W_T, 12288, narrow) \
     f(in_T, out_T, W_T, 13696, narrow) \
     f(in_T, out_T, W_T, 13824, narrow) \
     f(in_T, out_T, W_T, 14336, narrow) \
+    f(in_T, out_T, W_T, 14784, narrow) \
     f(in_T, out_T, W_T, 14848, narrow) \
     f(in_T, out_T, W_T, 15360, narrow) \
     f(in_T, out_T, W_T, 16384, narrow) \
+    f(in_T, out_T, W_T, 18944, narrow) \
     f(in_T, out_T, W_T, 20480, narrow) \
     f(in_T, out_T, W_T, 22016, narrow) \
     f(in_T, out_T, W_T, 24576, narrow) \
     f(in_T, out_T, W_T, 27392, narrow) \
     f(in_T, out_T, W_T, 27648, narrow) \
     f(in_T, out_T, W_T, 28672, narrow) \
+    f(in_T, out_T, W_T, 29568, narrow) \
     f(in_T, out_T, W_T, 29696, narrow) \
     f(in_T, out_T, W_T, 32000, narrow) \
     f(in_T, out_T, W_T, 32256, narrow) \
