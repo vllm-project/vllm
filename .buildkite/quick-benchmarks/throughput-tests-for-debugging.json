@@ -1,0 +1,10 @@
+[
+    {
+        "test_name": "latency_llama8B_tp1",
+        "parameters": {
+            "model": "meta-llama/Meta-Llama-3-8B",
+            "tensor_parallel_size": 1,
+            "load_format": "dummy"
+        }
+    }
+]
