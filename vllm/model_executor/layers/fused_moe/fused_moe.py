@@ -8,7 +8,6 @@ import torch
 import triton
 import triton.language as tl
 
-import vllm._moe_C as moe_kernels
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 
@@ -355,7 +354,7 @@ def fused_topk(
                                         topk,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
-    moe_kernels.topk_softmax(
+    ops.topk_softmax(
         topk_weights,
         topk_ids,
         token_expert_indicies,
