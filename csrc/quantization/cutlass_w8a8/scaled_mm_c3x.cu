@@ -278,6 +278,72 @@ struct sm90_fp8_config<InType, OutType, Epilogue, 64> {
                       KernelSchedule, EpilogueSchedule>;
 };
 
+template <typename InType, typename OutType, int32_t M, bool IsSmallN>
+struct sm90_int8_config {
+  static_assert(std::is_same<InType, int8_t>());
+  using KernelSchedule =
+      typename cutlass::gemm::KernelTmaWarpSpecializedPingpong;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_128, _128, _128>;
+  using ClusterShape = Shape<_2, _1, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, TileShape, ClusterShape, KernelSchedule,
+                      EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType, bool IsSmallN>
+struct sm90_int8_config<InType, OutType, 128, IsSmallN> {
+  // Specialization for M in (64, 128] and any N
+  static_assert(std::is_same<InType, int8_t>());
+  using KernelSchedule =
+      typename cutlass::gemm::KernelTmaWarpSpecializedPingpong;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _128, _128>;
+  using ClusterShape = Shape<_2, _1, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, TileShape, ClusterShape, KernelSchedule,
+                      EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType, bool IsSmallN>
+struct sm90_int8_config<InType, OutType, 64, IsSmallN> {
+  // Specialization for M in (32, 64] and any N
+  static_assert(std::is_same<InType, int8_t>());
+  using KernelSchedule = typename cutlass::gemm::KernelTmaWarpSpecialized;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _64, _256>;
+  using ClusterShape = Shape<_1, _1, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, TileShape, ClusterShape, KernelSchedule,
+                      EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType>
+struct sm90_int8_config<InType, OutType, 32, false> {
+  // Specialization for M in [1, 32] and N >= 8192
+  static_assert(std::is_same<InType, int8_t>());
+  using KernelSchedule = typename cutlass::gemm::KernelTmaWarpSpecialized;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _128, _256>;
+  using ClusterShape = Shape<_1, _4, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, TileShape, ClusterShape, KernelSchedule,
+                      EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType>
+struct sm90_int8_config<InType, OutType, 32, true> {
+  // Specialization for M in [1, 32] and N < 8192
+  static_assert(std::is_same<InType, int8_t>());
+  using KernelSchedule = typename cutlass::gemm::KernelTmaWarpSpecialized;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _64, _256>;
+  using ClusterShape = Shape<_1, _8, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, TileShape, ClusterShape, KernelSchedule,
+                      EpilogueSchedule>;
+};
+
 }  // namespace
 
 template <typename InType, typename OutType,
@@ -289,6 +355,8 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
+
+  static const int32_t MDimDontCare = 0;
 
   using Cutlass3xGemmDefault =
       typename sm90_fp8_config<InType, OutType, Epilogue, 0>::Cutlass3xGemm;
@@ -325,12 +393,6 @@ void cutlass_scaled_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
 
   if (a.dtype() == torch::kInt8) {
     TORCH_CHECK(b.dtype() == torch::kInt8);
-
-    using TileShape = Shape<_128, _128, _128>;
-    using ClusterShape = Shape<_1, _2, _1>;
-    using KernelSchedule =
-        typename cutlass::gemm::KernelTmaWarpSpecializedPingpong;
-    using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_caller<cutlass_3x_gemm<

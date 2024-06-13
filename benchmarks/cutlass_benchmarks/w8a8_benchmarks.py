@@ -120,9 +120,8 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
 
     # cutlass impl
     timers.append(
-        bench_fn(a, b, scale_a.to(device="cpu"), scale_b.to(device="cpu"),
-                 torch.bfloat16, label, sub_label, cutlass_impl,
-                 "cutlass_i8_i8_bf16_scaled_mm"))
+        bench_fn(a, b, scale_a, scale_b, torch.bfloat16, label, sub_label,
+                 cutlass_impl, "cutlass_i8_i8_bf16_scaled_mm"))
 
     return timers
 
@@ -160,14 +159,12 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
 
     # cutlass impl: bf16 output
     timers.append(
-        bench_fn(a, b, scale_a.to(device="cpu"), scale_b.to(device="cpu"),
-                 torch.bfloat16, label, sub_label, cutlass_impl,
-                 "cutlass_fp8_fp8_bf16_scaled_mm"))
+        bench_fn(a, b, scale_a, scale_b, torch.bfloat16, label, sub_label,
+                 cutlass_impl, "cutlass_fp8_fp8_bf16_scaled_mm"))
     # cutlass impl: fp16 output
     timers.append(
-        bench_fn(a, b, scale_a.to(device="cpu"), scale_b.to(device="cpu"),
-                 torch.float16, label, sub_label, cutlass_impl,
-                 "cutlass_fp8_fp8_fp16_scaled_mm"))
+        bench_fn(a, b, scale_a, scale_b, torch.float16, label, sub_label,
+                 cutlass_impl, "cutlass_fp8_fp8_fp16_scaled_mm"))
     return timers
 
 
