@@ -6,7 +6,7 @@ steps:
     - kubernetes:
         podSpec:
           containers:
-          - image: curlimages/curl
+          - image: badouralix/curl-jq
             command:
             - sh
             - -c
