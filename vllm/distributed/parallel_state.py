@@ -550,6 +550,10 @@ def init_distributed_environment(
     global _WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
+        if world_size != -1:
+            assert world_size == len(ranks), (
+                "given world_size does not match with world_size of torch")
+
         _WORLD = GroupCoordinator(
             group_ranks=[ranks],
             local_rank=local_rank,
@@ -558,7 +562,7 @@ def init_distributed_environment(
             use_custom_allreduce=False,
         )
     else:
-        assert _WORLD.world_size == torch.distributed.get_world_size(), (
+        assert _WORLD.world_size == world_size, (
             "world group already initialized with a different world size")
 
 
