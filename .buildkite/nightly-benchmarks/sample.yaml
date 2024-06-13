@@ -10,6 +10,7 @@ steps:
             command:
             - sh
             - -c
+            - '
             - |
               #!/bin/sh
 
@@ -31,6 +32,7 @@ steps:
               done
 
               exit 1
+            - '
   - wait
   - label: "A100: NVIDIA SMI"
     agents:
