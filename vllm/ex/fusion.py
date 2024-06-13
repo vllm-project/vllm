@@ -30,7 +30,9 @@ def fuse_graph_nodes(
     inputs = sub.inputs
 
     if len(outputs) != 1:
-        raise FusionFail("only single output supported currently.")
+        #raise FusionFail("only single output supported currently.")
+        logger.warning("only single output supported currently.")
+        return
 
     # Collect all kwargs for fused ops and all the nodes that
     # will need to be fused (and erased) later.
