@@ -261,7 +261,7 @@ class Fp8LinearMethod(LinearMethodBase):
             qinput, x_scale = ops.scaled_fp8_quant(x, layer.input_scale)
 
             # Fused GEMM_DQ
-            output = ops.cutlass_scaled_mm_dq(
+            output = ops.cutlass_scaled_mm(
                 qinput,
                 layer.weight,
                 out_dtype=x.dtype,

@@ -212,9 +212,9 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # cutlass
-def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
-                         scale_a: torch.Tensor, scale_b: torch.Tensor,
-                         out_dtype: Type[torch.dtype]) -> torch.Tensor:
+def cutlass_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor,
+                      scale_b: torch.Tensor,
+                      out_dtype: Type[torch.dtype]) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
 
@@ -222,8 +222,7 @@ def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.ops._C.cutlass_scaled_mm_dq(out, a, b, scale_a, scale_b)
-
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b)
     return out
 
 

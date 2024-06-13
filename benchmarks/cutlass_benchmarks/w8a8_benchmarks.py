@@ -76,11 +76,7 @@ def pytorch_fp8_impl_fast_accum(a: torch.tensor, b: torch.tensor,
 def cutlass_impl(a: torch.tensor, b: torch.tensor, scale_a: torch.tensor,
                  scale_b: torch.tensor,
                  out_dtype: torch.dtype) -> torch.tensor:
-    return ops.cutlass_scaled_mm_dq(a,
-                                    b,
-                                    scale_a,
-                                    scale_b,
-                                    out_dtype=out_dtype)
+    return ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype=out_dtype)
 
 
 # bench

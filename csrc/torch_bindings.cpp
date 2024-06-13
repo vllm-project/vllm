@@ -136,10 +136,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization.
   ops.def(
-      "cutlass_scaled_mm_dq(Tensor! out, Tensor a,"
-      "                     Tensor b, Tensor a_scales,"
-      "                     Tensor b_scales) -> ()");
-  ops.impl("cutlass_scaled_mm_dq", torch::kCUDA, &cutlass_scaled_mm_dq);
+      "cutlass_scaled_mm(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales) -> ()");
+  ops.impl("cutlass_scaled_mm", torch::kCUDA, &cutlass_scaled_mm);
 #endif
 
   // Quantized GEMM for GPTQ.
