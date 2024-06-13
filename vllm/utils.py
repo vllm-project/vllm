@@ -147,6 +147,15 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_tpu() -> bool:
+    try:
+        import libtpu
+    except ImportError:
+        libtpu = None
+    return libtpu is not None
+
+
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     max_shared_mem = (
@@ -544,6 +553,11 @@ def maybe_expand_dim(tensor: torch.Tensor,
     if tensor.ndim < target_dims:
         tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
     return tensor
+
+
+def get_dtype_size(dtype: torch.dtype) -> int:
+    """Get the size of the data type in bytes."""
+    return torch.tensor([], dtype=dtype).element_size()
 
 
 def merge_dicts(dict1: Dict[Any, List[Any]],

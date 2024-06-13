@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
+    VLLM_XLA_CACHE_PATH: str = "~/.vllm/xla_cache/"
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -217,6 +218,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Default is 5 seconds
     "VLLM_IMAGE_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
+
+    # Path to the XLA persistent cache directory.
+    # Only used for XLA devices such as TPUs.
+    "VLLM_XLA_CACHE_PATH":
+    lambda: os.getenv("VLLM_XLA_CACHE_PATH", "~/.vllm/xla_cache/"),
 }
 
 # end-env-vars-definition
