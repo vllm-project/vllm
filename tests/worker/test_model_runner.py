@@ -65,7 +65,7 @@ def test_prepare_prompt(batch_size):
     input_positions = model_input.input_positions
     attn_metadata = model_input.attn_metadata
     return_seq_lens = model_input.seq_lens
-    slot_mapping = model_input.slot_mapping
+    slot_mapping = attn_metadata.slot_mapping
     assert return_seq_lens == seq_lens
     assert len(slot_mapping) == len(input_tokens)
 
@@ -178,7 +178,7 @@ def test_prepare_decode_cuda_graph(batch_size):
         seq_group_metadata_list)
     input_tokens, input_positions, attn_metadata, slot_mapping = (
         model_input.input_tokens, model_input.input_positions,
-        model_input.attn_metadata, model_input.slot_mapping)
+        model_input.attn_metadata, model_input.attn_metadata.slot_mapping)
     assert len(slot_mapping) == len(input_tokens)
 
     expected_bs = _get_graph_batch_size(len(seq_group_metadata_list))
@@ -262,31 +262,26 @@ def test_empty_seq_group():
     seq_group_metadata_list = []
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
-    input_tokens, input_positions, attn_metadata, slot_mapping = (
+    input_tokens, input_positions, attn_metadata = (
         model_input.input_tokens,
         model_input.input_positions,
         model_input.attn_metadata,
-        model_input.slot_mapping,
     )
     assert input_tokens is None
     assert input_positions is None
     assert attn_metadata is None
-    assert slot_mapping is None
 
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
-    (input_tokens, input_positions, attn_metadata, slot_mapping,
-     return_seq_lens) = (
-         model_input.input_tokens,
-         model_input.input_positions,
-         model_input.attn_metadata,
-         model_input.slot_mapping,
-         model_input.seq_lens,
-     )
+    (input_tokens, input_positions, attn_metadata, return_seq_lens) = (
+        model_input.input_tokens,
+        model_input.input_positions,
+        model_input.attn_metadata,
+        model_input.seq_lens,
+    )
     assert input_tokens is None
     assert input_positions is None
     assert attn_metadata is None
-    assert slot_mapping is None
     assert return_seq_lens is None
 
 
