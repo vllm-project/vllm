@@ -31,8 +31,6 @@ ARG PYTORCH_ROCM_ARCH
 
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -y
-
-# Install some basic utilities
 RUN apt-get update && apt-get install -y \
     curl \
     ca-certificates \
@@ -53,6 +51,13 @@ WORKDIR ${APP_MOUNT}
 
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir fastapi ninja tokenizers pandas
+# Install torch==2.3.0 on ROCm 6.X
+RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
+        *"rocm-6."*) \
+            python3 -m pip install --no-cache-dir torch==2.3.0 \
+            # TODO: Use corresponding url for 6.1 when it is created
+            --extra-index-url https://download.pytorch.org/whl/rocm6.0 ;; \
+        *) ;; esac
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
 ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin:
@@ -83,7 +88,7 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
             && patch "${VLLM_TORCH_PATH}"/utils/hipify/hipify_python.py hipify_patch.patch;; \
         *) ;; esac \
     && GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
-    # Create an empty directory otherwise
+    # Create an empty directory otherwise as later build stages expect one
     else mkdir -p /install; \
     fi
 
@@ -99,7 +104,7 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
     && git clone https://github.com/ROCm/triton.git \
     && cd triton/python \
     && python3 setup.py bdist_wheel --dist-dir=/install; \
-    # Create an empty directory otherwise
+    # Create an empty directory otherwise as later build stages expect one
     else mkdir -p /install; \
     fi
 
@@ -130,10 +135,11 @@ RUN case "$(which python3)" in \
             rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/;; \
         *) ;; esac
 
+# Package upgrades for useful functionality or to avoid dependency issues
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade numba scipy
+    pip install --upgrade numba scipy huggingface-hub[cli]
 
-# make sure punica kernels are built (for LoRA)
+# Make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 # Workaround for ray >= 2.10.0
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
@@ -173,4 +179,3 @@ RUN if ls libs/*.whl; then \
     pip install libs/*.whl; fi
 
 CMD ["/bin/bash"]
-
