@@ -37,8 +37,7 @@ def main(args: argparse.Namespace):
               download_dir=args.download_dir,
               block_size=args.block_size,
               gpu_memory_utilization=args.gpu_memory_utilization,
-              distributed_executor_backend=args.distributed_executor_backend,
-              seed=args.seed)
+              distributed_executor_backend=args.distributed_executor_backend)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -47,6 +46,7 @@ def main(args: argparse.Namespace):
         use_beam_search=args.use_beam_search,
         ignore_eos=True,
         max_tokens=args.output_len,
+        seed=args.seed,
     )
     print(sampling_params)
     dummy_prompt_token_ids = np.random.randint(10000,
