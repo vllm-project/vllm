@@ -387,9 +387,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # We run the proposer once per lookahead slot. In the future we should
         # delegate how many times it runs to the proposer.
         for _ in range(max(num_lookahead_slots, 1)):
-            self.proposer_worker.execute_model()
+            self.proposer_worker.execute_model(execute_model_req=None)
 
-        self.scorer_worker.execute_model()
+        self.scorer_worker.execute_model(execute_model_req=None)
         return True
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
