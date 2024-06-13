@@ -127,9 +127,11 @@ class OpenAIServingCompletion(OpenAIServing):
                         truncate_prompt_tokens)
                 prompt_ids, prompt_text = prompt_formats
 
-                trace_context = extract_trace_context(raw_request.headers)
                 is_tracing_enabled = await self.engine.is_tracing_enabled()
-                if not is_tracing_enabled and contains_trace_context(
+                trace_headers = None
+                if is_tracing_enabled:
+                    trace_headers = extract_trace_headers(raw_request.headers)
+                if not is_tracing_enabled and contains_trace_headers(
                         raw_request.headers):
                     log_tracing_disabled_warning()
 
@@ -141,7 +143,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params,
                     f"{request_id}-{i}",
                     lora_request=lora_request,
-                    trace_context=trace_context,
+                    trace_headers=trace_headers,
                 )
 
                 generators.append(generator)

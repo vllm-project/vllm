@@ -12,7 +12,6 @@ from vllm.inputs import LLMInputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.tracing import Context
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalData
@@ -415,7 +414,7 @@ class SequenceGroup:
             for an embedding model.
         encoder_seq: Optional, the single encoder sequence. Should be None
                      unless you are working with an encoder/decoder model.
-        trace_context: OpenTelemetry trace context.
+        trace_headers: OpenTelemetry trace headers.
     """
 
     def __init__(
@@ -428,7 +427,7 @@ class SequenceGroup:
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
-        trace_context: Optional[Context] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -444,7 +443,7 @@ class SequenceGroup:
         self.embeddings = embeddings
         self.pooling_params = pooling_params
         self.encoder_seq = encoder_seq
-        self.trace_context = trace_context
+        self.trace_headers = trace_headers
 
     @property
     def prompt(self) -> Optional[str]:

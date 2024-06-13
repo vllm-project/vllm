@@ -1,6 +1,6 @@
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, ClassVar, Iterable, List, Optional
+from typing import TYPE_CHECKING, ClassVar, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Type, TypeVar, Union
 
@@ -31,7 +31,8 @@ from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
-from vllm.tracing import Context, SpanAttributes, SpanKind, init_tracer
+from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
+                          init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -447,7 +448,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
-        trace_context: Optional[Context] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -465,7 +466,7 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
-                trace_context=trace_context,
+                trace_headers=trace_headers,
             )
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
@@ -512,7 +513,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
-        trace_context: Optional[Context] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -530,7 +531,7 @@ class LLMEngine:
                 :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
-            trace_context: OpenTelemetry trace context.
+            trace_headers: OpenTelemetry trace headers.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -572,7 +573,7 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            trace_context=trace_context,
+            trace_headers=trace_headers,
         )
 
     def _create_sequence_group_with_sampling(
@@ -582,7 +583,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
-        trace_context: Optional[Context] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -610,7 +611,7 @@ class LLMEngine:
             arrival_time=arrival_time,
             sampling_params=sampling_params,
             lora_request=lora_request,
-            trace_context=trace_context,
+            trace_headers=trace_headers,
         )
 
         return seq_group
@@ -1019,10 +1020,12 @@ class LLMEngine:
             return
         arrival_time_nano_seconds = int(seq_group.metrics.arrival_time * 1e9)
 
+        trace_context = extract_trace_context(seq_group.trace_headers)
+
         with self.tracer.start_as_current_span(
                 "llm_request",
                 kind=SpanKind.SERVER,
-                context=seq_group.trace_context,
+                context=trace_context,
                 start_time=arrival_time_nano_seconds) as seq_span:
             metrics = seq_group.metrics
             ttft = metrics.first_token_time - metrics.arrival_time

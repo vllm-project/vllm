@@ -4,6 +4,8 @@ from typing import Mapping, Optional
 from vllm.logger import init_logger
 from vllm.utils import run_once
 
+TRACE_HEADERS = ["traceparent", "tracestate"]
+
 logger = init_logger(__name__)
 
 _is_otel_installed = False
@@ -71,6 +73,11 @@ def extract_trace_context(headers: Mapping[str, str]) -> Optional[Context]:
         return None
 
 
+def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
+
+    return {h: headers[h] for h in TRACE_HEADERS if h in headers}
+
+
 class SpanAttributes(BaseSpanAttributes):
     # The following span attribute names are added here because they are missing
     # from the Semantic Conventions for LLM.
@@ -83,8 +90,8 @@ class SpanAttributes(BaseSpanAttributes):
     LLM_LATENCY_E2E = "gen_ai.latency.e2e"
 
 
-def contains_trace_context(headers: Mapping[str, str]) -> bool:
-    return "traceparent" in headers or "tracestate" in headers
+def contains_trace_headers(headers: Mapping[str, str]) -> bool:
+    return any(h in headers for h in TRACE_HEADERS)
 
 
 @run_once
