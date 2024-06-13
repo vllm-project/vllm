@@ -24,7 +24,6 @@ steps:
                 sleep 5
               done
               exit 1
-            - '
   - wait
   - label: "A100: NVIDIA SMI"
     agents:
