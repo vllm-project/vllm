@@ -350,7 +350,7 @@ if __name__ == "__main__":
                         help="Batch size for calibration.",
                         type=int,
                         default=1)
-    parser.add_argument("--calib_size",
+    parser.add_argument("--calib-size",
                         help="Number of samples for calibration.",
                         type=int,
                         default=512)
