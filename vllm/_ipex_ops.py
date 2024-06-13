@@ -217,10 +217,6 @@ class ipex_ops:
                                              softmax_scale, zero_tensors,
                                              is_causal, return_softmax, gen_)
 
-
-class ipex_cache_ops:
-
-    @staticmethod
     def reshape_and_cache(
         key: torch.Tensor,
         value: torch.Tensor,
@@ -240,7 +236,6 @@ class ipex_cache_ops:
                     block_mapping: torch.Tensor) -> None:
         torch.xpu.copy_blocks(key_caches, value_caches, block_mapping)
 
-    @staticmethod
     def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                     block_mapping: torch.Tensor) -> None:
         torch.xpu.swap_blocks(src, dst, block_mapping)

@@ -19,6 +19,7 @@ class _Backend(enum.Enum):
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
     PALLAS = enum.auto()
+    IPEX = enum.auto()
 
 
 @lru_cache(maxsize=None)
@@ -58,12 +59,17 @@ def get_attn_backend(
             ROCmFlashAttentionBackend)
         return ROCmFlashAttentionBackend
     elif backend == _Backend.TORCH_SDPA:
-        # TODO: make XPU backend available here.
         assert is_cpu(), RuntimeError(
             "Torch SDPA backend is only used for the CPU device.")
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
         return TorchSDPABackend
+    elif backend == _Backend.IPEX:
+        assert is_xpu(), RuntimeError(
+            "IPEX attention backend is only used for the XPU device.")
+        logger.info("Using IPEX attention backend.")
+        from vllm.attention.backends.ipex_attn import IpexAttnBackend
+        return IpexAttnBackend
     elif backend == _Backend.FLASHINFER:
         logger.info("Using Flashinfer backend.")
         logger.warning("Eager mode is required for the Flashinfer backend. "
@@ -102,10 +108,15 @@ def which_attn_to_use(
                 "(case-sensitive).")
         selected_backend = _Backend[backend_by_env_var]
 
-    if is_cpu() or is_xpu():
+    if is_cpu():
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return _Backend.TORCH_SDPA
+
+    if is_xpu():
+        if selected_backend != _Backend.IPEX:
+            logger.info("Cannot use %s backend on XPU.", selected_backend)
+        return _Backend.IPEX
 
     if is_tpu():
         if selected_backend != _Backend.PALLAS:
