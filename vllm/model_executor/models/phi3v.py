@@ -303,19 +303,16 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
 
         return None
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
-                **kwargs: object):
+                attn_metadata: AttentionMetadata, **kwargs: object):
         image_input = self._parse_and_validate_image_input(**kwargs)
 
         if image_input is not None:
-            input_ids[input_ids==self.vision_language_config.image_token_id] = -1
+            input_ids[input_ids ==
+                      self.vision_language_config.image_token_id] = -1
             inputs_embeds = self.vision_embed_tokens(
-                input_ids, image_input["data"],
-                image_input["image_sizes"])
+                input_ids, image_input["data"], image_input["image_sizes"])
 
             input_ids = None
         else:

@@ -16,18 +16,15 @@ def run_phi3v():
         image_input_type="pixel_values",
         image_token_id=32044,
         image_input_shape="1,3,1008,1344",
-        image_feature_size=1024,
+        image_feature_size=1921,
         disable_image_processor=False,
     )
 
-    image = Image.open("images/stop_sign.jpg")
-    user_prompt = "<|user|>\n"
-    assistant_prompt = "<|assistant|>\n"
-    suffix = "<|end|>\n"
+    image = Image.open("images/cherry_blossom.jpg")
 
     # single-image prompt
-    prompt = "What is shown in this image?"
-    prompt = user_prompt+"<|image|>"*1921+f"<s>\n{prompt}{suffix}{assistant_prompt}"
+    prompt = "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n"  # noqa: E501
+    prompt = prompt.replace("<|image_1|>", "<|image|>" * 1921 + "<s>")
 
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
 

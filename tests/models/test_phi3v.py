@@ -7,11 +7,9 @@ from vllm.config import VisionLanguageConfig
 
 from ..conftest import IMAGE_FILES
 
-# pytestmark = pytest.mark.phi3v
-
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = [
-    "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",
+    "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
     "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
 ]
 
@@ -28,7 +26,7 @@ def iter_phi3v_configs(model_name: str):
             (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
         ]:
             yield (model_name,
-                    VisionLanguageConfig(image_input_type=input_type,
+                   VisionLanguageConfig(image_input_type=input_type,
                                         image_feature_size=f,
                                         image_token_id=32044,
                                         image_input_shape=input_shape,
@@ -60,7 +58,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     ]
     hf_output_str = output_str \
         .replace(image_token_str * vlm_config.image_feature_size, "") \
-        .replace("<s>", " ").replace("<|user|>", "").replace("<|end|>\n<|assistant|>", " ")
+        .replace("<s>", " ").replace("<|user|>", "") \
+        .replace("<|end|>\n<|assistant|>", " ")
 
     return hf_input_ids, hf_output_str
 
@@ -84,11 +83,12 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
 
     with hf_runner(model_id, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
-                                                max_tokens,
-                                                images=hf_images)
+                                              max_tokens,
+                                              images=hf_images)
 
     vllm_image_prompts = [
-        p.replace("<|image_1|>", "<|image|>" * vlm_config.image_feature_size + "<s>")
+        p.replace("<|image_1|>",
+                  "<|image|>" * vlm_config.image_feature_size + "<s>")
         for p in HF_IMAGE_PROMPTS
     ]
 
