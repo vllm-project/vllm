@@ -74,7 +74,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         # Run model sample_len times.
         model_outputs = []
         for _ in range(sample_len):
-            model_output = super().execute_model(
+            model_output: List[SamplerOutput] = super().execute_model(
                 execute_model_req=copied_execute_model_req)
             assert (len(model_output) == 1
                     ), "composing multistep workers not supported"
