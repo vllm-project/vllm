@@ -66,8 +66,10 @@ def get_span_exporter(endpoint):
     return OTLPSpanExporter(endpoint=endpoint)
 
 
-def extract_trace_context(headers: Mapping[str, str]) -> Optional[Context]:
+def extract_trace_context(
+        headers: Optional[Mapping[str, str]]) -> Optional[Context]:
     if is_otel_installed():
+        headers = headers or {}
         return TraceContextTextMapPropagator().extract(headers)
     else:
         return None
