@@ -5,16 +5,12 @@ Run `pytest tests/quantization/test_bitsandbytes.py`.
 import pytest
 import torch
 
+from tests.quantization.utils import is_quant_method_supported
 from vllm import SamplingParams
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
 
 
-@pytest.mark.skipif(
-    capability < QUANTIZATION_METHODS['bitsandbytes'].get_min_capability(),
-    reason='bitsandbytes is not supported on this GPU type.')
+@pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
+                    reason='bitsandbytes is not supported on this GPU type.')
 def test_load_bnb_model(vllm_runner) -> None:
     with vllm_runner('huggyllama/llama-7b',
                      quantization='bitsandbytes',
