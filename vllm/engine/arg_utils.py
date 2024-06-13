@@ -505,9 +505,10 @@ class EngineArgs:
         parser.add_argument(
             '--linear-lora-attn-only',
             action='store_true',
-            help=('By default, vLLM create LoRA modules for all linear modules. '
-                  'When enabling this, vLLM would not create LoRA modules for linear modules '
-                  'that is not in attention module.'))
+            help=('By default, vLLM create LoRA modules for all linear '
+                  'modules. When enabling this, vLLM would not create '
+                  'LoRA modules for linear modules that is not in '
+                  'attention module.'))
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
