@@ -12,6 +12,8 @@ from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
@@ -27,6 +29,27 @@ class BertEmbeddingModel(nn.Module):
        model: An instance of BertModel used for forward operations.
        _pooler: An instance of Pooler used for pooling operations.
    """
+
+    stacked_params_mapping = {
+        "query": {
+            "param_name": "qkv_proj",
+            "shard_id": "q",
+        },
+        "key": {
+            "param_name": "qkv_proj",
+            "shard_id": "k",
+        },
+        "value": {
+            "param_name": "qkv_proj",
+            "shard_id": "v",
+        },
+    }
+
+    params_mapping = {
+        "beta": "bias",
+        "gamma": "weight",
+        "LayerNorm": "layernorm",
+    }
 
     def __init__(
         self,
@@ -62,55 +85,48 @@ class BertEmbeddingModel(nn.Module):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
 
-        def _fix_key(key):
-            if "beta" in key:
-                return key.replace("beta", "bias")
-            if "gamma" in key:
-                return key.replace("gamma", "weight")
-            return key
-
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "query", "q"),
-            ("qkv_proj", "key", "k"),
-            ("qkv_proj", "value", "v"),
-        ]
         params_dict = dict(self.model.named_parameters())
-        _prefix = f"{self.base_model_prefix}."
+
         for name, loaded_weight in weights:
+            name = self._rename_key(name)
+
             # Skip the specific downstream task weight.
             if name.startswith('cls.'):
                 continue
-
-            name = name[len(_prefix):] if name.startswith(_prefix) else name
-            name = _fix_key(name)
-
             # use Pooler instead.
             if name.startswith('pooler.'):
                 continue
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
+                continue
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
+            name, shard_id = self._rename_stacked_param(name)
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            if shard_id:
                 weight_loader(param, loaded_weight, shard_id)
-                break
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+    def _rekey_key(self, key: str):
+        prefix = f"{self.base_model_prefix}."
+        key = key[len(prefix):] if key.startswith(prefix) else key
+
+        for src, dst in self.params_mapping.items():
+            key = key.replace(src, dst)
+
+        return key
+
+    def _rename_stacked_param(
+        self,
+        name: str,
+    ) -> Tuple[str, Optional[str]]:
+        for key, mapping in self.stacked_params_mapping.items():
+            if key in name:
+                name = name.replace(key, mapping["param_name"])
+                return name, mapping["shard_id"]
+        return name, None
 
 
 class BertModel(nn.Module):
@@ -145,17 +161,14 @@ class BertEmbedding(nn.Module):
     def __init__(self, config: BertConfig):
         super().__init__()
         self.size = config.hidden_size
-
-        self.word_embeddings = nn.Embedding(config.vocab_size,
-                                            config.hidden_size,
-                                            padding_idx=config.pad_token_id)
+        self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
+                                                      config.hidden_size)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings,
                                                 config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size,
                                                   config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+        self.layernorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type != "absolute":
@@ -198,8 +211,7 @@ class BertEmbedding(nn.Module):
 
         embeddings = inputs_embeds + token_type_embeddings
         embeddings += position_embeddings
-        embeddings = self.LayerNorm(embeddings)
-        embeddings = self.dropout(embeddings)
+        embeddings = self.layernorm(embeddings)
         return embeddings
 
 
@@ -355,14 +367,12 @@ class BertSelfOutput(nn.Module):
     def __init__(self, config: BertConfig):
         super(BertSelfOutput, self).__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+        self.layernorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, hidden_states, input_tensor):
         hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        hidden_states = self.layernorm(hidden_states + input_tensor)
         return hidden_states
 
 
@@ -384,9 +394,8 @@ class BertOutput(nn.Module):
     def __init__(self, config: BertConfig):
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+        self.layernorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
         self,
@@ -394,6 +403,5 @@ class BertOutput(nn.Module):
         input_tensor: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        hidden_states = self.layernorm(hidden_states + input_tensor)
         return hidden_states
