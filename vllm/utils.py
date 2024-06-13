@@ -724,4 +724,8 @@ def get_num_gpus_available_isolated() -> int:
     This should be used instead of torch.cuda.device_count()
     unless CUDA_VISIBLE_DEVICES has already been set to the desired
     value."""
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released.
+
     return _get_num_gpus_available_isolated(envs.CUDA_VISIBLE_DEVICES)
