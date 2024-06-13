@@ -34,6 +34,7 @@ __all__ = [
     "PoolingParams",
 ]
 
+
 def githash():
     import torch
     return torch.ops._C.githash()
