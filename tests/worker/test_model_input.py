@@ -81,7 +81,7 @@ def test_gpu_model_input():
             assert field.name not in tensor_dict
     # Broadcast should contain all non-empty fields defined by the developer
     # for this input type.
-    for field in GPUModelInputWithSamplingMetadata.BROADCASTABLE_FIELDS:
+    for field in model_input.broadcastable_fields:
         if getattr(model_input, field) is not None:
             assert field in tensor_dict
 
