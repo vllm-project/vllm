@@ -114,7 +114,8 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
     ) -> Tuple[List[SamplerOutput], bool]:
-        # it's called after tp_group has already been overridden
+        # do not call _parch_tensor_parallel_group, because
+        # it's always called after tp_group has already been overridden
         return self._worker.sampler_output(execute_model_req, sample_len)
 
     def get_spec_proposals(
