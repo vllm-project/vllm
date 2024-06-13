@@ -16,11 +16,10 @@ from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-"""
-Fuse all the nodes in the given module into a single function call.
-"""
 
-
+"""
+Fuse all the nodes in the given sub-graph into a single function call.
+"""
 def fuse_graph_nodes(
     cc: CodeCache,
     fgen: FusedOpGenerator,
@@ -289,6 +288,8 @@ def pointwise_fusion(cc: CodeCache,
             if not p in subgraphs:
                 subgraphs[p] = []
             subgraphs[p].append(n)
+
+    logger.debug(f"Found {len(subgraphs)} fusable subgraphs.")
 
     for p, nodes in subgraphs.items():
         sub = SubGraph(mod, subgraphs[p])

@@ -151,6 +151,7 @@ def module_in_partitions(parts: List[Partition],
             return True
     return False
 
+#torch._dynamo.config.accumulated_cache_size_limit = 128
 
 class backend_class:
     """
@@ -172,8 +173,8 @@ class backend_class:
                  example_inputs: List[torch.Tensor]) -> Callable:
 
         # Nop for baseline testing
+        #print(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
         #return backend_compile(gm, example_inputs, backend=self.backend)
-
 
         #logger.info("BACKEND")
 
@@ -185,7 +186,7 @@ class backend_class:
         gm = copy.copy(gm)
 
         #print(f"Original module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}")
-        print(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
+        #print(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
 
         logger.debug(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
         logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")
