@@ -442,6 +442,7 @@ class ModelRunner:
                 input_positions.extend(list(range(context_len, seq_len)))
                 lora_id = seq_group_metadata.lora_int_id
                 prompt_adapter_id = seq_group_metadata.prompt_adapter_id
+                prompt_adapter_id = seq_group_metadata.prompt_adapter_id
 
                 if is_prompt:
                     assert len(seq_ids) == 1
