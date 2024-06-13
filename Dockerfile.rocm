@@ -51,12 +51,17 @@ WORKDIR ${APP_MOUNT}
 
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir fastapi ninja tokenizers pandas
-# Install torch==2.3.0 on ROCm 6.X
+# Install torch >= 2.3.0 on ROCm 6.X
 RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-        *"rocm-6."*) \
-            python3 -m pip install --no-cache-dir torch==2.3.0 \
-            # TODO: Use corresponding url for 6.1 when it is created
-            --extra-index-url https://download.pytorch.org/whl/rocm6.0 ;; \
+        *"rocm-6.0"*) \
+            python3 -m pip uninstall -y torch \
+            && python3 -m pip install --no-cache-dir torch==2.3.0 \
+               --index-url https://download.pytorch.org/whl/rocm6.0;; \
+        *"rocm-6.1"*) \
+            python3 -m pip uninstall -y torch \
+            && python3 -m pip install --no-cache-dir --pre "torch >= 2.3.0, <=2.4.0" \
+               # TODO: Use stable torch wheels once they are released.
+               --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
         *) ;; esac
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
