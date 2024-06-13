@@ -6,6 +6,8 @@ import torch.distributed
 
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import (_ENABLE_CUSTOM_ALL_REDUCE,
+                                             GroupCoordinator,
+                                             get_world_group, get_tp_group,
                                              patch_tensor_parallel_group)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -28,8 +30,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
     @classmethod
     def maybe_wrap_worker(cls, worker, draft_parallel_config: ParallelConfig,
-                          target_parallel_config: ParallelConfig, rank: int,
-                          local_rank: int):
+                          target_parallel_config: ParallelConfig, rank: int):
         """Wrap the worker in a SmallerTpProposerWorker if necessary.
         """
         draft_tp = draft_parallel_config.tensor_parallel_size
@@ -48,26 +49,21 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
         if rank in ranks:
             logger.info("Wrapping {%s} in {%s}", type(worker), cls)
-            return cls(worker, ranks, local_rank)
+            return cls(worker, ranks)
         else:
             # for workers not participating in the draft generation
             logger.info("Returning dummy worker")
             return DummyProposerWorker(worker)
 
     def __init__(self, worker: Union[Worker, ProposerWorkerBase],
-                 ranks: List[int], local_rank: int):
+                 ranks: List[int]):
         self._worker = worker
         self._ranks = ranks
-        self._local_rank = local_rank
+        self._world_group = None
         self._tp_group = None
-        self._tp_cpu_group = None
-        self._tp_pynccl_comm = None
-        self._tp_ca_comm = None
 
     def _patch_tensor_parallel_group(self):
-        return patch_tensor_parallel_group(self._tp_group, self._tp_cpu_group,
-                                           self._tp_pynccl_comm,
-                                           self._tp_ca_comm)
+        return patch_tensor_parallel_group(self._world_group, self._tp_group)
 
     def init_device(self):
         """Initialize the device.
@@ -75,27 +71,24 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         This also creates an additional tensor-parallel process group containing
         only a subset of the whole ranks.
         """
-        self._tp_group = torch.distributed.new_group(
-            ranks=self._ranks, timeout=timedelta(seconds=10))
-        self._tp_cpu_group = torch.distributed.new_group(
-            ranks=self._ranks, timeout=timedelta(seconds=10), backend="gloo")
+        local_rank = get_world_group().local_rank
+        world_backend = torch.distributed.get_backend(get_world_group().device_group)
+        tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
 
-        from vllm.distributed.device_communicators.pynccl import (
-            PyNcclCommunicator)
-        if len(self._ranks) > 1:
-            self._tp_pynccl_comm = PyNcclCommunicator(
-                group=self._tp_cpu_group,
-                device=self._local_rank,
-            )
-
-
-        from vllm.distributed.device_communicators.custom_all_reduce import (
-            CustomAllreduce)
-        if _ENABLE_CUSTOM_ALL_REDUCE:
-            self._tp_ca_comm = CustomAllreduce(
-                group=self._tp_cpu_group,
-                device=self._local_rank,
-            )
+        self._world_group = GroupCoordinator(
+            group_ranks=[[self._ranks]],
+            local_rank=local_rank,
+            torch_distributed_backend=world_backend,
+            use_pynccl=False,
+            use_custom_allreduce=False,
+        )
+        self._tp_group = GroupCoordinator(
+            group_ranks=[[self._ranks]],
+            local_rank=local_rank,
+            torch_distributed_backend=tp_backend,
+            use_pynccl=True,
+            use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
+        )
 
         with self._patch_tensor_parallel_group():
             self._worker.init_device()

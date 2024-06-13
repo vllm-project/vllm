@@ -110,8 +110,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
             proposer_worker, draft_worker_kwargs['parallel_config'],
-            scorer_worker.parallel_config, scorer_worker.rank,
-            scorer_worker.local_rank)
+            scorer_worker.parallel_config, scorer_worker.rank)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
