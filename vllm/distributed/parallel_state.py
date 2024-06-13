@@ -25,10 +25,10 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
 from typing import Any, Dict, List, Optional, Tuple, Union
+from unittest.mock import patch
 
 import torch
 from torch.distributed import Backend, ProcessGroup
-from unittest.mock import patch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -746,7 +746,7 @@ def is_in_the_same_node(pg: ProcessGroup):
                                                         group=pg)
                 name = recv[0]
                 # fix to https://stackoverflow.com/q/62748654/9191338
-                # Python incorrectly tracks shared memory even if it is not 
+                # Python incorrectly tracks shared memory even if it is not
                 # created by the process. The following patch is a workaround.
                 with patch("multiprocessing.resource_tracker.register",
                            lambda *args, **kwargs: None):
@@ -764,7 +764,7 @@ def is_in_the_same_node(pg: ProcessGroup):
     # clean up the shared memory segment
     with contextlib.suppress(OSError):
         if rank == 0 and shm:
-                shm.unlink()
+            shm.unlink()
     torch.distributed.all_reduce(is_in_the_same_node, group=pg)
 
     return is_in_the_same_node.sum().item() == world_size
