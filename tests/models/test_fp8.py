@@ -73,7 +73,9 @@ EXPECTED_STRS_MAP = {
 # and is unstable w.r.t specifics of the fp8 implementation or
 # the hardware being run on.
 # Disabled to prevent it from breaking the build
-@pytest.disable()
+@pytest.mark.skip(
+    reason=
+    "Prevent unstable test based on golden strings from breaking the build.")
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
