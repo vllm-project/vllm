@@ -53,11 +53,11 @@ class CompressedTensors24(CompressedTensorsScheme):
                 "packed_dim": 1,
                 "pack_factor": pack_factor,
                 "marlin_tile_size": self.tile_size,
+                "weight_loader": weight_loader
             },
         )
 
         layer.register_parameter("weight_packed", qweight)
-        set_weight_attrs(qweight, {"weight_loader": weight_loader})
 
         input_groups = (1 if self.group_size is None else
                         input_size_per_partition // self.group_size)
@@ -75,10 +75,10 @@ class CompressedTensors24(CompressedTensorsScheme):
             {
                 "output_dim": 1,
                 "input_dim": None if input_groups == 1 else 0,
+                "weight_loader": weight_loader
             },
         )
         layer.register_parameter("scale_packed", scales)
-        set_weight_attrs(scales, {"weight_loader": weight_loader})
 
         weight_shape = Parameter(torch.empty(2, dtype=torch.int64),
                                  requires_grad=False)
@@ -102,10 +102,10 @@ class CompressedTensors24(CompressedTensorsScheme):
                 "pack_factor": 1,
                 "output_dim": 1,
                 "marlin_tile_size": 2,
+                "weight_loader": weight_loader
             },
         )
         layer.register_parameter("meta", meta)
-        set_weight_attrs(meta, {"weight_loader": weight_loader})
 
         max_workspace_size = (
             output_size_per_partition //

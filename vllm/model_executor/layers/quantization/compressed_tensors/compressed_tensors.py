@@ -7,7 +7,7 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme, CompressedTensorsW4A16, CompressedTensors24,
+    CompressedTensors24, CompressedTensorsScheme, CompressedTensorsW4A16,
     CompressedTensorsW8A8DynamicToken, CompressedTensorsW8A8StaticTensor)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
@@ -121,9 +121,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                                            num_bits=weight_quant.num_bits,
                                            group_size=weight_quant.group_size)
             if self.quant_format == CompressionFormat.pack_quantized.value:
-                return CompressedTensorsW4A16(num_bits=weight_quant.num_bits,
-                                            strategy=weight_quant.strategy,
-                                            group_size=weight_quant.group_size)
+                return CompressedTensorsW4A16(
+                    num_bits=weight_quant.num_bits,
+                    strategy=weight_quant.strategy,
+                    group_size=weight_quant.group_size)
 
         if self.quant_format == CompressionFormat.int_quantized.value:
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
@@ -132,7 +133,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8DynamicToken()
 
-        raise NotImplementedError("Scheme not supported.")
+        raise NotImplementedError(
+            "No compressed-tensors compatible scheme was found.")
 
     def get_scheme(self, layer: torch.nn.Module) -> "CompressedTensorsScheme":
 
@@ -180,7 +182,6 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             input_size=input_size,
             input_size_per_partition=input_size_per_partition,
             output_partition_sizes=output_partition_sizes,
-            input_size=input_size,
             output_size=output_size,
             params_dtype=params_dtype,
             weight_loader=weight_loader)
