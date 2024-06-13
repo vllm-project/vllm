@@ -5,8 +5,8 @@ import torch.distributed
 
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import (_ENABLE_CUSTOM_ALL_REDUCE,
-                                             GroupCoordinator,
-                                             get_world_group, get_tp_group,
+                                             GroupCoordinator, get_tp_group,
+                                             get_world_group,
                                              patch_tensor_parallel_group)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
