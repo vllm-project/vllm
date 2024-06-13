@@ -1,0 +1,7 @@
+{
+    "batchs=2,hidden_size=13824": {
+        "BLOCK_K": 64,
+        "SPLIT_K": 128,
+        "num_warps": 8
+    }
+}

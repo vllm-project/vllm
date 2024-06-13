@@ -35,7 +35,7 @@ def _get_op_configs(
                 f"batchs={batch},hidden_size={hidden_size}", None
             )
             return tuned_config
-
+    
     # If no optimized configuration is available, return None
     return None
 
@@ -45,7 +45,6 @@ def _get_default_config(op_type: str, batch: int, hidden_size: int):
         return {"BLOCK_N": 256, "SPLIT_N": 8, "num_warps": 8}
     else:
         return {"BLOCK_K": 32, "SPLIT_K": 64, "num_warps": 8}
-    # raise NotImplementedError
 
 
 def get_lora_op_configs(

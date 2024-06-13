@@ -1,0 +1,7 @@
+{
+    "batchs=24,hidden_size=128256": {
+        "BLOCK_N": 256,
+        "SPLIT_N": 4,
+        "num_warps": 8
+    }
+}
