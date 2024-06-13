@@ -113,17 +113,14 @@ class CPUModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int], Dict[
-            str, torch.Tensor], List[int], List[int], Set[LoRARequest]]:
+            str, torch.Tensor]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
-        multi_modal_input_list: List[torch.Tensor] = []
-
-        lora_index_mapping: List[int] = []
-        lora_prompt_mapping: List[int] = []
-        lora_requests: Set[LoRARequest] = set()
+        multi_modal_kwargs_list: Dict[str,
+                                      List[torch.Tensor]] = defaultdict(list)
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -144,19 +141,17 @@ class CPUModelRunner:
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
 
-            lora_id = seq_group_metadata.lora_int_id
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data is not None:
+                # Process multi-modal data
+                if self.multi_modal_input_processor is None:
+                    raise ValueError(
+                        "Multi-modal inputs are only supported by "
+                        "vision language models.")
 
-            if lora_id > 0:
-                lora_requests.add(seq_group_metadata.lora_request)
-
-            lora_index_mapping += [lora_id] * (seq_len - computed_len)
-            lora_prompt_mapping.extend([lora_id] * (
-                seq_len - computed_len if seq_group_metadata.sampling_params
-                and seq_group_metadata.sampling_params.prompt_logprobs else 1))
-
-            if seq_group_metadata.multi_modal_data:
-                multi_modal_input_list.append(
-                    seq_group_metadata.multi_modal_data.data)
+                mm_kwargs = self.multi_modal_input_processor(mm_data)
+                for k, v in mm_kwargs.items():
+                    multi_modal_kwargs_list[k].append(v)
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
@@ -209,8 +204,7 @@ class CPUModelRunner:
             slot_mapping=slot_mapping,
         )
         return (input_tokens, input_positions, attn_metadata, seq_lens,
-                multi_modal_kwargs, lora_index_mapping, lora_prompt_mapping,
-                lora_requests)
+                multi_modal_kwargs)
 
     def _prepare_decode(
         self,
@@ -307,8 +301,8 @@ class CPUModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], List[int], Optional[torch.Tensor]]:
-        multi_modal_input = None
+               Optional[Dict[str, torch.Tensor]]]:
+        multi_modal_kwargs = None
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
@@ -316,22 +310,12 @@ class CPUModelRunner:
             # Prepare input tensors.
             if is_prompt:
                 (input_tokens, input_positions, attn_metadata, seq_lens,
-                 multi_modal_input, lora_index_mapping, lora_prompt_mapping,
-                 lora_requests) = self._prepare_prompt(seq_group_metadata_list)
+                 multi_modal_kwargs
+                 ) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                (input_tokens, input_positions, attn_metadata,
-                 lora_index_mapping, lora_prompt_mapping,
-                 lora_requests) = self._prepare_decode(seq_group_metadata_list)
+                (input_tokens, input_positions,
+                 attn_metadata) = self._prepare_decode(seq_group_metadata_list)
                 seq_lens = []
-
-            if self.lora_config:
-                lora_mapping = LoRAMapping(
-                    lora_index_mapping,
-                    lora_prompt_mapping,
-                )
-            else:
-                lora_mapping = None
-
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list,
                 seq_lens,
@@ -347,8 +331,6 @@ class CPUModelRunner:
                 "input_positions": input_positions,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
-                "lora_requests": lora_requests,
-                "lora_mapping": lora_mapping,
             }
             metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
@@ -358,8 +340,6 @@ class CPUModelRunner:
             input_positions = metadata_dict.pop("input_positions")
             selected_token_indices = metadata_dict.pop(
                 "selected_token_indices")
-            lora_mapping = metadata_dict.pop("lora_mapping")
-            lora_requests = metadata_dict.pop("lora_requests")
             attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
@@ -371,8 +351,7 @@ class CPUModelRunner:
             )
 
         return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_input)
+                sampling_metadata, multi_modal_kwargs)
 
     @torch.inference_mode()
     def execute_model(
