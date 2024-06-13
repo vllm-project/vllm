@@ -90,8 +90,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
         )
 
-        with self._patch_tensor_parallel_group():
-            self._worker.init_device()
+        self._worker.init_device()
 
     def set_include_gpu_probs_tensor(self):
         self._worker.set_include_gpu_probs_tensor()
