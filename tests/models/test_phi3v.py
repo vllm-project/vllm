@@ -59,7 +59,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
         if input_id != image_token_id or input_ids[idx - 1] != image_token_id
     ]
     hf_output_str = output_str \
-        .replace(image_token_str * vlm_config.image_feature_size, "")
+        .replace(image_token_str * vlm_config.image_feature_size, "") \
+        .replace("<s>", " ").replace("<|user|>", "").replace("<|end|>\n<|assistant|>", " ")
 
     return hf_input_ids, hf_output_str
 
@@ -93,7 +94,6 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
 
     with vllm_runner(model_id,
                      dtype=dtype,
-                     max_model_len=4096,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
