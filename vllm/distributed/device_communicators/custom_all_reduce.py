@@ -11,6 +11,7 @@ from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
 from vllm.distributed.parallel_state import is_in_the_same_node
 from vllm.logger import init_logger
+from vllm.utils import cuda_device_count_stateless
 
 try:
     import pynvml
@@ -144,7 +145,7 @@ class CustomAllreduce:
         if cuda_visible_devices:
             device_ids = list(map(int, cuda_visible_devices.split(",")))
         else:
-            device_ids = list(range(torch.cuda.device_count()))
+            device_ids = list(range(cuda_device_count_stateless()))
 
         physical_device_id = device_ids[device.index]
         tensor = torch.tensor([physical_device_id],
