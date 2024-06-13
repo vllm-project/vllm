@@ -1002,6 +1002,9 @@ class LLMEngine:
     def check_health(self) -> None:
         self.model_executor.check_health()
 
+    def is_tracing_enabled(self) -> bool:
+        return self.tracer is not None
+
     def do_tracing(self, scheduler_outputs: SchedulerOutputs) -> None:
         if self.tracer is None:
             return

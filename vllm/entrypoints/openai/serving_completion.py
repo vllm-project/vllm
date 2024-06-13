@@ -24,7 +24,7 @@ from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
-from vllm.tracing import (contains_trace_context, extract_trace_context,
+from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.utils import merge_async_iterators, random_uuid
 
@@ -128,7 +128,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_ids, prompt_text = prompt_formats
 
                 trace_context = extract_trace_context(raw_request.headers)
-                if self.engine.engine.tracer is None and contains_trace_context(
+                is_tracing_enabled = await self.engine.is_tracing_enabled()
+                if not is_tracing_enabled and contains_trace_context(
                         raw_request.headers):
                     log_tracing_disabled_warning()
 

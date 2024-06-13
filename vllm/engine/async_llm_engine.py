@@ -853,3 +853,10 @@ class AsyncLLMEngine:
         else:
             await self.engine.check_health_async()
         logger.debug("Health check took %fs", time.perf_counter() - t)
+
+    async def is_tracing_enabled(self) -> bool:
+        if self.engine_use_ray:
+            return await self.engine.is_tracing_enabled.remote(  # type: ignore
+            )
+        else:
+            return self.engine.is_tracing_enabled()

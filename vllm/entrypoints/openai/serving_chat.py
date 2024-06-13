@@ -271,15 +271,17 @@ class OpenAIServingChat(OpenAIServing):
 
         trace_context = extract_trace_context(
             raw_request.headers if raw_request else {})
-        if self.engine.engine.tracer is None and contains_trace_context(
+        is_tracing_enabled = await self.engine.is_tracing_enabled()
+        if not is_tracing_enabled and contains_trace_context(
                 raw_request.headers if raw_request else {}):
             log_tracing_disabled_warning()
+
         result_generator = self.engine.generate(
             inputs,
             sampling_params,
             request_id,
             lora_request,
-            trace_context=trace_context,
+            trace_headers=trace_context,
         )
         # Streaming response
         if request.stream:
