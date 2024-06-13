@@ -679,8 +679,8 @@ class LoRAModelManager:
                 self._attn_modules[name] = module
 
     def _match_target_modules(self, module_name: str, module: nn.Module):
-        is_attn_child = any(module_name.startswith(x + ".")
-                            for x in self._attn_modules)
+        is_attn_child = any(
+            module_name.startswith(x + ".") for x in self._attn_modules)
         if self.lora_config.linear_lora_attn_only and not is_attn_child and \
                 "Linear" in module.__class__.__name__:
             return False
