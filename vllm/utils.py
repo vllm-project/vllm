@@ -695,8 +695,8 @@ def deprecate_kwargs(
     return wrapper
 
 
-@lru_cache(maxsize=5)
-def _get_num_gpus_available_isolated(
+@lru_cache(maxsize=8)
+def _cuda_device_count_stateless(
         cuda_visible_devices: Optional[str] = None) -> int:
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
@@ -716,7 +716,7 @@ def _get_num_gpus_available_isolated(
     return r
 
 
-def get_num_gpus_available_isolated() -> int:
+def cuda_device_count_stateless() -> int:
     """Get number of GPUs without caching the number of devices
     in current process.
     
@@ -727,4 +727,4 @@ def get_num_gpus_available_isolated() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
 
-    return _get_num_gpus_available_isolated(envs.CUDA_VISIBLE_DEVICES)
+    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)

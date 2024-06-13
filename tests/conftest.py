@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
-from vllm.utils import get_num_gpus_available_isolated, is_cpu
+from vllm.utils import cuda_device_count_stateless, is_cpu
 
 logger = init_logger(__name__)
 
@@ -535,4 +535,4 @@ def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
 
-    return get_num_gpus_available_isolated()
+    return cuda_device_count_stateless()
