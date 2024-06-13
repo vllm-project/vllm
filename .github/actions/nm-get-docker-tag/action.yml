@@ -5,12 +5,17 @@ inputs:
     description: "type of nm-vllm to install for the docker image: NIGHTLY (default) or RELEASE"
     type: string
     default: 'NIGHTLY'
+outputs:
+  tag:
+    description: "extra tag for the docker image based on build type"
+    value: ${{ steps.extratag.outputs.tag }}
 runs:
   using: composite
   steps:
-  - run: |
+  - id: extratag
+    run: |
       tag=nightly
-      if [[ "${build_type}" = "RELEASE" ]]; then
+      if [[ "${{ inputs.build_type }}" = "RELEASE" ]]; then
           tag=latest
       fi
       echo "tag=${tag}" >> $GITHUB_OUTPUT

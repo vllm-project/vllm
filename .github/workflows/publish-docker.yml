@@ -40,18 +40,19 @@ jobs:
               password: ${{ secrets.GITHUB_TOKEN }}
 
           - name: Checkout code
-            uses: actions/checkout@v3
+            uses: actions/checkout@v4
             with:
-              fetch-depth: 1
+              fetch-depth: 0
+              ref: ${{ inputs.gitref }}
               submodules: recursive
 
           - name: Set up nvidia-container-toolkit
             id: setup
             uses: ./.github/actions/nm-setup-nvidia-container-toolkit/
 
-          - name: Get image additional tag
+          - name: Get docker image extra tag
             id: tag
-            uses: ./.github/actions/nm-get-tag/
+            uses: ./.github/actions/nm-get-docker-tag/
             with:
               build_type: ${{ inputs.build_type }}
 
@@ -60,7 +61,7 @@ jobs:
             uses: ./.github/actions/nm-build-docker/
             with:
               docker_tag: ${{ inputs.docker_tag }}
-              additional_tag: ${{ steps.tag.outputs.tag }}
+              extra_tag: ${{ steps.tag.outputs.tag }}
               build_type: ${{ inputs.build_type }}
               build_version: ${{ inputs.build_version }}
 
