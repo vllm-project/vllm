@@ -37,7 +37,8 @@ def main(args: argparse.Namespace):
               download_dir=args.download_dir,
               block_size=args.block_size,
               gpu_memory_utilization=args.gpu_memory_utilization,
-              distributed_executor_backend=args.distributed_executor_backend)
+              distributed_executor_backend=args.distributed_executor_backend,
+              seed=args.seed)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -229,5 +230,6 @@ if __name__ == '__main__':
         help='Backend to use for distributed serving. When more than 1 GPU '
         'is used, will be automatically set to "ray" if installed '
         'or "mp" (multiprocessing) otherwise.')
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     main(args)
