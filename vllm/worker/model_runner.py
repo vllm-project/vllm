@@ -499,6 +499,12 @@ class ModelRunner:
                 seq_lens.append(1)
                 block_tables.append([])
                 lora_index_mapping.append(0)
+
+                last_paged_kv_indptr = paged_kv_indptr[-1]
+                if self.attn_backend.get_name() == "flashinfer":
+                    paged_kv_indptr.append(last_paged_kv_indptr)
+                    paged_kv_last_page_len.append(0)
+
             batch_size = graph_batch_size
             num_decode_tokens = batch_size
 
