@@ -8,8 +8,8 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
+from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -67,14 +67,6 @@ EXPECTED_STRS_MAP = {
     },
 }
 
-fp8_not_supported = True
-
-if torch.cuda.is_available():
-    capability = torch.cuda.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
-    fp8_not_supported = (capability <
-                         QUANTIZATION_METHODS["fp8"].get_min_capability())
-
 
 # This test compares against golden strings for exact match since
 # there is no baseline implementation to compare against
@@ -82,7 +74,7 @@ if torch.cuda.is_available():
 # the hardware being run on.
 # Disabled to prevent it from breaking the build
 @pytest.disable()
-@pytest.mark.skipif(fp8_not_supported,
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
