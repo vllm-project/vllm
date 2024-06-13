@@ -21,6 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
+import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -441,57 +442,117 @@ class LlamaForCausalLM(nn.Module):
 
     def load_quantized_weights(self, weights: Iterable[Tuple[str,
                                                              torch.Tensor]]):
-        params_dict = dict(self.named_parameters())
-        #with open("/projects/a.txt", "r") as f:
-        #    j = json.load(f)
-        #    for k, v in j.items():
-        #        params_dict[k].data.copy_(v)
-        quant_shards = [
-            ("mlp.gate_up_proj", "mlp.fc", 0),  # fc is gate_proj
-            ("mlp.gate_up_proj", "mlp.gate", 1),  # gate is up_proj
-        ]
-        quant_map = [
-            ("mlp.down_proj", "mlp.proj"),
-            ("self_attn.o_proj", "attention.dense"),
-            ("self_attn.qkv_proj", "attention.qkv"),
-        ]
-        for name, loaded_weight in weights:
-            #print(name)
-            name = name.replace('transformer', 'model')
-            name = name.replace('kv_cache_scaling_factor',
-                                'qkv.output_scaling_factor')
-            loaded_weight = loaded_weight.to("cuda")
-            if loaded_weight.dtype == torch.int8:
-                loaded_weight[loaded_weight == -128] = 0
-                assert loaded_weight.is_contiguous
-                loaded_weight = loaded_weight.view(torch.float8_e4m3fnuz)
-            for (param_name, weight_name, shard_id) in quant_shards:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                for (param_name, weight_name) in quant_map:
+
+        def load_ammo():
+            params_dict = dict(self.named_parameters())
+            quant_shards = [
+                ("mlp.gate_up_proj", "mlp.fc", 0),  # fc is gate_proj
+                ("mlp.gate_up_proj", "mlp.gate", 1),  # gate is up_proj
+            ]
+            quant_map = [
+                ("mlp.down_proj", "mlp.proj"),
+                ("self_attn.o_proj", "attention.dense"),
+                ("self_attn.qkv_proj", "attention.qkv"),
+            ]
+            for name, loaded_weight in weights:
+                name = name.replace('transformer', 'model')
+                name = name.replace('kv_cache_scaling_factor',
+                                    'qkv.output_scaling_factor')
+                loaded_weight = loaded_weight.to("cuda")
+                if loaded_weight.dtype == torch.int8:
+                    loaded_weight[loaded_weight == -128] = 0
+                    assert loaded_weight.is_contiguous
+                    loaded_weight = loaded_weight.view(torch.float8_e4m3fnuz)
+                for (param_name, weight_name, shard_id) in quant_shards:
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
                     param = params_dict[name]
-                    if ("activation_scaling_factor" in name
-                            or "weights_scaling_factor" in name
-                            or "output_scaling_factor" in name):
-                        param.data.copy_(loaded_weight)
-                    else:
-                        weight_loader = getattr(param, "weight_loader",
-                                                default_weight_loader)
-                        weight_loader(param, loaded_weight)
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
                     break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    for (param_name, weight_name) in quant_map:
+                        if weight_name not in name:
+                            continue
+                        name = name.replace(weight_name, param_name)
+                        param = params_dict[name]
+                        if ("activation_scaling_factor" in name
+                                or "weights_scaling_factor" in name
+                                or "output_scaling_factor" in name):
+                            param.data.copy_(loaded_weight)
+                        else:
+                            weight_loader = getattr(param, "weight_loader",
+                                                    default_weight_loader)
+                            weight_loader(param, loaded_weight)
+                        break
+
+        def load_quark():
+            params_dict = dict(self.named_parameters())
+            quant_shards = [
+                ("mlp.gate_up_proj", "mlp.gate_proj", 0),  # fc is gate_proj
+                ("mlp.gate_up_proj", "mlp.up_proj", 1),  # gate is up_proj
+            ]
+            quant_map = [
+                ("mlp.down_proj", "mlp.down_proj"),
+                ("self_attn.o_proj", "self_attn.o_proj"),
+                ("self_attn.qkv_proj", "self_attn.qkv"),
+            ]
+            scaling_factor_map = [
+                ("activation_scaling_factor", "input_quant_scale"),
+                ("weights_scaling_factor", "weight_quant_scale"),
+                ("output_scaling_factor", "output_quant_scale"),
+            ]
+            for name, loaded_weight in weights:
+                if "zero_point" in name:
+                    continue
+                if len(loaded_weight.shape) == 0:
+                    loaded_weight = torch.Tensor([loaded_weight])
+                # replace the name for scaling factor
+                for (scale_name, weight_name) in scaling_factor_map:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, scale_name)
+                if loaded_weight.dtype == torch.int8:
+                    loaded_weight[loaded_weight == -128] = 0
+                    assert loaded_weight.is_contiguous
+                    loaded_weight = loaded_weight.view(torch.float8_e4m3fnuz)
+
+                for (param_name, weight_name, shard_id) in quant_shards:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    for (param_name, weight_name) in quant_map:
+                        if weight_name not in name:
+                            continue
+                        name = name.replace(weight_name, param_name)
+                        param = params_dict[name]
+                        if ("activation_scaling_factor" in name
+                                or "weights_scaling_factor" in name
+                                or "output_scaling_factor" in name):
+                            param.data.copy_(loaded_weight)
+                        else:
+                            weight_loader = getattr(param, "weight_loader",
+                                                    default_weight_loader)
+                            weight_loader(param, loaded_weight)
+                        break
+
+        load_func = load_ammo if os.getenv(
+            "VLLM_FP8_USE_AMMO") == "1" else load_quark
+        load_func()
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
