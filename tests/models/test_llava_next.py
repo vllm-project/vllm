@@ -1,6 +1,7 @@
 from typing import List, Tuple
 
 import pytest
+import torch
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
@@ -72,11 +73,17 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     return hf_input_ids, hf_output_str
 
 
+# TODO: remove this after CPU float16 support ready
+target_dtype = "float"
+if torch.cuda.is_available():
+    target_dtype = "half"
+
+
 @pytest.mark.xfail(
     reason="Inconsistent image processor being used due to lack "
     "of support for dynamic image token replacement")
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
                 model_and_config, dtype: str, max_tokens: int) -> None:
