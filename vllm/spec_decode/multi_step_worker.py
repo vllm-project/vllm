@@ -72,7 +72,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                                      sample_len)
 
         # Run model sample_len times.
-        model_outputs = []
+        model_outputs: List[SamplerOutput] = []
         for _ in range(sample_len):
             model_output: List[SamplerOutput] = super().execute_model(
                 execute_model_req=copied_execute_model_req)
