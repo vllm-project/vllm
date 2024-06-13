@@ -91,6 +91,18 @@ class RMSNorm(CustomOp):
         )
         return out
 
+    def forward_cpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]: 
+        # Note: the forward_native() with torch.compile has significant
+        # performance regression.
+        return self.forward_cuda(
+            x,
+            residual,
+        )
+
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
         s += f", eps={self.variance_epsilon}"

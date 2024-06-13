@@ -73,19 +73,24 @@ void rotary_embedding_impl(
     }
   };
 
-#pragma omp parallel for
+#pragma omp parallel for collapse(2)
   for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
-    int64_t pos = positions[token_idx];
-    const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
-
     for (int i = 0; i < num_heads; ++i) {
+      int64_t pos = positions[token_idx];
+      const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
+
       const int head_idx = i;
       const int64_t token_head =
           token_idx * query_stride + head_idx * head_size;
       compute_loop(token_head, cache_ptr, query);
     }
+  }
 
+#pragma omp parallel for collapse(2)
+  for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
     for (int i = 0; i < num_kv_heads; ++i) {
+      int64_t pos = positions[token_idx];
+      const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
       const int head_idx = i;
       const int64_t token_head = token_idx * key_stride + head_idx * head_size;
       compute_loop(token_head, cache_ptr, key);

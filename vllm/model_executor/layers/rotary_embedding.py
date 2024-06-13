@@ -255,6 +255,22 @@ class RotaryEmbedding(CustomOp):
                       if self.use_native2 else self.forward_native)
         return forward_fn(positions, query, key, offsets)
 
+    def forward_cpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Note: the forward_native() with torch.compile has significant
+        # performance regression.
+        return self.forward_cuda(
+            positions,
+            query,
+            key,
+            offsets,
+        )
+
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
         s += f", max_position_embeddings={self.max_position_embeddings}"
