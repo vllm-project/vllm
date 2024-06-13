@@ -11,7 +11,7 @@ steps:
             - sh
             - .buildkite/nightly-benchmarks/wait-for-image.sh
   - wait
-  - label: "A100: NVIDIA SMI"
+  - label: "A100 Benchmark"
     agents:
       queue: A100
     plugins:
@@ -46,7 +46,7 @@ steps:
   #     queue: H100
   #   plugins:
   #   - docker#v5.11.0:
-  #       image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
+  #       image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
   #       command:
   #       - bash
   #       - .buildkite/quick-benchmarks/quick-benchmarks.sh

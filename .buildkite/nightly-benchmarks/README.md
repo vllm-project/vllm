@@ -3,7 +3,7 @@
 
 ## Introduction
 
-This directory contains a quick performance benchmarking CI for vllm. The goal is to help developers know the impact of their PRs on the performance of vllm. 
+This directory contains a quick performance benchmarking CI for vllm. The goal is to help developers know the impact of their PRs on the performance of vllm.
 
 This benchmark will be *triggered* upon:
 - A PR being merged into vllm.
@@ -15,7 +15,7 @@ This benchmark will be *triggered* upon:
 
 ## Configuring the workload for the quick benchmark
 
-The workload of the quick benchmark contains two parts: latency tests in `latency-tests.json`, throughput tests in `throughput-tests.json` and serving tests in `serving-tests.json`. 
+The workload of the quick benchmark contains two parts: latency tests in `latency-tests.json`, throughput tests in `throughput-tests.json` and serving tests in `serving-tests.json`.
 
 ### Latency test
 
@@ -86,8 +86,8 @@ We test the throughput by using `benchmark_serving.py` with request rate = inf t
 
 Inside this example:
 - The `test_name` attribute is also a unique identifier for the test. It must start with `serving_`.
-- The `server-parameters` includes the command line arguments for vllm server. 
-- The `client-parameters` includes the command line arguments for `benchmark_serving.py`. 
+- The `server-parameters` includes the command line arguments for vllm server.
+- The `client-parameters` includes the command line arguments for `benchmark_serving.py`.
 - The `qps_list` controls the list of qps for test. It will be used to configure the `--request-rate` parameter in `benchmark_serving.py`
 
 The number of this test is less stable compared to the delay and latency benchmarks (due to randomized sharegpt dataset sampling inside `benchmark_serving.py`), but a large change on this number (e.g. 5% change) still says something.
