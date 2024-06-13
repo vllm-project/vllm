@@ -279,7 +279,8 @@ class _AsyncLLMEngine(LLMEngine):
         if prompt_adapter_request:
             prompt_token_ids = [
                 0
-            ] * prompt_adapter_request.prompt_adapter_num_virtual_tokens + prompt_token_ids
+            ] * prompt_adapter_request.prompt_adapter_num_virtual_tokens + \
+                prompt_token_ids
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=inputs.get("prompt"),

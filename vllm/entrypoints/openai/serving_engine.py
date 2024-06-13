@@ -73,7 +73,7 @@ class OpenAIServing:
         self.prompt_adapter_requests = []
         if prompt_adapters is not None:
             for i, prompt_adapter in enumerate(prompt_adapters, start=1):
-                with open(prompt_adapter.local_path) as f:
+                with open(f"./{prompt_adapter.local_path}/adapter_config.json") as f:
                     adapter_config = json.load(f)
                     num_virtual_tokens = adapter_config["num_virtual_tokens"]
                 self.prompt_adapter_requests.append(
