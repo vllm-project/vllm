@@ -5,7 +5,6 @@ Run `pytest tests/quantization/test_compressed_tensors.py`.
 
 import pytest
 import torch
-from torch.testing._internal.common_utils import skipIfRocm
 
 from vllm import SamplingParams
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
@@ -14,7 +13,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 
 
 
-@skipIfRocm
 def test_compressed_tensors_w8a8_static_setup(vllm_runner):
     model_path = "nm-testing/tinyllama-oneshot-w8a8-static-v2"
     with vllm_runner(model_path, enforce_eager=True) as llm:
@@ -44,7 +42,6 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner):
         assert qkv_proj.input_scale.dtype is torch.float32
 
 
-@skipIfRocm
 def test_compressed_tensors_no_enforce_eager(vllm_runner):
     model_path = "nm-testing/tinyllama-oneshot-w8a8-static-v2"
     with vllm_runner(model_path) as llm:
@@ -53,7 +50,6 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
         assert output
 
 
-@skipIfRocm
 def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner):
     model_path = "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2"
     with vllm_runner(model_path, enforce_eager=True,
