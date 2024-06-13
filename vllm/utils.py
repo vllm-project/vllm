@@ -2,25 +2,27 @@ import asyncio
 import datetime
 import enum
 import gc
-import glob
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
 import warnings
 from collections import defaultdict
-from functools import lru_cache, partial
+from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
                     Union)
 
+import numpy as np
 import psutil
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
@@ -145,14 +147,19 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_tpu() -> bool:
+    try:
+        import libtpu
+    except ImportError:
+        libtpu = None
+    return libtpu is not None
+
+
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
-    # NOTE: This import statement should be executed lazily since
-    # the Neuron-X backend does not have the `cuda_utils` module.
-    from vllm._C import cuda_utils
-
     max_shared_mem = (
-        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+        ops.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
     # will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
@@ -235,9 +242,11 @@ def merge_async_iterators(
                 yield item
         except (Exception, asyncio.CancelledError) as e:
             for task in _tasks:
-                # NOTE: Pass the error msg in cancel()
-                # when only Python 3.9+ is supported.
-                task.cancel()
+                if sys.version_info >= (3, 9):
+                    # msg parameter only supported in Python 3.9+
+                    task.cancel(e)
+                else:
+                    task.cancel()
             raise e
         await asyncio.gather(*_tasks)
 
@@ -286,7 +295,15 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 def get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
-        return port
+        while True:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("", port))
+                    return port
+            except OSError:
+                port += 1  # Increment port number if already in use
+                logger.info("Port %d is already in use, trying port %d",
+                            port - 1, port)
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -499,11 +516,6 @@ def str_to_int_tuple(s: str) -> Tuple[int, ...]:
             f"(e.g., 1, 2, 3). Given input: {s}") from e
 
 
-def pad_to_max_length(x: List[int], max_len: int, pad: int) -> List[int]:
-    assert len(x) <= max_len
-    return x + [pad] * (max_len - len(x))
-
-
 def make_tensor_with_pad(
     x: List[List[int]],
     max_len: int,
@@ -516,7 +528,10 @@ def make_tensor_with_pad(
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
     """
-    padded_x = [pad_to_max_length(x_i, max_len, pad) for x_i in x]
+    padded_x = np.zeros([len(x), max_len], dtype=np.int32) + pad
+    for ind, blocktb in enumerate(x):
+        assert len(blocktb) <= max_len
+        padded_x[ind, :len(blocktb)] = blocktb
     return torch.tensor(padded_x, dtype=dtype, device=device)
 
 
@@ -538,6 +553,11 @@ def maybe_expand_dim(tensor: torch.Tensor,
     if tensor.ndim < target_dims:
         tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
     return tensor
+
+
+def get_dtype_size(dtype: torch.dtype) -> int:
+    """Get the size of the data type in bytes."""
+    return torch.tensor([], dtype=dtype).element_size()
 
 
 def merge_dicts(dict1: Dict[Any, List[Any]],
@@ -563,28 +583,6 @@ def init_cached_hf_modules():
     """
     from transformers.dynamic_module_utils import init_hf_modules
     init_hf_modules()
-
-
-def nccl_integrity_check(filepath):
-    """
-    when the library is corrupted, we cannot catch
-    the exception in python. it will crash the process.
-    instead, we use the exit code of `ldd` to check
-    if the library is corrupted. if not, we will return
-    the version of the library.
-    """
-    exit_code = os.system(f"ldd {filepath} 2>&1 > /dev/null")
-    if exit_code != 0:
-        raise RuntimeError(f"Failed to load NCCL library from {filepath} .")
-    import ctypes
-
-    nccl = ctypes.CDLL(filepath)
-    version = ctypes.c_int()
-    nccl.ncclGetVersion.restype = ctypes.c_int
-    nccl.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
-    result = nccl.ncclGetVersion(ctypes.byref(version))
-    assert result == 0
-    return version.value
 
 
 @lru_cache(maxsize=None)
@@ -616,17 +614,13 @@ def find_library(lib_name: str) -> str:
 
 
 def find_nccl_library():
+    """
+    We either use the library file specified by the `VLLM_NCCL_SO_PATH`
+    environment variable, or we find the library file brought by PyTorch.
+    After importing `torch`, `libnccl.so.2` or `librccl.so.1` can be
+    found by `ctypes` automatically.
+    """
     so_file = envs.VLLM_NCCL_SO_PATH
-    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
-
-    # check if we have vllm-managed nccl
-    vllm_nccl_path = None
-    if torch.version.cuda is not None:
-        cuda_major = torch.version.cuda.split(".")[0]
-        path = os.path.expanduser(
-            f"{VLLM_CONFIG_ROOT}/vllm/nccl/cu{cuda_major}/libnccl.so.*")
-        files = glob.glob(path)
-        vllm_nccl_path = files[0] if files else None
 
     # manually load the nccl library
     if so_file:
@@ -635,9 +629,9 @@ def find_nccl_library():
             so_file)
     else:
         if torch.version.cuda is not None:
-            so_file = vllm_nccl_path or find_library("libnccl.so.2")
+            so_file = "libnccl.so.2"
         elif torch.version.hip is not None:
-            so_file = find_library("librccl.so.1")
+            so_file = "librccl.so.1"
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info("Found nccl from library %s", so_file)
@@ -658,3 +652,44 @@ def enable_trace_function_call_for_thread() -> None:
                                 filename)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         enable_trace_function_call(log_path)
+
+
+def identity(value: T) -> T:
+    return value
+
+
+F = TypeVar('F', bound=Callable[..., Any])
+
+
+def deprecate_kwargs(
+        *kws: str,
+        is_deprecated: Union[bool, Callable[[], bool]] = True,
+        additional_message: Optional[str] = None) -> Callable[[F], F]:
+    deprecated_kws = set(kws)
+
+    if not callable(is_deprecated):
+        is_deprecated = partial(identity, is_deprecated)
+
+    def wrapper(fn: F) -> F:
+
+        @wraps(fn)
+        def inner(*args, **kwargs):
+            if is_deprecated():
+                deprecated_kwargs = kwargs.keys() & deprecated_kws
+                if deprecated_kwargs:
+                    msg = (
+                        f"The keyword arguments {deprecated_kwargs} are "
+                        "deprecated and will be removed in a future update.")
+                    if additional_message is not None:
+                        msg += f" {additional_message}"
+
+                    warnings.warn(
+                        DeprecationWarning(msg),
+                        stacklevel=3,  # The inner function takes up one level
+                    )
+
+            return fn(*args, **kwargs)
+
+        return inner  # type: ignore
+
+    return wrapper

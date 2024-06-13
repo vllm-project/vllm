@@ -68,13 +68,13 @@ def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int):
     if queue_size < disable_by_batch_size:
         # Should raise exception when executing the mocked draft model.
         with pytest.raises(ValueError, match=exception_secret):
-            proposer.get_proposals(execute_model_req=ExecuteModelRequest(
+            proposer.get_spec_proposals(execute_model_req=ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 num_lookahead_slots=k), )
     else:
         # Should not execute the draft model because spec decode is disabled
         # for all requests. Accordingly, the proposal length should be 0.
-        proposals = proposer.get_proposals(
+        proposals = proposer.get_spec_proposals(
             execute_model_req=ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 num_lookahead_slots=k), )

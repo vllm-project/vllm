@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from vllm.config import SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
@@ -14,6 +15,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
+from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
                                    get_sampled_token_logprobs, nvtx_range,
@@ -29,7 +31,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     WorkerWrapper. It constructs a SpecDecodeWorker from the speculative config.
     """
     assert "speculative_config" in kwargs
-    speculative_config = kwargs.get("speculative_config")
+    speculative_config: SpeculativeConfig = kwargs.get("speculative_config")
     assert speculative_config is not None
 
     target_worker = Worker(*args, **kwargs)
@@ -108,16 +110,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
 
-        return SpecDecodeWorker(
-            proposer_worker,
-            scorer_worker,
-            disable_by_batch_size=disable_by_batch_size,
-            rejection_sampler=RejectionSampler(
-                disable_bonus_tokens=disable_bonus_tokens, ))
+        return SpecDecodeWorker(proposer_worker,
+                                scorer_worker,
+                                disable_by_batch_size=disable_by_batch_size,
+                                rejection_sampler=RejectionSampler(
+                                    disable_bonus_tokens=disable_bonus_tokens))
 
     def __init__(
         self,
-        proposer_worker: WorkerBase,
+        proposer_worker: ProposerWorkerBase,
         scorer_worker: WorkerBase,
         rejection_sampler: RejectionSampler,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
@@ -260,7 +261,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # This is required as if the number of draft model runs changes
         # dynamically, the non-driver workers won't know unless we perform a
-        # communication to inform then.
+        # communication to inform them.
         broadcast_dict = dict(
             num_lookahead_slots=num_lookahead_slots,
             disable_all_speculation=disable_all_speculation,
