@@ -185,6 +185,7 @@ class backend_class:
         gm = copy.copy(gm)
 
         #print(f"Original module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: n.users)}")
+        print(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
 
         logger.debug(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
         logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")

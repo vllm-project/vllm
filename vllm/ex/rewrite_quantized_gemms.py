@@ -9,7 +9,7 @@ from torch.fx.passes.operator_support import create_op_support
 from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner, Partition
 from torch.fx.passes.tools_common import get_node_target
 from torch.fx.passes.shape_prop import ShapeProp
-from torch.fx.subgraph_rewriter import replace_pattern
+from torch.fx.subgraph_rewriter import replace_pattern, replace_pattern_with_filters
 from torch.fx import subgraph_rewriter #symbolic_trace
 from torch.fx.passes.utils.matcher_utils import SubgraphMatcher, InternalMatch
 from torch.fx.passes.utils.matcher_with_name_node_map_utils import SubgraphMatcherWithNameNodeMap
@@ -75,13 +75,6 @@ def _cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
 
     return out
 
-def pattern4(x, w, x_scale, w_scale, xtype):
-    torch._check(x_scale.numel() == 1)
-    f_x = x.to(torch.float32)
-    f_w = w.to(torch.float32) * w_scale
-    f_out = torch.nn.functional.linear(f_x, f_w.transpose(1, 0))
-    return f_out.to(xtype)
-
 #torch.fx.wrap('torch.ops._C.static_scaled_int8_quant')
 #torch.fx.wrap('torch.ops._C.cutlass_scaled_mm_dq')
 
@@ -90,8 +83,7 @@ def scale(x, x_scale):
     torch.ops._C.static_scaled_int8_quant(out, x, x_scale)
     return out
 
-def replace3(x, w, w_scale, x_type):
-    x_scale = torch.rand((1, 1), device=x.device, dtype=torch.float32)  # temp
+def replace3(x, w, x_scale, w_scale, x_type):
     x_q, _ = custom_ops.scaled_int8_quant(x, x_scale)
     return custom_ops.cutlass_scaled_mm_dq(x_q, w, x_scale, w_scale, x_type)
 
@@ -101,24 +93,30 @@ def pattern3(x, w, w_scale, xtype):
     f_out = torch.nn.functional.linear(f_x, f_w.transpose(1, 0))
     return f_out.to(xtype)
 
-def replace4(x_scale):
+def replace3a(x_scale):
     def replace_sub(x, w, w_scale, x_type):
         x_q, _ = custom_ops.scaled_int8_quant(x, x_scale)
         return custom_ops.cutlass_scaled_mm_dq(x_q, w, x_scale, w_scale, x_type)
     return replace_sub
 
+#########################################
 
-class replacement_class(torch.nn.Module):
+def pattern3(x, w, w_scale, x_type):
+    f_x = x.to(torch.float32)
+    f_w = w.to(torch.float32) * w_scale
+    f_out = torch.nn.functional.linear(f_x, f_w.transpose(1, 0))
+    return f_out.to(x_type)
 
-    def __init__(self):
-        super().__init__()
-        self.x_scale = torch.empty((1, 1), dtype=torch.float32,
-                                   device='cuda')  # temp hack
+def pattern4(x, w, x_scale, w_scale): #, xtype):
+    f_x = x.to(torch.float32)
+    f_w = w.to(torch.float32) * w_scale
+    f_out = torch.nn.functional.linear(f_x, f_w.transpose(1, 0))
+    return f_out.to(torch.float16)
 
-    def forward(self, x, w, w_scale, x_type):
-        x_q, _ = custom_ops.scaled_int8_quant(x, self.x_scale)
-        return custom_ops.cutlass_scaled_mm_dq(x_q, w, self.x_scale, w_scale,
-                                               x_type)
+def replace4(x, w, x_scale, w_scale): #, x_type):
+    x_q, _ = custom_ops.scaled_int8_quant(x, x_scale)
+    return custom_ops.cutlass_scaled_mm_dq(x_q, w, x_scale, w_scale, torch.float16) #x_type
+
 
 
 def llama_mlp_pattern(l_x_, weight, weight_1):
@@ -215,17 +213,18 @@ def replacement_pattern_junk():
         replace_graph = symbolic_trace(replace4(xsf), {'x':xf, 'w': wf, 'x_type': x_type}, [x, w, w_scale, x_type])
         #replace_graph = symbolic_trace(replace4(xsf), {'x_type': x_type})
 
-    if False:
-        replacement = replacement_class()
-        replace_graph = symbolic_trace(replacement)
 
 # registering dynamic shapes
 # See: https://pytorch.org/docs/stable/torch.compiler_dynamic_shapes.html
 
 
+# See torch.compiler.allow_in_graph(fn)
+
 def rewrite_quantized_gemms(
         mod: torch.fx.GraphModule,
         example_inputs: List[torch.Tensor]) -> torch.fx.GraphModule:
+
+    return mod
 
     #
     # setup sample/fake inputs
@@ -251,18 +250,15 @@ def rewrite_quantized_gemms(
     #
     # Generate patterns
     #
-    pattern_graph = symbolic_trace(pattern3)
+    pattern_graph = symbolic_trace(pattern4)
     print(f"Pattern graph:\n{graph_print_tabular(pattern_graph)}\n")
 
-    replace_graph = symbolic_trace(replace4(x_scale), [x, w, w_scale, x_type])
+    replace_graph = symbolic_trace(replace4, [x, w, x_scale, w_scale])#, x_type])
+    #replace_graph = symbolic_trace(replace4(x_scale), [x, w, w_scale, x_type])
     print(f"Replace graph:\n{graph_print_tabular(replace_graph)}\n")
 
-    # See https://github.com/pytorch/pytorch/issues/93002
-    # https://github.com/pytorch/pytorch/issues/120124
-    #with torch._C.DisableTorchFunction():
-
     # might need to do this in two steps (match, figure out inputs, generate replacement)
-    rep_matches = replace_pattern(mod, pattern_graph, replace_graph)
+    rep_matches = replace_pattern_with_filters(mod, pattern_graph, replace_graph, None)
     print(f"root MATCHES {rep_matches}")
 
     if len(rep_matches) > 0:

@@ -91,7 +91,7 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     #@torch.compile(backend=make_backend(backend='inductor'))
-    @torch.compile(backend=make_backend(backend=None))
+    #@torch.compile(backend=make_backend(backend=None))
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
@@ -314,10 +314,10 @@ class LlamaModel(nn.Module):
         return self.embed_tokens(input_ids)
 
     #@torch.compile(backend='cudagraphs')
-    #@torch.compile(backend=make_backend(backend=None))
     #@torch.compile(backend=make_backend(backend='inductor'))
     #@torch.compile(backend='inductor')
     #@torch.compile
+    @torch.compile(backend=make_backend(backend=None), fullgraph=True)
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
@@ -433,10 +433,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             self.lm_head = PPMissingLayer()
 
     #@torch.compile(backend='cudagraphs')
-    #@torch.compile(backend=make_backend(backend=None))
     #@torch.compile(backend=make_backend(backend='inductor'))
     #@torch.compile(backend='inductor')
     #@torch.compile
+    @torch.compile(backend=make_backend(backend=None), fullgraph=True)
     def forward(
         self,
         input_ids: torch.Tensor,
