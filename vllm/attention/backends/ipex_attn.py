@@ -117,7 +117,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         self.alibi_slopes = alibi_slopes
         self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
-        self.fuse_batch = False  #is_xpu()
+        self.fuse_batch = is_xpu()
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -140,7 +140,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = 1 if is_xpu() else (16 // kv_cache.element_size())
+        x = 1
         num_blocks = kv_cache.shape[1]
 
         key_cache = kv_cache[0]

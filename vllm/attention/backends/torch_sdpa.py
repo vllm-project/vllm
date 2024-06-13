@@ -121,7 +121,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         self.alibi_slopes = alibi_slopes
         self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
-        self.fuse_batch = is_xpu()
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -137,22 +136,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             raise NotImplementedError(
                 "Torch SDPA backend does not support FP8 KV cache. "
                 "Please use xFormers backend instead.")
-
-    def split_kv_cache(
-        self,
-        kv_cache: torch.Tensor,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = 1 if is_xpu() else (16 // kv_cache.element_size())
-        num_blocks = kv_cache.shape[1]
-
-        key_cache = kv_cache[0]
-        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
-                                   -1, x)
-        value_cache = kv_cache[1]
-        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
-        return key_cache, value_cache
 
     def forward(
         self,
@@ -182,7 +165,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
         if kv_cache is not None:
-            key_cache, value_cache = self.split_kv_cache(
+            key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
@@ -207,13 +190,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                             attn_metadata.seq_lens, self.sliding_window,
                             query.dtype)  # type: ignore
                     else:
-                        if self.fuse_batch:
-                            att_masks = _make_sliding_window_bias(
-                                attn_metadata.seq_lens,
-                                None,
-                                dtype=query.dtype)
-                        else:
-                            att_masks = [None] * len(attn_metadata.seq_lens)
+                        att_masks = [None] * len(attn_metadata.seq_lens)
                     attn_metadata.attn_bias = att_masks
 
                 # query = query.unsqueeze(0) # [batch_size, num_tokens, num_heads, head_size]
@@ -270,7 +247,7 @@ def _make_alibi_bias(
 ) -> List[torch.Tensor]:
     attn_biases = []
     for seq_len in seq_lens:
-        bias = torch.arange(seq_len, dtype=dtype, device=alibi_slopes.device)
+        bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
         #     `bias = bias[None, :].repeat(seq_len, 1)`
         # here. We find that both biases give the same results, but
@@ -283,8 +260,7 @@ def _make_alibi_bias(
         bias.mul_(alibi_slopes[:, None, None]).unsqueeze_(0)
         inf_mask = torch.empty(
             (1, seq_len, seq_len),
-            dtype=bias.dtype,
-            device=alibi_slopes.device).fill_(-torch.inf).triu_(diagonal=1)
+            dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1)
         attn_biases.append((bias + inf_mask).to(dtype))
 
     return attn_biases
