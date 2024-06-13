@@ -77,7 +77,7 @@ class ModelInput:
 
     Model runners should inherit from this class and add their required fields.
     For distributed executors, any fields that should be sent during a
-    broadcast op should also be added to the BROADCASTABLE_FIELDS. During
+    broadcast op should also be added to the broadcastable_fields. During
     execution, these fields will be extracted from the source copy and
     broadcasted to all workers using broadcast_tensor_dict.
 
@@ -88,12 +88,17 @@ class ModelInput:
     override _get_init_kwargs to perform the custom deserialization (
     GPUModelInput for an example).
     """
-    # Fields to broadcast to all workers from driver. The value must be
-    # broadcastable using broadcast_tensor_dict (i.e. either a tensor, or a
-    # Python primitive like int). During the broadcast, the listed fields will
-    # be extracted from the source copy and then passed to `new()` to create a
-    # copy on the destination(s).
-    BROADCASTABLE_FIELDS: Tuple[str, ...] = ()
+
+    @property
+    def broadcastable_fields(self) -> Tuple[str, ...]:
+        """
+        Return fields to broadcast to all workers from driver. The value of
+        each field must be broadcastable using broadcast_tensor_dict (i.e.
+        either a tensor, or a Python primitive like int). During the broadcast,
+        the listed fields will be extracted from the source copy and then
+        passed to `new()` to create a copy on the destination(s).
+        """
+        raise NotImplementedError()
 
     @classmethod
     def _get_init_kwargs(cls, **kwargs) -> Dict[str, Any]:
@@ -136,7 +141,7 @@ class ModelInput:
         custom deserialization.
         """
         tensor_dict: Dict[str, Union[int, torch.Tensor]] = {}
-        for field in self.BROADCASTABLE_FIELDS:
+        for field in self.broadcastable_fields:
             val = getattr(self, field, None)
             if val is not None:
                 tensor_dict[field] = val
@@ -159,13 +164,15 @@ class CPUModelInput(ModelInput):
     attn_metadata: Optional["AttentionMetadata"] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
 
-    BROADCASTABLE_FIELDS: Tuple[str, ...] = (
-        "num_seq_groups",
-        "blocks_to_copy",
-        "input_tokens",
-        "input_positions",
-        "multi_modal_kwargs",
-    )
+    @property
+    def broadcastable_fields(self) -> Tuple[str, ...]:
+        return (
+            "num_seq_groups",
+            "blocks_to_copy",
+            "input_tokens",
+            "input_positions",
+            "multi_modal_kwargs",
+        )
 
     @classmethod
     def _get_init_kwargs(  # type: ignore
@@ -206,17 +213,19 @@ class GPUModelInput(ModelInput):
 
     attn_metadata: Optional["AttentionMetadata"] = None
 
-    BROADCASTABLE_FIELDS: Tuple[str, ...] = (
-        "num_seq_groups",
-        "blocks_to_swap_in",
-        "blocks_to_swap_out",
-        "blocks_to_copy",
-        "input_tokens",
-        "input_positions",
-        "lora_requests",
-        "lora_mapping",
-        "multi_modal_kwargs",
-    )
+    @property
+    def broadcastable_fields(self) -> Tuple[str, ...]:
+        return (
+            "num_seq_groups",
+            "blocks_to_swap_in",
+            "blocks_to_swap_out",
+            "blocks_to_copy",
+            "input_tokens",
+            "input_positions",
+            "lora_requests",
+            "lora_mapping",
+            "multi_modal_kwargs",
+        )
 
     @classmethod
     def _get_init_kwargs(  # type: ignore
