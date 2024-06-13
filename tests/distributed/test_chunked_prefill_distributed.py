@@ -54,7 +54,7 @@ def test_models(
             model,
             dtype=dtype,
             tensor_parallel_size=2,
-            enforce_eager=True if is_hip() else False,
+            enforce_eager=bool(is_hip()),
             max_num_seqs=max_num_seqs,
             enable_chunked_prefill=enable_chunked_prefill,
             max_num_batched_tokens=max_num_batched_tokens,

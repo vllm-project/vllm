@@ -107,7 +107,7 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
                             enable_lora=enable_lora,
                             gpu_memory_utilization=gpu_memory_utilization,
                             tensor_parallel_size=tp_size,
-                            enforce_eager=True if is_hip() else False,
+                            enforce_eager=bool(is_hip()),
                         ))
         p.start()
         p.join()
@@ -121,7 +121,7 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
                             gpu_memory_utilization=gpu_memory_utilization,
                             tensor_parallel_size=tp_size,
                             load_format="sharded_state",
-                            enforce_eager=True if is_hip() else False,
+                            enforce_eager=bool(is_hip()),
                         ))
         p.start()
         p.join()
