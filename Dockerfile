@@ -10,7 +10,7 @@
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git
+    && apt-get install -y python3-pip git curl sudo
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -70,10 +70,28 @@ ENV NVCC_THREADS=$nvcc_threads
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
+ARG USE_SCCACHE
+# if USE_SCCACHE is set, use sccache to speed up compilation
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Installing sccache..." \
+        && curl -L -o sccache.tar.gz https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-x86_64-unknown-linux-musl.tar.gz \
+        && tar -xzf sccache.tar.gz \
+        && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
+        && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
+        && export SCCACHE_BUCKET=vllm-build-sccache \
+        && export SCCACHE_REGION=us-west-2 \
+        && sccache --show-stats \
+        && python3 setup.py bdist_wheel --dist-dir=dist \
+        && sccache --show-stats; \
+    fi
+
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
-    python3 setup.py bdist_wheel --dist-dir=dist
+    if [ "$USE_SCCACHE" != "1" ]; then \
+        python3 setup.py bdist_wheel --dist-dir=dist; \
+    fi
 
 # check the size of the wheel, we cannot upload wheels larger than 100MB
 COPY .buildkite/check-wheel-size.py check-wheel-size.py

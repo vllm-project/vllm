@@ -7,7 +7,7 @@ steps:
       queue: cpu_queue
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
+      - "docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
     env:
       DOCKER_BUILDKIT: "1"
