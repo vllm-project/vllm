@@ -113,7 +113,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
-    ) -> Tuple[List[SamplerOutput], bool]:
+    ) -> Tuple[Optional[List[SamplerOutput]], bool]:
         # do not call _parch_tensor_parallel_group, because
         # it's always called after tp_group has already been overridden
         return self._worker.sampler_output(execute_model_req, sample_len)
