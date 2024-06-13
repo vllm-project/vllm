@@ -7,33 +7,56 @@ from vllm.attention import AttentionMetadata
 
 STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
 "Chunked prefill is not currently " + \
-"supported with encoder/decoder models."
+"supported with encoder/decoder or encoder-only models."
 
 STR_NOT_IMPL_ENC_DEC_ROCM_HIP = \
 "ROCm/HIP is not currently supported" + \
-"with encoder/decoder models."
+"with encoder/decoder or encoder-only models."
 
 STR_NOT_IMPL_ENC_DEC_NON_XFORMERS_BACKEND = \
 "Currently only the XFormers backend " + \
-    "supports encoder/decoder models."
+    "supports encoder/decoder and encoder-only models."
 
 STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING = \
 "Prefix caching is not currently supported " + \
-"with encoder/decoder models"
+"with encoder/decoder or encoder-only models"
 
 # Check for unsupported encoder/decoder scenarios
 
 
+def is_encoder_metadata_assuming_supported_backend(
+        attn_metadata) -> bool:
+    '''
+    Return True if the attn_metadata argument contains
+    the metadata fields that would be required for
+    encoder attention, which proves that the user is
+    not running a purely decoder-only model
+
+    Assumes attn_metadata is derived from a backend that supports
+    encoder-only or encoder/decoder models.
+
+    Arguments:
+
+    * attn_metadata: instance of supported backend metadata. 
+                     Type annotation omitted to avoid circular import.
+
+
+    Returns:
+
+    * True if attn_metadata is configured for an encoder-only model
+    '''
+    return attn_metadata.is_all_encoder_attn_metadata_set
+
 def is_encoder_decoder_metadata_assuming_supported_backend(
         attn_metadata) -> bool:
     '''
-    Return True of the attn_metadata argument contains
+    Return True if the attn_metadata argument contains
     the metadata fields that would be required for
-    encoder attention, which proves that the user is
-    not running a purely decoder-only model.
+    encoder/decoder attention, which proves that the user is
+    running an encoder/decoder model
 
     Assumes attn_metadata is derived from a backend that supports
-    encoder/decoder models.
+    encoder-only or encoder/decoder models.
 
     Arguments:
 
@@ -45,8 +68,7 @@ def is_encoder_decoder_metadata_assuming_supported_backend(
 
     * True if attn_metadata is configured for an encoder/decoder model
     '''
-    return attn_metadata.is_all_encoder_attn_metadata_set
-
+    return attn_metadata.is_all_encoder_decoder_attn_metadata_set
 
 def fail_encoder_decoder_prefix_caching() -> None:
     '''
@@ -70,7 +92,7 @@ def assert_no_encdec_chunked_prefill_assuming_supported_backend(
     * attn_metadata: Attention metadata structure
     '''
 
-    if not is_encoder_decoder_metadata_assuming_supported_backend(
+    if not is_encoder_metadata_assuming_supported_backend(
             attn_metadata):
         # Only care about encoder/decoder
         # scenarios.
