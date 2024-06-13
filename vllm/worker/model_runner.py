@@ -38,7 +38,7 @@ _BATCH_SIZE_ALIGNMENT = 8
 # Capture graphs for token size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
 # NOTE: _get_graph_batch_size needs to be updated if this list is changed.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
-    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 10)
+    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
 _NUM_WARMUP_ITERS = 2
 
@@ -292,12 +292,12 @@ class ModelRunner:
         # [0, 5, 8, 1, 6, 7, 3, 4]
         # paged_kv_indptr is used to index into paged_kv_indices:
         # [0, 3, 6, 8]
+        paged_kv_indices: List[int] = []
         # 0 at the beginning of paged_kv_indptr indicates the start of the
         # first request’s page indices in the paged_kv_indices list.
-        paged_kv_indptr = [0]
-        paged_kv_indices = []
+        paged_kv_indptr: List[int] = [0]
         # paged_kv_last_page_len is the length of the last page of each request
-        paged_kv_last_page_len = []
+        paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
             return ModelInput.empty(self.device)
@@ -408,7 +408,6 @@ class ModelRunner:
                 else:
                     # Prefill without chunked prefill or memory profiling.
                     block_table = []
-
                 block_tables.append(block_table)
 
                 seq_lens.append(sliding_seq_len)

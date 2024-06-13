@@ -99,7 +99,6 @@ RUN ldconfig /usr/local/cuda-12.4/compat/
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     pip install dist/*.whl --verbose
-
 #################### vLLM installation IMAGE ####################
 
 
