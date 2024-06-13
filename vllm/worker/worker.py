@@ -17,7 +17,6 @@ from vllm.distributed import (broadcast_tensor_dict,
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
