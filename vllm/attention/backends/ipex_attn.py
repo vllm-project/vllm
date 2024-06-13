@@ -332,7 +332,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     self.num_kv_heads,
                     self.scale,
                     attn_metadata.block_tables,
-                    attn_metadata.seq_lens,
+                    attn_metadata.seq_lens_tensor,
                     block_size,
                     max_seq_len,
                     self.alibi_slopes,
