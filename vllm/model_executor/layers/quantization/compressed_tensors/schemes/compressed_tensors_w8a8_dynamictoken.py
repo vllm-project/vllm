@@ -12,6 +12,8 @@ __all__ = ["CompressedTensorsW8A8DynamicToken"]
 
 
 class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
+    def __init__(self, strategy: str):
+        self.strategy = strategy
 
     def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
         if isinstance(shard_id, int):
@@ -45,8 +47,9 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         # CompressedTensorsW8A8StaticTensor::create_weights for further
         # information.
         is_tensor_partitioned = len(output_partition_sizes) != 1
+        # TODO: if strategy: channel this should always be weight_scale_dim
         weight_scale_dim = sum(
-            output_partition_sizes) if is_tensor_partitioned else 1
+            output_partition_sizes) if (is_tensor_partitioned or self.strategy == "CHANNEL") else 1
 
         weight_zero_point = Parameter(torch.empty(1, dtype=torch.int8),
                                       requires_grad=False)
