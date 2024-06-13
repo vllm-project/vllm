@@ -8,6 +8,8 @@ https://arxiv.org/abs/2310.18547
 import torch
 import triton
 import triton.language as tl
+from typing import Any, Dict, Optional
+from .utils import get_lora_op_configs
 
 
 @triton.jit
@@ -92,8 +94,8 @@ def bgmv_expand_slice(
     lora_indices_tensor: torch.Tensor,
     slice_offset: int,
     slice_size: int,
-    batchs: int,
-    add_inputs: bool = False,
+    add_inputs: bool = True,
+    override_config: Optional[Dict[str, int]] = None,
 ):
     """
     Args:
@@ -114,7 +116,7 @@ def bgmv_expand_slice(
         torch.bfloat16,
     ]
     assert inputs.size(1) == lora_b_weights.size(-1)
-    assert lora_indices_tensor.size(0) == batchs
+
     assert slice_size == lora_b_weights.size(-2)
     assert inputs.is_contiguous()
     assert output_tensor.is_contiguous()
@@ -130,9 +132,9 @@ def bgmv_expand_slice(
     # TODO tuning this config
 
     N, K = lora_b_weights.shape[-2:]  # K= rank,N=hidden_size
-    BLOCK_N = 256
+    # BLOCK_N = 256
     BLOCK_K = triton.next_power_of_2(K)
-    SPLIT_N = 64
+    # SPLIT_N = 64
     EVEN_K = K % BLOCK_K == 0
     ADD_INPUTS = add_inputs
     CAST_TYPE = False
@@ -141,10 +143,18 @@ def bgmv_expand_slice(
             torch.bfloat16,
     ]:
         CAST_TYPE = True
-    grid = [
-        SPLIT_N,
+
+    batchs = lora_indices_tensor.size(0)
+
+    if override_config:
+        config = override_config
+    else:
+        config = get_lora_op_configs("expand", batchs, N)
+
+    grid = lambda META: (
+        META["SPLIT_N"],
         batchs,
-    ]
+    )
     _bgmv_expand_slice_kernel[grid](
         inputs,
         lora_b_weights,
@@ -160,11 +170,10 @@ def bgmv_expand_slice(
         output_tensor.stride(0),
         output_tensor.stride(1),
         slice_offset,
-        BLOCK_N,
-        BLOCK_K,
-        SPLIT_N,
-        EVEN_K,
-        ADD_INPUTS,
-        CAST_TYPE,
+        BLOCK_K=BLOCK_K,
+        EVEN_K=EVEN_K,
+        ADD_INPUTS=ADD_INPUTS,
+        CAST_TYPE=CAST_TYPE,
+        **config,
     )
     return

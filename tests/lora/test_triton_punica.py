@@ -69,7 +69,7 @@ _BATCH_SIZE_ALIGNMENT = 8
 BATCHS = [1, 2, 4] + [_BATCH_SIZE_ALIGNMENT * i for i in range(1, 8)]
 
 NUM_LORA = [1, 4, 8, 16, 32, 64, 128, 256]
-DTYPES = [torch.float16,torch.bfloat16]
+DTYPES = [torch.float16, torch.bfloat16]
 MAX_RANKS = [1, 4, 8, 16, 32, 64, 128]
 SCALES = [0.5]
 OP_TYPES = ["shrink", "expand"]
@@ -107,7 +107,7 @@ def _torch_groupgemm(
     out_list = []
     current_offset = 0
     for lora_index, b_length in zip(range(batchs), seq_len_tensor):
-        input_weight = inputs[current_offset : b_length + current_offset, :]
+        input_weight = inputs[current_offset:b_length + current_offset, :]
         current_offset += b_length
         lora_weight = lora_weights[lora_indices_tensor[lora_index]]
         result = torch.nn.functional.linear(input_weight, lora_weight)
@@ -121,29 +121,27 @@ def _torch_groupgemm(
     return
 
 
-def _generate_data(
-    batchs, hidden_size, lora_nums, max_rank, max_length, dtype, op_type, device
-):
+def _generate_data(batchs, hidden_size, lora_nums, max_rank, max_length, dtype,
+                   op_type, device):
     if max_length == 1:
         max_length += 1
-    seq_len_tensor = torch.randint(1, max_length, (batchs,)).to(device)
+    seq_len_tensor = torch.randint(1, max_length, (batchs, )).to(device)
     b_seq_start_loc = torch.cumsum(
         torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
         dim=0,
     ).to(device)
     total_tokens = seq_len_tensor.sum()
     if op_type == "shrink":
-        inputs_tensor = torch.rand((total_tokens, hidden_size), dtype=dtype).to(
-            device
-        )
+        inputs_tensor = torch.rand((total_tokens, hidden_size),
+                                   dtype=dtype).to(device)
         lora_weights = torch.rand(
             (lora_nums, max_rank, hidden_size),  # col-major
             dtype=dtype,
         ).to(device)
         # shrink op need atomic_add, so output is initinized by 0
-        ref_out_tensor = torch.zeros(
-            (total_tokens, max_rank), dtype=dtype, device=inputs_tensor.device
-        )
+        ref_out_tensor = torch.zeros((total_tokens, max_rank),
+                                     dtype=dtype,
+                                     device=inputs_tensor.device)
         # NOTE  shrink kernel using torch.float32 as output type
         our_out_tensor = torch.zeros(
             (total_tokens, max_rank),
@@ -169,16 +167,15 @@ def _generate_data(
         # Ensure the same input.
         our_out_tensor = ref_out_tensor.clone()
 
-    lora_indices_tensor = torch.randint(
-        0, lora_nums - 1 if lora_nums > 1 else 1, (batchs,)
-    ).to(device)
+    lora_indices_tensor = torch.randint(0,
+                                        lora_nums - 1 if lora_nums > 1 else 1,
+                                        (batchs, )).to(device)
     indices = torch.zeros((total_tokens), dtype=torch.long).to(device)
     current_offset = 0
     for b_id in range(batchs):
         lora_index = lora_indices_tensor[b_id]
-        indices[
-            current_offset : current_offset + seq_len_tensor[b_id]
-        ] = lora_index.item()
+        indices[current_offset:current_offset +
+                seq_len_tensor[b_id]] = lora_index.item()
         current_offset += seq_len_tensor[b_id].item()
     return (
         inputs_tensor,
@@ -192,12 +189,11 @@ def _generate_data(
     )
 
 
-def _generate_data_expand_nslices(
-    batchs, hidden_size, lora_nums, max_rank, max_length, dtype, nslices, device
-):
+def _generate_data_expand_nslices(batchs, hidden_size, lora_nums, max_rank,
+                                  max_length, dtype, nslices, device):
     if max_length == 1:
         max_length += 1
-    seq_len_tensor = torch.randint(1, max_length, (batchs,)).to(device)
+    seq_len_tensor = torch.randint(1, max_length, (batchs, )).to(device)
     b_seq_start_loc = torch.cumsum(
         torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
         dim=0,
@@ -214,8 +210,7 @@ def _generate_data_expand_nslices(
             torch.rand(
                 (lora_nums, hidden_size, max_rank),  # col-major
                 dtype=dtype,
-            ).to(device)
-        )
+            ).to(device))
     # expand op needs to complete y+=a@lora_b, so output is
     # initinized randomly
     ref_out_tensor = torch.rand(
@@ -226,16 +221,15 @@ def _generate_data_expand_nslices(
     # Ensure the same input.
     our_out_tensor = ref_out_tensor.clone()
 
-    lora_indices_tensor = torch.randint(
-        0, lora_nums - 1 if lora_nums > 1 else 1, (batchs,)
-    ).to(device)
+    lora_indices_tensor = torch.randint(0,
+                                        lora_nums - 1 if lora_nums > 1 else 1,
+                                        (batchs, )).to(device)
     indices = torch.zeros((total_tokens), dtype=torch.long).to(device)
     current_offset = 0
     for b_id in range(batchs):
         lora_index = lora_indices_tensor[b_id]
-        indices[
-            current_offset : current_offset + seq_len_tensor[b_id]
-        ] = lora_index.item()
+        indices[current_offset:current_offset +
+                seq_len_tensor[b_id]] = lora_index.item()
         current_offset += seq_len_tensor[b_id].item()
     return (
         inputs_tensor,
@@ -363,9 +357,8 @@ def test_triton_sgmv_punica_bgmv(
         lora_indices_tensor,
         seq_len_tensor,
         indices,
-    ) = _generate_data(
-        batchs, hidden_size, num_loras, rank, seq_len, dtype, op_type, device
-    )
+    ) = _generate_data(batchs, hidden_size, num_loras, rank, seq_len, dtype,
+                       op_type, device)
 
     max_seq_length = seq_len_tensor.max()
     if isinstance(max_seq_length, tuple):
@@ -444,9 +437,8 @@ def test_triton_bgmv_punica_bgmv(
         lora_indices_tensor,
         seq_len_tensor,
         indices,
-    ) = _generate_data(
-        batchs, hidden_size, num_loras, rank, seq_len, dtype, op_type, device
-    )
+    ) = _generate_data(batchs, hidden_size, num_loras, rank, seq_len, dtype,
+                       op_type, device)
 
     if op_type == "shrink":
         bgmv_shrink(
@@ -454,7 +446,6 @@ def test_triton_bgmv_punica_bgmv(
             lora_weights,
             our_out_tensor,
             lora_indices_tensor,
-            batchs,
             scaling,
         )
     else:
@@ -463,7 +454,6 @@ def test_triton_bgmv_punica_bgmv(
             lora_weights,
             our_out_tensor,
             lora_indices_tensor,
-            batchs,
             add_inputs=True,
         )
     lora_weights_4d = lora_weights.unsqueeze(dim=1)
@@ -478,6 +468,7 @@ def test_triton_bgmv_punica_bgmv(
         ref_out_tensor = ref_out_tensor.to(torch.float32)
     assert_close(our_out_tensor, ref_out_tensor)
 
+
 @pytest.mark.parametrize("batchs", BATCHS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("nslices", NSLICES)
@@ -485,7 +476,7 @@ def test_triton_bgmv_punica_bgmv(
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sgmv_expand_slice(
-    batchs:int,
+    batchs: int,
     hidden_size: int,
     nslices: int,
     dtype: str,
@@ -555,6 +546,7 @@ def test_sgmv_expand_slice(
         slice_offset += hidden_size
     assert_close(our_outputs, ref_outputs)
 
+
 @pytest.mark.parametrize("batchs", BATCHS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("nslices", NSLICES)
@@ -562,7 +554,7 @@ def test_sgmv_expand_slice(
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_bgmv_expand_slice(
-    batchs:int,
+    batchs: int,
     hidden_size: int,
     nslices: int,
     dtype: str,
@@ -604,8 +596,7 @@ def test_bgmv_expand_slice(
             our_outputs,
             lora_indices_tensor,
             slice_offset,
-            hidden_size,
-            batchs,
+            slice_size=hidden_size,
             add_inputs=True,
         )
         lora_weights_4d = lora_weights.unsqueeze(dim=1)
@@ -626,8 +617,8 @@ def test_bgmv_expand_slice(
 
 if __name__ == "__main__":
     test_bgmv_expand_slice(
-        batchs=256,
-        hidden_size=3424,
+        batchs=32,
+        hidden_size=128,
         nslices=2,
         dtype=torch.bfloat16,
         seed=0,

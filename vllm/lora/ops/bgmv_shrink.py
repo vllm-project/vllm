@@ -8,6 +8,8 @@ https://arxiv.org/abs/2310.18547
 import torch
 import triton
 import triton.language as tl
+from typing import Dict, Optional
+from .utils import get_lora_op_configs
 
 
 @triton.jit
@@ -81,8 +83,8 @@ def bgmv_shrink(
     lora_a_weights: torch.Tensor,
     output_tensor: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
-    batchs: int,
-    scaling: float,
+    scaling: float = 1.0,
+    override_config: Optional[Dict[str, int]] = None,
 ):
     """
     Args:
@@ -101,7 +103,6 @@ def bgmv_shrink(
         torch.bfloat16,
     ]
     assert inputs.size(1) == lora_a_weights.size(-1)
-    assert lora_indices_tensor.size(0) == batchs
     assert inputs.is_contiguous()
 
     if lora_a_weights.ndim == 4:  # shape:(lora_num,1,rank, size)
@@ -112,14 +113,19 @@ def bgmv_shrink(
     assert lora_a_weights.is_contiguous()
     assert output_tensor.is_contiguous()
     # TODO tuning this config
+    batchs = lora_indices_tensor.size(0)
     N, K = lora_a_weights.shape[-2:]  # K=hidden_size,N=rank
-    BLOCK_K = 256
     BLOCK_N = triton.next_power_of_2(output_tensor.size(1))
-    SPLIT_K = 64
-    grid = [
-        SPLIT_K,
+    if override_config:
+        config = override_config
+    else:
+        # First try to load optimal config from the file
+        config = get_lora_op_configs("shrink", batchs, K)
+
+    grid = lambda META: (
+        META["SPLIT_K"],
         batchs,
-    ]
+    )
     _bgmv_shrink_kernel[grid](
         inputs,
         lora_a_weights,
@@ -135,8 +141,7 @@ def bgmv_shrink(
         lora_a_weights.stride(2),
         output_tensor.stride(0),
         output_tensor.stride(1),
-        BLOCK_N,
-        BLOCK_K,
-        SPLIT_K,
+        BLOCK_N=BLOCK_N,
+        **config,
     )
     return

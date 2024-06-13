@@ -246,7 +246,7 @@ def add_lora_triton(
     *,
     buffer: Optional[torch.Tensor] = None,
 ):
-    """ 
+    """
     Semantics:
       y[i] += (
           x[i].unsqueeze(0)
@@ -264,18 +264,18 @@ def add_lora_triton(
             into sequence. E.g.,if the sequence length is [4, 6], it is
             [0, 4]. Used only during the prefilling stage.
         seq_length_tensor (torch.Tensor): batch_size,). record the sequence
-            length of the sequences in the batch. Used only during the 
+            length of the sequences in the batch. Used only during the
             prefilling stage.
         lora_index_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch
         batch_size (int): batch size. Used only during the prefilling stage.
-        max_length (int):  maximum seq length in the batch.Used only during the 
+        max_length (int):  maximum seq length in the batch.Used only during the
             prefilling stage.
         layer_idx (int): Layer index of LoRA weights.
         scale (float):  Scaling factor.
-        is_prefilling (bool): True indicates the prefilling stage, while False 
+        is_prefilling (bool): True indicates the prefilling stage, while False
         indicates the decoding stage."
-        buffer (Optional[torch.Tensor], optional): (batch_size,rank) 
+        buffer (Optional[torch.Tensor], optional): (batch_size,rank)
     """
     r = wb_t_all.size(-1)
     if buffer is None:
@@ -307,7 +307,6 @@ def add_lora_triton(
             wa_t_all,
             wb_t_all,
             lora_indices_tensor,
-            batch_size,
             layer_idx,
             scale,
             buffer=buffer,
@@ -358,18 +357,12 @@ def _lora_bgmv(
     wa_t_all: torch.Tensor,
     wb_t_all: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
-    batch_size: int,
     layer_idx: int,
     scale: float,
     buffer: torch.Tensor,
 ):
-    bgmv_shrink(x, wa_t_all, buffer, lora_indices_tensor, batch_size, scale)
-    bgmv_expand(buffer,
-                wb_t_all,
-                y,
-                lora_indices_tensor,
-                batch_size,
-                add_inputs=True)
+    bgmv_shrink(x, wa_t_all, buffer, lora_indices_tensor, scale)
+    bgmv_expand(buffer, wb_t_all, y, lora_indices_tensor, add_inputs=True)
 
 
 def add_lora_triton_slice(
@@ -408,22 +401,53 @@ def add_lora_triton_slice(
                              dtype=torch.float32,
                              device=x.device)
     if is_prefilling:
-        _lora_sgmv_nslice(y, x, wa_t_all, wb_t_all, b_seq_start_tensor,
-                          seq_length_tensor, lora_indices_tensor, batch_size,
-                          max_length, layer_idx, scale, y_offset, y_slice_size,
-                          buffer)
+        _lora_sgmv_nslice(
+            y,
+            x,
+            wa_t_all,
+            wb_t_all,
+            b_seq_start_tensor,
+            seq_length_tensor,
+            lora_indices_tensor,
+            batch_size,
+            max_length,
+            layer_idx,
+            scale,
+            y_offset,
+            y_slice_size,
+            buffer,
+        )
     else:
-        _lora_bgmv_nslice(y, x, wa_t_all, wb_t_all, lora_indices_tensor,
-                          batch_size, layer_idx, scale, y_offset, y_slice_size,
-                          buffer)
+        _lora_bgmv_nslice(
+            y,
+            x,
+            wa_t_all,
+            wb_t_all,
+            lora_indices_tensor,
+            layer_idx,
+            scale,
+            y_offset,
+            y_slice_size,
+            buffer,
+        )
 
 
-def _lora_sgmv_nslice(y: torch.Tensor, x: torch.Tensor, wa_t_all: torch.Tensor,
-                      wb_t_all: torch.Tensor, b_seq_start_tensor: torch.Tensor,
-                      seq_length_tensor: torch.Tensor,
-                      lora_indices_tensor: torch.Tensor, batch_size: int,
-                      max_length: int, layer_idx: int, scale: float,
-                      y_offset: int, y_slice_size: int, buffer):
+def _lora_sgmv_nslice(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
+    b_seq_start_tensor: torch.Tensor,
+    seq_length_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batch_size: int,
+    max_length: int,
+    layer_idx: int,
+    scale: float,
+    y_offset: int,
+    y_slice_size: int,
+    buffer,
+):
     sgmv_shrink(
         x,
         wa_t_all,
@@ -450,17 +474,25 @@ def _lora_sgmv_nslice(y: torch.Tensor, x: torch.Tensor, wa_t_all: torch.Tensor,
     )
 
 
-def _lora_bgmv_nslice(y: torch.Tensor, x: torch.Tensor, wa_t_all: torch.Tensor,
-                      wb_t_all: torch.Tensor,
-                      lora_indices_tensor: torch.Tensor, batch_size: int,
-                      layer_idx: int, scale: float, y_offset: int,
-                      y_slice_size: int, buffer):
-    bgmv_shrink(x, wa_t_all, buffer, lora_indices_tensor, batch_size, scale)
-    bgmv_expand_slice(buffer,
-                      wb_t_all,
-                      y,
-                      lora_indices_tensor,
-                      y_offset,
-                      y_slice_size,
-                      batch_size,
-                      add_inputs=True)
+def _lora_bgmv_nslice(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    layer_idx: int,
+    scale: float,
+    y_offset: int,
+    y_slice_size: int,
+    buffer,
+):
+    bgmv_shrink(x, wa_t_all, buffer, lora_indices_tensor, scale)
+    bgmv_expand_slice(
+        buffer,
+        wb_t_all,
+        y,
+        lora_indices_tensor,
+        y_offset,
+        y_slice_size,
+        add_inputs=True,
+    )
