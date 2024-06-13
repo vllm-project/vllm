@@ -12,7 +12,10 @@ from huggingface_hub import snapshot_download
 
 import vllm
 from vllm.config import LoRAConfig
-from vllm.distributed import destroy_model_parallel, initialize_model_parallel
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel,
+                              init_distributed_environment,
+                              initialize_model_parallel)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
@@ -35,6 +38,7 @@ LONG_LORA_INFOS = [{
 
 def cleanup():
     destroy_model_parallel()
+    destroy_distributed_environment()
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
@@ -42,23 +46,36 @@ def cleanup():
     ray.shutdown()
 
 
+@pytest.fixture()
+def should_do_global_cleanup_after_test(request) -> bool:
+    """Allow subdirectories to skip global cleanup by overriding this fixture.
+    This can provide a ~10x speedup for non-GPU unit tests since they don't need
+    to initialize torch.
+    """
+
+    if request.node.get_closest_marker("skip_global_cleanup"):
+        return False
+
+    return True
+
+
 @pytest.fixture(autouse=True)
-def cleanup_fixture():
+def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
-    cleanup()
+    if should_do_global_cleanup_after_test:
+        cleanup()
 
 
 @pytest.fixture
 def dist_init():
-    if not torch.distributed.is_initialized():
-        temp_file = tempfile.mkstemp()[1]
-        torch.distributed.init_process_group(
-            backend="nccl",
-            world_size=1,
-            rank=0,
-            init_method=f"file://{temp_file}",
-        )
-        torch.distributed.all_reduce(torch.zeros(1).cuda())
+    temp_file = tempfile.mkstemp()[1]
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"file://{temp_file}",
+        local_rank=0,
+        backend="nccl",
+    )
     initialize_model_parallel(1, 1)
     yield
     cleanup()

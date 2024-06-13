@@ -19,10 +19,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
     """Python multiprocessing-based multi-GPU executor"""
 
     def _init_executor(self) -> None:
-        assert (
-            not self.speculative_config
-        ), "Speculative decoding not yet supported for MultiProcGPU backend."
-
         # Create the parallel GPU workers.
         world_size = self.parallel_config.tensor_parallel_size
 
@@ -34,6 +30,9 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
         os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()
 
+        # Disable torch async compiling which won't work with daemonic processes
+        os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+
         from torch.cuda import device_count
         assert world_size <= device_count(), (
             "please set tensor_parallel_size to less than max local gpu count")
@@ -43,6 +42,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
         if world_size == 1:
             self.workers = []
+            self.worker_monitor = None
         else:
             result_handler = ResultHandler()
             self.workers = [
@@ -124,7 +124,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
     def check_health(self) -> None:
         """Raises an error if engine is unhealthy."""
-        if not self.worker_monitor.is_alive():
+        if self.worker_monitor is not None and not self.worker_monitor.is_alive(
+        ):
             raise RuntimeError("Worker processes are not running")
 
     def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:

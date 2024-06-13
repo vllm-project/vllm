@@ -4,7 +4,7 @@ from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
 from typing_extensions import NotRequired
 
 if TYPE_CHECKING:
-    from vllm.sequence import MultiModalData
+    from vllm.multimodal import MultiModalData
 
 
 class ParsedText(TypedDict):
@@ -126,5 +126,5 @@ PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
 
 class LLMInputs(TypedDict):
     prompt_token_ids: List[int]
-    prompt: Optional[str]
-    multi_modal_data: Optional["MultiModalData"]
+    prompt: NotRequired[Optional[str]]
+    multi_modal_data: NotRequired[Optional["MultiModalData"]]
