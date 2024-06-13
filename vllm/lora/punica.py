@@ -5,8 +5,8 @@ from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.lora import native_kernels
 from vllm.logger import init_logger
+from vllm.lora import native_kernels
 from vllm.utils import is_cpu
 
 logger = init_logger(__name__)
