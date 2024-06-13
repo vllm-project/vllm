@@ -122,6 +122,10 @@ class CPUModelRunner:
         multi_modal_kwargs_list: Dict[str,
                                       List[torch.Tensor]] = defaultdict(list)
 
+        lora_index_mapping: List[int] = []
+        lora_prompt_mapping: List[int] = []
+        lora_requests: Set[LoRARequest] = set()
+
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -140,6 +144,16 @@ class CPUModelRunner:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
+
+            lora_id = seq_group_metadata.lora_int_id
+
+            if lora_id > 0:
+                lora_requests.add(seq_group_metadata.lora_request)
+
+            lora_index_mapping += [lora_id] * (seq_len - computed_len)
+            lora_prompt_mapping.extend([lora_id] * (
+                seq_len - computed_len if seq_group_metadata.sampling_params
+                and seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data is not None:
@@ -204,7 +218,8 @@ class CPUModelRunner:
             slot_mapping=slot_mapping,
         )
         return (input_tokens, input_positions, attn_metadata, seq_lens,
-                multi_modal_kwargs)
+                multi_modal_kwargs, lora_index_mapping, lora_prompt_mapping,
+                lora_requests)
 
     def _prepare_decode(
         self,
@@ -301,7 +316,8 @@ class CPUModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Optional[Dict[str, torch.Tensor]]]:
+               Set[LoRARequest], LoRAMapping, Optional[Dict[str,
+                                                            torch.Tensor]]]:
         multi_modal_kwargs = None
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
@@ -310,12 +326,22 @@ class CPUModelRunner:
             # Prepare input tensors.
             if is_prompt:
                 (input_tokens, input_positions, attn_metadata, seq_lens,
-                 multi_modal_kwargs
-                 ) = self._prepare_prompt(seq_group_metadata_list)
+                 multi_modal_kwargs, lora_index_mapping, lora_prompt_mapping,
+                 lora_requests) = self._prepare_prompt(seq_group_metadata_list)
             else:
-                (input_tokens, input_positions,
-                 attn_metadata) = self._prepare_decode(seq_group_metadata_list)
+                (input_tokens, input_positions, attn_metadata,
+                 lora_index_mapping, lora_prompt_mapping,
+                 lora_requests) = self._prepare_decode(seq_group_metadata_list)
                 seq_lens = []
+
+            if self.lora_config:
+                lora_mapping = LoRAMapping(
+                    lora_index_mapping,
+                    lora_prompt_mapping,
+                )
+            else:
+                lora_mapping = None
+
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list,
                 seq_lens,
@@ -331,6 +357,8 @@ class CPUModelRunner:
                 "input_positions": input_positions,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
+                "lora_requests": lora_requests,
+                "lora_mapping": lora_mapping,
             }
             metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
@@ -351,7 +379,8 @@ class CPUModelRunner:
             )
 
         return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, multi_modal_kwargs)
+                sampling_metadata, lora_requests, lora_mapping,
+                multi_modal_kwargs)
 
     @torch.inference_mode()
     def execute_model(
