@@ -47,7 +47,6 @@ Build from source
 .. code-block:: console
 
     $ pip install --upgrade pip
-    $ pip install -v -r requirements-dev.txt
     $ pip install -v -r requirements-xpu.txt 
 
 - Finally, build and install vLLM XPU backend: 
@@ -57,5 +56,6 @@ Build from source
     $ VLLM_TARGET_DEVICE=xpu python setup.py install
 
 .. note::
-    - FP16 is the default data type in the current XPU backend. 
+    - FP16 is the default data type in the current XPU backend. The BF16 data
+     type will be supported in the future.
 
