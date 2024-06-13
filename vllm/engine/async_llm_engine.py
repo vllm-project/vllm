@@ -260,6 +260,7 @@ class _AsyncLLMEngine(LLMEngine):
         request_id: str,
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
@@ -274,6 +275,11 @@ class _AsyncLLMEngine(LLMEngine):
                 lora_request=lora_request)
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
+
+        if prompt_adapter_request:
+            prompt_token_ids = [
+                0
+            ] * prompt_adapter_request.prompt_adapter_num_virtual_tokens + prompt_token_ids
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=inputs.get("prompt"),
@@ -295,7 +301,10 @@ class _AsyncLLMEngine(LLMEngine):
             arrival_time = time.time()
 
         processed_inputs = await self.process_model_inputs_async(
-            request_id=request_id, inputs=inputs, lora_request=lora_request)
+            request_id=request_id,
+            inputs=inputs,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request)
 
         self._add_processed_request(
             request_id=request_id,
