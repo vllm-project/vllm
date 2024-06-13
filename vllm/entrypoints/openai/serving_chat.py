@@ -1,6 +1,7 @@
 import codecs
 import time
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
                     List, Optional)
 from typing import Sequence as GenericSequence
@@ -94,6 +95,22 @@ class OpenAIServingChat(OpenAIServing):
             logger.warning(
                 "No chat template provided. Chat API will not work.")
 
+    @cached_property
+    def image_token_str(self) -> str:
+        vlm_config = self.model_config.multimodal_config
+        if vlm_config is None:
+            raise ValueError(
+                "'image_url' input is not supported as the loaded "
+                "model is not multimodal.")
+
+        image_token_id = vlm_config.image_token_id
+        if vlm_config.image_token_id is None:
+            raise ValueError(
+                "'image_url' input is not supported as the loaded "
+                "model does not specify an image token.")
+
+        return self.tokenizer.decode(image_token_id)
+
     def _parse_chat_message_content_parts(
         self,
         role: str,
@@ -109,29 +126,23 @@ class OpenAIServingChat(OpenAIServing):
 
                 texts.append(text)
             elif part_type == "image_url":
-                if self.model_config.multimodal_config is None:
-                    raise ValueError(
-                        "'image_url' input is not supported as the loaded "
-                        "model is not multimodal.")
-
-                elif len(image_futures) == 0:
-                    assert self.tokenizer is not None
-                    image_url = cast(ChatCompletionContentPartImageParam,
-                                     part)["image_url"]
-
-                    if image_url.get("detail", "auto") != "auto":
-                        logger.warning(
-                            "'image_url.detail' is currently not supported and "
-                            "will be ignored.")
-
-                    image_future = async_get_and_parse_image(image_url["url"])
-                    image_futures.append(image_future)
-
-                else:
+                if len(image_futures) > 0:
                     raise NotImplementedError(
                         "Multiple 'image_url' input is currently not supported."
                     )
 
+                image_token = self.image_token_str
+                image_url = cast(ChatCompletionContentPartImageParam,
+                                 part)["image_url"]
+
+                if image_url.get("detail", "auto") != "auto":
+                    logger.warning(
+                        "'image_url.detail' is currently not supported and "
+                        "will be ignored.")
+
+                texts.append(image_token)
+                image_future = async_get_and_parse_image(image_url["url"])
+                image_futures.append(image_future)
             else:
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 
