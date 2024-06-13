@@ -717,8 +717,8 @@ def _cuda_device_count_stateless(
 
 
 def cuda_device_count_stateless() -> int:
-    """Get number of GPUs without caching the number of devices
-    in current process.
+    """Get number of CUDA devices, caching based on the value of
+    CUDA_VISIBLE_DEVICES at the time of call.
     
     This should be used instead of torch.cuda.device_count()
     unless CUDA_VISIBLE_DEVICES has already been set to the desired
