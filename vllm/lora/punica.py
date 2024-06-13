@@ -4,31 +4,21 @@ from typing import Optional
 
 import torch
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm import _custom_ops as ops
 
 
-def _warn_import_error():
-    if not torch.cuda.is_available():
-        logger.warning("punica LoRA kernels require a GPU to run. "
-                       "But you are using the CPU version vLLM")
+def _check_punica_support():
+    if ops.is_custom_op_supported("_punica_C::dispatch_bgmv"):
         return
-    # No need to check compute capability if no GPU is available.
+
     if torch.cuda.get_device_capability() < (8, 0):
-        logger.warning("punica LoRA kernels require compute capability >= 8.0")
+        raise ImportError(
+            "punica LoRA kernels require compute capability >= 8.0")
     else:
         logger.warning(
             "punica LoRA kernels could not be imported. If you built vLLM "
             "from source, make sure VLLM_INSTALL_PUNICA_KERNELS=1 env var "
             "was set.")
-
-
-try:
-    import vllm._punica_C as punica_kernels
-    bgmv_func = punica_kernels.dispatch_bgmv
-except ImportError:
-    _warn_import_error()
 
 
 def bgmv(
@@ -56,14 +46,9 @@ def bgmv(
       layer_idx: Layer index of the weight matrices.
       scale: Scaling factor.
     """
-    try:
-        import vllm._punica_C as punica_kernels
-        bgmv_func = punica_kernels.dispatch_bgmv
-    except ImportError:
-        import vllm.lora.kernels as torch_kernels
-        bgmv_func = torch_kernels.dispatch_bgmv
+    _check_punica_support()
 
-    bgmv_func(y, x, w_t_all, indicies, layer_idx, scale)
+    ops.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
 
 
 def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
@@ -92,14 +77,9 @@ def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
       y_offset: Offset to apply to the starting column of y.
       y_slice_size: Size of the y column slice.
     """
-    try:
-        import vllm._punica_C as punica_kernels
-        bgmv_lowlevel_func = punica_kernels.dispatch_bgmv_low_level
-    except ImportError:
-        import vllm.lora.kernels as torch_kernels
-        bgmv_lowlevel_func = torch_kernels.dispatch_bgmv_low_level
+    _check_punica_support()
 
-    bgmv_lowlevel_func(
+    ops.dispatch_bgmv_low_level(
         y,
         x,
         w_t_all,
@@ -142,12 +122,7 @@ def add_lora(y: torch.Tensor,
       scale: Scaling factor.
       buffer: Optional. Shape: `[B, R]`. Temporary buffer.
     """
-    try:
-        import vllm._punica_C as punica_kernels
-        bgmv_func = punica_kernels.dispatch_bgmv
-    except ImportError:
-        import vllm.lora.kernels as torch_kernels
-        bgmv_func = torch_kernels.dispatch_bgmv
+    _check_punica_support()
 
     r = wb_t_all.size(-1)
     if buffer is None:
@@ -157,8 +132,8 @@ def add_lora(y: torch.Tensor,
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
-    bgmv_func(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
-    bgmv_func(y, buffer, wb_t_all, indicies, layer_idx, scale)
+    ops.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
+    ops.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx, scale)
 
 
 def add_lora_slice(y: torch.Tensor,
@@ -197,12 +172,7 @@ def add_lora_slice(y: torch.Tensor,
       y_offset: Offset to apply to the starting column of y.
       y_slice_size: Size of the y column slice.
     """
-    try:
-        import vllm._punica_C as punica_kernels
-        bgmv_lowlevel_func = punica_kernels.dispatch_bgmv_low_level
-    except ImportError:
-        import vllm.lora.kernels as torch_kernels
-        bgmv_lowlevel_func = torch_kernels.dispatch_bgmv_low_level
+    _check_punica_support()
 
     r = wb_t_all.size(-1)
     if buffer is None:
@@ -212,7 +182,7 @@ def add_lora_slice(y: torch.Tensor,
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
-    bgmv_lowlevel_func(
+    ops.dispatch_bgmv_low_level(
         buffer,
         x,
         wa_t_all,
@@ -223,7 +193,7 @@ def add_lora_slice(y: torch.Tensor,
         buffer.size(1),
         0,
     )
-    bgmv_lowlevel_func(
+    ops.dispatch_bgmv_low_level(
         y,
         buffer,
         wb_t_all,

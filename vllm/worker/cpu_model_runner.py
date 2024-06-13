@@ -1,4 +1,5 @@
-from typing import List, Optional, Set, Tuple
+from collections import defaultdict
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -14,6 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
 
@@ -66,6 +68,16 @@ class CPUModelRunner:
             self.block_size,
         )
 
+        # Create processor for multi-modal data
+        if self.vision_language_config is not None:
+            self.multi_modal_input_processor = MULTIMODAL_REGISTRY \
+                .create_input_processor(
+                    self.model_config,
+                    self.vision_language_config,
+                )
+        else:
+            self.multi_modal_input_processor = None
+
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
@@ -100,8 +112,8 @@ class CPUModelRunner:
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
-               Optional[torch.Tensor], List[int], List[int], Set[LoRARequest]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int], Dict[
+            str, torch.Tensor], List[int], List[int], Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -168,14 +180,10 @@ class CPUModelRunner:
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-        if multi_modal_input_list:
-            assert self.vision_language_config, (
-                "Multi-modal inputs are only supported by "
-                "vision language models.")
-            multi_modal_input = torch.cat(multi_modal_input_list,
-                                          dim=0).to(self.device)
-        else:
-            multi_modal_input = None
+        multi_modal_kwargs = {
+            k: torch.cat(v, dim=0).to(self.device)
+            for k, v in multi_modal_kwargs_list.items()
+        }
 
         num_prompt_tokens = len(input_tokens)
 
@@ -201,7 +209,7 @@ class CPUModelRunner:
             slot_mapping=slot_mapping,
         )
         return (input_tokens, input_positions, attn_metadata, seq_lens,
-                multi_modal_input, lora_index_mapping, lora_prompt_mapping,
+                multi_modal_kwargs, lora_index_mapping, lora_prompt_mapping,
                 lora_requests)
 
     def _prepare_decode(
@@ -386,8 +394,8 @@ class CPUModelRunner:
             "kv_caches": kv_caches,
             "attn_metadata": attn_metadata,
         }
-        if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": multi_modal_input})
+        if self.vision_language_config and multi_modal_input is not None:
+            execute_model_kwargs.update(multi_modal_input)
 
         hidden_states = model_executable(**execute_model_kwargs)
 
