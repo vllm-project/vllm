@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# NOTE(simon): this script runs inside a buildkite agent with CPU only access.
 set -euo pipefail
 
 # Install system packages

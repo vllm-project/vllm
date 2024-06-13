@@ -1,5 +1,37 @@
 steps:
-  # NOTE(simon): You can create separate blocks for different jobs
+  - label: "Wait for container to be ready"
+    agents:
+      queue: A100
+    plugins:
+    - kubernetes:
+        podSpec:
+          containers:
+          - image: curlimages/curl
+            command:
+            - sh
+            - -c
+            - |
+              #!/bin/sh
+
+              set -x
+
+              TOKEN=$(curl -s -L "https://public.ecr.aws/token?service=public.ecr.aws&scope=repository:q9t5s3a7/vllm-ci-test-repo:pull" | jq -r .token)
+              URL="https://public.ecr.aws/v2/q9t5s3a7/vllm-ci-test-repo/manifests/$BUILDKITE_COMMIT"
+
+              retries=0
+
+              while [ $retries -lt 1000 ]
+              do
+                if [ $(curl -s -L -H "Authorization: Bearer $TOKEN" -o /dev/null -w "%{http_code}" $URL) -eq 200 ]; then
+                  exit 0
+                fi
+
+                retries=$((retries + 1))
+                sleep 5
+              done
+
+              exit 1
+  - wait
   - label: "A100: NVIDIA SMI"
     agents:
       queue: A100
@@ -7,9 +39,7 @@ steps:
     - kubernetes:
         podSpec:
           containers:
-          # - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT
-          # TODO(simon): check latest main branch or use the PR image.
-          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f7f9c5f97b4dd206a3cd9c65729a1c807ac82f50
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
             command:
             - bash .buildkite/quick-benchmarks/quick-benchmarks.sh
             resources:
