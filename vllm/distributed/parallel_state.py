@@ -675,9 +675,9 @@ def model_parallel_is_initialized():
 
 OVERRIDE_TP_STATE = False
 
+
 @contextlib.contextmanager
-def patch_tensor_parallel_group(world_group,
-                                tp_group):
+def patch_tensor_parallel_group(world_group, tp_group):
     global OVERRIDE_TP_STATE
     if OVERRIDE_TP_STATE:
         return
