@@ -80,16 +80,18 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         self._tp_cpu_group = torch.distributed.new_group(
             ranks=self._ranks, timeout=timedelta(seconds=10), backend="gloo")
 
+        from vllm.distributed.device_communicators.pynccl import (
+            PyNcclCommunicator)
         if len(self._ranks) > 1:
-            from vllm.distributed.device_communicators.pynccl import (
-                PyNcclCommunicator)
             self._tp_pynccl_comm = PyNcclCommunicator(
                 group=self._tp_cpu_group,
                 device=self._local_rank,
             )
+
+
+        from vllm.distributed.device_communicators.custom_all_reduce import (
+            CustomAllreduce)
         if _ENABLE_CUSTOM_ALL_REDUCE:
-            from vllm.distributed.device_communicators.custom_all_reduce \
-                import CustomAllreduce
             self._tp_ca_comm = CustomAllreduce(
                 group=self._tp_cpu_group,
                 device=self._local_rank,
