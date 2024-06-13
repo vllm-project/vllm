@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 try:
     from flash_attn import flash_attn_varlen_func
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
-    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
 except ImportError:
     flashinfer = None
