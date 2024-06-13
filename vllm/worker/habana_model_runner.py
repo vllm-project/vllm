@@ -919,8 +919,10 @@ class HabanaModelRunner:
     def profile_run(self) -> None:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        seq_len = self.max_model_len // self.max_num_seqs
-        self.warmup_scenario(self.max_num_seqs, seq_len, True, kv_caches)
+        max_batch_size = self.prompt_bs_bucket_cfg[-1]
+        max_seq_len = self.prompt_seq_bucket_cfg[-1]
+
+        self.warmup_scenario(max_batch_size, max_seq_len, True, kv_caches)
 
     def warmup_scenario(self, batch_size, seq_len, is_prompt, kv_caches) -> None:
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
