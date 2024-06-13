@@ -11,7 +11,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron, is_tpu
+from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
+                        is_hip, is_neuron, is_tpu)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -605,12 +606,11 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
-            from torch.cuda import device_count
 
             from vllm.executor import ray_utils
             backend = "mp"
             ray_found = ray_utils.ray is not None
-            if device_count() < self.world_size:
+            if cuda_device_count_stateless() < self.world_size:
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
                                      "required for multi-node inference")
