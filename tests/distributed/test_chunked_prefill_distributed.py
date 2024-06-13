@@ -16,6 +16,8 @@ import os
 import pytest
 import torch
 
+from vllm.utils import is_hip
+
 MODELS = [
     os.environ["TEST_DIST_MODEL"],
 ]
@@ -52,6 +54,7 @@ def test_models(
             model,
             dtype=dtype,
             tensor_parallel_size=2,
+            enforce_eager=True if is_hip() else False,
             max_num_seqs=max_num_seqs,
             enable_chunked_prefill=enable_chunked_prefill,
             max_num_batched_tokens=max_num_batched_tokens,

@@ -9,6 +9,7 @@ from huggingface_hub import snapshot_download
 
 from vllm import LLM, SamplingParams
 from vllm.model_executor.model_loader.loader import ShardedStateLoader
+from vllm.utils import is_hip
 
 prompts = [
     "Hello, my name is",
@@ -106,6 +107,7 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
                             enable_lora=enable_lora,
                             gpu_memory_utilization=gpu_memory_utilization,
                             tensor_parallel_size=tp_size,
+                            enforce_eager=True if is_hip() else False,
                         ))
         p.start()
         p.join()
@@ -119,6 +121,7 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
                             gpu_memory_utilization=gpu_memory_utilization,
                             tensor_parallel_size=tp_size,
                             load_format="sharded_state",
+                            enforce_eager=True if is_hip() else False,
                         ))
         p.start()
         p.join()

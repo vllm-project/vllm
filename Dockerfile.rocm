@@ -117,5 +117,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && cp build/lib.linux-x86_64-cpython-${VLLM_PYTHON_VERSION}/vllm/*.so vllm/ \
     && cd ..
 
+# workaround for expecttest package
+RUN pip freeze |grep expecttest || pip install expecttest
 
 CMD ["/bin/bash"]
