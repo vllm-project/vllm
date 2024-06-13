@@ -23,16 +23,10 @@ If you have cool projects related to vLLM or LLM inference, we would love to see
 This will be a great chance for everyone in the community to get together and learn.
 Please submit your proposal [here](https://raysummit.anyscale.com/flow/anyscale/raysummit2024/landing/page/eventsite)
 
-**The Fourth vLLM Bay Area Meetup (June 11th 5:30pm-8pm PT)**
-
-We are thrilled to announce our fourth vLLM Meetup!
-The vLLM team will share recent updates and roadmap.
-We will also have vLLM collaborators from BentoML and Cloudflare coming up to the stage to discuss their experience in deploying LLMs with vLLM.
-Please register [here](https://lu.ma/agivllm) and join us!
-
 ---
 
 *Latest News* 🔥
+- [2024/06] We hosted [the fourth vLLM meetup](https://lu.ma/agivllm) with Cloudflare and BentoML! Please find the meetup slides [here](https://docs.google.com/presentation/d/1iJ8o7V2bQEi0BFEljLTwc5G1S10_Rhv3beed5oB0NJ4/edit?usp=sharing).
 - [2024/04] We hosted [the third vLLM meetup](https://robloxandvllmmeetup2024.splashthat.com/) with Roblox! Please find the meetup slides [here](https://docs.google.com/presentation/d/1A--47JAK4BJ39t954HyTkvtfwn0fkqtsL8NGFuslReM/edit?usp=sharing).
 - [2024/01] We hosted [the second vLLM meetup](https://lu.ma/ygxbpzhl) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/12mI2sKABnUw5RBWXDYY-HtHth4iMSNcEoQ10jDQbxgA/edit?usp=sharing).
 - [2024/01] Added ROCm 6.0 support to vLLM.
