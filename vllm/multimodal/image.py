@@ -301,8 +301,6 @@ class ImageInputProcessors:
         pad_token_left: Optional[int] = None,
         pad_token_right: Optional[int] = None,
     ) -> Tuple[Optional[str], List[int]]:
-        # To avoid invoking the tokenizer, we assume that the
-        # image token is called "<image>"
         if prompt is None:
             new_prompt = None
         else:
