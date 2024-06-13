@@ -30,7 +30,7 @@ python3 quantize_quark.py --model_dir [llama2 checkpoint folder] \
                           --output_dir output_dir \
                           --quant_scheme w_fp8_a_fp8_o_fp8 \
                           --num_calib_data 128 \
-                          --export_safetensors \
+                          --model_export vllm_adopted_safetensors \
                           --no_weight_matrix_merge
 ```
 For more details, please refer to Quark's documentation.
