@@ -11,7 +11,7 @@ steps:
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image cp -r dist /artifacts_host"
       - "ls -l artifacts"
-      - "buildkite-agent artifact upload artifacts/dist/vllm-0.5.0+cu124-cp310-cp310-linux_x86_64.whl"
+      - "buildkite-agent artifact upload artifacts/dist/*"
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
     env:
