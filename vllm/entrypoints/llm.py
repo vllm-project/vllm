@@ -532,7 +532,7 @@ class LLM:
             self,
             inputs: PromptInputs,
             params: Union[SamplingParams, PoolingParams],
-            lora_request: Optional[Union[List[LoRARequest], 
+            lora_request: Optional[Union[List[LoRARequest],
                                          LoRARequest]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> None:
