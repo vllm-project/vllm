@@ -25,26 +25,25 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
-from vllm.worker.model_runner import (_PAD_SLOT_ID, LORA_WARMUP_RANK,
-                                      _BATCH_SIZE_ALIGNMENT,
-                                      _BATCH_SIZES_TO_CAPTURE,
-                                      _NUM_WARMUP_ITERS, ModelInput,
-                                      ModelRunner, _is_block_tables_empty,
-                                      _get_graph_batch_size, CUDAGraphRunner,
-                                      _is_encoder_decoder_model)
+from vllm.worker.model_runner import (
+    _PAD_SLOT_ID, LORA_WARMUP_RANK, _BATCH_SIZE_ALIGNMENT,
+    _BATCH_SIZES_TO_CAPTURE, _NUM_WARMUP_ITERS, ModelInput, ModelRunner,
+    _is_block_tables_empty, _get_graph_batch_size, CUDAGraphRunner,
+    _is_encoder_decoder_model)
 from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
                                    STR_NOT_IMPL_ENC_DEC_SWA)
 from vllm.attention.backends.utils import STR
 
 logger = init_logger(__name__)
 
-# Error message if EncoderDecoderModelRunner is used with 
+# Error message if EncoderDecoderModelRunner is used with
 # a non-encoder/decoder model (i.e. decoder-only)
 STR_ENCDECMR_ENCODER_DECODER_REQUIRED = "Only encoder/decoder models may be executed using EncoderDecoderModelRunner"
 
-# Error message if EncoderDecoderModelRunner is used with 
+# Error message if EncoderDecoderModelRunner is used with
 # CUDAGraph
 STR_ENCDECMR_CUDAGRAPH_UNSUPPORTED = "Currently CUDAGraph is not supported for encoder/decoder models"
+
 
 class EncoderDecoderModelInput(ModelInput):
     input_tokens: torch.Tensor

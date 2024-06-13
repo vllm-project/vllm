@@ -42,6 +42,7 @@ _NUM_WARMUP_ITERS = 2
 # Error message if ModelRunner is used with an encoder/decoder model
 STR_MR_ENCODER_DECODER_UNSUPPORTED = "Encoder/decoder model must be executed using EncoderDecoderModelRunner"
 
+
 class ModelInput(NamedTuple):
     input_tokens: torch.Tensor
     input_positions: torch.Tensor
@@ -247,35 +248,37 @@ class ModelRunner:
         block_size = self.block_size
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
 
-    def _prepare_seq_model_input(self,
-                                 is_prompt:bool,
-                                 num_prefills:int,
-                                 num_prefill_tokens:int,
-                                 num_decode_tokens:int,
-                                 decode_only:bool,
-                                 block_tables:List[List[int]],
-                                 seq_lens:List[int],
-                                 slot_mapping:List[int],
-                                 context_lens:List[int],
-                                 query_lens:List[int],
-                                 input_tokens:List[int],
-                                 input_positions:List[int],
-                                 prefill_seq_lens:List[int],
-                                 decode_seq_lens:List[int],
-                                 seq_group_metadata:SequenceGroupMetadata,
-                                 seq_data:SequenceData,
-                                 computed_block_nums:Optional[List[int]],
-                                 block_table:Optional[List[int]],
-                                 paged_kv_indices:Optional[List[int]],
-                                 paged_kv_indptr:Optional[List[int]],
-                                 paged_kv_last_page_len:Optional[List[int]],
-                                 sliding_window_blocks:int = 0,
-                                 block_aligned_sliding_window:int = 0,
-                                 lora_index_mapping: List[int] = [],
-                                 lora_prompt_mapping: List[int] = [],
-                                 lora_requests: Set[LoRARequest] = set(),
-                                 multi_modal_kwargs_list: Dict[str,
-                                      List[torch.Tensor]] = defaultdict(list)) -> tuple[bool,int,int,int]:
+    def _prepare_seq_model_input(
+        self,
+        is_prompt: bool,
+        num_prefills: int,
+        num_prefill_tokens: int,
+        num_decode_tokens: int,
+        decode_only: bool,
+        block_tables: List[List[int]],
+        seq_lens: List[int],
+        slot_mapping: List[int],
+        context_lens: List[int],
+        query_lens: List[int],
+        input_tokens: List[int],
+        input_positions: List[int],
+        prefill_seq_lens: List[int],
+        decode_seq_lens: List[int],
+        seq_group_metadata: SequenceGroupMetadata,
+        seq_data: SequenceData,
+        computed_block_nums: Optional[List[int]],
+        block_table: Optional[List[int]],
+        paged_kv_indices: Optional[List[int]],
+        paged_kv_indptr: Optional[List[int]],
+        paged_kv_last_page_len: Optional[List[int]],
+        sliding_window_blocks: int = 0,
+        block_aligned_sliding_window: int = 0,
+        lora_index_mapping: List[int] = [],
+        lora_prompt_mapping: List[int] = [],
+        lora_requests: Set[LoRARequest] = set(),
+        multi_modal_kwargs_list: Dict[str,
+                                      List[torch.Tensor]] = defaultdict(list)
+    ) -> tuple[bool, int, int, int]:
 
         if is_prompt:
             context_len = seq_data.get_num_computed_tokens()
@@ -285,9 +288,8 @@ class ModelRunner:
             # TODO(sang): Fix it.
             context_len = seq_data.get_len() - 1
 
-        seq_len = min(
-            seq_data.get_len(),
-            context_len + seq_group_metadata.token_chunk_size)
+        seq_len = min(seq_data.get_len(),
+                      context_len + seq_group_metadata.token_chunk_size)
         if is_prompt:
             tokens = seq_data.get_token_ids()[context_len:seq_len]
         else:
@@ -299,8 +301,7 @@ class ModelRunner:
         # Prefix is not supported with sliding_window
         prefix_cache_hit = (computed_block_nums is not None
                             and len(computed_block_nums) > 0
-                            and self.sliding_window is None
-                            and is_prompt)
+                            and self.sliding_window is None and is_prompt)
 
         # These are seq_len/context_len capped to the sliding window.
         # They are passed to decode kernel.
@@ -318,8 +319,8 @@ class ModelRunner:
             if self.scheduler_config.use_v2_block_manager:
                 # number of elements in last block
                 suff_len = seq_len % self.block_size
-                sliding_seq_len = min(
-                    seq_len, block_aligned_sliding_window + suff_len)
+                sliding_seq_len = min(seq_len,
+                                      block_aligned_sliding_window + suff_len)
                 if suff_len > 0:
                     curr_sliding_window_blocks += 1
             else:
@@ -347,20 +348,17 @@ class ModelRunner:
                 # provide a unified interface for different backends.
                 #block_table = seq_group_metadata.block_tables[seq_id]
                 block_table = computed_block_nums
-        elif (self.scheduler_config.chunked_prefill_enabled
-                or not is_prompt):
+        elif (self.scheduler_config.chunked_prefill_enabled or not is_prompt):
             if seq_group_metadata.block_tables is not None:
                 # chunked prefill or decode
                 #block_table = seq_group_metadata.block_tables[seq_id]
                 if curr_sliding_window_blocks is not None:
-                    block_table = block_table[
-                        -curr_sliding_window_blocks:]
+                    block_table = block_table[-curr_sliding_window_blocks:]
                 if self.attn_backend.get_name() == "flashinfer":
                     paged_kv_indices.extend(block_table)
                     paged_kv_indptr.append(paged_kv_indptr[-1] +
-                                            len(block_table))
-                    last_page_len = seq_data.get_len(
-                    ) % self.block_size
+                                           len(block_table))
+                    last_page_len = seq_data.get_len() % self.block_size
                     if last_page_len == 0:
                         last_page_len = self.block_size
                     paged_kv_last_page_len.append(last_page_len)
@@ -399,16 +397,15 @@ class ModelRunner:
         lora_prompt_mapping.extend(
             [lora_id] *
             (query_len if seq_group_metadata.sampling_params
-                and seq_group_metadata.sampling_params.prompt_logprobs
-                is not None else 1))
+             and seq_group_metadata.sampling_params.prompt_logprobs is not None
+             else 1))
 
         mm_data = seq_group_metadata.multi_modal_data
         if mm_data is not None:
             # Process multi-modal data
             if self.multi_modal_input_processor is None:
-                raise ValueError(
-                    "Multi-modal inputs are only supported by "
-                    "vision language models.")
+                raise ValueError("Multi-modal inputs are only supported by "
+                                 "vision language models.")
 
             mm_kwargs = self.multi_modal_input_processor(mm_data)
             for k, v in mm_kwargs.items():
@@ -420,7 +417,7 @@ class ModelRunner:
             # slot mapping.
             # In embeddings, the block tables are {seq_id: None}.
             slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
-            return decode_only,num_prefills,num_prefill_tokens,num_decode_tokens
+            return decode_only, num_prefills, num_prefill_tokens, num_decode_tokens
 
         # Compute the slot mapping.
         #block_table = seq_group_metadata.block_tables[seq_id]
@@ -453,7 +450,7 @@ class ModelRunner:
             slot = block_number * self.block_size + block_offset
             slot_mapping.append(slot)
 
-        return decode_only,num_prefills,num_prefill_tokens,num_decode_tokens
+        return decode_only, num_prefills, num_prefill_tokens, num_decode_tokens
 
     def _prepare_model_input(
         self,
@@ -537,33 +534,16 @@ class ModelRunner:
 
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 block_table = seq_group_metadata.block_tables[seq_id]
-                decode_only,num_prefills,num_prefill_tokens,num_decode_tokens=self._prepare_seq_model_input(is_prompt,
-                                                        decode_only,
-                                                        num_prefills,
-                                                        num_prefill_tokens,
-                                                        num_decode_tokens,
-                                                        block_tables,
-                                                        seq_lens,
-                                                        slot_mapping,
-                                                        context_lens,
-                                                        query_lens,
-                                                        input_tokens,
-                                                        input_positions,
-                                                        prefill_seq_lens,
-                                                        decode_seq_lens,
-                                                        seq_group_metadata,
-                                                        seq_data,
-                                                        computed_block_nums,
-                                                        block_table,
-                                                        paged_kv_indices,
-                                                        paged_kv_indptr,
-                                                        paged_kv_last_page_len,
-                                                        sliding_window_blocks,
-                                                        block_aligned_sliding_window,
-                                                        lora_index_mapping,
-                                                        lora_prompt_mapping,
-                                                        lora_requests,
-                                                        multi_modal_kwargs_list)
+                decode_only, num_prefills, num_prefill_tokens, num_decode_tokens = self._prepare_seq_model_input(
+                    is_prompt, decode_only, num_prefills, num_prefill_tokens,
+                    num_decode_tokens, block_tables, seq_lens, slot_mapping,
+                    context_lens, query_lens, input_tokens, input_positions,
+                    prefill_seq_lens, decode_seq_lens, seq_group_metadata,
+                    seq_data, computed_block_nums, block_table,
+                    paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
+                    sliding_window_blocks, block_aligned_sliding_window,
+                    lora_index_mapping, lora_prompt_mapping, lora_requests,
+                    multi_modal_kwargs_list)
 
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
