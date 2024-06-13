@@ -7,9 +7,9 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.communication_op import (  # noqa
-    graph_capture, tensor_model_parallel_all_reduce)
+    tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
-                                             get_tp_ca_communicator)
+                                             get_tp_group, graph_capture)
 
 from ..utils import (init_test_distributed_environment,
                      multi_process_tensor_parallel)
@@ -91,7 +91,7 @@ def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
     # communicate independently
     num_communication = rank // tp_size + 1
     sz = 1024
-    fa = get_tp_ca_communicator()
+    fa = get_tp_group().ca_comm
     inp = torch.ones(sz, dtype=torch.float32, device=device)
     out = inp
     for _ in range(num_communication):
