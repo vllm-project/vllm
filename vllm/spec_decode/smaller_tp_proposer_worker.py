@@ -1,4 +1,3 @@
-from datetime import timedelta
 from typing import List, Optional, Set, Tuple, Union
 
 import torch
@@ -72,7 +71,8 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         only a subset of the whole ranks.
         """
         local_rank = get_world_group().local_rank
-        world_backend = torch.distributed.get_backend(get_world_group().device_group)
+        world_backend = torch.distributed.get_backend(get_world_group()
+                                                      .device_group)
         tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
 
         self._world_group = GroupCoordinator(
