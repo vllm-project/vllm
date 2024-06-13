@@ -717,7 +717,7 @@ def _get_num_gpus_available_isolated(
 
 
 def get_num_gpus_available_isolated() -> int:
-    """Get number of GPUs without initializing the CUDA context
+    """Get number of GPUs without caching the number of devices
     in current process.
     
     This should be used instead of torch.cuda.device_count()
