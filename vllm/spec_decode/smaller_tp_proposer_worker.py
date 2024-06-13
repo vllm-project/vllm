@@ -76,14 +76,14 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
 
         self._world_group = GroupCoordinator(
-            group_ranks=[[self._ranks]],
+            group_ranks=[self._ranks],
             local_rank=local_rank,
             torch_distributed_backend=world_backend,
             use_pynccl=False,
             use_custom_allreduce=False,
         )
         self._tp_group = GroupCoordinator(
-            group_ranks=[[self._ranks]],
+            group_ranks=[self._ranks],
             local_rank=local_rank,
             torch_distributed_backend=tp_backend,
             use_pynccl=True,

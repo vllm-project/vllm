@@ -971,7 +971,7 @@ class SpeculativeConfig:
         if speculative_tensor_parallel_size > \
             target_parallel_config.tensor_parallel_size:
             raise ValueError(
-                f"{speculative_tensor_parallel_size=} cannot be"
+                f"{speculative_tensor_parallel_size=} cannot be "
                 f"larger than {target_parallel_config.tensor_parallel_size}")
 
         draft_parallel_config = ParallelConfig(
