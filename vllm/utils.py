@@ -700,21 +700,20 @@ def _get_num_gpus_available_isolated(
         cuda_visible_devices: Optional[str] = None) -> int:
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
-    try:
-        out = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import torch; print(torch.cuda.device_count())",
-            ],
-            capture_output=True,
-            check=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as e:
-        logger.warning("Failed to get number of GPUs.", exc_info=e)
+
+    # Code below is based on
+    # https://github.com/pytorch/pytorch/blob/
+    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+    # torch/cuda/__init__.py#L831C1-L831C17
+    import torch.cuda
+    import torch.version
+
+    if not torch.cuda._is_compiled():
         return 0
-    return int(out.stdout.strip())
+    # bypass _device_count_nvml() if rocm (not supported)
+    nvml_count = -1 if torch.version.hip else torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if nvml_count < 0 else nvml_count
+    return r
 
 
 def get_num_gpus_available_isolated() -> int:
