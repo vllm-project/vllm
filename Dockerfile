@@ -4,12 +4,13 @@
 # Please update any changes made here to
 # docs/source/dev/dockerfile/dockerfile.rst and
 # docs/source/assets/dev/dockerfile-stages-dependency.png
-ARG CUDA_VERSION
-ARG PYTHON_VERSION
 
+ARG CUDA_VERSION
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS dev
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 ENV CUDA_VERSION=${CUDA_VERSION}
 
