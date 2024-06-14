@@ -89,6 +89,7 @@ class BertEmbeddingModel(nn.Module):
 
         for name, loaded_weight in weights:
             name = self._rename_key(name)
+            name, shard_id = self._rename_stacked_param(name)
 
             # Skip the specific downstream task weight.
             if name.startswith('cls.'):
@@ -100,7 +101,6 @@ class BertEmbeddingModel(nn.Module):
             if name.endswith(".bias") and name not in params_dict:
                 continue
 
-            name, shard_id = self._rename_stacked_param(name)
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
