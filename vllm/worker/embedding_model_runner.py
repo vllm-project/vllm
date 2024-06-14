@@ -7,9 +7,9 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.model_input import GPUModelInputWithPoolingMetadata
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
+from vllm.worker.model_input import GPUModelInputWithPoolingMetadata
 from vllm.worker.model_runner import ModelRunner
 
 logger = init_logger(__name__)
@@ -51,13 +51,17 @@ class EmbeddingModelRunner(ModelRunner):
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         if self.lora_config:
+            assert model_input.lora_requests is not None
+            assert model_input.lora_mapping is not None
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
+        assert model_input.attn_metadata is not None
         prefill_meta = model_input.attn_metadata.prefill_metadata
         decode_meta = model_input.attn_metadata.decode_metadata
         if prefill_meta is None and decode_meta.use_cuda_graph:
+            assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
@@ -73,8 +77,8 @@ class EmbeddingModelRunner(ModelRunner):
             "attn_metadata": model_input.attn_metadata,
         }
         if self.vision_language_config:
-            execute_model_kwargs.update(
-                {"image_input": model_input.multi_modal_input})
+            multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+            execute_model_kwargs.update({"image_input": multi_modal_kwargs})
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.
@@ -92,6 +96,7 @@ class EmbeddingModelRunner(ModelRunner):
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list)
         # Prepare PoolingMetadata.
+        assert model_input.seq_lens is not None
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
                                                  model_input.seq_lens)
 

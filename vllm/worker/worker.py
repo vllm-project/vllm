@@ -16,10 +16,10 @@ from vllm.distributed import (broadcast_tensor_dict, disable_communication,
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.model_input import GPUModelInput
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
+from vllm.worker.model_input import GPUModelInput
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
 
@@ -264,7 +264,7 @@ class Worker(WorkerBase):
     def prepare_model_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> GPUModelInput:
+    ) -> Optional[GPUModelInput]:
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.parallel_config.tensor_parallel_size > 1:

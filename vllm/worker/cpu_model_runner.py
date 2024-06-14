@@ -11,10 +11,10 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.model_input import CPUModelInput
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
+from vllm.worker.model_input import CPUModelInput
 
 logger = init_logger(__name__)
 
@@ -320,8 +320,8 @@ class CPUModelRunner:
             "attn_metadata": model_input.attn_metadata,
         }
         if (self.vision_language_config
-                and model_input.multi_modal_input is not None):
-            execute_model_kwargs.update(model_input.multi_modal_input)
+                and model_input.multi_modal_kwargs is not None):
+            execute_model_kwargs.update(model_input.multi_modal_kwargs)
 
         hidden_states = model_executable(**execute_model_kwargs)
 

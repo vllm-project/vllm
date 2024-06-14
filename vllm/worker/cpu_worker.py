@@ -13,10 +13,10 @@ from vllm.distributed import (broadcast_tensor_dict, disable_communication,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.model_input import CPUModelInput
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.cpu_model_runner import CPUModelRunner
+from vllm.worker.model_input import CPUModelInput
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 logger = init_logger(__name__)
@@ -286,8 +286,8 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
     @torch.inference_mode()
     def prepare_model_input(
-            self,
-            execute_model_req: Optional[ExecuteModelRequest]) -> CPUModelInput:
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[CPUModelInput]:
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.parallel_config.tensor_parallel_size > 1:

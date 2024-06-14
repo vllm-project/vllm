@@ -8,8 +8,8 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.distributed import disable_communication
 from vllm.model_executor import set_random_seed
-from vllm.model_input import ModelInputForNeuron
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.worker.model_input import ModelInputForNeuron
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
@@ -82,7 +82,8 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
             execute_model_req: ExecuteModelRequest) -> ModelInputForNeuron:
         model_input = self.model_runner.prepare_model_input_tensors(
             execute_model_req.seq_group_metadata_list)
-        return model_input
+        return model_input.replace(num_seq_groups=len(
+            execute_model_req.seq_group_metadata_list), )
 
     def prepare_model_input(
         self, execute_model_req: Optional[ExecuteModelRequest]

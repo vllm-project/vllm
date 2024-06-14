@@ -8,7 +8,8 @@ import torch
 from vllm.distributed import disable_communication
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, ModelInput, SamplerOutput
+from vllm.worker.model_input import ModelInput
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 
@@ -75,8 +76,8 @@ class WorkerBase(ABC):
 
     @abstractmethod
     def prepare_model_input(
-            self,
-            execute_model_req: Optional[ExecuteModelRequest]) -> ModelInput:
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[ModelInput]:
         """
         Prepare a model execution request. Communication with other workers
         may occur to produce the model input that should be passed to

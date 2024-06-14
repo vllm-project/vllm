@@ -8,9 +8,9 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
-from vllm.model_input import ModelInputForNeuron
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.worker.model_input import ModelInputForNeuron
 
 logger = init_logger(__name__)
 

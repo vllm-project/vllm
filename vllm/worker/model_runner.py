@@ -20,13 +20,13 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.model_input import GPUModelInput
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (ModelInputWithSamplingMetadata, SamplerOutput,
-                           SequenceData, SequenceGroupMetadata)
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
+from vllm.worker.model_input import (GPUModelInput,
+                                     GPUModelInputWithSamplingMetadata)
 
 logger = init_logger(__name__)
 
@@ -627,7 +627,7 @@ class ModelRunner:
     def prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> ModelInputWithSamplingMetadata:
+    ) -> GPUModelInput:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
 
@@ -648,37 +648,42 @@ class ModelRunner:
                                                      model_input.query_lens,
                                                      self.device,
                                                      self.pin_memory)
-        return ModelInputWithSamplingMetadata.new(
+        return GPUModelInputWithSamplingMetadata.new(
             clone=model_input, sampling_metadata=sampling_metadata)
 
-    def get_empty_model_input(self) -> ModelInputWithSamplingMetadata:
-        return ModelInputWithSamplingMetadata.new()
+    def get_empty_model_input(self) -> GPUModelInput:
+        return GPUModelInputWithSamplingMetadata.new()
 
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: ModelInputWithSamplingMetadata,
+        model_input: GPUModelInputWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         if self.lora_config:
+            assert model_input.lora_requests is not None
+            assert model_input.lora_mapping is not None
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
+        assert model_input.attn_metadata is not None
         prefill_meta = model_input.attn_metadata.prefill_metadata
         decode_meta = model_input.attn_metadata.decode_metadata
         if prefill_meta is None and decode_meta.use_cuda_graph:
+            assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
 
+        multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         hidden_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             kv_caches=kv_caches,
             attn_metadata=model_input.attn_metadata,
-            **model_input.multi_modal_kwargs,
+            **multi_modal_kwargs,
         )
 
         # Compute the logits.

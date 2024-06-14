@@ -6,7 +6,7 @@ import torch
 from vllm.attention import AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.model_executor import SamplingMetadata
-from vllm.model_input import GPUModelInputWithSamplingMetadata
+from vllm.worker.model_input import GPUModelInputWithSamplingMetadata
 
 
 class MockAttentionBackend(AttentionBackend):
