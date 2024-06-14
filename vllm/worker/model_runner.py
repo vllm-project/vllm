@@ -341,17 +341,19 @@ class ModelRunner:
                 "Prefix caching is not supported with sliding window"
             sliding_context_len = context_len
 
-            if self.attn_backend.get_name() != "flash-attn":
+            if self.attn_backend.get_name() == "flash-attn":
                 # NOTE(woosuk): For flash-attn, the block table should
                 # include the entries for the incoming prefill tokens.
                 # TODO(woosuk): This is a temporary fix. We should
                 # provide a unified interface for different backends.
-                #block_table = seq_group_metadata.block_tables[seq_id]
+                block_table = original_block_table
+            else:
                 block_table = computed_block_nums
+
         elif (self.scheduler_config.chunked_prefill_enabled or not is_prompt):
             if seq_group_metadata.block_tables is not None:
                 # chunked prefill or decode
-                #block_table = seq_group_metadata.block_tables[seq_id]
+                block_table = original_block_table
                 if curr_sliding_window_blocks is not None:
                     block_table = block_table[-curr_sliding_window_blocks:]
                 if self.attn_backend.get_name() == "flashinfer":
@@ -420,7 +422,7 @@ class ModelRunner:
             return decode_only, num_prefills, num_prefill_tokens, num_decode_tokens
 
         # Compute the slot mapping.
-        #block_table = seq_group_metadata.block_tables[seq_id]
+        block_table = original_block_table
 
         # Mask the [0, start_idx) tokens of the prompt with
         # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
