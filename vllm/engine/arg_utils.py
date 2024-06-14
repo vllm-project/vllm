@@ -230,7 +230,7 @@ class EngineArgs:
             '* "dummy" will initialize the weights with random values, '
             'which is mainly for profiling.\n'
             '* "tensorizer" will load the weights using tensorizer from '
-            'CoreWeave. See the Tensorize vLLM Model script in the Examples'
+            'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
