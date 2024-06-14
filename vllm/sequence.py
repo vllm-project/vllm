@@ -119,16 +119,42 @@ class SequenceData:
         if output_token_ids is None:
             output_token_ids = []
 
-        self.prompt_token_ids = prompt_token_ids
-        self._prompt_token_ids_tuple = tuple(prompt_token_ids)
-        self.output_token_ids = output_token_ids
+        self._prompt_token_ids = prompt_token_ids
+        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
+        self._output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
 
+        self._update_cached_all_tokens()
+
+    def _update_cached_all_tokens(self):
+        self._cached_all_token_ids = (self._prompt_token_ids +
+                                      self._output_token_ids)
+
+    @property
+    def prompt_token_ids(self) -> List[int]:
+        return self._prompt_token_ids
+
+    @prompt_token_ids.setter
+    def prompt_token_ids(self, new_prompt_token_ids) -> None:
+        self._prompt_token_ids = new_prompt_token_ids
+        self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
+        self._update_cached_all_tokens()
+
+    @property
+    def output_token_ids(self) -> List[int]:
+        return self._output_token_ids
+
+    @output_token_ids.setter
+    def output_token_ids(self, new_output_token_ids) -> None:
+        self._output_token_ids = new_output_token_ids
+        self._update_cached_all_tokens()
+
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
+        self._cached_all_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
     def get_len(self) -> int:
@@ -141,7 +167,7 @@ class SequenceData:
         return len(self.output_token_ids)
 
     def get_token_ids(self) -> List[int]:
-        return self.prompt_token_ids + self.output_token_ids
+        return self._cached_all_token_ids
 
     def get_prefix_token_ids(
             self, num_tokens: int

@@ -140,11 +140,14 @@ class CopyOnWriteTracker:
         assert refcount != 0
         if refcount > 1:
             src_block_id = block_id
-            # Decrement refcount of the old block.
-            self._allocator.free(block)
+
+            # Decrement refcount of the old physical block. Note that
+            # we do not free the actual block object here since it is
+            # going to reused by the caller.
+            self._allocator.free_block_id(block)
 
             # Allocate a fresh new block.
-            block_id = self._allocator.allocate_mutable(
+            block_id = self._allocator.allocate_mutable_block(
                 prev_block=block.prev_block).block_id
 
             # Track src/dst copy.

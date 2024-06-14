@@ -100,6 +100,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.block_tables: Dict[SeqId, BlockTable] = {}
         self.cross_block_tables: Dict[EncoderSeqId, BlockTable] = {}
 
+        self._cached_computed_seq_blocks: Dict[SeqId, List[int]] = {}
+        self._seq_last_access: Dict[SeqId, float] = {}
+
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
@@ -224,11 +227,28 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return new_cows
 
     def free(self, seq: Sequence) -> None:
-        if seq.seq_id not in self.block_tables:
+        seq_id = seq.seq_id
+
+        if seq_id not in self.block_tables:
             # Already freed or haven't been scheduled yet.
             return
-        self.block_tables[seq.seq_id].free()
-        del self.block_tables[seq.seq_id]
+
+        # Update seq block ids with the latest access time
+        if seq_id in self._seq_last_access:
+            ts = self._seq_last_access[seq_id]
+            # TODO: Ask Cade how it may be possible to have
+            # allocated block id inside the evictor
+            self.block_allocator.mark_blocks_as_accessed(
+                self.block_tables[
+                    seq.seq_id].physical_block_ids,  # type: ignore
+                ts)
+            del self._seq_last_access[seq_id]
+
+        self.block_tables[seq_id].free()
+        del self.block_tables[seq_id]
+
+        if seq_id in self._cached_computed_seq_blocks:
+            del self._cached_computed_seq_blocks[seq_id]
 
     def free_cross(self, seq_group: SequenceGroup) -> None:
         request_id = seq_group.request_id
@@ -239,9 +259,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         del self.cross_block_tables[request_id]
 
     def get_block_table(self, seq: Sequence) -> List[int]:
-        assert seq.seq_id in self.block_tables
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
-        assert all(b is not None for b in block_ids)
         return block_ids  # type: ignore
 
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:
@@ -252,20 +270,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return block_ids  # type: ignore
 
     def access_all_blocks_in_seq(self, seq: Sequence, now: float):
-        # Update the last accessed time of all the blocks accessed
-        # in this step.
-        # And the accessed time is only useful for prefix caching now,
-        # as it support internal evictor policy for which cached
-        # block could be refilled, to keep cached content could be reused
-        # at max extend.
         if self.enable_caching:
-            block_table = self.block_tables[seq.seq_id]
-            block_ids: List[Optional[int]] = []
-            for block_id in block_table.physical_block_ids:
-                block_ids.append(block_id)
-            self.block_allocator.mark_blocks_as_accessed(
-                block_ids,  # type: ignore
-                now)
+            # Record the latest access time for the sequence. The actual update
+            # of the block ids is deferred to the sequence free(..) call, since
+            # only during freeing of block ids, the blocks are actually added to
+            # the evictor (which is when the most updated time is required)
+            # (This avoids expensive calls to mark_blocks_as_accessed(..))
+            self._seq_last_access[seq.seq_id] = now
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         # The only need for mark block as computed is for prefix caching,
@@ -273,6 +284,43 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # or not by check whether it has content hash.
         # So this function is useless for block_v2.
         pass
+
+    def get_and_update_computed_block_ids(self, seqs):
+        ret = []
+        for seq in seqs:
+            seq_id = seq.seq_id
+
+            # Get block ids of this sequence, while not considering the
+            # last block
+            block_ids = self.block_tables[seq_id].physical_block_ids[:-1]
+
+            # Here we cache the detection of computed_block_ids for seq_id.
+            # Since computed_block_ids form a prefix of block_ids,
+            # the first time we see seq_id, we detect computed_block_ids
+            # fully and store them in the cache. In the next times we see
+            # seq_id, we detect computed_block_ids incrementally, by looking
+            # only at the new blocks that come after the cached
+            # computed_block_ids
+            if seq_id not in self._cached_computed_seq_blocks:
+                # First time init for seq_id => Detect fully
+                computed_block_ids = self.block_allocator.get_computed_block_ids(  # noqa: E501
+                    [], block_ids)
+                self._cached_computed_seq_blocks[seq_id] = computed_block_ids
+            else:
+                computed_block_ids = self._cached_computed_seq_blocks[seq_id]
+                if len(computed_block_ids) < len(block_ids):
+                    # Incremental init for seq_id => Look only at the new blocks
+                    computed_block_ids = self.block_allocator.get_computed_block_ids(  # noqa: E501
+                        computed_block_ids, block_ids)
+                    self._cached_computed_seq_blocks[
+                        seq_id] = computed_block_ids
+                else:
+                    # Cache HIT
+                    assert len(computed_block_ids) == len(block_ids)
+
+            ret.append(computed_block_ids)
+
+        return ret
 
     def get_common_computed_block_ids(
             self, seqs: List[Sequence]) -> GenericSequence[int]:
@@ -285,12 +333,12 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         This method determines which blocks can be safely skipped for all
         sequences in the sequence group.
         """
-        seq_block_ids = [
-            self.block_tables[seq.seq_id].physical_block_ids for seq in seqs
-        ]
+
+        computed_seq_block_ids = self.get_and_update_computed_block_ids(seqs)
+
         # NOTE(sang): This assumes seq_block_ids doesn't contain any None.
         return self.block_allocator.get_common_computed_block_ids(
-            seq_block_ids)  # type: ignore
+            computed_seq_block_ids)  # type: ignore
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         src_block_table = self.block_tables[parent_seq.seq_id]

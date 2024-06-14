@@ -9,7 +9,7 @@ BlockId = int
 class Block(ABC):
 
     @abstractmethod
-    def append_token_ids(self, token_ids: List[int]) -> None:
+    def append_token_ids(self, token_ids: Optional[List[int]]) -> None:
         pass
 
     @property
@@ -25,7 +25,12 @@ class Block(ABC):
 
     @property
     @abstractmethod
-    def token_ids(self) -> List[int]:
+    def token_ids(self) -> Optional[List[int]]:
+        pass
+
+    @property
+    @abstractmethod
+    def num_token_ids(self) -> int:
         pass
 
     @property
@@ -56,6 +61,11 @@ class Block(ABC):
 
     @property
     @abstractmethod
+    def allocator(self) -> "BlockAllocator":
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
     def last_accessed(self) -> float:
         raise NotImplementedError
 
@@ -70,7 +80,7 @@ class Block(ABC):
         def __call__(
             self,
             prev_block: Optional["Block"],
-            token_ids: List[int],
+            token_ids: Optional[List[int]],
             block_size: int,
             allocator: "BlockAllocator",
             block_id: Optional[int] = None,
@@ -92,12 +102,22 @@ class Block(ABC):
 class BlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
+    def allocate_mutable_block(self, prev_block: Optional[Block]) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int]) -> Block:
+    def allocate_immutable_block(self, prev_block: Optional[Block],
+                                 token_ids: Optional[List[int]]) -> Block:
+        pass
+
+    @abstractmethod
+    def allocate_immutable_blocks(
+            self, prev_block: Optional[Block],
+            block_token_ids: List[List[int]]) -> List[Block]:
+        pass
+
+    @abstractmethod
+    def free_block_id(self, block: Block) -> None:
         pass
 
     @abstractmethod
@@ -147,8 +167,13 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
+    def get_computed_block_ids(self, prev_computed_block_ids: List[int],
+                               block_ids: List[int]) -> List[int]:
+        pass
+
+    @abstractmethod
     def get_common_computed_block_ids(
-            self, seq_block_ids: List[List[int]]) -> List[int]:
+            self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
     @abstractmethod
@@ -174,13 +199,20 @@ class BlockAllocator(ABC):
 class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable(self, prev_block: Optional[Block],
-                         device: Device) -> Block:
+    def allocate_mutable_block(self, prev_block: Optional[Block],
+                               device: Device) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int], device: Device) -> Block:
+    def allocate_immutable_block(self, prev_block: Optional[Block],
+                                 token_ids: List[int],
+                                 device: Device) -> Block:
+        pass
+
+    @abstractmethod
+    def allocate_immutable_blocks(self, prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  device: Device) -> List[Block]:
         pass
 
     @abstractmethod
@@ -218,8 +250,13 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
+    def get_computed_block_ids(self, prev_computed_block_ids: List[int],
+                               block_ids: List[int]) -> List[int]:
+        pass
+
+    @abstractmethod
     def get_common_computed_block_ids(
-            self, seq_block_ids: List[List[int]]) -> List[int]:
+            self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
     @abstractmethod

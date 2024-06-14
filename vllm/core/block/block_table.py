@@ -1,7 +1,59 @@
 from typing import List, Optional
 
-from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
+from vllm.core.block.interfaces import (Block, BlockId,
+                                        DeviceAwareBlockAllocator)
 from vllm.utils import Device, cdiv, chunk_list
+
+
+# This class is an optimization to allow fast-access to physical block ids
+class BlockList:
+
+    def __init__(self, blocks: List[Block]):
+        self._blocks: List[Block] = []
+        self._block_ids: List[int] = []
+
+        self.update(blocks)
+
+    def _add_block_id(self, block_id: Optional[BlockId]) -> None:
+        assert block_id is not None
+        self._block_ids.append(block_id)
+
+    def _update_block_id(self, block_index: int,
+                         new_block_id: Optional[BlockId]) -> None:
+        assert new_block_id is not None
+        self._block_ids[block_index] = new_block_id
+
+    def update(self, blocks: List[Block]):
+        self._blocks = blocks
+
+        # Cache block ids for fast query
+        self._block_ids = []
+        for block in self._blocks:
+            self._add_block_id(block.block_id)
+
+    def append(self, new_block: Block):
+        self._blocks.append(new_block)
+        self._add_block_id(new_block.block_id)
+
+    def __len__(self) -> int:
+        return len(self._blocks)
+
+    def __getitem__(self, block_index: int) -> Block:
+        return self._blocks[block_index]
+
+    def __setitem__(self, block_index: int, new_block: Block) -> None:
+        self._blocks[block_index] = new_block
+        self._update_block_id(block_index, new_block.block_id)
+
+    def reset(self):
+        self._blocks = []
+        self._block_ids = []
+
+    def list(self) -> List[Block]:
+        return self._blocks
+
+    def ids(self) -> List[int]:
+        return self._block_ids
 
 
 class BlockTable:
@@ -47,7 +99,7 @@ class BlockTable:
         self._allocator = block_allocator
         if _blocks is None:
             _blocks = []
-        self._blocks: List[Block] = _blocks
+        self._blocks: BlockList = BlockList(_blocks)
 
         self._max_block_sliding_window = max_block_sliding_window
         # Use helper method instead of directly calculating, as blocks
@@ -88,9 +140,10 @@ class BlockTable:
         """
         assert not self._is_allocated
         assert token_ids
-        self._blocks = self._allocate_blocks_for_token_ids(prev_block=None,
-                                                           token_ids=token_ids,
-                                                           device=device)
+        blocks = self._allocate_blocks_for_token_ids(prev_block=None,
+                                                     token_ids=token_ids,
+                                                     device=device)
+        self._blocks.update(blocks)
         self._num_full_slots = len(token_ids)
 
     def append_token_ids(self,
@@ -140,7 +193,7 @@ class BlockTable:
                                     num_lookahead_slots)
 
         # Update the blocks with the new tokens
-        blocks = self._blocks[self._num_full_slots // self._block_size:]
+        blocks = self.blocks[self._num_full_slots // self._block_size:]
         token_blocks = self._chunk_token_blocks_for_append(token_ids)
 
         for block, token_block in zip(blocks, token_blocks):
@@ -174,8 +227,8 @@ class BlockTable:
         for _ in range(blocks_to_allocate):
             assert len(self._blocks) > 0
             self._blocks.append(
-                self._allocator.allocate_mutable(prev_block=self._blocks[-1],
-                                                 device=device))
+                self._allocator.allocate_mutable_block(
+                    prev_block=self._blocks[-1], device=device))
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
@@ -209,12 +262,12 @@ class BlockTable:
         is set to `None`.
         """
         assert self._is_allocated
-        for block in self._blocks:
+        for block in self.blocks:
             self._allocator.free(block)
-        self._blocks = []
+        self._blocks.reset()
 
     @property
-    def physical_block_ids(self) -> List[Optional[int]]:
+    def physical_block_ids(self) -> List[int]:
         """Returns a list of physical block indices for the blocks in the
         BlockTable.
 
@@ -228,7 +281,7 @@ class BlockTable:
                 BlockTable.
         """
         assert self._is_allocated
-        return [block.block_id for block in self._blocks]
+        return self._blocks.ids()
 
     def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:
         """Get the number of "unseen" tokens in the sequence.
@@ -253,17 +306,30 @@ class BlockTable:
                                        token_ids: List[int],
                                        device: Device) -> List[Block]:
         blocks: List[Block] = []
-        for block_token_ids in chunk_list(token_ids, self._block_size):
-            if len(block_token_ids) == self._block_size:
-                # If the block is full, create an immutable block.
-                prev_block = self._allocator.allocate_immutable(
-                    prev_block, token_ids=block_token_ids, device=device)
+
+        block_token_ids = []
+        tail_token_ids = []
+        for cur_token_ids in chunk_list(token_ids, self._block_size):
+            if len(cur_token_ids) == self._block_size:
+                block_token_ids.append(cur_token_ids)
             else:
-                # Else, partially fill a mutable block with token ids.
-                prev_block = self._allocator.allocate_mutable(
-                    prev_block=prev_block, device=device)
-                prev_block.append_token_ids(block_token_ids)
-            blocks.append(prev_block)
+                tail_token_ids.append(cur_token_ids)
+
+        if block_token_ids:
+            blocks.extend(
+                self._allocator.allocate_immutable_blocks(
+                    prev_block, block_token_ids=block_token_ids,
+                    device=device))
+            prev_block = blocks[-1]
+
+        if tail_token_ids:
+            assert len(tail_token_ids) == 1
+            cur_token_ids = tail_token_ids[0]
+
+            block = self._allocator.allocate_mutable_block(
+                prev_block=prev_block, device=device)
+            block.append_token_ids(cur_token_ids)
+            blocks.append(block)
 
         return blocks
 
@@ -274,8 +340,10 @@ class BlockTable:
         if not self._is_allocated:
             return token_ids
 
-        for block in self._blocks:
-            token_ids.extend(block.token_ids)
+        for block in self.blocks:
+            cur_token_ids = block.token_ids
+            assert cur_token_ids is not None
+            token_ids.extend(cur_token_ids)
 
         return token_ids
 
@@ -284,8 +352,8 @@ class BlockTable:
         return len(self._blocks) > 0
 
     @property
-    def blocks(self) -> Optional[List[Block]]:
-        return self._blocks
+    def blocks(self) -> List[Block]:
+        return self._blocks.list()
 
     @property
     def _num_empty_slots(self) -> int:
