@@ -174,8 +174,8 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_e2e_with_small_draft_tps(test_llm_generator,
-                                           baseline_llm_generator,
-                                           batch_size: int):
+                                              baseline_llm_generator,
+                                              batch_size: int):
     """Verify spec decode works well with smaller tp for draft models.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
@@ -183,6 +183,7 @@ def test_spec_decode_e2e_with_small_draft_tps(test_llm_generator,
                                          batch_size,
                                          max_output_len=32,
                                          force_output_len=True)
+
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",

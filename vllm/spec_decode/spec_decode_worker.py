@@ -105,8 +105,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
         else:
-            draft_parallel_config: ParallelConfig = \
-                draft_worker_kwargs['parallel_config']
+            draft_parallel_config: ParallelConfig = draft_worker_kwargs[
+                'parallel_config']
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
