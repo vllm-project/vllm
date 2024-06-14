@@ -5,7 +5,7 @@ steps:
   - label: "diff check"
     key: diff_check
     agents:
-      queue: small cpu_queue
+      queue: small_cpu_queue
     commands:
       - ./scripts/diff_check.sh
     soft_fail:
