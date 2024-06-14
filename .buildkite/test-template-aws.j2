@@ -4,7 +4,7 @@
 steps:
   - block: "Build release wheels"
 
-  - label: "Build wheel - Python {{ matrix.python_version }} - CUDA {{ matrix.cuda_version }}" 
+  - label: "Build wheel {{matrix}}" 
     agents:
       queue: cpu_queue
     commands:
