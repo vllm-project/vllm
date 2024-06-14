@@ -40,13 +40,11 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
              the GPU ranks written in this value participaten in draft generation
         """
         rank = kwargs['rank']
-        self.is_dummy = False
         self._draft_ranks = draft_ranks
-        if draft_ranks is not None:
-            self.is_dummy = rank not in draft_ranks
-            self._tp_groups = None
-            logger.info(f"{self._draft_ranks=}, {self._tp_groups=}")
-        logger.info(f"{rank=}, {draft_ranks=}, {self.is_dummy=}")
+        self._tp_groups = None
+        self._is_dummy = False if draft_ranks is None else rank not in draft_ranks
+
+        logger.info(f"{rank=}, {draft_ranks=}, {self._is_dummy=}")
 
         super().__init__(**kwargs)
 
@@ -60,7 +58,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         return None
 
     def init_device(self):
-        if self.is_dummy:
+        if self._is_dummy:
             return
 
         if self._draft_ranks:
@@ -100,17 +98,17 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
 
     def load_model(self):
-        if not self.is_dummy:
+        if not self._is_dummy:
             with self._patch_tensor_parallel_group():
                 super().load_model()
 
     def determine_num_available_blocks(self):
-        if not self.is_dummy:
+        if not self._is_dummy:
             with self._patch_tensor_parallel_group():
                 return super().determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int):
-        if not self.is_dummy:
+        if not self._is_dummy:
             with self._patch_tensor_parallel_group():
                 super().initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
@@ -127,7 +125,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         For multi step worker, this indicator shall be True.
         """
-        if not self.is_dummy:
+        if not self._is_dummy:
             return [], True
 
         self._raise_if_unsupported(execute_model_req)
@@ -165,7 +163,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
-        if not self.is_dummy:
+        if not self._is_dummy:
             return SpeculativeProposals(None, None, None)
 
         with self._patch_tensor_parallel_group():
@@ -288,14 +286,14 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        if self.is_dummy:
+        if self._is_dummy:
             return []
 
         with self._patch_tensor_parallel_group():
             return super().execute_model(execute_model_req)
 
     def get_cache_block_size_bytes(self) -> int:
-        if self.is_dummy:
+        if self._is_dummy:
             return 0
 
         return super().get_cache_block_size_bytes()
