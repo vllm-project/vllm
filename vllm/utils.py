@@ -148,6 +148,15 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_tpu() -> bool:
+    try:
+        import libtpu
+    except ImportError:
+        libtpu = None
+    return libtpu is not None
+
+
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     max_shared_mem = (
@@ -547,6 +556,11 @@ def maybe_expand_dim(tensor: torch.Tensor,
     return tensor
 
 
+def get_dtype_size(dtype: torch.dtype) -> int:
+    """Get the size of the data type in bytes."""
+    return torch.tensor([], dtype=dtype).element_size()
+
+
 def merge_dicts(dict1: Dict[Any, List[Any]],
                 dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Merge 2 dicts that have key -> List of items.
@@ -680,6 +694,41 @@ def deprecate_kwargs(
         return inner  # type: ignore
 
     return wrapper
+
+
+@lru_cache(maxsize=8)
+def _cuda_device_count_stateless(
+        cuda_visible_devices: Optional[str] = None) -> int:
+    # Note: cuda_visible_devices is not used, but we keep it as an argument for
+    # LRU Cache purposes.
+
+    # Code below is based on
+    # https://github.com/pytorch/pytorch/blob/
+    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+    # torch/cuda/__init__.py#L831C1-L831C17
+    import torch.cuda
+    import torch.version
+
+    if not torch.cuda._is_compiled():
+        return 0
+    # bypass _device_count_nvml() if rocm (not supported)
+    nvml_count = -1 if torch.version.hip else torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if nvml_count < 0 else nvml_count
+    return r
+
+
+def cuda_device_count_stateless() -> int:
+    """Get number of CUDA devices, caching based on the value of
+    CUDA_VISIBLE_DEVICES at the time of call.
+    
+    This should be used instead of torch.cuda.device_count()
+    unless CUDA_VISIBLE_DEVICES has already been set to the desired
+    value."""
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released.
+
+    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 def maybe_make_int_tensor(_list: List[int],
                               device: Union[torch.device, str]) \

@@ -31,7 +31,7 @@ STR_INVALID_VAL: str = "INVALID"
 class QKVInputs(NamedTuple):
     '''
     Data structure for representing unpacked attention inputs, 
-    query/key/value.
+    query/key/values and their sequence lengths.
 
     Attributes:
 
@@ -73,9 +73,9 @@ class PackedQKVInputs(NamedTuple):
 
         * {query,key,value}: packed (number_of_tokens x num_heads 
                              x head_size) attention inputs
-        * q_seq_lens: list of query start locations within packed tensor
-        * kv_seq_lens: shared list of key/value start locations within
-                       packed tensor
+        * q_start_loc_list: list of query start locations within packed tensor
+        * kv_start_loc_list: shared list of key/value start locations within
+                             packed tensor
         * q_seq_lens: query sequence lengths list
         * kv_seq_lens: shared key/value sequence lengths list
     '''
@@ -696,9 +696,9 @@ def make_test_metadata(
     Construct fake attention metadata for a given test phase
     (prefill-phase or decode-phase).
 
-    encoder_test_params and cross_test_params arguments all encoder
-    attention and enc/dec cross-attention to use distinct metadata values
-    from decoder self-attention (decoder_test_params.)
+    encoder_test_params and cross_test_params arguments allow encoder
+    attention and enc/dec cross-attention (respectively) to use distinct
+    metadata values from decoder self-attention (decoder_test_params.)
     
     if encoder_test_params and cross_test_params are None, the attention
     metadata will support decoder-only scenario.

@@ -16,6 +16,14 @@ The following :ref:`engine arguments <engine_args>` are specific to VLMs:
     :prog: -m vllm.entrypoints.openai.api_server
     :nodefaultconst:
 
+.. important::
+    Currently, the support for vision language models on vLLM has the following limitations:
+
+    * Only single image input is supported per text prompt.
+    * Dynamic ``image_input_shape`` is not supported: the input image will be resized to the static ``image_input_shape``. This means our LLaVA-NeXT output may not exactly match the huggingface implementation.
+
+    We are continuously improving user & developer experience for VLMs. Please `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ if you have any feedback or feature requests.
+
 Offline Batched Inference
 -------------------------
 
@@ -31,7 +39,7 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
         image_feature_size=576,
     )
 
-For now, we only support a single image per text prompt. To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
+To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
 
 * ``prompt``: The prompt should have a number of ``<image>`` tokens equal to ``image_feature_size``.
 * ``multi_modal_data``: This should be an instance of :class:`~vllm.multimodal.image.ImagePixelData` or :class:`~vllm.multimodal.image.ImageFeatureData`.
