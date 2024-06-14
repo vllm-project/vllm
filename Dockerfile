@@ -4,10 +4,11 @@
 # Please update any changes made here to
 # docs/source/dev/dockerfile/dockerfile.rst and
 # docs/source/assets/dev/dockerfile-stages-dependency.png
-
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS dev
+FROM nvidia/cuda:{CUDA_VERSION}-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
     && apt-get install -y python3-pip git curl sudo
@@ -16,7 +17,7 @@ RUN apt-get update -y \
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
 # or future versions of triton.
-RUN ldconfig /usr/local/cuda-12.4/compat/
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 WORKDIR /workspace
 
@@ -103,7 +104,7 @@ RUN python3 check-wheel-size.py dist
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS vllm-base
+FROM nvidia/cuda:{CUDA_VERSION}-base-ubuntu22.04 AS vllm-base
 WORKDIR /vllm-workspace
 
 RUN apt-get update -y \
@@ -113,7 +114,7 @@ RUN apt-get update -y \
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
 # or future versions of triton.
-RUN ldconfig /usr/local/cuda-12.4/compat/
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 # install vllm wheel first, so that torch etc will be installed
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
