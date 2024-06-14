@@ -73,9 +73,9 @@ class PackedQKVInputs(NamedTuple):
 
         * {query,key,value}: packed (number_of_tokens x num_heads 
                              x head_size) attention inputs
-        * q_seq_lens: list of query start locations within packed tensor
-        * kv_seq_lens: shared list of key/value start locations within
-                       packed tensor
+        * q_start_loc_list: list of query start locations within packed tensor
+        * kv_start_loc_list: shared list of key/value start locations within
+                             packed tensor
         * q_seq_lens: query sequence lengths list
         * kv_seq_lens: shared key/value sequence lengths list
     '''

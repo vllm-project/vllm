@@ -142,15 +142,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     #         
     _attn_type: AttentionType = AttentionType.DECODER
 
-    # (batch_size,). The "cross-sequence-length" per sequence,i.e. the key/value
-    # sequence length (usually encoder sequence length) in the cross-attention
-    # computation. None if this is self-attention
+    # Encoder sequence lengths representation
     encoder_seq_lens: Optional[List[int]] = None
     encoder_seq_lens_tensor: Optional[torch.Tensor] = None
 
-    # The maximum cross-sequence-length, if cross_seq_lens is specified.
-    # Note that for cross-attention there is no difference in key/value
-    # sequence length between prefill and decode
+    # Maximum sequence length among encoder sequences
     max_encoder_seq_len: Optional[int] = None
 
     # Cross-attention memory-mapping data structures: slot mapping
@@ -200,15 +196,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             "Must set self.encoder_seq_lens, self.cross_slot_mapping, " + \
             "self.cross_block_tables in order to perform cross-attention"
 
-            self._attn_type = AttentionType.ENCODER_DECODER
         elif atype == AttentionType.ENCODER:
             assert self.is_all_encoder_attn_metadata_set, \
             "Must set self.encoder_seq_lens in order to perform cross-attention"
 
-            self._attn_type = AttentionType.ENCODER
-        else:
-            # AttentionType.{ENCODER,DECODER}
-            self._attn_type = atype
+        self._attn_type = atype
 
     @property
     def prefill_metadata(self) -> Optional["XFormersMetadata"]:
@@ -224,7 +216,6 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             (self.encoder_seq_lens is not None)
         assert (self.seq_lens_tensor is not None) or \
             (self.encoder_seq_lens_tensor is not None)
-        #assert self.context_lens_tensor is not None
         assert self.block_tables is not None
 
         query_start_loc = None if self.query_start_loc is None \
