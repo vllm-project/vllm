@@ -3,12 +3,11 @@
 # convenient for use when we just need to call a few functions.
 
 import ctypes
-import platform
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, List
 
 # this line makes it possible to directly load `libcudart.so` using `ctypes`
-import torch
+import torch  # noqa
 
 from vllm.logger import init_logger
 
@@ -51,15 +50,15 @@ class CudaRTLibrary:
         # ​cudaError_t cudaMemset ( void* devPtr, int  value, size_t count )
         Function("cudaMemset", cudaError_t,
                  [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]),
-        # ​cudaError_t cudaMemcpy ( void* dst, const void* src, size_t count, cudaMemcpyKind kind )
+        # ​cudaError_t cudaMemcpy ( void* dst, const void* src, size_t count, cudaMemcpyKind kind ) # noqa
         Function("cudaMemcpy", cudaError_t, [
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind
         ]),
 
-        # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr )
+        # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr ) # noqa
         Function("cudaIpcGetMemHandle", cudaError_t,
                  [ctypes.POINTER(cudaIpcMemHandle_t), ctypes.c_void_p]),
-        # ​cudaError_t cudaIpcOpenMemHandle ( void** devPtr, cudaIpcMemHandle_t handle, unsigned int  flags )
+        # ​cudaError_t cudaIpcOpenMemHandle ( void** devPtr, cudaIpcMemHandle_t handle, unsigned int  flags ) # noqa
         Function("cudaIpcOpenMemHandle", cudaError_t, [
             ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint
         ]),

@@ -5,16 +5,15 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from typing import Callable, Dict, List, Optional
+from typing import Dict, Optional
 
-import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
-from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
 logger = init_logger(__name__)
 
@@ -54,7 +53,7 @@ def producer(i: int,
             host_data = (ctypes.c_char * 1024)()
             lib.cudaMemcpy(host_data, pointer, 1024)
             for i in range(1024):
-                assert host_data[i] == 2
+                assert ord(host_data[i]) == 2
         else:
             raise RuntimeError("Failed to open the IPC handle")
 
@@ -91,7 +90,7 @@ def consumer(j: int,
             host_data = (ctypes.c_char * 1024)()
             lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
             for i in range(1024):
-                assert host_data[i] == 2
+                assert ord(host_data[i]) == 2
         else:
             raise RuntimeError("Failed to open the IPC handle")
 
