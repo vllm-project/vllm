@@ -390,15 +390,18 @@ class CPUModelRunner:
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        model_config = self.model_config
+        vlm_config = self.vision_language_config
+
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
-        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        max_num_batched_tokens = min(
+            self.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
         max_num_seqs = self.scheduler_config.max_num_seqs
 
         assert self.lora_config is None
-
-        model_config = self.model_config
-        vlm_config = self.vision_language_config
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
