@@ -888,9 +888,9 @@ def test_vocab_parallel_embedding_indices(tp_size, seed):
     computed_added_vocab_size = 0
     vocab_size_padded = -1
 
-    all_org_tokens = []
-    all_added_tokens = []
-    token_ids = []
+    all_org_tokens: List[int] = []
+    all_added_tokens: List[int] = []
+    token_ids: List[int] = []
 
     for tp_rank in range(tp_size):
         with patch(
