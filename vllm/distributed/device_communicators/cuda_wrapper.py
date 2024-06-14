@@ -4,7 +4,7 @@
 
 import ctypes
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, Dict, List, Optional
 
 # this line makes it possible to directly load `libcudart.so` using `ctypes`
 import torch  # noqa
@@ -66,16 +66,33 @@ class CudaRTLibrary:
         ]),
     ]
 
-    def __init__(self):
-        so_file = "libcudart.so"
-        self.lib = ctypes.CDLL(so_file)
-        _funcs = {}
-        for func in CudaRTLibrary.exported_functions:
-            f = getattr(self.lib, func.name)
-            f.restype = func.restype
-            f.argtypes = func.argtypes
-            _funcs[func.name] = f
-        self.funcs = _funcs
+    # class attribute to store the mapping from the path to the library
+    # to avoid loading the same library multiple times
+    path_to_library_cache: Dict[str, Any] = {}
+
+    # class attribute to store the mapping from library path
+    #  to the corresponding dictionary
+    path_to_dict_mapping: Dict[str, Dict[str, Any]] = {}
+
+    def __init__(self, so_file: Optional[str] = None):
+        if so_file is None:
+            assert torch.version.cuda is not None
+            major_version = torch.version.cuda.split(".")[0]
+            so_file = f"libcudart.so.{major_version}"
+        if so_file not in CudaRTLibrary.path_to_library_cache:
+            lib = ctypes.CDLL(so_file)
+            CudaRTLibrary.path_to_library_cache[so_file] = lib
+        self.lib = CudaRTLibrary.path_to_library_cache[so_file]
+
+        if so_file not in CudaRTLibrary.path_to_dict_mapping:
+            _funcs = {}
+            for func in CudaRTLibrary.exported_functions:
+                f = getattr(self.lib, func.name)
+                f.restype = func.restype
+                f.argtypes = func.argtypes
+                _funcs[func.name] = f
+            CudaRTLibrary.path_to_dict_mapping[so_file] = _funcs
+        self.funcs = CudaRTLibrary.path_to_dict_mapping[so_file]
 
     def CUDART_CHECK(self, result: cudaError_t) -> None:
         if result != 0:
