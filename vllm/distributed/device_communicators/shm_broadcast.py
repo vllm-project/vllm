@@ -1,3 +1,8 @@
+"""
+A shared memory ring buffer implementation for broadcast communication.
+It is optimized for the case where there is one writer and multiple readers.
+This way, we don't need locks to synchronize the access to the buffer.
+"""
 import pickle
 import time
 from contextlib import contextmanager
