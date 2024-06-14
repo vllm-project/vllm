@@ -32,22 +32,17 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     requires more thought for MultiStepWorker support.
     """
 
-    def __init__(self, draft_ranks: Optional[List[int]], **kwargs):
+    def __init__(self, ranks: Optional[List[int]], **kwargs):
         """Create a MultiStepWorker.
 
         Args:
-            draft_ranks (Optional[List[int]]): if this value is given, only some of
-             the GPU ranks written in this value participaten in draft generation
+            ranks (Optional[List[int]]): if this value is given, only some of
+             the GPU ranks written in this value participate in draft generation
         """
-        rank = kwargs['rank']
-        self._draft_ranks = draft_ranks
+        self._draft_ranks = ranks
         self._world_group = None
         self._tp_group = None
-        self._is_dummy = False if draft_ranks is None else rank not in draft_ranks
-
-        logger.info(f"{rank=}, {draft_ranks=}, {self._is_dummy=}")
-
-        logger.info(f"{kwargs=}")
+        self._is_dummy = False if ranks is None else kwargs['rank'] not in ranks
 
         super().__init__(**kwargs)
 
@@ -65,7 +60,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             local_rank = get_world_group().local_rank
             world_backend = torch.distributed.get_backend(
                 get_world_group().device_group)
-            tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
+            tp_backend = torch.distributed.get_backend(
+                get_tp_group().device_group)
 
             self._world_group = GroupCoordinator(
                 group_ranks=[self._draft_ranks],
