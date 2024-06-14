@@ -172,7 +172,7 @@ class LLM:
                                         List[SamplingParams]]] = None,
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -184,7 +184,7 @@ class LLM:
                                         List[SamplingParams]]] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -197,7 +197,7 @@ class LLM:
         *,
         prompt_token_ids: List[int],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -210,7 +210,7 @@ class LLM:
         *,
         prompt_token_ids: List[List[int]],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -221,7 +221,7 @@ class LLM:
         sampling_params: None,
         prompt_token_ids: Union[List[int], List[List[int]]],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -234,7 +234,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -251,7 +251,7 @@ class LLM:
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -314,7 +314,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -326,7 +326,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -339,7 +339,7 @@ class LLM:
         *,
         prompt_token_ids: List[int],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -352,7 +352,7 @@ class LLM:
         *,
         prompt_token_ids: List[List[int]],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -363,7 +363,7 @@ class LLM:
         pooling_params: None,
         prompt_token_ids: Union[List[int], List[List[int]]],
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -376,7 +376,7 @@ class LLM:
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
@@ -393,7 +393,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> List[EmbeddingRequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -500,7 +500,7 @@ class LLM:
         inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
-        lora_request: Optional[LoRARequest],
+        lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
     ) -> None:
 
         if isinstance(inputs, (str, dict)):
@@ -508,7 +508,10 @@ class LLM:
             inputs = [inputs]
 
         num_requests = len(inputs)
-
+        if isinstance(lora_request,
+                      list) and len(lora_request) != num_requests:
+            raise ValueError("The lengths of prompts and lora_request "
+                             "must be the same.")
         if params is None:
             # Use default sampling params.
             params = [SamplingParams()] * num_requests
@@ -528,8 +531,25 @@ class LLM:
             self._add_request(
                 request_inputs,
                 params[i] if isinstance(params, Sequence) else params,
-                lora_request=lora_request,
+                lora_request=lora_request[i] if isinstance(
+                    lora_request, Sequence) else lora_request,
             )
+
+    def _add_guided_processor(self, params: SamplingParams):
+        if options := params.guided_options:
+            if isinstance(options, dict):
+                options = GuidedDecodingFields(**options)
+            if options.guided_decoding_backend is None:
+                decoding_config = self.llm_engine.get_decoding_config()
+                options.guided_decoding_backend = (
+                    decoding_config.guided_decoding_backend)
+            guided_logits_processor = get_guided_decoding_logits_processor(
+                options, self.get_tokenizer())
+            if guided_logits_processor:
+                if params.logits_processors is None:
+                    params.logits_processors = []
+                params.logits_processors.append(guided_logits_processor)
+        return params
 
     def _add_guided_processor(self, params: SamplingParams):
         if options := params.guided_options:
@@ -551,7 +571,7 @@ class LLM:
         self,
         inputs: PromptInputs,
         params: Union[SamplingParams, PoolingParams],
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
@@ -569,11 +589,13 @@ class LLM:
                 total=num_requests,
                 desc="Processed prompts",
                 dynamic_ncols=True,
-                postfix=f"Generation Speed: {0:.2f} toks/s",
+                postfix=(f"est. speed input: {0:.2f} toks/s, "
+                         f"output: {0:.2f} toks/s"),
             )
         # Run the engine.
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
-        total_toks = 0
+        total_in_toks = 0
+        total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
@@ -582,10 +604,15 @@ class LLM:
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
-                            total_toks += sum(
+                            total_in_toks += len(output.prompt_token_ids)
+                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                            total_out_toks += sum(
                                 len(stp.token_ids) for stp in output.outputs)
-                            spd = total_toks / pbar.format_dict["elapsed"]
-                            pbar.postfix = f"Generation Speed: {spd:.2f} toks/s"
+                            out_spd = total_out_toks / pbar.format_dict[
+                                "elapsed"]
+                            pbar.postfix = (
+                                f"est. speed input: {in_spd:.2f} toks/s, "
+                                f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
         if use_tqdm:
             pbar.close()

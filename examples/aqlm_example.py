@@ -17,7 +17,7 @@ def main():
                         type=int,
                         default=0,
                         help='known good models by index, [0-4]')
-    parser.add_argument('--tensor_parallel_size',
+    parser.add_argument('--tensor-parallel-size',
                         '-t',
                         type=int,
                         default=1,

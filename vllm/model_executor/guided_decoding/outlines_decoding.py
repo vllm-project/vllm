@@ -74,20 +74,20 @@ def get_outlines_guided_decoding_logits_processor(
     return logits_processor
 
 
-def convert_json_format(json):
-    if isinstance(json, dict):
-        # turn dict into hashable string
-        json = json_dumps(json)
-    elif isinstance(json, BaseModel):
-        # use pydantic signature so that different model classes
-        # with the same fields will get hashed the same
-        json = str(json.__signature__)
-    return json
+# def convert_json_format(json):
+#     if isinstance(json, dict):
+#         # turn dict into hashable string
+#         json = json_dumps(json)
+#     elif isinstance(json, BaseModel):
+#         # use pydantic signature so that different model classes
+#         # with the same fields will get hashed the same
+#         json = str(json.__signature__)
+#     return json
 
 
-def convert_guided_choice_format(guided_choice):
-    choices = [regex_escape(str(choice)) for choice in guided_choice]
-    return "(" + "|".join(choices) + ")"
+# def convert_guided_choice_format(guided_choice):
+#     choices = [regex_escape(str(choice)) for choice in guided_choice]
+#     return "(" + "|".join(choices) + ")"
 
 
 def _get_guide_and_mode(

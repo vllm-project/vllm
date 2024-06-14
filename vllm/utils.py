@@ -22,6 +22,7 @@ import psutil
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
@@ -146,14 +147,19 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_tpu() -> bool:
+    try:
+        import libtpu
+    except ImportError:
+        libtpu = None
+    return libtpu is not None
+
+
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
-    # NOTE: This import statement should be executed lazily since
-    # the Neuron-X backend does not have the `cuda_utils` module.
-    from vllm._C import cuda_utils
-
     max_shared_mem = (
-        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+        ops.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
     # will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
@@ -289,7 +295,15 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 def get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
-        return port
+        while True:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("", port))
+                    return port
+            except OSError:
+                port += 1  # Increment port number if already in use
+                logger.info("Port %d is already in use, trying port %d",
+                            port - 1, port)
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -541,6 +555,11 @@ def maybe_expand_dim(tensor: torch.Tensor,
     return tensor
 
 
+def get_dtype_size(dtype: torch.dtype) -> int:
+    """Get the size of the data type in bytes."""
+    return torch.tensor([], dtype=dtype).element_size()
+
+
 def merge_dicts(dict1: Dict[Any, List[Any]],
                 dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Merge 2 dicts that have key -> List of items.
@@ -674,3 +693,38 @@ def deprecate_kwargs(
         return inner  # type: ignore
 
     return wrapper
+
+
+@lru_cache(maxsize=8)
+def _cuda_device_count_stateless(
+        cuda_visible_devices: Optional[str] = None) -> int:
+    # Note: cuda_visible_devices is not used, but we keep it as an argument for
+    # LRU Cache purposes.
+
+    # Code below is based on
+    # https://github.com/pytorch/pytorch/blob/
+    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+    # torch/cuda/__init__.py#L831C1-L831C17
+    import torch.cuda
+    import torch.version
+
+    if not torch.cuda._is_compiled():
+        return 0
+    # bypass _device_count_nvml() if rocm (not supported)
+    nvml_count = -1 if torch.version.hip else torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if nvml_count < 0 else nvml_count
+    return r
+
+
+def cuda_device_count_stateless() -> int:
+    """Get number of CUDA devices, caching based on the value of
+    CUDA_VISIBLE_DEVICES at the time of call.
+    
+    This should be used instead of torch.cuda.device_count()
+    unless CUDA_VISIBLE_DEVICES has already been set to the desired
+    value."""
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released.
+
+    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
