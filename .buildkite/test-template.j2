@@ -31,6 +31,7 @@ steps:
         {% endfor %}
         env:
           DOCKER_BUILDKIT: "1"
+        priority: 100
         soft_fail: true
 
   - label: "Neuron Test"
