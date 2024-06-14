@@ -1,17 +1,17 @@
-
-# Quick benchmark
+# vLLM benchmark suite
 
 ## Introduction
 
-This directory contains a quick performance benchmarking CI for vllm. The goal is to help developers know the impact of their PRs on the performance of vllm.
+This directory contains the performance benchmarking CI for vllm.
+The goal is to help developers know the impact of their PRs on the performance of vllm.
 
 This benchmark will be *triggered* upon:
 - A PR being merged into vllm.
 - Every commit for those PRs with `perf-benchmarks` label.
 
-**Benchmarking coverage**: latency, throughput and fix-qps serving on A100 (the support for more GPUs is comming later), with different models.
+**Benchmarking Coverage**: latency, throughput and fix-qps serving on A100 (the support for more GPUs is comming later), with different models.
 
-**Benchmarking ETA**: 40 minutes
+**Benchmarking Duration**: about 1hr.
 
 ## Configuring the workload for the quick benchmark
 
@@ -42,20 +42,17 @@ In this example:
 -  The `test_name` attributes is a unique identifier for the test. In `latency-tests.json`, it must start with `latency_`.
 -  The `parameters` attribute control the command line arguments to be used for `benchmark_latency.py`. Note that please use underline `_` instead of the dash `-` when specifying the command line arguments, and `quick-benchmark.sh` will convert the underline to dash when feeding the arguments to `benchmark_latency.py`. For example, the corresponding command line arguments for `benchmark_latency.py` will be `--model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 1 --load-format dummy --num-iters-warmup 5 --num-iters 15`
 
-The number of this test is stable -- a slight change on the value of this number says something.
+Note that the performance numbers are highly sensitive to the value of the parameters. Please make sure the parameters are set correctly.
 
 WARNING: The benchmarking script will save json results by itself, so please do not configure `--output-json` parameter in the json file.
 
 
 ### Throughput test
-
 The tests are specified in `throughput-tests.json`. The syntax is similar to `latency-tests.json`, except for that the parameters will be fed forward to `benchmark_throughput.py`.
 
-The number of this test is also stable -- a slight change on the value of this number says something.
+The number of this test is also stable -- a slight change on the value of this number might vary the performance numbers by a lot.
 
 ### Serving test
-
-
 We test the throughput by using `benchmark_serving.py` with request rate = inf to cover the online serving overhead. The corresponding parameters are in `serving-tests.json`, and here is an example:
 
 ```
@@ -86,26 +83,16 @@ We test the throughput by using `benchmark_serving.py` with request rate = inf t
 
 Inside this example:
 - The `test_name` attribute is also a unique identifier for the test. It must start with `serving_`.
-- The `server-parameters` includes the command line arguments for vllm server.
+- The `server-parameters` includes the command line arguments for vLLM server.
 - The `client-parameters` includes the command line arguments for `benchmark_serving.py`.
 - The `qps_list` controls the list of qps for test. It will be used to configure the `--request-rate` parameter in `benchmark_serving.py`
 
-The number of this test is less stable compared to the delay and latency benchmarks (due to randomized sharegpt dataset sampling inside `benchmark_serving.py`), but a large change on this number (e.g. 5% change) still says something.
+The number of this test is less stable compared to the delay and latency benchmarks (due to randomized sharegpt dataset sampling inside `benchmark_serving.py`), but a large change on this number (e.g. 5% change) still vary the output greatly.
 
 WARNING: The benchmarking script will save json results by itself, so please do not configure `--save-results` or other results-saving-related parameters in `serving-tests.json`.
 
-
-## JSON files for debugging
-
-We provide a debugging version for json file, which covers much less test cases but is sufficient to test if the benchmark is written in the right way. Feel free to use it when you contribute to this benchmark -- it will make your iteration cycles go much faster.
-
-
 ## Visualizing the results
-
-The `results2md.py` helps you put the benchmarking results inside a markdown table. To see this table, scroll to very bottom of your PR:
-![PR position](./imgs/position.jpg)
-
-Then find the `performance-benchmark` column, click details, and you will see the benchmarking tables
-![Benchmarking results](./imgs/results.jpg)
-
+The `convert-results-json-to-markdown.py` helps you put the benchmarking results inside a markdown table.
+You can find the result presented as a table inside the `buildkite/performance-benchmark` job page.
 If you do not see the table, please wait till the benchmark finish running.
+The JSON file is also attached within each buildkite job for further analysis.

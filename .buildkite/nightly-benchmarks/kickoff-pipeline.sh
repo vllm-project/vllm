@@ -24,4 +24,4 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
 fi
 
 # Upload sample.yaml
-buildkite-agent pipeline upload .buildkite/nightly-benchmarks/sample.yaml
+buildkite-agent pipeline upload .buildkite/nightly-benchmarks/benchmark-pipeline.yaml

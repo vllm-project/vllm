@@ -8,11 +8,8 @@
 # and we still want to see other benchmarking results even when mixtral crashes.
 set -o pipefail
 
-
-
 check_gpus() {
   # check the number of GPUs and GPU type.
-
   declare -g gpu_count=$(nvidia-smi --list-gpus | wc -l)
   if [[ $gpu_count -gt 0 ]]; then
     echo "GPU found."
@@ -24,11 +21,8 @@ check_gpus() {
   echo "GPU type is $gpu_type"
 }
 
-
-
 check_hf_token() {
   # check if HF_TOKEN is available and valid
-
   if [[ -z "$HF_TOKEN" ]]; then
     echo "Error: HF_TOKEN is not set."
     exit 1
@@ -39,8 +33,6 @@ check_hf_token() {
     echo "HF_TOKEN is set and valid."
   fi
 }
-
-
 
 json2args() {
   # transforms the JSON string to command line args, and '_' is replaced to '-'
@@ -58,8 +50,6 @@ json2args() {
   echo "$args"
 }
 
-
-
 wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
@@ -69,11 +59,8 @@ wait_for_server() {
     done' && return 0 || return 1
 }
 
-
-
 kill_gpu_processes() {
   # kill all processes on GPU.
-
   pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
   if [ -z "$pids" ]; then
       echo "No GPU processes found."
@@ -97,10 +84,7 @@ kill_gpu_processes() {
   gpu_memory_usage=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
   # The memory usage should be 0 MB.
   echo "GPU 0 Memory Usage: $gpu_memory_usage MB"
-
 }
-
-
 
 upload_to_buildkite() {
   # upload the benchmarking results to buildkite
@@ -114,8 +98,6 @@ upload_to_buildkite() {
   /workspace/buildkite-agent artifact upload "$RESULTS_FOLDER/*"
 }
 
-
-
 run_latency_tests() {
   # run latency tests using `benchmark_latency.py`
   # $1: a json file specifying latency test cases
@@ -125,12 +107,17 @@ run_latency_tests() {
 
   # Iterate over latency tests
   jq -c '.[]' "$latency_test_file" | while read -r params; do
-
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^latency_ ]]; then
       echo "In latency-test.json, test_name must start with \"latency_\"."
       exit 1
+    fi
+
+    # if TEST_SELECTOR is set, only run the test cases that match the selector
+    if [[ -n "$TEST_SELECTOR" ]] && [[ ! "$test_name" =~ $TEST_SELECTOR ]]; then
+      echo "Skip test case $test_name."
+      continue
     fi
 
     # get arguments
@@ -145,8 +132,8 @@ run_latency_tests() {
     fi
 
     latency_command="python3 benchmark_latency.py \
-    --output-json $RESULTS_FOLDER/${test_name}.json \
-    $latency_args"
+      --output-json $RESULTS_FOLDER/${test_name}.json \
+      $latency_args"
 
     echo "Running test case $test_name"
     echo "Latency command: $latency_command"
@@ -167,7 +154,6 @@ run_latency_tests() {
     kill_gpu_processes
 
   done
-
 }
 
 
@@ -180,12 +166,17 @@ run_throughput_tests() {
 
   # Iterate over throughput tests
   jq -c '.[]' "$throughput_test_file" | while read -r params; do
-
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^throughput_ ]]; then
       echo "In throughput-test.json, test_name must start with \"throughput_\"."
       exit 1
+    fi
+
+    # if TEST_SELECTOR is set, only run the test cases that match the selector
+    if [[ -n "$TEST_SELECTOR" ]] && [[ ! "$test_name" =~ $TEST_SELECTOR ]]; then
+      echo "Skip test case $test_name."
+      continue
     fi
 
     # get arguments
@@ -200,8 +191,8 @@ run_throughput_tests() {
     fi
 
     throughput_command="python3 benchmark_throughput.py \
-    --output-json $RESULTS_FOLDER/${test_name}.json \
-    $throughput_args"
+      --output-json $RESULTS_FOLDER/${test_name}.json \
+      $throughput_args"
 
     echo "Running test case $test_name"
     echo "Throughput command: $throughput_command"
@@ -221,10 +212,7 @@ run_throughput_tests() {
     kill_gpu_processes
 
   done
-
 }
-
-
 
 run_serving_tests() {
   # run serving tests using `benchmark_serving.py`
@@ -235,13 +223,19 @@ run_serving_tests() {
 
   # Iterate over serving tests
   jq -c '.[]' "$serving_test_file" | while read -r params; do
-
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^serving_ ]]; then
       echo "In serving-test.json, test_name must start with \"serving_\"."
       exit 1
     fi
+
+    # if TEST_SELECTOR is set, only run the test cases that match the selector
+    if [[ -n "$TEST_SELECTOR" ]] && [[ ! "$test_name" =~ $TEST_SELECTOR ]]; then
+      echo "Skip test case $test_name."
+      continue
+    fi
+
 
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.server_parameters')
@@ -288,7 +282,6 @@ run_serving_tests() {
 
     # iterate over different QPS
     for qps in $qps_list; do
-
       # remove the surrounding single quote from qps
       if [[ "$qps" == *"inf"* ]]; then
         echo "qps was $qps"
@@ -326,16 +319,10 @@ run_serving_tests() {
 
     # clean up
     kill_gpu_processes
-
   done
-
 }
 
-
-
-
 main() {
-
   check_gpus
   check_hf_token
 
@@ -359,16 +346,13 @@ main() {
   run_serving_tests $QUICK_BENCHMARK_ROOT/serving-tests.json
   run_latency_tests $QUICK_BENCHMARK_ROOT/latency-tests.json
   run_throughput_tests $QUICK_BENCHMARK_ROOT/throughput-tests.json
-  
+
 
   # postprocess benchmarking results
   pip install tabulate pandas
-  python3 $QUICK_BENCHMARK_ROOT/results2md.py
+  python3 $QUICK_BENCHMARK_ROOT/convert-results-json-to-markdown.py
 
   upload_to_buildkite
-
 }
-
-
 
 main "$@"

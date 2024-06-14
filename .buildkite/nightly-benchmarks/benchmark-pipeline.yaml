@@ -9,7 +9,7 @@ steps:
           - image: badouralix/curl-jq
             command:
             - sh
-            - .buildkite/nightly-benchmarks/wait-for-image.sh
+            - .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
   - wait
   - label: "A100 Benchmark"
     agents:
@@ -20,7 +20,7 @@ steps:
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
             command:
-            - bash .buildkite/quick-benchmarks/quick-benchmarks.sh
+            - bash .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
             resources:
               limits:
                 nvidia.com/gpu: 8
