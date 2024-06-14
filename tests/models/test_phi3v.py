@@ -37,8 +37,7 @@ def iter_phi3v_configs(model_name: str):
 
 
 model_and_vl_config = [
-    # *iter_phi3v_configs("microsoft/Phi-3-vision-128k-instruct"),
-    *iter_phi3v_configs("/data/LLM-model/Phi-3-vision-128k-instruct"),
+    *iter_phi3v_configs("microsoft/Phi-3-vision-128k-instruct"),
 ]
 
 
