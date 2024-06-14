@@ -5,16 +5,18 @@
 # docs/source/dev/dockerfile/dockerfile.rst and
 # docs/source/assets/dev/dockerfile-stages-dependency.png
 ARG CUDA_VERSION
-ARG PYTHON_VER
+ARG PYTHON_VERSION
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+ENV CUDA_VERSION=${CUDA_VERSION}
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS dev
 
 RUN echo ${CUDA_VERSION}
-RUN echo ${PYTHON_VER}
-RUN echo python${PYTHON_VER}
+RUN echo ${PYTHON_VERSION}
+RUN echo python${PYTHON_VERSION}
 RUN apt-get update -y \
-    && apt-get install -y python${PYTHON_VER} python3-pip git curl sudo
+    && apt-get install -y python${PYTHON_VERSION} python3-pip git curl sudo
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -88,7 +90,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && export SCCACHE_BUCKET=vllm-build-sccache \
         && export SCCACHE_REGION=us-west-2 \
         && sccache --show-stats \
-        && python${PYTHON_VER} setup.py bdist_wheel --dist-dir=dist \
+        && python${PYTHON_VERSION} setup.py bdist_wheel --dist-dir=dist \
         && sccache --show-stats; \
     fi
 
@@ -96,7 +98,7 @@ ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" != "1" ]; then \
-        python${PYTHON_VER} setup.py bdist_wheel --dist-dir=dist; \
+        python${PYTHON_VERSION} setup.py bdist_wheel --dist-dir=dist; \
     fi
 
 # check the size of the wheel, we cannot upload wheels larger than 100MB
