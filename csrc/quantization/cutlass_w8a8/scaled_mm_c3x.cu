@@ -319,9 +319,12 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
 void cutlass_scaled_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
-                            torch::Tensor const& b_scales) {
+                            torch::Tensor const& b_scales,
+                            c10::optional<torch::Tensor> const& bias_azp) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+
+  TORCH_CHECK(!bias_azp, "Bias AZP not supported on Hopper yet");
 
   if (a.dtype() == torch::kInt8) {
     TORCH_CHECK(b.dtype() == torch::kInt8);
