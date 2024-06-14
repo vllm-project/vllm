@@ -106,7 +106,8 @@ class ShmRingBuffer:
 
     def broadcast_object(self, obj=None):
         if self.is_writer:
-            serialized_obj = pickle.dumps(obj)
+            serialized_obj = pickle.dumps(obj,
+                                          protocol=pickle.HIGHEST_PROTOCOL)
             with self.acquire_write() as buf:
                 buf[:len(serialized_obj)] = serialized_obj
             return obj
