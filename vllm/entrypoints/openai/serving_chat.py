@@ -1,8 +1,10 @@
 import codecs
 import time
 from dataclasses import dataclass
-from typing import (AsyncGenerator, AsyncIterator, Iterable, List, Optional,
-                    TypedDict, Union, cast, final)
+from typing import (AsyncGenerator, AsyncIterator, Dict, Iterable, List,
+                    Optional)
+from typing import Sequence as GenericSequence
+from typing import TypedDict, Union, cast, final
 
 from fastapi import Request
 from openai.types.chat import ChatCompletionContentPartTextParam
@@ -10,17 +12,20 @@ from openai.types.chat import ChatCompletionContentPartTextParam
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionContentPartParam, ChatCompletionMessageParam,
+    ChatCompletionContentPartParam, ChatCompletionLogProb,
+    ChatCompletionLogProbs, ChatCompletionLogProbsContent,
+    ChatCompletionMessageParam, ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-    UsageInfo)
+    FunctionCall, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     GuidedDecodingFields, get_guided_decoding_logits_processor_async)
 from vllm.outputs import RequestOutput
+from vllm.sequence import Logprob
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -158,7 +163,9 @@ class OpenAIServingChat(OpenAIServing):
         try:
             # Tokenize/detokenize depending on prompt format (string/token list)
             prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
-                request, prompt=prompt, add_special_tokens=False)
+                request,
+                prompt=prompt,
+                add_special_tokens=request.add_special_tokens)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
 
@@ -284,11 +291,10 @@ class OpenAIServingChat(OpenAIServing):
                         previous_num_tokens[i]:] if output.logprobs else None
 
                     if request.logprobs:
-                        logprobs = self._create_logprobs(
+                        logprobs = self._create_chat_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
                             num_output_top_logprobs=request.top_logprobs,
-                            initial_text_offset=len(previous_texts[i]),
                         )
                     else:
                         logprobs = None
@@ -296,11 +302,24 @@ class OpenAIServingChat(OpenAIServing):
                     delta_text = output.text[len(previous_texts[i]):]
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
+
+                    if request.tool_choice and type(
+                            request.tool_choice
+                    ) is ChatCompletionNamedToolChoiceParam:
+                        delta_message = DeltaMessage(tool_calls=[
+                            ToolCall(function=FunctionCall(
+                                name=request.tool_choice.function.name,
+                                arguments=delta_text))
+                        ])
+                    else:
+                        delta_message = DeltaMessage(content=delta_text)
+
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
+
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
-                            delta=DeltaMessage(content=delta_text),
+                            delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=None)
                         chunk = ChatCompletionStreamResponse(
@@ -322,7 +341,7 @@ class OpenAIServingChat(OpenAIServing):
                         )
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
-                            delta=DeltaMessage(content=delta_text),
+                            delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=output.finish_reason,
                             stop_reason=output.stop_reason)
@@ -371,7 +390,7 @@ class OpenAIServingChat(OpenAIServing):
             top_logprobs = output.logprobs
 
             if request.logprobs:
-                logprobs = self._create_logprobs(
+                logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,
                     top_logprobs=top_logprobs,
                     num_output_top_logprobs=request.top_logprobs,
@@ -379,13 +398,25 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
+            if request.tool_choice and type(
+                    request.tool_choice) is ChatCompletionNamedToolChoiceParam:
+                message = ChatMessage(
+                    role=role,
+                    content="",
+                    tool_calls=[
+                        ToolCall(function=FunctionCall(
+                            name=request.tool_choice.function.name,
+                            arguments=output.text))
+                    ])
+            elif not request.tool_choice or request.tool_choice == "none":
+                message = ChatMessage(role=role, content=output.text)
+
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
-                message=ChatMessage(role=role, content=output.text),
+                message=message,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason,
-                stop_reason=output.stop_reason,
-            )
+                stop_reason=output.stop_reason)
             choices.append(choice_data)
 
         if request.echo:
@@ -415,3 +446,51 @@ class OpenAIServingChat(OpenAIServing):
         )
 
         return response
+
+    def _get_top_logprobs(
+            self, logprobs: Dict[int, Logprob],
+            top_logprobs: Optional[int]) -> List[ChatCompletionLogProb]:
+        return [
+            ChatCompletionLogProb(
+                token=self._get_decoded_token(p[1], p[0]),
+                logprob=max(p[1].logprob, -9999.0),
+                bytes=list(
+                    self._get_decoded_token(p[1],
+                                            p[0]).encode("utf-8",
+                                                         errors="replace")))
+            for i, p in enumerate(logprobs.items())
+            if top_logprobs and i < top_logprobs
+        ]
+
+    def _create_chat_logprobs(
+        self,
+        token_ids: GenericSequence[int],
+        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
+        num_output_top_logprobs: Optional[int] = None,
+    ) -> ChatCompletionLogProbs:
+        """Create OpenAI-style logprobs."""
+
+        logprobs_content = []
+
+        for i, token_id in enumerate(token_ids):
+            step_top_logprobs = top_logprobs[i]
+            if step_top_logprobs is None:
+                logprobs_content.append(
+                    ChatCompletionLogProbsContent(
+                        token=self.tokenizer.decode(token_id),
+                        bytes=list(
+                            self.tokenizer.decode(token_id).encode(
+                                "utf-8", errors="replace"))))
+            else:
+                logprobs_content.append(
+                    ChatCompletionLogProbsContent(
+                        token=step_top_logprobs[token_id].decoded_token,
+                        logprob=max(step_top_logprobs[token_id].logprob,
+                                    -9999.0),
+                        bytes=list(
+                            step_top_logprobs[token_id].decoded_token.encode(
+                                "utf-8", errors="replace")),
+                        top_logprobs=self._get_top_logprobs(
+                            step_top_logprobs, num_output_top_logprobs)))
+
+        return ChatCompletionLogProbs(content=logprobs_content)

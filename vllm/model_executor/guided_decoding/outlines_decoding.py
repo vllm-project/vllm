@@ -1,13 +1,11 @@
-from copy import copy
 from enum import Enum
-from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
 from typing import Optional, Tuple, Union
-
+from copy import copy
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
-
+from functools import lru_cache
 from vllm.model_executor.guided_decoding.fields import GuidedDecodingFields
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
@@ -50,6 +48,11 @@ pair   : UNESCAPED_STRING ":" value
 global_thread_pool = None  # used for generating logits processor fsm
 
 
+# async def get_outlines_guided_decoding_logits_processor(
+#     request: Union[CompletionRequest,
+#                    ChatCompletionRequest], tokenizer: PreTrainedTokenizerBase
+# ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
+#            None]:
 def get_outlines_guided_decoding_logits_processor(
         request: GuidedDecodingFields, tokenizer
 ) -> Optional[Union[JSONLogitsProcessor, RegexLogitsProcessor]]:
@@ -60,14 +63,14 @@ def get_outlines_guided_decoding_logits_processor(
     we make a shallow copy to reuse the same underlying FSM.
     """
     guide, mode = _get_guide_and_mode(request)
-    if not guide:
+    if not guide or not mode:
         return None
 
     logits_processor = copy(
         _get_cached_logits_processor(guide, tokenizer, mode,
                                      request.guided_whitespace_pattern))
     # reset logits processor's internal state
-    logits_processor.init_state()
+    # logits_processor.init_state()
     return logits_processor
 
 
