@@ -106,6 +106,11 @@ class ShmRingBuffer:
         if self.is_writer:
             serialized_obj = pickle.dumps(obj,
                                           protocol=pickle.HIGHEST_PROTOCOL)
+            if len(serialized_obj) > self.max_chunk_bytes:
+                raise RuntimeError(
+                    f"{len(serialized_obj)=} larger than the allowed value "
+                    f"{self.max_chunk_bytes},"
+                    "Please increase the max_chunk_bytes parameter.")
             with self.acquire_write() as buf:
                 buf[:len(serialized_obj)] = serialized_obj
             return obj
