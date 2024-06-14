@@ -36,8 +36,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         parallel degree than target model.
         This reduces the communication overhead of small draft models.
 
-        This is implemented by changing vLLM's tensor parallel group to a group of
-        size temporarily during forward passes of draft models.
+        This is implemented by changing vLLM's tensor parallel group to a group
+        of the small size temporarily during forward passes of draft models.
 
         Args:
             ranks (Optional[List[int]]): if this value is given, only some of
