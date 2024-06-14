@@ -20,19 +20,17 @@ steps:
   - group: "AMD Tests"
     depends_on: ~
     steps:
-      - label: "AMD Tests: {$BUILDKITE_COMMIT}"
+    {% for step in steps %}
+    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
+      - label: "AMD: {{ step.label }}"
         agents:
           queue: amd
-        commands: 
-        {% for step in steps %}
-        {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
-          - bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" ; ")) | safe }}"
-        {% endif %}
-        {% endfor %}
+        command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" ; ")) | safe }}"
         env:
           DOCKER_BUILDKIT: "1"
-        priority: 100
         soft_fail: true
+    {% endif %}
+    {% endfor %}
 
   - label: "Neuron Test"
     depends_on: ~
