@@ -175,9 +175,15 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache in %s", path)
         cache = {}
+        batch_is = []
+        batch_js = []
         for _i in range(num_dev):
             for _j in range(num_dev):
-                cache[f"{_i}->{_j}"] = can_actually_p2p(_i, _j)
+                batch_is.append(_i)
+                batch_js.append(_j)
+        result = can_actually_p2p(batch_is, batch_js)
+        for _i, _j, r in zip(batch_is, batch_js, result):
+            cache[f"{_i}->{_j}"] = r
         with open(path, "w") as f:
             json.dump(cache, f, indent=4)
     if is_distributed:
