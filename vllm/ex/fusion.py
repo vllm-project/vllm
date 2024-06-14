@@ -252,7 +252,7 @@ def pointwise_fusion(cc: CodeCache,
         return all([is_fusable(n) and not is_compute(n) for n in nodes])
 
     if fuse_with_compute:
-        num_fused_compute = 0
+        num_fused_compute = 0  # prevent more than one compute op in a fusion stack
         for n in mod.graph.nodes:
             if not is_call(n):
                 continue
