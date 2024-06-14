@@ -2,6 +2,15 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
+  - label: "diff check"
+    key: diff_check
+    agents:
+      queue: small cpu_queue
+    commands:
+      - ./scripts/diff_check.sh
+    soft_fail:
+      - exit_status: 2
+
   - label: ":docker: build image"
     agents:
       queue: cpu_queue
