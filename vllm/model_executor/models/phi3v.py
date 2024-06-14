@@ -140,7 +140,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
                 input_ids: torch.LongTensor,
                 pixel_values: torch.FloatTensor,
                 image_sizes=None) -> torch.FloatTensor:
-        "process and merge text embeddings with image embeddings."
+        """process and merge text embeddings with image embeddings."""
 
         MAX_INPUT_ID = int(1e9)
         img_embeds = pixel_values
