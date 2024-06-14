@@ -9,9 +9,9 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
-from vllm.distributed.parallel_state import (
-    get_local_rank, get_tensor_model_parallel_cpu_group)
+from vllm.distributed.parallel_state import is_in_the_same_node
 from vllm.logger import init_logger
+from vllm.utils import cuda_device_count_stateless
 
 try:
     import pynvml
@@ -86,8 +86,8 @@ class CustomAllreduce:
 
     # max_size: max supported allreduce size
     def __init__(self,
-                 group: Optional[ProcessGroup] = None,
-                 device: Optional[Union[int, str, torch.device]] = None,
+                 group: ProcessGroup,
+                 device: Union[int, str, torch.device],
                  max_size=8192 * 1024) -> None:
         """
         Args:
@@ -107,11 +107,17 @@ class CustomAllreduce:
             # e.g. in a non-cuda environment
             return
 
-        group = group or get_tensor_model_parallel_cpu_group()
         self.group = group
 
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "CustomAllreduce should be attached to a non-NCCL group.")
+
+        if not is_in_the_same_node(group):
+            # No need to initialize custom allreduce for multi-node case.
+            logger.warning(
+                "Custom allreduce is disabled because this process group"
+                " spans across nodes.")
+            return
 
         rank = dist.get_rank(group=self.group)
         world_size = dist.get_world_size(group=self.group)
@@ -127,10 +133,7 @@ class CustomAllreduce:
                 world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
             return
 
-        if device is None:
-            local_rank = get_local_rank()
-            device = torch.device(f"cuda:{local_rank}")
-        elif isinstance(device, int):
+        if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
             device = torch.device(device)
@@ -142,7 +145,7 @@ class CustomAllreduce:
         if cuda_visible_devices:
             device_ids = list(map(int, cuda_visible_devices.split(",")))
         else:
-            device_ids = list(range(torch.cuda.device_count()))
+            device_ids = list(range(cuda_device_count_stateless()))
 
         physical_device_id = device_ids[device.index]
         tensor = torch.tensor([physical_device_id],
