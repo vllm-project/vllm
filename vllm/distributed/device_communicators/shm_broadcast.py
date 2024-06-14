@@ -63,8 +63,7 @@ class ShmRingBuffer:
                 if buffer[0] and read_count != self.world_size - 1:
                     # this block is written and not read by all readers
                     # try to write to the next block
-                    self.current_idx += 1
-                    self.current_idx %= self.max_chunks
+                    self.current_idx = (self.current_idx + 1) % self.max_chunks
                     continue
                 # found a block that is either
                 # (1) not written
@@ -91,8 +90,7 @@ class ShmRingBuffer:
                     # (1) not written
                     # (2) already read by this reader
                     # try to read the next block
-                    self.current_idx += 1
-                    self.current_idx %= self.max_chunks
+                    self.current_idx = (self.current_idx + 1) % self.max_chunks
                     continue
                 # found a block that is not read by this reader
                 # let caller read from the buffer
