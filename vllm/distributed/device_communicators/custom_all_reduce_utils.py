@@ -79,7 +79,10 @@ def consumer(batch_js: List[int],
         lib.cudaDeviceReset()
 
 
-def can_actually_p2p(batch_is, batch_js):
+def can_actually_p2p(
+    batch_is: List[int],
+    batch_js: List[int],
+):
     """
     Usually, checking if P2P access is enabled can be done by
     `torch.cuda.can_device_access_peer(i, j)`. However, sometimes
@@ -103,7 +106,12 @@ def can_actually_p2p(batch_is, batch_js):
     tensor in process j will be reflected in the tensor in process i, because
     they are the same memory segment.
     It is important to note that process j accesses the tensor in GPU j, not
-    GPU i. That's why we need p2p access. # noqa
+    GPU i. That's why we need p2p access.
+
+    The most time-consuming part is the process creation. To avoid creating
+    processes for every pair of GPUs, we use batched testing. We create two
+    processes for testing all pairs of GPUs in batch. The trick is to reset
+    the device after each test (which is not available in PyTorch). # noqa
     """
     cuda_visible_devices = os.getenv('CUDA_VISIBLE_DEVICES', None)
     # pass the CUDA_VISIBLE_DEVICES to the child process
