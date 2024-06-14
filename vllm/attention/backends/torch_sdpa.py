@@ -193,9 +193,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                         att_masks = [None] * len(attn_metadata.seq_lens)
                     attn_metadata.attn_bias = att_masks
 
-                # query = query.unsqueeze(0) # [batch_size, num_tokens, num_heads, head_size]
-                # key = key.unsqueeze(0)
-                # value = value.unsqueeze(0)
+                query = query.movedim(0, query.dim() - 2)
+                key = key.movedim(0, key.dim() - 2)
+                value = value.movedim(0, value.dim() - 2)
 
                 start = 0
                 output = torch.empty(

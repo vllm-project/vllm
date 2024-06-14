@@ -57,5 +57,5 @@ Build from source
 
 .. note::
     - FP16 is the default data type in the current XPU backend. The BF16 data
-     type will be supported in the future.
+      type will be supported in the future.
 
