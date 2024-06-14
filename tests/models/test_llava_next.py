@@ -1,3 +1,4 @@
+import re
 from typing import List, Tuple
 
 import pytest
@@ -66,8 +67,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
         input_id for idx, input_id in enumerate(input_ids)
         if input_id != image_token_id or input_ids[idx - 1] != image_token_id
     ]
-    hf_output_str = output_str \
-        .replace(image_token_str * vlm_config.image_feature_size, " ")
+    hf_output_str = re.sub(fr"({image_token_str})+", " ", output_str)
 
     return hf_input_ids, hf_output_str
 
