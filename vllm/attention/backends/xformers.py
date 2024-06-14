@@ -123,9 +123,23 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     # Begin encoder attn & enc/dec cross-attn fields...
 
-    # If True, prefill_metadata() and decode_metadata() will return
-    # seqlen & memory-mapping data structures for cross-attention;
-    # otherwise, self-attention data structures will be returned.
+    # Attention type enum.
+    #
+    # * Impact on XFormersImpl.forward(): 
+    #
+    #       * DECODER: normal decoder-only behavior;
+    #         use decoder self-attention block table
+    #       * ENCODER: no KV caching; pass encoder sequence
+    #         attributes (encoder_seq_lens/encoder_seq_lens_tensor/
+    #         max_encoder_seq_len) to kernel, in lieu of decoder
+    #         sequence attributes (seq_lens/seq_lens_tensor/max_seq_len)
+    #       * ENCODER_DECODER: cross-attention behavior;
+    #         use cross-attention block table for caching KVs derived
+    #         from encoder hidden states; since KV sequence lengths
+    #         will match encoder sequence lengths, pass encoder sequence
+    #         attributes to kernel (encoder_seq_lens/encoder_seq_lens_tensor/
+    #         max_encoder_seq_len)
+    #         
     _attn_type: AttentionType = AttentionType.DECODER
 
     # (batch_size,). The "cross-sequence-length" per sequence,i.e. the key/value
@@ -487,7 +501,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         assert_no_encdec_chunked_prefill_assuming_supported_backend(
             attn_metadata)
 
-        if (kv_cache is not None):
+        if (attn_type != AttentionType.ENCODER and \
+            kv_cache is not None):
+            # KV-cache during decoder-self- or
+            # encoder-decoder-cross-attention, but not
+            # during encoder attention.
+            #
             # Even if there are no new key/value pairs to cache,
             # we still need to break out key_cache and value_cache
             # i.e. for later use by paged attention
