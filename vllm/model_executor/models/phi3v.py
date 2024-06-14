@@ -120,9 +120,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.glb_GN = nn.Parameter(torch.empty([1, 1, self.image_dim_out * 4]))
         self.sub_GN = nn.Parameter(
             torch.empty([1, 1, 1, self.image_dim_out * 4]))
-        logger.info(
-            'learnable separator enabled for hd transform'
-            'hd_transform_order = %s', self.hd_transform_order)
 
         dim_projection = hidden_size
         depth = 2
@@ -143,6 +140,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
                 input_ids: torch.LongTensor,
                 pixel_values: torch.FloatTensor,
                 image_sizes=None) -> torch.FloatTensor:
+        "process and merge text embeddings with image embeddings."
 
         MAX_INPUT_ID = int(1e9)
         img_embeds = pixel_values
@@ -294,7 +292,9 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
         ImageInputType = VisionLanguageConfig.ImageInputType
 
         if expected_input_type != ImageInputType.PIXEL_VALUES:
-            return None
+            raise ValueError(
+                f"Unexpected image input type: {expected_input_type}."
+                "Phi3v only support pixel_values input currently.")
 
         if pixel_values is not None and image_sizes is not None:
             return Phi3VImagePixelInputs(type="pixel_values",
