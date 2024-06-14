@@ -5,7 +5,7 @@ Deploying with Docker
 
 vLLM offers official docker image for deployment.
 The image can be used to run OpenAI compatible server.
-The image is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.com/r/vllm/vllm-openai/tags>`_.
+The image is available on Dockesr Hub as `vllm/vllm-openai <https://hub.docker.com/r/vllm/vllm-openai/tags>`_.
 
 .. code-block:: console
 
