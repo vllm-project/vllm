@@ -523,7 +523,7 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
 ):
-    logger.info(
+    logger.debug(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
         distributed_init_method, backend)
@@ -682,6 +682,7 @@ OVERRIDE_TP_STATE = False
 
 @contextlib.contextmanager
 def patch_tensor_parallel_group(world_group, tp_group):
+    """Patch the tp group temporarily until this function ends."""
     global OVERRIDE_TP_STATE
     if OVERRIDE_TP_STATE:
         return
@@ -695,6 +696,7 @@ def patch_tensor_parallel_group(world_group, tp_group):
     try:
         yield
     finally:
+        # restore the original state
         OVERRIDE_TP_STATE = False
         _WORLD = old_world_group
         _TP = old_tp_group

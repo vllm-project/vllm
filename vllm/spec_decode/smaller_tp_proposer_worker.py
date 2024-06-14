@@ -134,9 +134,6 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             return self._worker.execute_model(execute_model_req)
 
     def get_cache_block_size_bytes(self) -> int:
-        """Return the size of a single cache block, in bytes. Used in
-        speculative decoding.
-        """
         return self._worker.get_cache_block_size_bytes()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -158,6 +155,9 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
 
 class DummyProposerWorker(ProposerWorkerBase):
+    """Dummy proposer worker that do nothing.
+    It's for workers that do not participate in draft generation.
+    """
 
     def __init__(
         self,

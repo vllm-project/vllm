@@ -292,6 +292,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         ) == 0 or disable_all_speculation:
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
+
         return self._run_speculative_decoding_step(execute_model_req,
                                                    num_lookahead_slots)
 
