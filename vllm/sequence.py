@@ -1,8 +1,8 @@
 """Sequence and its related classes."""
 import copy
-import dataclasses
 import enum
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
-@dataclasses.dataclass
+@dataclass
 class Logprob:
     """Infos for supporting OpenAI compatible logprobs and token ranks.
 
@@ -81,7 +81,7 @@ class SequenceStage(enum.Enum):
     DECODE = enum.auto()
 
 
-@dataclasses.dataclass
+@dataclass
 class RequestMetrics:
     """Metrics associated with a request.
 
@@ -391,7 +391,7 @@ class Sequence:
                 f"num_blocks={len(self.logical_token_blocks)})")
 
 
-@dataclasses.dataclass
+@dataclass
 class SequenceGroupState:
     """Mutable state tied to a specific sequence group"""
 
@@ -768,7 +768,7 @@ class EmbeddingSequenceGroupOutput(SequenceGroupOutput):
         return self.embeddings == other.embeddings
 
 
-@dataclasses.dataclass
+@dataclass
 class SamplerOutput:
     """For each sequence group, we generate a list of SequenceOutput object,
     each of which contains one possible candidate for the next token.
@@ -818,7 +818,7 @@ class SamplerOutput:
             f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
 
 
-@dataclasses.dataclass
+@dataclass
 class PoolerOutput:
     """The output from a pooling operation in the embedding model."""
     outputs: List[EmbeddingSequenceGroupOutput]
@@ -839,21 +839,18 @@ class PoolerOutput:
                           self.__class__) and self.outputs == other.outputs
 
 
-@dataclasses.dataclass
+@dataclass
 class ExecuteModelRequest:
     """The model execution request, containing CPU metadata only. The LLM
     engine should create an instance of this class for each request batch."""
     # The sequence group metadata list.
     seq_group_metadata_list: List[SequenceGroupMetadata]
     # Blocks to swap in. List of CPU -> GPU block number.
-    blocks_to_swap_in: List[Tuple[int, int]] = dataclasses.field(
-        default_factory=list)
+    blocks_to_swap_in: List[Tuple[int, int]] = field(default_factory=list)
     # Blocks to swap out. List of GPU -> CPU block number.
-    blocks_to_swap_out: List[Tuple[int, int]] = dataclasses.field(
-        default_factory=list)
+    blocks_to_swap_out: List[Tuple[int, int]] = field(default_factory=list)
     # Blocks to copy. Source to dest block.
-    blocks_to_copy: List[Tuple[int,
-                               int]] = dataclasses.field(default_factory=list)
+    blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int = 0
     # The number of requests in the running queue.
