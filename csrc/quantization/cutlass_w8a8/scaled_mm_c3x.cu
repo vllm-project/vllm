@@ -486,8 +486,8 @@ void cutlass_scaled_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
           out, a, b, a_scales, b_scales);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
-      return cutlass_gemm_sm90_fp8_dispatch<
-          cutlass::float_e4m3_t, cutlass::half_t, ScaledEpilogue>(
+      return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
+                                            cutlass::half_t, ScaledEpilogue>(
           out, a, b, a_scales, b_scales);
     }
   }
