@@ -679,6 +679,7 @@ def _run_encoder_decoder_cross_attention_test(
     return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query, key,
                         value, kv_cache, attn_metadata)
 
+
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -688,10 +689,9 @@ def _run_encoder_decoder_cross_attention_test(
 @pytest.mark.parametrize("max_dec_seq_len", MAX_DEC_SEQ_LENS)
 @pytest.mark.parametrize("max_enc_seq_len", MAX_ENC_SEQ_LENS)
 def test_encoder_only(num_heads: int, head_size: int, backend_name: str,
-                      batch_size: int, block_size: int,
-                      max_dec_seq_len: int, max_enc_seq_len: int,
-                      monkeypatch):
-    
+                      batch_size: int, block_size: int, max_dec_seq_len: int,
+                      max_enc_seq_len: int, monkeypatch):
+
     # Force Attention wrapper backend
     override_backend_env_variable(monkeypatch, backend_name)
 
@@ -732,6 +732,7 @@ def test_encoder_only(num_heads: int, head_size: int, backend_name: str,
 
     # - Is encoder attention result correct?
     assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
+
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)

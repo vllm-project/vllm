@@ -287,7 +287,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             block_tables=block_tables,
             use_cuda_graph=self.use_cuda_graph,
             _attn_type=self.
-                    _attn_type,  # Begin encoder & cross attn fields below...
+            _attn_type,  # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
             max_encoder_seq_len=self.max_encoder_seq_len,
