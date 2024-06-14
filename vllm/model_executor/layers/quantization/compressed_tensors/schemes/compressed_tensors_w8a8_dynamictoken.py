@@ -49,14 +49,20 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         is_tensor_partitioned = len(output_partition_sizes) != 1
         # TODO: if strategy: channel this should always be weight_scale_dim
         weight_scale_dim = sum(
-            output_partition_sizes) if (is_tensor_partitioned or self.strategy == "CHANNEL") else 1
+            output_partition_sizes) if (is_tensor_partitioned or self.strategy.value == "channel") else 1
 
         weight_zero_point = Parameter(torch.empty(1, dtype=torch.int8),
                                       requires_grad=False)
 
-        weight_scale = Parameter(torch.empty(weight_scale_dim,
-                                             dtype=torch.float32),
-                                 requires_grad=False)
+        # Can we add the extra dim for the per tensor case so the shapes are the same?
+        if self.strategy.value == "channel":
+            weight_scale = Parameter(torch.empty(weight_scale_dim, 1,
+                                                dtype=torch.float32),
+                                    requires_grad=False)
+        else:
+            weight_scale = Parameter(torch.empty(weight_scale_dim, 
+                                                dtype=torch.float32),
+                                        requires_grad=False)
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
@@ -70,11 +76,20 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
 
         layer.register_parameter("weight_scale", weight_scale)
         set_weight_attrs(weight_scale, {"weight_loader": weight_loader})
-        set_weight_attrs(
-            weight_scale, {
-                "shard_splitter": self.scales_shard_splitter,
-                "logical_widths": output_partition_sizes
-            })
+
+        if self.strategy.value == "channel":
+            set_weight_attrs(
+                weight_scale, {
+                    "output_dim": 0,
+                })
+
+        # Shouldn't need the shard_splitter if using channel-wise. Confirm this all loads
+        if self.strategy.value != "channel":
+            set_weight_attrs(
+                weight_scale, {
+                    "logical_widths": output_partition_sizes,
+                    "shard_splitter": self.scales_shard_splitter,
+                })
 
         layer.register_parameter("weight_zero_point", weight_zero_point)
         set_weight_attrs(weight_zero_point, {"weight_loader": weight_loader})
