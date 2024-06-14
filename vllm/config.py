@@ -879,6 +879,7 @@ class SpeculativeConfig:
             # config, in future, we may try refactor it out, and set
             # draft related config as None here.
             draft_model_config = target_model_config
+            draft_parallel_config = target_parallel_config
         else:
             ngram_prompt_lookup_max = 0
             ngram_prompt_lookup_min = 0
@@ -907,9 +908,9 @@ class SpeculativeConfig:
                     target_model_config.max_model_len,
                 ))
 
-        draft_parallel_config = (
-            SpeculativeConfig.create_draft_parallel_config(
-                target_parallel_config, speculative_tensor_parallel_size))
+            draft_parallel_config = (
+                SpeculativeConfig.create_draft_parallel_config(
+                    target_parallel_config, speculative_tensor_parallel_size))
 
         return SpeculativeConfig(
             draft_model_config,
