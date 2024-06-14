@@ -167,7 +167,7 @@ class GroupCoordinator:
             ShmRingBuffer)
         self.shm_broadcaster: Optional[ShmRingBuffer] = None
         if is_in_the_same_node(self.cpu_group):
-            self.shm_broadcaster = ShmRingBuffer(self.cpu_group, 1 << 20, 2)
+            self.shm_broadcaster = ShmRingBuffer(self.cpu_group, 1 << 20, 6)
 
     @property
     def first_rank(self):
