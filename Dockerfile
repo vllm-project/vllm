@@ -6,11 +6,12 @@
 # docs/source/assets/dev/dockerfile-stages-dependency.png
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
-ENV PYTHON_VERSION=${PYTHON_VERSION}
-ENV CUDA_VERSION=${CUDA_VERSION}
+
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS dev
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+ENV CUDA_VERSION=${CUDA_VERSION}
 
 RUN echo ${CUDA_VERSION}
 RUN echo ${PYTHON_VERSION}
@@ -50,7 +51,10 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### WHEEL BUILD IMAGE ####################
 FROM dev AS build
-
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+ENV CUDA_VERSION=${CUDA_VERSION}
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
