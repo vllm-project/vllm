@@ -33,8 +33,10 @@ def producer(batch_src: Sequence[int],
         producer_queue.put(handle)
         open_success = consumer_queue.get()
         if open_success:
+            # use two queues to simulate barrier
             producer_queue.put(0)
             consumer_queue.get()
+            # check if the memory is modified
             host_data = (ctypes.c_char * 1024)()
             lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
             for i in range(1024):
@@ -67,9 +69,12 @@ def consumer(batch_tgt: Sequence[int],
             pass
         consumer_queue.put(open_success)
         if open_success:
+            # modify the memory
             lib.cudaMemset(pointer, 2, 1024)
+            # use two queues to simulate barrier
             producer_queue.get()
             consumer_queue.put(0)
+            # check if the memory is modified
             host_data = (ctypes.c_char * 1024)()
             lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
             for i in range(1024):
