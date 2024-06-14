@@ -1,9 +1,13 @@
 import copy
 import weakref
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import torch
 
+from vllm.distributed.parallel_state import (_ENABLE_CUSTOM_ALL_REDUCE,
+                                             GroupCoordinator, get_tp_group,
+                                             get_world_group,
+                                             patch_tensor_parallel_group)
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
@@ -25,14 +29,51 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     requires more thought for MultiStepWorker support.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, ranks, is_dummy, **kwargs):
+        self.is_dummy = is_dummy
+        if ranks is not None and not is_dummy:
+            self._ranks = ranks
+            self._tp_groups = None
+
+        super().__init__(**kwargs)
 
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
+    def _patch_tensor_parallel_group(self):
+        if self._tp_groups is not None:
+            return patch_tensor_parallel_group(self._tp_groups[0],
+                                               self._tp_groups[1])
+        return None
+
     def init_device(self):
-        super().init_device()
+        if self.is_dummy:
+            return
+
+        local_rank = get_world_group().local_rank
+        world_backend = torch.distributed.get_backend(
+            get_world_group().device_group)
+        tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
+
+        world_group = GroupCoordinator(
+            group_ranks=[self._ranks],
+            local_rank=local_rank,
+            torch_distributed_backend=world_backend,
+            use_pynccl=False,
+            use_custom_allreduce=False,
+        )
+        tp_group = GroupCoordinator(
+            group_ranks=[self._ranks],
+            local_rank=local_rank,
+            torch_distributed_backend=tp_backend,
+            use_pynccl=True,
+            use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
+        )
+
+        self._tp_groups = world_group, tp_group
+
+        with self._patch_tensor_parallel_group():
+            super().init_device()
 
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]
@@ -44,6 +85,21 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     def set_include_gpu_probs_tensor(self):
         # Need include_gpu_probs_tensor for multi_step_worker
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
+
+    def load_model(self):
+        if not self.is_dummy:
+            with self._patch_tensor_parallel_group():
+                super().load_model()
+
+    def determine_num_available_blocks(self):
+        if not self.is_dummy:
+            with self._patch_tensor_parallel_group():
+                return super().determine_num_available_blocks()
+
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int):
+        if not self.is_dummy:
+            with self._patch_tensor_parallel_group():
+                super().initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @torch.inference_mode()
     def sampler_output(
@@ -58,6 +114,9 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         For multi step worker, this indicator shall be True.
         """
+        if not self.is_dummy:
+            return [], True
+
         self._raise_if_unsupported(execute_model_req)
 
         # Shallow copy input data so modifications (such as appending tokens)
@@ -93,8 +152,11 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
+        if not self.is_dummy:
+            return SpeculativeProposals(None, None, None)
 
-        return self._proposer.get_spec_proposals(execute_model_req)
+        with self._patch_tensor_parallel_group():
+            return self._proposer.get_spec_proposals(execute_model_req)
 
     @staticmethod
     def _append_new_tokens(
@@ -207,3 +269,20 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 execute_model_req.seq_group_metadata_list):
             raise NotImplementedError(
                 "MultiStepWorker does not support beam search.")
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        if self.is_dummy:
+            return []
+
+        with self._patch_tensor_parallel_group():
+            return super().execute_model(execute_model_req)
+
+    def get_cache_block_size_bytes(self) -> int:
+        if self.is_dummy:
+            return 0
+
+        return super().get_cache_block_size_bytes()

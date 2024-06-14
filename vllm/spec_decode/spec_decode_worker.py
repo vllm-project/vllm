@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.config import SpeculativeConfig
+from vllm.config import SpeculativeConfig, ParallelConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
@@ -16,7 +16,6 @@ from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
-from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
 from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
                                    get_sampled_token_logprobs, nvtx_range,
@@ -106,11 +105,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
         else:
-            proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+            draft_parallel_config: ParallelConfig = draft_worker_kwargs['parallel_config']
+            draft_tp = draft_parallel_config.tensor_parallel_size
+            target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
-        proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
-            proposer_worker, draft_worker_kwargs['parallel_config'],
-            scorer_worker.parallel_config, scorer_worker.rank)
+            draft_ranks = None
+            is_dummy = None
+            if target_tp != draft_tp:
+                # gpu ranks that will generate draft tokens
+                draft_ranks = list(range(draft_tp))
+                is_dummy = scorer_worker.rank not in draft_ranks
+            proposer_worker = MultiStepWorker(draft_ranks, is_dummy,
+                                              **draft_worker_kwargs)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
