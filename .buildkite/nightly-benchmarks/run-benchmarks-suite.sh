@@ -350,7 +350,7 @@ main() {
 
   # postprocess benchmarking results
   pip install tabulate pandas
-  python3 $QUICK_BENCHMARK_ROOT/convert-results-json-to-markdown.py
+  python3 $QUICK_BENCHMARK_ROOT/scripts/convert-results-json-to-markdown.py
 
   upload_to_buildkite
 }
