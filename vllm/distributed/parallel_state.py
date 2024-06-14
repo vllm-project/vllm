@@ -684,22 +684,21 @@ OVERRIDE_TP_STATE = False
 def patch_tensor_parallel_group(world_group, tp_group):
     """Patch the tp group temporarily until this function ends."""
     global OVERRIDE_TP_STATE
-    if OVERRIDE_TP_STATE or not world_group or not tp_group:
-        return
-
-    OVERRIDE_TP_STATE = True
-    old_world_group = get_world_group()
-    old_tp_group = get_tp_group()
-    global _WORLD, _TP
-    _WORLD = world_group
-    _TP = tp_group
+    if not OVERRIDE_TP_STATE and world_group and tp_group:
+        OVERRIDE_TP_STATE = True
+        old_world_group = get_world_group()
+        old_tp_group = get_tp_group()
+        global _WORLD, _TP
+        _WORLD = world_group
+        _TP = tp_group
     try:
         yield
     finally:
         # restore the original state
-        OVERRIDE_TP_STATE = False
-        _WORLD = old_world_group
-        _TP = old_tp_group
+        if OVERRIDE_TP_STATE:
+            OVERRIDE_TP_STATE = False
+            _WORLD = old_world_group
+            _TP = old_tp_group
 
 
 def get_tensor_model_parallel_world_size():
