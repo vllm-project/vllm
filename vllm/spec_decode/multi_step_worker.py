@@ -41,8 +41,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         """
         rank = kwargs['rank']
         self.is_dummy = False
+        self._draft_ranks = draft_ranks
         if draft_ranks is not None:
-            self._draft_ranks = draft_ranks
             self.is_dummy = rank not in draft_ranks
             self._tp_groups = None
             logger.info(f"{self._draft_ranks=}, {self._tp_groups=}")
