@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
 logger = init_logger(__name__)
 
@@ -37,16 +38,24 @@ def producer(i: int,
             world_size=2,
             rank=0,
         )
-        # produce a tensor in GPU i
-        data = torch.zeros((128, ), device=f"cuda:{i}")
-        # get the information to reconstruct the shared tensor
-        func, args = torch.multiprocessing.reductions.reduce_tensor(data)
-        args = list(args)
-        dist.broadcast_object_list([(func, args)], src=0)
-        dist.barrier()
-        torch.cuda.synchronize()
-        assert torch.all(data == 1).item()
-
+        lib = CudaRTLibrary()
+        lib.cudaSetDevice(i)
+        pointer = lib.cudaMalloc(1024)
+        lib.cudaMemset(pointer, 1, 1024)
+        lib.cudaDeviceSynchronize()
+        handle = lib.cudaIpcGetMemHandle(pointer)
+        dist.broadcast_object_list([handle], src=0)
+        recv = [None]
+        dist.broadcast_object_list(recv, src=1)
+        open_success = recv[0]
+        if open_success:
+            dist.barrier()
+            host_data = (ctypes.c_char * 1024)()
+            lib.cudaMemcpy(host_data, pointer, 1024)
+            for i in range(1024):
+                assert host_data[i] == 2
+        else:
+            raise RuntimeError("Failed to open the IPC handle")
 
 def consumer(j: int,
              init_method: str,
@@ -60,22 +69,29 @@ def consumer(j: int,
             world_size=2,
             rank=1,
         )
-        torch.cuda.set_device(j)
+        lib = CudaRTLibrary()
+        lib.cudaSetDevice(j)
         recv = [None]
         dist.broadcast_object_list(recv, src=0)
-        func: Callable
-        args: List
-        func, args = recv[0]  # type: ignore
-        # `args[6]` is the device id
-        # by default pytorch will use `i` from the producer
-        # here we need to set it to `j` to test P2P access
-        args[6] = j
-        data = func(*args)
-        data += 1
-        dist.barrier()
-        torch.cuda.synchronize()
-        assert torch.all(data == 1).item()
-
+        handle = recv[0]
+        open_success = False
+        try:
+            pointer = lib.cudaIpcOpenMemHandle(handle)
+            open_success = True
+        except RuntimeError:
+            # cannot error out here, because the producer process
+            # is still waiting for the response.
+            pass
+        dist.broadcast_object_list([open_success], src=1)
+        if open_success:
+            lib.cudaMemset(pointer, 2, 1024)
+            dist.barrier()
+            host_data = (ctypes.c_char * 1024)()
+            lib.cudaMemcpy(host_data, pointer, 1024)
+            for i in range(1024):
+                assert host_data[i] == 2
+        else:
+            raise RuntimeError("Failed to open the IPC handle")
 
 def can_actually_p2p(i, j):
     """
