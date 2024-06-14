@@ -96,9 +96,6 @@ steps:
             {% if step.label == "Speculative decoding tests" %}
             - VLLM_ATTENTION_BACKEND=XFORMERS
             {% endif %}
-            {% if step.num_gpus == 2 %}
-            - CUDA_VISIBLE_DEVICES=0,1
-            {% endif %}
           volumes:
             - /dev/shm:/dev/shm
   {% endfor %}
