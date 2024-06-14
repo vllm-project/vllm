@@ -478,9 +478,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         """
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
+            assert value is not None
             key = key.view(-1, self.num_kv_heads, self.head_size)
-        if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size)
+        else:
+            assert value is None
 
         # Self-attention vs. cross-attention will impact
         # which KV cache memory-mapping & which
