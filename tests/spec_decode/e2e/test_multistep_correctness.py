@@ -176,7 +176,7 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
 def test_spec_decode_e2e_with_small_draft_tps(test_llm_generator,
                                            baseline_llm_generator,
                                            batch_size: int):
-    """Verify spec decode works well with async LLM engine.
+    """Verify spec decode works well with smaller tp for draft models.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,

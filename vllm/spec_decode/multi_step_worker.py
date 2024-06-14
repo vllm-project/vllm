@@ -46,7 +46,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             self.is_dummy = rank not in draft_ranks
             self._tp_groups = None
             logger.info(f"{self._draft_ranks=}, {self._tp_groups=}")
-        logger.inf(f"{rank=}, {draft_ranks=}, {self.is_dummy=}")
+        logger.info(f"{rank=}, {draft_ranks=}, {self.is_dummy=}")
 
         super().__init__(**kwargs)
 
