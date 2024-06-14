@@ -18,7 +18,10 @@ RUN echo ${CUDA_VERSION}
 RUN echo ${PYTHON_VERSION}
 RUN echo python${PYTHON_VERSION}
 RUN apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python3-pip git curl sudo
+    && apt-get install -y python3-pip git curl sudo software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} \
+    && python${PYTHON_VERSION} --version
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -62,8 +65,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-build.txt
 
 # install compiler cache to speed up compilation leveraging local or remote caching
-RUN apt-get update -y && apt-get install -y ccache
-
+RUN apt-get update -y && apt-get install -y ccache software-properties-common && add-apt-repository ppa:deadsnakes/ppa && apt-get update -y && apt-get install -y python${PYTHON_VERSION} && python${PYTHON_VERSION} --version
+RUN python${PYTHOON_VERSION} --version
 # files and directories related to build wheels
 COPY csrc csrc
 COPY setup.py setup.py
