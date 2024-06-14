@@ -11,10 +11,7 @@ ARG PYTHON_VERSION
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git curl sudo software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev
+    && apt-get install -y python3-pip git curl sudo python${PYTHON_VERSION}
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
