@@ -64,10 +64,9 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
                 "input_dim": 1,
                 "output_dim": 0,
                 "packed_dim": 1,
-                "pack_factor": pack_factor
+                "pack_factor": pack_factor,
+                "weight_loader": weight_loader
             })
-        set_weight_attrs(weight, {"weight_loader": weight_loader})
-
         layer.register_parameter("weight_packed", weight)
 
         weight_scale = Parameter(
@@ -79,11 +78,12 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
             requires_grad=False,
         )
 
-        set_weight_attrs(weight_scale, {"weight_loader": weight_loader})
-        set_weight_attrs(weight_scale, {
-            "input_dim": weight_scale_dim,
-            "output_dim": 0
-        })
+        set_weight_attrs(
+            weight_scale, {
+                "weight_loader": weight_loader,
+                "input_dim": weight_scale_dim,
+                "output_dim": 0
+            })
         layer.register_parameter("weight_scale", weight_scale)
 
         # A 2D array defining the original shape of the weights
@@ -92,7 +92,10 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
                                  requires_grad=False)
 
         layer.register_parameter("weight_shape", weight_shape)
-        set_weight_attrs(weight_shape, {"weight_loader": weight_loader})
+        set_weight_attrs(weight_shape, {
+            "weight_loader": weight_loader,
+            "ignore_warning": True,
+        })
 
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
