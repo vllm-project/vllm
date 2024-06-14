@@ -6,12 +6,15 @@ from torch.nn import Parameter
 from vllm import _custom_ops as custom_ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    QuantizationStrategy)
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsW8A8DynamicToken"]
 
 
 class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
+
     def __init__(self, strategy: str):
         self.strategy = strategy
 
@@ -33,6 +36,9 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         size = logical_widths[shard_id]
         # update loaded weight with copies for broadcast.
         loaded_weight = loaded_weight.repeat(size)
+        # parameter defined for scale is 2D; expand
+        if len(loaded_weight.shape) == 1:
+            loaded_weight = torch.unsqueeze(loaded_weight, -1)
         return param[offset:offset + size], loaded_weight
 
     def create_weights(self, layer: torch.nn.Module,
@@ -47,22 +53,18 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         # CompressedTensorsW8A8StaticTensor::create_weights for further
         # information.
         is_tensor_partitioned = len(output_partition_sizes) != 1
-        # TODO: if strategy: channel this should always be weight_scale_dim
-        weight_scale_dim = sum(
-            output_partition_sizes) if (is_tensor_partitioned or self.strategy.value == "channel") else 1
+
+        weight_scale_dim = sum(output_partition_sizes) if (
+            is_tensor_partitioned
+            or self.strategy == QuantizationStrategy.CHANNEL) else 1
 
         weight_zero_point = Parameter(torch.empty(1, dtype=torch.int8),
                                       requires_grad=False)
 
-        # Can we add the extra dim for the per tensor case so the shapes are the same?
-        if self.strategy.value == "channel":
-            weight_scale = Parameter(torch.empty(weight_scale_dim, 1,
-                                                dtype=torch.float32),
-                                    requires_grad=False)
-        else:
-            weight_scale = Parameter(torch.empty(weight_scale_dim, 
-                                                dtype=torch.float32),
-                                        requires_grad=False)
+        weight_scale = Parameter(torch.empty(weight_scale_dim,
+                                             1,
+                                             dtype=torch.float32),
+                                 requires_grad=False)
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
@@ -77,14 +79,11 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         layer.register_parameter("weight_scale", weight_scale)
         set_weight_attrs(weight_scale, {"weight_loader": weight_loader})
 
-        if self.strategy.value == "channel":
-            set_weight_attrs(
-                weight_scale, {
-                    "output_dim": 0,
-                })
-
-        # Shouldn't need the shard_splitter if using channel-wise. Confirm this all loads
-        if self.strategy.value != "channel":
+        if self.strategy == QuantizationStrategy.CHANNEL:
+            set_weight_attrs(weight_scale, {
+                "output_dim": 0,
+            })
+        else:
             set_weight_attrs(
                 weight_scale, {
                     "logical_widths": output_partition_sizes,

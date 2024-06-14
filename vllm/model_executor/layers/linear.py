@@ -468,14 +468,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
 
-        if fp8_scales_shard_indexer is None:
-            if len(param_data.shape) == 0:
-                param_data = param_data.reshape(1)
-
-            if len(loaded_weight.shape) == 0:
-                loaded_weight = loaded_weight.reshape(1)
-
-        print(param_data.shape, loaded_weight.shape)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -687,12 +679,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "QKVParallelLinear, assume the weight is the same "
                     "for all partitions.")
 
-        if len(param_data.shape) == 0:
-            param_data = param_data.reshape(1)
-
-        if len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
-
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -785,7 +771,7 @@ class RowParallelLinear(LinearBase):
                                                                  shard_id=0)
 
         if fp8_scales_shard_indexer is None and len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
+            loaded_weight = loaded_weight.reshape(1, 1)
 
         print(param_data.shape, loaded_weight.shape)
         assert param_data.shape == loaded_weight.shape
