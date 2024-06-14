@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
-    tensorizer_weights_iterator)
+    serialize_vllm_model, tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -34,6 +34,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import is_tpu
 
 logger = init_logger(__name__)
 
@@ -227,12 +228,26 @@ class DefaultModelLoader(BaseModelLoader):
         if self.load_config.load_format == LoadFormat.NPCACHE:
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
-            return np_cache_weights_iterator(model_name_or_path,
-                                             self.load_config.download_dir,
-                                             hf_folder, hf_weights_files)
-        if use_safetensors:
-            return safetensors_weights_iterator(hf_weights_files)
-        return pt_weights_iterator(hf_weights_files)
+            weights_iterator = np_cache_weights_iterator(
+                model_name_or_path, self.load_config.download_dir, hf_folder,
+                hf_weights_files)
+        elif use_safetensors:
+            weights_iterator = safetensors_weights_iterator(hf_weights_files)
+        else:
+            weights_iterator = pt_weights_iterator(hf_weights_files)
+
+        if is_tpu():
+            # In PyTorch XLA, we should call `xm.mark_step` frequently so that
+            # not too many ops are accumulated in the XLA program.
+            import torch_xla.core.xla_model as xm
+
+            def _xla_weights_iterator(iterator: Generator):
+                for weights in iterator:
+                    yield weights
+                    xm.mark_step()
+
+            weights_iterator = _xla_weights_iterator(weights_iterator)
+        return weights_iterator
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -377,6 +392,12 @@ class TensorizerLoader(BaseModelLoader):
                    cache_config: CacheConfig) -> nn.Module:
         self._verify_config(model_config, parallel_config)
 
+        if parallel_config.tensor_parallel_size > 1:
+            from vllm.distributed import get_tensor_model_parallel_rank
+            self.tensorizer_config.tensorizer_uri = \
+                self.tensorizer_config.tensorizer_uri \
+                    % get_tensor_model_parallel_rank()
+
         if is_vllm_tensorized(self.tensorizer_config):
             return self._load_model_serialized(model_config, device_config,
                                                lora_config,
@@ -386,6 +407,16 @@ class TensorizerLoader(BaseModelLoader):
                                                lora_config,
                                                vision_language_config,
                                                cache_config)
+
+    @staticmethod
+    def save_model(
+        model: torch.nn.Module,
+        tensorizer_config: TensorizerConfig,
+    ) -> None:
+        serialize_vllm_model(
+            model=model,
+            tensorizer_config=tensorizer_config,
+        )
 
 
 class ShardedStateLoader(BaseModelLoader):

@@ -6,7 +6,6 @@ from typing import Awaitable, List
 
 import aiohttp
 
-import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
@@ -16,6 +15,7 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
+from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
@@ -136,7 +136,7 @@ async def main(args):
 if __name__ == "__main__":
     args = parse_args()
 
-    logger.info("vLLM API server version %s", vllm.__version__)
+    logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
     asyncio.run(main(args))
