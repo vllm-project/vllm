@@ -696,9 +696,9 @@ def make_test_metadata(
     Construct fake attention metadata for a given test phase
     (prefill-phase or decode-phase).
 
-    encoder_test_params and cross_test_params arguments all encoder
-    attention and enc/dec cross-attention to use distinct metadata values
-    from decoder self-attention (decoder_test_params.)
+    encoder_test_params and cross_test_params arguments allow encoder
+    attention and enc/dec cross-attention (respectively) to use distinct
+    metadata values from decoder self-attention (decoder_test_params.)
     
     if encoder_test_params and cross_test_params are None, the attention
     metadata will support decoder-only scenario.
