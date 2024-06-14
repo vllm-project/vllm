@@ -5,10 +5,12 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
+from typing import Dict, Optional
+
 import torch
 import triton
 import triton.language as tl
-from typing import Any, Dict, Optional
+
 from .utils import get_lora_op_configs
 
 

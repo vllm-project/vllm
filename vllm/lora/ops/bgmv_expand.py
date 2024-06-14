@@ -5,10 +5,12 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
+from typing import Dict, Optional
+
 import torch
 import triton
 import triton.language as tl
-from typing import Dict, Optional
+
 from .utils import get_lora_op_configs
 
 
@@ -137,7 +139,6 @@ def bgmv_expand(
             torch.bfloat16,
     ]:
         CAST_TYPE = True
-    config = {"BLOCK_N": 64, "SPLIT_N": 8}
     batchs = lora_indices_tensor.size(0)
 
     if override_config:
