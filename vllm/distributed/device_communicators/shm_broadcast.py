@@ -20,7 +20,7 @@ class ShmRingBuffer:
         self.max_chunks = max_chunks
         total_bytes = (self.max_chunk_bytes +
                        self.world_size) * self.max_chunks
-        self.buffer_offset = 0
+        self.data_offset = 0
         self.metadata_offset = self.max_chunk_bytes * self.max_chunks
 
         if self.is_writer:
@@ -43,8 +43,8 @@ class ShmRingBuffer:
                 self.shared_memory = shared_memory.SharedMemory(name=name)
 
     @property
-    def buffer(self):
-        start = self.buffer_offset + self.current_idx * self.max_chunk_bytes
+    def data(self):
+        start = self.data_offset + self.current_idx * self.max_chunk_bytes
         end = start + self.max_chunk_bytes
         return memoryview(self.shared_memory.buf[start:end])
 
@@ -58,9 +58,9 @@ class ShmRingBuffer:
     def acquire_write(self):
         assert self.is_writer, "Only writers can acquire write"
         while True:
-            with self.metadata as buffer:
-                read_count = sum(buffer[1:])
-                written_flag = buffer[0]
+            with self.metadata as metadata_buffer:
+                read_count = sum(metadata_buffer[1:])
+                written_flag = metadata_buffer[0]
                 if written_flag and read_count != self.world_size - 1:
                     # this block is written and not read by all readers
                     # try to write to the next block
@@ -70,23 +70,23 @@ class ShmRingBuffer:
                 # (1) not written
                 # (2) read by all readers
                 # let caller write to the buffer
-                with self.buffer as buf:
+                with self.data as buf:
                     yield buf
 
                 # caller has written to the buffer
                 # reset the state
-                buffer[0] = 1
+                metadata_buffer[0] = 1
                 for i in range(1, self.world_size):
-                    buffer[i] = 0
+                    metadata_buffer[i] = 0
                 break
 
     @contextmanager
     def acquire_read(self):
         assert self.is_reader, "Only readers can acquire read"
         while True:
-            with self.metadata as buffer:
-                read_flag = buffer[self.rank]
-                written_flag = buffer[0]
+            with self.metadata as metadata_buffer:
+                read_flag = metadata_buffer[self.rank]
+                written_flag = metadata_buffer[0]
                 if not written_flag or read_flag:
                     # this block is either
                     # (1) not written
@@ -96,12 +96,12 @@ class ShmRingBuffer:
                     continue
                 # found a block that is not read by this reader
                 # let caller read from the buffer
-                with self.buffer as buf:
+                with self.data as buf:
                     yield buf
 
                 # caller has read from the buffer
                 # set the read flag
-                buffer[self.rank] = 1
+                metadata_buffer[self.rank] = 1
                 break
 
     def broadcast_object(self, obj=None):
