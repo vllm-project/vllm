@@ -169,7 +169,7 @@ struct cutlass_3x_gemm_bias {
 };
 
 template <typename Gemm>
-void cutlass_scaled_mm_dq_bias_dispatcher(torch::Tensor& out,
+void cutlass_scaled_mm_bias_dispatcher(torch::Tensor& out,
                                           torch::Tensor const& a,
                                           torch::Tensor const& b,
                                           torch::Tensor const& a_scales,
@@ -290,7 +290,7 @@ struct sm90_fp8_config<InType, OutType, 64> {
 }  // namespace
 
 template <typename InType, typename OutType>
-void cutlass_scaled_mm_dq_bias_sm90_fp8_dispatch(torch::Tensor& out,
+void cutlass_scaled_mm_bias_sm90_fp8_dispatch(torch::Tensor& out,
                                                  torch::Tensor const& a,
                                                  torch::Tensor const& b,
                                                  torch::Tensor const& a_scales,
@@ -319,20 +319,20 @@ void cutlass_scaled_mm_dq_bias_sm90_fp8_dispatch(torch::Tensor& out,
 
   if (mp2 <= 64) {
     // m in [1, 64]
-    return cutlass_scaled_mm_dq_bias_dispatcher<Cutlass3xGemmM64>(
+    return cutlass_scaled_mm_bias_dispatcher<Cutlass3xGemmM64>(
         out, a, b, a_scales, b_scales, bias);
   } else if (mp2 <= 128) {
     // m in (64, 128]
-    return cutlass_scaled_mm_dq_bias_dispatcher<Cutlass3xGemmM128>(
+    return cutlass_scaled_mm_bias_dispatcher<Cutlass3xGemmM128>(
         out, a, b, a_scales, b_scales, bias);
   } else {
     // m in (128, inf)
-    return cutlass_scaled_mm_dq_bias_dispatcher<Cutlass3xGemmDefault>(
+    return cutlass_scaled_mm_bias_dispatcher<Cutlass3xGemmDefault>(
         out, a, b, a_scales, b_scales, bias);
   }
 }
 
-void cutlass_scaled_mm_dq_bias_sm90(torch::Tensor& out, torch::Tensor const& a,
+void cutlass_scaled_mm_bias_sm90(torch::Tensor& out, torch::Tensor const& a,
                                     torch::Tensor const& b,
                                     torch::Tensor const& a_scales,
                                     torch::Tensor const& b_scales,
@@ -344,12 +344,12 @@ void cutlass_scaled_mm_dq_bias_sm90(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
   if (out.dtype() == torch::kBFloat16) {
-    return cutlass_scaled_mm_dq_bias_sm90_fp8_dispatch<cutlass::float_e4m3_t,
+    return cutlass_scaled_mm_bias_sm90_fp8_dispatch<cutlass::float_e4m3_t,
                                                        cutlass::bfloat16_t>(
         out, a, b, a_scales, b_scales, bias);
   } else {
     TORCH_CHECK(out.dtype() == torch::kFloat16);
-    return cutlass_scaled_mm_dq_bias_sm90_fp8_dispatch<cutlass::float_e4m3_t,
+    return cutlass_scaled_mm_bias_sm90_fp8_dispatch<cutlass::float_e4m3_t,
                                                        cutlass::half_t>(
         out, a, b, a_scales, b_scales, bias);
   }
