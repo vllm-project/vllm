@@ -93,16 +93,20 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         )
 
     def set_include_gpu_probs_tensor(self):
-        if not self._is_dummy:
-            # Need include_gpu_probs_tensor for multi_step_worker
-            self.model_runner.model.sampler.include_gpu_probs_tensor = True
+        if self._is_dummy:
+            return
+
+        # Need include_gpu_probs_tensor for multi_step_worker
+        self.model_runner.model.sampler.include_gpu_probs_tensor = True
 
     def load_model(self):
-        if not self._is_dummy:
-            with self._patch_tensor_parallel_group():
-                super().load_model()
+        if self._is_dummy:
+            return
 
-    def determine_num_available_blocks(self):
+        with self._patch_tensor_parallel_group():
+            super().load_model()
+
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         if self._is_dummy:
             return -1, -1
 
@@ -110,9 +114,11 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             return super().determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int):
-        if not self._is_dummy:
-            with self._patch_tensor_parallel_group():
-                super().initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        if self._is_dummy:
+            return
+
+        with self._patch_tensor_parallel_group():
+            super().initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @torch.inference_mode()
     def sampler_output(
@@ -127,7 +133,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         For multi step worker, this indicator shall be True.
         """
-        if not self._is_dummy:
+        if self._is_dummy:
             return [], True
 
         self._raise_if_unsupported(execute_model_req)
@@ -165,7 +171,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
-        if not self._is_dummy:
+        if self._is_dummy:
             return SpeculativeProposals(None, None, None)
 
         with self._patch_tensor_parallel_group():
