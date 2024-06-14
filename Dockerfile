@@ -11,6 +11,9 @@ ARG CUDA_VERSION
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS dev
 ARG CUDA_VERSION
 ENV CUDA_VERSION=${CUDA_VERSION}
+ARG PYTHON_VERSION
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
@@ -61,15 +64,6 @@ ENV PYTHON_VERSION=${PYTHON_VERSION}
 COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-build.txt
-ENV DEBIAN_FRONTEND=noninteractive
-# install compiler cache to speed up compilation leveraging local or remote caching
-RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
-    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
-    && apt-get update -y \
-    && apt-get install -y ccache software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION}
 # files and directories related to build wheels
 COPY csrc csrc
 COPY setup.py setup.py
