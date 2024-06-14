@@ -85,7 +85,7 @@ __global__ void LLGemm1_kernel(float4* af4, __half2* bf4, __half2* c,
     }
   }
 
-// all reduce accross warp.
+// all reduce across warp.
 #pragma unroll
   for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
 #pragma unroll
