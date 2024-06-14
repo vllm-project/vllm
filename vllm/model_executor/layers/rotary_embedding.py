@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
+from vllm.utils import is_tpu
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -41,6 +42,19 @@ def _rotate_gptj(x: torch.Tensor) -> torch.Tensor:
     x2 = x[..., 1::2]
     x = torch.stack((-x2, x1), dim=-1)
     return x.flatten(-2)
+
+
+def _apply_rotary_emb(
+    x: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> torch.Tensor:
+    x_ = torch.view_as_complex(
+        torch.stack(torch.chunk(x.transpose(1, 2).float(), 2, dim=-1), dim=-1))
+    x_out = torch.view_as_real(x_ * freqs_cis).type_as(x)
+    x_out = torch.cat(torch.chunk(x_out, 2, dim=-1), dim=-2)
+    x_out = x_out.reshape(x_out.shape[0], x_out.shape[1], x_out.shape[2],
+                          -1).transpose(1, 2)
+    return x_out
 
 
 class RotaryEmbedding(CustomOp):
@@ -64,8 +78,14 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
-        cache = cache.to(dtype)
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        self.use_native2 = is_tpu() and is_neox_style
+        if not self.use_native2:
+            cache = cache.to(dtype)
+            self.register_buffer("cos_sin_cache", cache, persistent=False)
+        else:
+            cos, sin = cache.chunk(2, dim=-1)
+            freqs_cis = cos + 1j * sin
+            self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -100,7 +120,11 @@ class RotaryEmbedding(CustomOp):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """PyTorch-native implementation equivalent to forward()."""
+        """A PyTorch-native implementation equivalent to forward().
+
+        This method mimics the implementation of the custom CUDA kernel
+        used in `forward_cuda()`.
+        """
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
 
@@ -138,6 +162,42 @@ class RotaryEmbedding(CustomOp):
         key = key.flatten(-2)
         return query, key
 
+    def forward_native2(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Another PyTorch-native implementation of forward().
+
+        This method might perform better than `forward_native()` when compiled.
+        """
+        if positions.dim() == 1:
+            batch_size = 1
+            seq_len = positions.shape[0]
+        else:
+            batch_size, seq_len = positions.shape
+        if offsets is not None:
+            positions = positions + offsets
+        freqs_cis = self.freqs_cis.index_select(0, positions.flatten())
+        freqs_cis = freqs_cis.view(batch_size, 1, seq_len, -1)
+
+        query_shape = query.shape
+        query = query.view(batch_size, seq_len, -1, self.head_size)
+        query_rot = query[..., :self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        query_rot = _apply_rotary_emb(query_rot, freqs_cis)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.view(batch_size, seq_len, -1, self.head_size)
+        key_rot = key[..., :self.rotary_dim]
+        key_pass = key[..., self.rotary_dim:]
+        key_rot = _apply_rotary_emb(key_rot, freqs_cis)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
+
     def forward_cuda(
         self,
         positions: torch.Tensor,
@@ -160,6 +220,17 @@ class RotaryEmbedding(CustomOp):
             ops.rotary_embedding(positions, query, key, self.head_size,
                                  self.cos_sin_cache, self.is_neox_style)
         return query, key
+
+    def forward_tpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        forward_fn = (self.forward_native2
+                      if self.use_native2 else self.forward_native)
+        return forward_fn(positions, query, key, offsets)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
