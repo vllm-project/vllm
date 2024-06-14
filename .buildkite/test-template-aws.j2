@@ -7,7 +7,7 @@ steps:
     agents:
       queue: small_cpu_queue
     commands:
-      - ./scripts/diff_check.sh
+      - ./.buildkite/scripts/diff_check.sh
     soft_fail:
       - exit_status: 2
 
