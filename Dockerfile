@@ -63,10 +63,17 @@ ENV CUDA_VERSION=${CUDA_VERSION}
 COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-build.txt
-
+ENV DEBIAN_FRONTEND=noninteractive
 # install compiler cache to speed up compilation leveraging local or remote caching
-RUN apt-get update -y && apt-get install -y ccache software-properties-common && add-apt-repository ppa:deadsnakes/ppa && apt-get update -y && apt-get install -y python${PYTHON_VERSION} && python${PYTHON_VERSION} --version
-RUN python${PYTHOON_VERSION} --version
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y ccache software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} \
+    && python${PYTHON_VERSION} --version
+RUN python${PYTHON_VERSION} --version
 # files and directories related to build wheels
 COPY csrc csrc
 COPY setup.py setup.py
