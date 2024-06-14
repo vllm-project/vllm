@@ -1,7 +1,8 @@
 import ctypes
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Dict, Optional, Sequence
+from itertools import product
 
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -14,7 +15,7 @@ from vllm.utils import cuda_device_count_stateless
 logger = init_logger(__name__)
 
 
-def producer(batch_is: List[int],
+def producer(batch_is: Sequence[int],
              producer_queue,
              consumer_queue,
              result_queue,
@@ -44,7 +45,7 @@ def producer(batch_is: List[int],
         lib.cudaDeviceReset()
 
 
-def consumer(batch_js: List[int],
+def consumer(batch_js: Sequence[int],
              producer_queue,
              consumer_queue,
              result_queue,
@@ -80,8 +81,8 @@ def consumer(batch_js: List[int],
 
 
 def can_actually_p2p(
-    batch_is: List[int],
-    batch_js: List[int],
+    batch_is: Sequence[int],
+    batch_js: Sequence[int],
 ):
     """
     Usually, checking if P2P access is enabled can be done by
@@ -183,12 +184,9 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache in %s", path)
         cache = {}
-        batch_is = []
-        batch_js = []
-        for _i in range(num_dev):
-            for _j in range(num_dev):
-                batch_is.append(_i)
-                batch_js.append(_j)
+        ids = list(range(num_dev))
+        # batch of all pairs of GPUs
+        batch_is, batch_js = zip(*list(product(ids, ids)))
         result = can_actually_p2p(batch_is, batch_js)
         for _i, _j, r in zip(batch_is, batch_js, result):
             cache[f"{_i}->{_j}"] = r
