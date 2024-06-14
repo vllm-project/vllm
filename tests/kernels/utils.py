@@ -31,7 +31,7 @@ STR_INVALID_VAL: str = "INVALID"
 class QKVInputs(NamedTuple):
     '''
     Data structure for representing unpacked attention inputs, 
-    query/key/value.
+    query/key/values and their sequence lengths.
 
     Attributes:
 
