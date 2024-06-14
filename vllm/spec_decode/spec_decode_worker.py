@@ -7,7 +7,6 @@ from vllm.config import SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.worker.model_input import ModelInput
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
@@ -21,6 +20,7 @@ from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
+from vllm.worker.model_input import ModelInput
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 

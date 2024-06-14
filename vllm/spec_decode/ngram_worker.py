@@ -3,11 +3,11 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from vllm.worker.model_input import ModelInput
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
+from vllm.worker.model_input import ModelInput
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 
