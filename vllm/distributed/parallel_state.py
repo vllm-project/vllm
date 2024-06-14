@@ -442,6 +442,26 @@ class GroupCoordinator:
         """
         torch.distributed.barrier(group=self.cpu_group)
 
+    def send(self, tensor: torch.Tensor, dst: int) -> None:
+        """Sends a tensor to the destination rank in a non-blocking way"""
+        pynccl_comm = self.pynccl_comm
+        if (pynccl_comm is not None and not pynccl_comm.disabled):
+            pynccl_comm.send(tensor)
+        else:
+            torch.distributed.isend(tensor, dst, self.device_group)
+
+    def recv(self, size: torch.Size, dtype: torch.dtype,
+             src: int) -> torch.Tensor:
+        """Receives a tensor from the src rank."""
+        tensor = torch.empty(size, dtype=dtype, device=self.device)
+        pynccl_comm = self.pynccl_comm
+        if (pynccl_comm is not None and not pynccl_comm.disabled):
+            pynccl_comm.recv(tensor)
+        else:
+            req = torch.distributed.irecv(tensor, src, self.device_group)
+            req.wait()
+        return tensor
+
     def destroy(self):
         if self.device_group is not None:
             torch.distributed.destroy_process_group(self.device_group)
@@ -682,6 +702,28 @@ def get_tensor_model_parallel_world_size():
 def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
+
+
+def get_pipeline_model_parallel_world_size():
+    """Return world size for the pipeline model parallel group."""
+    return get_pp_group().world_size
+
+
+def get_pipeline_model_parallel_rank():
+    """Return my rank for the pipeline model parallel group."""
+    return get_pp_group().rank_in_group
+
+
+def is_pipeline_model_parallel_first_rank():
+    """Return True if the rank is the first rank in the
+    pipeline model parallel group."""
+    return get_pp_group().rank_in_group == 0
+
+
+def is_pipeline_model_parallel_last_rank():
+    """Return True if the rank is the last rank in the
+    pipeline model parallel group."""
+    return get_pp_group().rank_in_group == get_pp_group().world_size - 1
 
 
 def destroy_model_parallel():

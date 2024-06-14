@@ -2,7 +2,7 @@
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-from typing import Sequence
+from typing import Sequence, Tuple
 
 import torch
 
@@ -46,3 +46,12 @@ def split_tensor_along_last_dim(
         return tuple(chunk.contiguous() for chunk in tensor_list)
 
     return tensor_list
+
+
+def get_pp_indices(num_hidden_layers: int, pp_rank: int,
+                   pp_size: int) -> Tuple[int, int]:
+    layers_per_partition = divide(num_hidden_layers, pp_size)
+    start_layer = pp_rank * layers_per_partition
+    end_layer = start_layer + layers_per_partition
+
+    return (start_layer, end_layer)

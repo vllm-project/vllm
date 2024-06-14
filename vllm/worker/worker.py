@@ -58,9 +58,9 @@ class Worker(WorkerBase):
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
-        if self.is_driver_worker:
-            assert self.rank == 0, "The driver worker must have rank 0."
-
+        if parallel_config and is_driver_worker:
+            assert rank % parallel_config.tensor_parallel_size == 0, \
+                   "Driver worker should be rank 0 of tensor parallel group."
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -86,9 +86,11 @@ class Worker(WorkerBase):
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: CacheEngine
+        self.cache_engine: List[CacheEngine]
         # Initialize gpu_cache as embedding models don't initialize kv_caches
-        self.gpu_cache: Optional[List[torch.tensor]] = None
+        self.gpu_cache: List[Optional[List[torch.tensor]]] = [
+            None for _ in range(parallel_config.pipeline_parallel_size)
+        ]
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -204,9 +206,15 @@ class Worker(WorkerBase):
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
-        self.gpu_cache = self.cache_engine.gpu_cache
+        self.cache_engine = [
+            CacheEngine(self.cache_config, self.model_config,
+                        self.parallel_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.gpu_cache = [
+            self.cache_engine[ve].gpu_cache
+            for ve in range(self.parallel_config.pipeline_parallel_size)
+        ]
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -217,17 +225,18 @@ class Worker(WorkerBase):
 
     def cache_swap(
         self,
+        virtual_engine: int,
         blocks_to_swap_in: torch.Tensor,
         blocks_to_swap_out: torch.Tensor,
         blocks_to_copy: torch.Tensor,
     ) -> None:
         # Issue cache operations.
         if blocks_to_swap_in.numel() > 0:
-            self.cache_engine.swap_in(blocks_to_swap_in)
+            self.cache_engine[virtual_engine].swap_in(blocks_to_swap_in)
         if blocks_to_swap_out.numel() > 0:
-            self.cache_engine.swap_out(blocks_to_swap_out)
+            self.cache_engine[virtual_engine].swap_out(blocks_to_swap_out)
         if blocks_to_copy.numel() > 0:
-            self.cache_engine.copy(blocks_to_copy)
+            self.cache_engine[virtual_engine].copy(blocks_to_copy)
 
     @torch.inference_mode()
     def execute_model(
@@ -249,6 +258,11 @@ class Worker(WorkerBase):
 
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         num_seq_groups = len(seq_group_metadata_list)
+        if execute_model_req.virtual_engine is None:
+            virtual_engine = 0
+        else:
+            virtual_engine = execute_model_req.virtual_engine
+
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
         blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
@@ -268,17 +282,20 @@ class Worker(WorkerBase):
             "blocks_to_swap_in": blocks_to_swap_in,
             "blocks_to_swap_out": blocks_to_swap_out,
             "blocks_to_copy": blocks_to_copy,
+            "virtual_engine": virtual_engine,
         }
         broadcast_tensor_dict(data, src=0)
 
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+        self.cache_swap(virtual_engine, blocks_to_swap_in, blocks_to_swap_out,
+                        blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
+        output = self.model_runner.execute_model(
+            seq_group_metadata_list, self.gpu_cache[virtual_engine],
+            virtual_engine)
 
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.
@@ -308,13 +325,16 @@ class Worker(WorkerBase):
         blocks_to_swap_in = data.get("blocks_to_swap_in")
         blocks_to_swap_out = data.get("blocks_to_swap_out")
         blocks_to_copy = data.get("blocks_to_copy")
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+        virtual_engine = data.get("virtual_engine", 0)
+        self.cache_swap(virtual_engine, blocks_to_swap_in, blocks_to_swap_out,
+                        blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
             return False
 
-        self.model_runner.execute_model(None, self.gpu_cache)
+        self.model_runner.execute_model(None, self.gpu_cache[virtual_engine],
+                                        virtual_engine)
         return True
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

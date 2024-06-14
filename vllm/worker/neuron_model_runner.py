@@ -171,6 +171,7 @@ class NeuronModelRunner:
     def execute_model(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, input_block_ids, sampling_metadata
          ) = self.prepare_input_tensors(seq_group_metadata_list)

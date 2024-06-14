@@ -6,13 +6,15 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
+import torch.distributed
 import torch.nn as nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
+from vllm.distributed import (broadcast_tensor_dict,
+                              is_pipeline_model_parallel_last_rank)
 from vllm.distributed.parallel_state import graph_capture
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -104,7 +106,10 @@ class ModelRunner:
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
-        self.graph_runners: Dict[int, CUDAGraphRunner] = {}
+
+        self.graph_runners: List[Dict[int, CUDAGraphRunner]] = [
+            {} for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
         # When using CUDA graph, the input block tables must be padded to
@@ -729,6 +734,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
+        virtual_engine: int = 0,
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_kwargs
@@ -742,7 +748,8 @@ class ModelRunner:
         decode_meta = attn_metadata.decode_metadata
         if prefill_meta is None and decode_meta.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
-            model_executable = self.graph_runners[graph_batch_size]
+            model_executable = self.graph_runners[virtual_engine][
+                graph_batch_size]
         else:
             model_executable = self.model
 
@@ -754,10 +761,14 @@ class ModelRunner:
             **multi_modal_kwargs,
         )
 
-        # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        # Compute the logits in the last pipeline stage.
+        if is_pipeline_model_parallel_last_rank():
+            logits = self.model.compute_logits(hidden_states,
+                                               sampling_metadata)
+        else:
+            return None
 
-        # Only perform sampling in the driver worker.
+        # Only perform sampling in the first TP worker.
         if not self.is_driver_worker:
             return None
 
@@ -872,7 +883,7 @@ class ModelRunner:
         return self.lora_manager.list_loras()
 
     @torch.inference_mode()
-    def capture_model(self, kv_caches: List[torch.Tensor]) -> None:
+    def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:
         """Cuda graph capture a model.
 
         Note that CUDA graph's performance gain is negligible if number
@@ -919,45 +930,41 @@ class ModelRunner:
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
-            for batch_size in reversed(batch_size_capture_list):
-                # Create dummy attn_metadata.
-                attn_metadata = self.attn_backend.make_metadata(
-                    num_prefills=0,
-                    num_prefill_tokens=0,
-                    num_decode_tokens=batch_size,
-                    slot_mapping=slot_mapping[:batch_size],
-                    seq_lens=None,
-                    seq_lens_tensor=seq_lens[:batch_size],
-                    max_query_len=None,
-                    max_prefill_seq_len=0,
-                    max_decode_seq_len=self.max_seq_len_to_capture,
-                    query_start_loc=None,
-                    seq_start_loc=None,
-                    context_lens_tensor=None,
-                    block_tables=block_tables[:batch_size],
-                    use_cuda_graph=True,
-                )
-
-                if self.lora_config:
-                    lora_mapping = LoRAMapping(
-                        [0] * batch_size,
-                        [0] * batch_size,
+            for virtual_engine in range(
+                    self.parallel_config.pipeline_parallel_size):
+                for batch_size in reversed(batch_size_capture_list):
+                    # Create dummy attn_metadata.
+                    attn_metadata = self.attn_backend.make_metadata(
+                        num_prefills=0,
+                        num_prefill_tokens=0,
+                        num_decode_tokens=batch_size,
+                        slot_mapping=slot_mapping[:batch_size],
+                        seq_lens=None,
+                        seq_lens_tensor=seq_lens[:batch_size],
+                        max_query_len=None,
+                        max_prefill_seq_len=0,
+                        max_decode_seq_len=self.max_seq_len_to_capture,
+                        query_start_loc=None,
+                        seq_start_loc=None,
+                        context_lens_tensor=None,
+                        block_tables=block_tables[:batch_size],
+                        use_cuda_graph=True,
                     )
-                    self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model)
-                hidden_states = graph_runner.capture(
-                    input_tokens[:batch_size],
-                    input_positions[:batch_size],
-                    hidden_states[:batch_size]
-                    if hidden_states is not None else None,
-                    kv_caches,
-                    attn_metadata,
-                    memory_pool=self.graph_memory_pool,
-                    stream=graph_capture_context.stream,
-                )
-                self.graph_memory_pool = graph_runner.graph.pool()
-                self.graph_runners[batch_size] = graph_runner
+                    graph_runner = CUDAGraphRunner(self.model)
+                    hidden_states = graph_runner.capture(
+                        input_tokens[:batch_size],
+                        input_positions[:batch_size],
+                        hidden_states[:batch_size]
+                        if hidden_states is not None else None,
+                        kv_caches[virtual_engine],
+                        attn_metadata,
+                        memory_pool=self.graph_memory_pool,
+                        stream=graph_capture_context.stream,
+                    )
+                    self.graph_memory_pool = graph_runner.graph.pool()
+                    self.graph_runners[virtual_engine][
+                        batch_size] = graph_runner
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time

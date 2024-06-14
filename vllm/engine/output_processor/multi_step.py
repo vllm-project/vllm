@@ -141,4 +141,5 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 break
 
         if seq.is_finished():
-            self.scheduler.free_seq(seq)
+            for scheduler in self.scheduler:
+                scheduler.free_seq(seq)
