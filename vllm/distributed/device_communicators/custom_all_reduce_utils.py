@@ -1,8 +1,8 @@
 import ctypes
 import json
 import os
-from typing import Dict, Optional, Sequence
 from itertools import product
+from typing import Dict, Optional, Sequence
 
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -15,7 +15,7 @@ from vllm.utils import cuda_device_count_stateless
 logger = init_logger(__name__)
 
 
-def producer(batch_is: Sequence[int],
+def producer(batch_src: Sequence[int],
              producer_queue,
              consumer_queue,
              result_queue,
@@ -24,7 +24,7 @@ def producer(batch_is: Sequence[int],
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
 
     lib = CudaRTLibrary()
-    for i in batch_is:
+    for i in batch_src:
         lib.cudaSetDevice(i)
         pointer = lib.cudaMalloc(1024)
         lib.cudaMemset(pointer, 1, 1024)
@@ -45,7 +45,7 @@ def producer(batch_is: Sequence[int],
         lib.cudaDeviceReset()
 
 
-def consumer(batch_js: Sequence[int],
+def consumer(batch_tgt: Sequence[int],
              producer_queue,
              consumer_queue,
              result_queue,
@@ -54,7 +54,7 @@ def consumer(batch_js: Sequence[int],
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
 
     lib = CudaRTLibrary()
-    for j in batch_js:
+    for j in batch_tgt:
         lib.cudaSetDevice(j)
         handle = producer_queue.get()
         open_success = False
@@ -81,13 +81,13 @@ def consumer(batch_js: Sequence[int],
 
 
 def can_actually_p2p(
-    batch_is: Sequence[int],
-    batch_js: Sequence[int],
+    batch_src: Sequence[int],
+    batch_tgt: Sequence[int],
 ):
     """
     Usually, checking if P2P access is enabled can be done by
-    `torch.cuda.can_device_access_peer(i, j)`. However, sometimes
-    the driver might be broken, and `torch.cuda.can_device_access_peer(i, j)`
+    `torch.cuda.can_device_access_peer(src, tgt)`. However, sometimes
+    the driver might be broken, and `torch.cuda.can_device_access_peer(src, tgt)`
     returns `True` even if P2P access is not actually possible.
     See https://github.com/vllm-project/vllm/issues/2728 and
     https://forums.developer.nvidia.com/t/direct-gpu-gpu-communication-does-not-seem-to-work-properly/283264/10
@@ -96,24 +96,24 @@ def can_actually_p2p(
 
     Note on p2p and cuda IPC:
     Usually, one process uses one GPU:
-    GPU i --> cuda context i --> tensor i --> process i
+    GPU src --> cuda context src --> tensor src --> process src
 
     We need to combine p2p and cuda IPC, so that:
-    GPU i --> cuda context i --> tensor i --> process i
-                                 |shared|
-    GPU j --> cuda context j --> tensor j --> process j
-    That is to say, process i creates a tensor in GPU i, passes IPC handle to
-    process j, and process j accesses the tensor in GPU j. Any operation on the
-    tensor in process j will be reflected in the tensor in process i, because
+    GPU src --> cuda context src --> tensor src --> process src
+                                      |shared|
+    GPU tgt --> cuda context tgt --> tensor tgt --> process tgt
+    That is to say, process src creates a tensor in GPU src, passes IPC handle to
+    process tgt, and process tgt accesses the tensor in GPU tgt. Any operation on the
+    tensor in process tgt will be reflected in the tensor in process src, because
     they are the same memory segment.
-    It is important to note that process j accesses the tensor in GPU j, not
-    GPU i. That's why we need p2p access.
+    It is important to note that process tgt accesses the tensor in GPU tgt, not
+    GPU src. That's why we need p2p access.
 
     The most time-consuming part is the process creation. To avoid creating
     processes for every pair of GPUs, we use batched testing. We create two
     processes for testing all pairs of GPUs in batch. The trick is to reset
-    the device after each test (which is not available in PyTorch). # noqa
-    """
+    the device after each test (which is not available in PyTorch).
+    """  # noqa
     cuda_visible_devices = os.getenv('CUDA_VISIBLE_DEVICES', None)
     # pass the CUDA_VISIBLE_DEVICES to the child process
     # to make sure they see the same set of GPUs
@@ -123,18 +123,18 @@ def can_actually_p2p(
     producer_queue = smp.Queue()
     consumer_queue = smp.Queue()
     result_queue = smp.Queue()
-    pi = smp.Process(target=producer,
-                     args=(batch_is, producer_queue, consumer_queue,
-                           result_queue, cuda_visible_devices))
-    pj = smp.Process(target=consumer,
-                     args=(batch_js, producer_queue, consumer_queue,
-                           result_queue, cuda_visible_devices))
-    pi.start()
-    pj.start()
-    pi.join()
-    pj.join()
+    p_src = smp.Process(target=producer,
+                        args=(batch_src, producer_queue, consumer_queue,
+                              result_queue, cuda_visible_devices))
+    p_tgt = smp.Process(target=consumer,
+                        args=(batch_tgt, producer_queue, consumer_queue,
+                              result_queue, cuda_visible_devices))
+    p_src.start()
+    p_tgt.start()
+    p_src.join()
+    p_tgt.join()
     result = []
-    for i, j in zip(batch_is, batch_js):
+    for src, tgt in zip(batch_src, batch_tgt):
         a = result_queue.get()
         b = result_queue.get()
         assert a == b
@@ -157,14 +157,14 @@ def can_actually_p2p(
 _gpu_p2p_access_cache: Optional[Dict[str, bool]] = None
 
 
-def gpu_p2p_access_check(i: int, j: int) -> bool:
-    """Check if GPU i can access GPU j."""
+def gpu_p2p_access_check(src: int, tgt: int) -> bool:
+    """Check if GPU src can access GPU tgt."""
 
     # if the cache variable is already calculated,
     # read from the cache instead of checking it again
     global _gpu_p2p_access_cache
     if _gpu_p2p_access_cache is not None:
-        return _gpu_p2p_access_cache[f"{i}->{j}"]
+        return _gpu_p2p_access_cache[f"{src}->{tgt}"]
 
     is_distributed = dist.is_initialized()
 
@@ -186,9 +186,9 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         cache = {}
         ids = list(range(num_dev))
         # batch of all pairs of GPUs
-        batch_is, batch_js = zip(*list(product(ids, ids)))
-        result = can_actually_p2p(batch_is, batch_js)
-        for _i, _j, r in zip(batch_is, batch_js, result):
+        batch_src, batch_tgt = zip(*list(product(ids, ids)))
+        result = can_actually_p2p(batch_src, batch_tgt)
+        for _i, _j, r in zip(batch_src, batch_tgt, result):
             cache[f"{_i}->{_j}"] = r
         with open(path, "w") as f:
             json.dump(cache, f, indent=4)
@@ -198,7 +198,7 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
     with open(path, "r") as f:
         cache = json.load(f)
     _gpu_p2p_access_cache = cache
-    return _gpu_p2p_access_cache[f"{i}->{j}"]
+    return _gpu_p2p_access_cache[f"{src}->{tgt}"]
 
 
 __all__ = ["gpu_p2p_access_check"]
