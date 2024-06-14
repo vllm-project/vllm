@@ -27,8 +27,8 @@ class ShmRingBuffer:
         if self.is_writer:
             self.shared_memory = shared_memory.SharedMemory(create=True,
                                                             size=total_bytes)
-            # initialize the buffer to 0
-            for i in range(total_bytes):
+            # initialize the metadata section to 0
+            for i in range(self.metadata_offset, total_bytes):
                 self.shared_memory.buf[i] = 0
             dist.broadcast_object_list([self.shared_memory.name],
                                        src=global_ranks[0])
