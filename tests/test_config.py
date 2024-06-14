@@ -1,4 +1,28 @@
+import pytest
+
 from vllm.config import ModelConfig
+
+MODEL_IDS_EXPECTED = [
+    ("Qwen/Qwen1.5-7B", 32768),
+    ("mistralai/Mistral-7B-v0.1", 4096),
+    ("mistralai/Mistral-7B-Instruct-v0.2", 32768),
+]
+
+
+@pytest.mark.parametrize("model_id_expected", MODEL_IDS_EXPECTED)
+def test_disable_sliding_window(model_id_expected):
+    model_id, expected = model_id_expected
+    model_config = ModelConfig(
+        model_id,
+        model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        revision=None,
+        disable_sliding_window=True,
+    )
+    assert model_config.max_model_len == expected
 
 
 def test_get_sliding_window():
@@ -39,8 +63,9 @@ def test_get_sliding_window():
     assert mistral_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
 
 
-def test_rope_scaling():
+def test_rope_customization():
     TEST_ROPE_SCALING = {"type": "dynamic", "factor": 2.0}
+    TEST_ROPE_THETA = 16_000_000.0
     LONGCHAT_ROPE_SCALING = {"type": "linear", "factor": 8.0}
 
     llama_model_config = ModelConfig(
@@ -52,6 +77,7 @@ def test_rope_scaling():
         seed=0,
     )
     assert getattr(llama_model_config.hf_config, "rope_scaling", None) is None
+    assert getattr(llama_model_config.hf_config, "rope_theta", None) == 500_000
     assert llama_model_config.max_model_len == 8192
 
     llama_model_config = ModelConfig(
@@ -62,9 +88,12 @@ def test_rope_scaling():
         dtype="float16",
         seed=0,
         rope_scaling=TEST_ROPE_SCALING,
+        rope_theta=TEST_ROPE_THETA,
     )
     assert getattr(llama_model_config.hf_config, "rope_scaling",
                    None) == TEST_ROPE_SCALING
+    assert getattr(llama_model_config.hf_config, "rope_theta",
+                   None) == TEST_ROPE_THETA
     assert llama_model_config.max_model_len == 16384
 
     longchat_model_config = ModelConfig(
