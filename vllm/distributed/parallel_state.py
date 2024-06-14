@@ -684,7 +684,7 @@ OVERRIDE_TP_STATE = False
 def patch_tensor_parallel_group(world_group, tp_group):
     """Patch the tp group temporarily until this function ends."""
     global OVERRIDE_TP_STATE
-    if OVERRIDE_TP_STATE:
+    if OVERRIDE_TP_STATE or not world_group or not tp_group:
         return
 
     OVERRIDE_TP_STATE = True

@@ -41,7 +41,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         """
         rank = kwargs['rank']
         self._draft_ranks = draft_ranks
-        self._tp_groups = None
+        self._world_group = None
+        self._tp_group = None
         self._is_dummy = False if draft_ranks is None else rank not in draft_ranks
 
         logger.info(f"{rank=}, {draft_ranks=}, {self._is_dummy=}")
@@ -52,9 +53,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         self._proposer: SpeculativeProposer
 
     def _patch_tensor_parallel_group(self):
-        if self._tp_groups is not None:
-            return patch_tensor_parallel_group(self._tp_groups[0],
-                                               self._tp_groups[1])
+        return patch_tensor_parallel_group(self._world_group, self._tp_group)
 
     def init_device(self):
         if self._is_dummy:
@@ -66,21 +65,20 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 get_world_group().device_group)
             tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
 
-            world_group = GroupCoordinator(
+            self._world_group = GroupCoordinator(
                 group_ranks=[self._draft_ranks],
                 local_rank=local_rank,
                 torch_distributed_backend=world_backend,
                 use_pynccl=False,
                 use_custom_allreduce=False,
             )
-            tp_group = GroupCoordinator(
+            self._tp_group = GroupCoordinator(
                 group_ranks=[self._draft_ranks],
                 local_rank=local_rank,
                 torch_distributed_backend=tp_backend,
                 use_pynccl=True,
                 use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
             )
-            self._tp_groups = world_group, tp_group
 
         with self._patch_tensor_parallel_group():
             super().init_device()
