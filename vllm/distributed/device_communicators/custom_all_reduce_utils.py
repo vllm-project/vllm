@@ -1,10 +1,6 @@
 import ctypes
 import json
 import os
-import sys
-import tempfile
-import time
-from contextlib import contextmanager
 from typing import Dict, Optional
 
 import torch.distributed as dist
@@ -18,81 +14,65 @@ from vllm.utils import cuda_device_count_stateless
 logger = init_logger(__name__)
 
 
-@contextmanager
-def mute_output():
-    with open(os.devnull, "w") as f:
-        sys.stderr = f
-        sys.stdout = f
-        yield
-
-
 def producer(i: int,
-             init_method: str,
+             producer_queue,
+             consumer_queue,
+             result_queue,
              cuda_visible_devices: Optional[str] = None):
     if cuda_visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
-    with mute_output():
-        dist.init_process_group(
-            backend="gloo",
-            init_method=init_method,
-            world_size=2,
-            rank=0,
-        )
-        lib = CudaRTLibrary()
-        lib.cudaSetDevice(i)
-        pointer = lib.cudaMalloc(1024)
-        lib.cudaMemset(pointer, 1, 1024)
-        lib.cudaDeviceSynchronize()
-        handle = lib.cudaIpcGetMemHandle(pointer)
-        dist.broadcast_object_list([handle], src=0)
-        recv = [None]
-        dist.broadcast_object_list(recv, src=1)
-        open_success = recv[0]
-        if open_success:
-            dist.barrier()
-            host_data = (ctypes.c_char * 1024)()
-            lib.cudaMemcpy(host_data, pointer, 1024)
-            for i in range(1024):
-                assert ord(host_data[i]) == 2
-        else:
-            raise RuntimeError("Failed to open the IPC handle")
+
+    lib = CudaRTLibrary()
+    lib.cudaSetDevice(i)
+    pointer = lib.cudaMalloc(1024)
+    lib.cudaMemset(pointer, 1, 1024)
+    lib.cudaDeviceSynchronize()
+    handle = lib.cudaIpcGetMemHandle(pointer)
+    producer_queue.put(handle)
+    open_success = consumer_queue.get()
+    if open_success:
+        producer_queue.put(0)
+        consumer_queue.get()
+        host_data = (ctypes.c_char * 1024)()
+        lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
+        for i in range(1024):
+            if ord(host_data[i]) != 2:
+                open_success = False
+                break
+    result_queue.put(open_success)
 
 
 def consumer(j: int,
-             init_method: str,
+             producer_queue,
+             consumer_queue,
+             result_queue,
              cuda_visible_devices: Optional[str] = None):
     if cuda_visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
-    with mute_output():
-        dist.init_process_group(
-            backend="gloo",
-            init_method=init_method,
-            world_size=2,
-            rank=1,
-        )
-        lib = CudaRTLibrary()
-        lib.cudaSetDevice(j)
-        recv = [None]
-        dist.broadcast_object_list(recv, src=0)
-        handle = recv[0]
-        open_success = False
-        try:
-            pointer = lib.cudaIpcOpenMemHandle(handle)  # type: ignore
-            open_success = True
-        except RuntimeError:
-            # cannot error out here, because the producer process
-            # is still waiting for the response.
-            pass
-        dist.broadcast_object_list([open_success], src=1)
-        if open_success:
-            lib.cudaMemset(pointer, 2, 1024)
-            dist.barrier()
-            host_data = (ctypes.c_char * 1024)()
-            lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
-            for i in range(1024):
-                assert ord(host_data[i]) == 2
-        else:
-            raise RuntimeError("Failed to open the IPC handle")
+
+    lib = CudaRTLibrary()
+    lib.cudaSetDevice(j)
+    handle = producer_queue.get()
+    open_success = False
+    try:
+        pointer = lib.cudaIpcOpenMemHandle(handle)  # type: ignore
+        open_success = True
+    except RuntimeError:
+        # cannot error out here, because the producer process
+        # is still waiting for the response.
+        pass
+    consumer_queue.put(open_success)
+    if open_success:
+        lib.cudaMemset(pointer, 2, 1024)
+        producer_queue.get()
+        consumer_queue.put(0)
+        host_data = (ctypes.c_char * 1024)()
+        lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
+        for i in range(1024):
+            if ord(host_data[i]) != 2:
+                open_success = False
+                break
+    result_queue.put(open_success)
 
 
 def can_actually_p2p(i, j):
@@ -125,24 +105,25 @@ def can_actually_p2p(i, j):
     # pass the CUDA_VISIBLE_DEVICES to the child process
     # to make sure they see the same set of GPUs
 
-    # make sure the temp file is not the same across different calls
-    temp_path = tempfile.mktemp() + str(time.time())
-    # create an empty file
-    with open(temp_path, "w"):
-        pass
-    init_method = f"file://{temp_path}"
-
     # make sure the processes are spawned
     smp = mp.get_context("spawn")
+    producer_queue = smp.Queue()
+    consumer_queue = smp.Queue()
+    result_queue = smp.Queue()
     pi = smp.Process(target=producer,
-                     args=(i, init_method, cuda_visible_devices))
+                     args=(i, producer_queue, consumer_queue, result_queue,
+                           cuda_visible_devices))
     pj = smp.Process(target=consumer,
-                     args=(j, init_method, cuda_visible_devices))
+                     args=(j, producer_queue, consumer_queue, result_queue,
+                           cuda_visible_devices))
     pi.start()
     pj.start()
     pi.join()
     pj.join()
-    return pi.exitcode == 0 and pj.exitcode == 0
+    a = result_queue.get()
+    b = result_queue.get()
+    assert a == b
+    return a
 
 
 # why do we need this cache?

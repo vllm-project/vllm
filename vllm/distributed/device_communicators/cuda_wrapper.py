@@ -38,6 +38,8 @@ class CudaRTLibrary:
         Function("cudaSetDevice", cudaError_t, [ctypes.c_int]),
         # cudaError_t 	cudaDeviceSynchronize ( void )
         Function("cudaDeviceSynchronize", cudaError_t, []),
+        # ​cudaError_t cudaDeviceReset ( void )
+        Function("cudaDeviceReset", cudaError_t, []),
 
         # const char* 	cudaGetErrorString ( cudaError_t error )
         Function("cudaGetErrorString", ctypes.c_char_p, [cudaError_t]),
@@ -88,6 +90,9 @@ class CudaRTLibrary:
 
     def cudaDeviceSynchronize(self) -> None:
         self.CUDART_CHECK(self.funcs["cudaDeviceSynchronize"]())
+
+    def cudaDeviceReset(self) -> None:
+        self.CUDART_CHECK(self.funcs["cudaDeviceReset"]())
 
     def cudaMalloc(self, size: int) -> ctypes.c_void_p:
         devPtr = ctypes.c_void_p()
