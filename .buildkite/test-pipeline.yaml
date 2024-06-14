@@ -48,6 +48,7 @@ steps:
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
   - pytest -v -s spec_decode/e2e/test_integration_dist.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
 - label: Distributed Tests (Multiple Groups)
   #mirror_hardwares: [amd]
