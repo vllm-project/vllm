@@ -109,7 +109,7 @@ class BertEmbeddingModel(nn.Module):
             else:
                 weight_loader(param, loaded_weight)
 
-    def _rekey_key(self, key: str):
+    def _rename_key(self, key: str):
         prefix = f"{self.base_model_prefix}."
         key = key[len(prefix):] if key.startswith(prefix) else key
 
