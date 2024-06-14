@@ -340,7 +340,7 @@ main() {
   wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
-  QUICK_BENCHMARK_ROOT=../.buildkite/quick-benchmarks/
+  QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
   # benchmarking
   run_serving_tests $QUICK_BENCHMARK_ROOT/serving-tests.json
