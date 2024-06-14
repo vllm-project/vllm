@@ -163,8 +163,6 @@ class SequenceData:
 
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
-        # TODO: Check who calls this and make sure it's synchronized across
-        # driver and workers.
         self._num_computed_tokens += num_new_computed_tokens
         assert self._num_computed_tokens <= self.get_len(), (
             self._num_computed_tokens, self.get_len())
