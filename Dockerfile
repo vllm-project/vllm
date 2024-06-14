@@ -10,18 +10,10 @@ ARG CUDA_VERSION
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS dev
 ARG CUDA_VERSION
-ARG PYTHON_VERSION
-ENV PYTHON_VERSION=${PYTHON_VERSION}
 ENV CUDA_VERSION=${CUDA_VERSION}
 
-RUN echo ${CUDA_VERSION}
-RUN echo ${PYTHON_VERSION}
-RUN echo python${PYTHON_VERSION}
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git curl sudo software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} \
-    && python${PYTHON_VERSION} --version
+    && apt-get install -y python3-pip git curl sudo
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -55,10 +47,8 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### WHEEL BUILD IMAGE ####################
 FROM dev AS build
-ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ENV PYTHON_VERSION=${PYTHON_VERSION}
-ENV CUDA_VERSION=${CUDA_VERSION}
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
