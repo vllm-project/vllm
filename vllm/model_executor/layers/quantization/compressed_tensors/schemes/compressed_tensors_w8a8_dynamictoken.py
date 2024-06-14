@@ -53,7 +53,8 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         # CompressedTensorsW8A8StaticTensor::create_weights for further
         # information.
         is_tensor_partitioned = len(output_partition_sizes) != 1
-
+        # when doing channel-wise quantization, number of scales
+        # is equal to output_dim
         weight_scale_dim = sum(output_partition_sizes) if (
             is_tensor_partitioned
             or self.strategy == QuantizationStrategy.CHANNEL) else 1
@@ -79,6 +80,8 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         layer.register_parameter("weight_scale", weight_scale)
         set_weight_attrs(weight_scale, {"weight_loader": weight_loader})
 
+        # Don't need a shard_splitter for channel-wise quantization
+        # Use the default loading method
         if self.strategy == QuantizationStrategy.CHANNEL:
             set_weight_attrs(weight_scale, {
                 "output_dim": 0,
