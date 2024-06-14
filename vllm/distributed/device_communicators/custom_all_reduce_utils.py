@@ -1,3 +1,4 @@
+import ctypes
 import json
 import os
 import sys
@@ -57,6 +58,7 @@ def producer(i: int,
         else:
             raise RuntimeError("Failed to open the IPC handle")
 
+
 def consumer(j: int,
              init_method: str,
              cuda_visible_devices: Optional[str] = None):
@@ -76,7 +78,7 @@ def consumer(j: int,
         handle = recv[0]
         open_success = False
         try:
-            pointer = lib.cudaIpcOpenMemHandle(handle)
+            pointer = lib.cudaIpcOpenMemHandle(handle)  # type: ignore
             open_success = True
         except RuntimeError:
             # cannot error out here, because the producer process
@@ -87,11 +89,12 @@ def consumer(j: int,
             lib.cudaMemset(pointer, 2, 1024)
             dist.barrier()
             host_data = (ctypes.c_char * 1024)()
-            lib.cudaMemcpy(host_data, pointer, 1024)
+            lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
             for i in range(1024):
                 assert host_data[i] == 2
         else:
             raise RuntimeError("Failed to open the IPC handle")
+
 
 def can_actually_p2p(i, j):
     """
