@@ -3,9 +3,14 @@ from typing import List
 
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import LLM, SamplingParams
 
 from .conftest import get_text_from_llm_generator
+
+if should_skip_test_group(group_name="TEST_CORE"):
+    pytest.skip("TEST_CORE=DISABLE, skipping core test group",
+                allow_module_level=True)
 
 # relatively small model with 4k sliding window
 MODEL = "bigcode/starcoder2-3b"

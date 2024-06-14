@@ -8,11 +8,16 @@ import pytest
 import torch
 from transformers import GenerationConfig, GenerationMixin
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import Counter, is_pin_memory_available
+
+if should_skip_test_group(group_name="TEST_SAMPLERS"):
+    pytest.skip("TEST_SAMPLERS=DISABLE, skipping sampler test group",
+                allow_module_level=True)
 
 
 class MockLogitsSampler(Sampler):

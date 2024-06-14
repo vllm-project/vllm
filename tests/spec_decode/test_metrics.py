@@ -4,7 +4,12 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.spec_decode.metrics import AsyncMetricsCollector
+
+if should_skip_test_group(group_name="TEST_SPEC_DECODE"):
+    pytest.skip("TEST_SPEC_DECODE=DISABLE, skipping spec decode group",
+                allow_module_level=True)
 
 
 def test_initial_call_returns_none():

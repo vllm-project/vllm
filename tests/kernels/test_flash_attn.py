@@ -4,6 +4,12 @@ import pytest
 import torch
 from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
+from tests.nm_utils.utils_skip import should_skip_test_group
+
+if should_skip_test_group(group_name="TEST_KERNELS"):
+    pytest.skip("TEST_KERNELS=DISABLE, skipping kernels test group",
+                allow_module_level=True)
+
 NUM_HEADS = [(16, 16), (32, 8), (64, 8)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16, 32]

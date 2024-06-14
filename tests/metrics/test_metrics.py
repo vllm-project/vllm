@@ -3,10 +3,15 @@ from typing import List
 import pytest
 from prometheus_client import REGISTRY
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import EngineArgs, LLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
+
+if should_skip_test_group(group_name="TEST_METRICS"):
+    pytest.skip("TEST_METRICS=DISABLE, skipping metrics test group",
+                allow_module_level=True)
 
 MODELS = [
     "facebook/opt-125m",

@@ -1,9 +1,15 @@
+import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.worker import Worker
+
+if should_skip_test_group(group_name="TEST_WORKER"):
+    pytest.skip("TEST_WORKER=DISABLE, skipping worker test group",
+                allow_module_level=True)
 
 
 def test_swap() -> None:

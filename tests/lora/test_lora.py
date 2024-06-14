@@ -1,9 +1,14 @@
 import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.lora.layers import _apply_lora, _apply_lora_packed_nslice
 
 from .utils import DummyLoRAManager
+
+if should_skip_test_group(group_name="TEST_LORA"):
+    pytest.skip("TEST_LORA=DISABLE, skipping lora test group",
+                allow_module_level=True)
 
 TENSOR_SIZES = [128, 1024, 2048, 4096, 8192, 11008, 11008 // 2, 11008 // 4]
 QKV_TENSOR_SIZES = [

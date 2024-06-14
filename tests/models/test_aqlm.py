@@ -6,7 +6,12 @@ Run `pytest tests/models/test_aqlm.py`.
 import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+
+if should_skip_test_group(group_name="TEST_MODELS"):
+    pytest.skip("TEST_MODELS=DISABLE, skipping model test group",
+                allow_module_level=True)
 
 aqlm_not_supported = True
 

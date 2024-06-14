@@ -5,8 +5,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.utils import set_random_seed
+
+if should_skip_test_group(group_name="TEST_SAMPLERS"):
+    pytest.skip("TEST_SAMPLERS=DISABLE, skipping sampler test group",
+                allow_module_level=True)
 
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)

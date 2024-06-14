@@ -3,8 +3,13 @@ import random
 import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.model_executor.layers.ops.rand import seeded_uniform
 from vllm.model_executor.utils import set_random_seed
+
+if should_skip_test_group(group_name="TEST_KERNELS"):
+    pytest.skip("TEST_KERNELS=DISABLE, skipping kernels test group",
+                allow_module_level=True)
 
 
 @pytest.mark.skip("C compiler not installed in NM automation. "

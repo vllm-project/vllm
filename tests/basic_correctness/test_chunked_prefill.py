@@ -8,6 +8,13 @@ Run `pytest tests/models/test_chunked_prefill.py`.
 """
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
+
+if should_skip_test_group(group_name="TEST_BASIC_CORRECTNESS"):
+    pytest.skip(
+        "TEST_BASIC_CORRECTNESS=DISABLE, skipping basic correctness test group",
+        allow_module_level=True)
+
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",

@@ -5,11 +5,16 @@ import torch
 import triton
 import triton.language as tl
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.model_executor.layers.ops.sample import (
     MAX_TRITON_N_COLS, _uniform_to_exponential, get_num_triton_sampler_splits,
     sample)
 from vllm.model_executor.sampling_metadata import SamplingTensors
 from vllm.model_executor.utils import set_random_seed
+
+if should_skip_test_group(group_name="TEST_KERNELS"):
+    pytest.skip("TEST_KERNELS=DISABLE, skipping kernels test group",
+                allow_module_level=True)
 
 SINGLE_SPLIT_VOCAB_SIZE = 32000  # llama/mistral/mixtral vocab size
 MULTI_SPLIT_VOCAB_SIZE = MAX_TRITON_N_COLS + 100

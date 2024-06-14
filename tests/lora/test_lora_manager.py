@@ -6,6 +6,7 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.config import LoRAConfig
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
@@ -17,6 +18,10 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)
 from vllm.model_executor.layers.linear import RowParallelLinear
+
+if should_skip_test_group(group_name="TEST_LORA"):
+    pytest.skip("TEST_LORA=DISABLE, skipping lora test group",
+                allow_module_level=True)
 
 EMBEDDING_MODULES = {
     "embed_tokens": "input_embeddings",

@@ -27,7 +27,7 @@ jobs:
       test_label_solo: aws-avx2-32G-a10g-24G
       test_label_multi: aws-avx2-192G-4-a10g-96G
       test_timeout: 480
-      test_skip_list: neuralmagic/tests/skip-for-weekly.txt
+      test_skip_env_vars: neuralmagic/tests/test_skip_env_vars/full.txt
 
       benchmark_label: aws-avx2-32G-a10g-24G
       benchmark_config_list_file: ./.github/data/nm_benchmark_weekly_configs_list.txt

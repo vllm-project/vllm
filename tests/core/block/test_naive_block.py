@@ -2,8 +2,13 @@ from typing import List, Optional
 
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
+
+if should_skip_test_group(group_name="TEST_CORE"):
+    pytest.skip("TEST_CORE=DISABLE, skipping core test group",
+                allow_module_level=True)
 
 
 class TestNaiveBlockAllocator:

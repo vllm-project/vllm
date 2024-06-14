@@ -3,9 +3,14 @@ from unittest.mock import MagicMock
 import pytest
 from transformers import PreTrainedTokenizer
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob, Sequence, SequenceStatus
+
+if should_skip_test_group(group_name="TEST_ENGINE"):
+    pytest.skip("TEST_ENGINE=DISABLE, skipping engine test group",
+                allow_module_level=True)
 
 
 def sequence_with_eos(text: str, eos_token: str,

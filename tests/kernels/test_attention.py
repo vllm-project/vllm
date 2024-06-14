@@ -6,10 +6,15 @@ import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import _custom_ops as ops
 from vllm.utils import get_max_shared_memory_bytes, is_hip
 
 from .allclose_default import get_default_atol, get_default_rtol
+
+if should_skip_test_group(group_name="TEST_KERNELS"):
+    pytest.skip("TEST_KERNELS=DISABLE, skipping kernels test group",
+                allow_module_level=True)
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.

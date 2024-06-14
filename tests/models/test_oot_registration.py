@@ -1,8 +1,14 @@
+import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+
+if should_skip_test_group(group_name="TEST_MODELS"):
+    pytest.skip("TEST_MODELS=DISABLE, skipping model test group",
+                allow_module_level=True)
 
 
 class MyOPTForCausalLM(OPTForCausalLM):

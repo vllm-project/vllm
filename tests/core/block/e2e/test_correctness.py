@@ -2,9 +2,14 @@ from itertools import cycle
 
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import SamplingParams
 
 from .conftest import get_token_ids_from_llm_generator
+
+if should_skip_test_group(group_name="TEST_CORE"):
+    pytest.skip("TEST_CORE=DISABLE, skipping core test group",
+                allow_module_level=True)
 
 
 @pytest.mark.parametrize(

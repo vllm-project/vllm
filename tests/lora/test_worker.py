@@ -3,11 +3,18 @@ import random
 import tempfile
 from unittest.mock import patch
 
+import pytest
+
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig)
 from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.worker.worker import Worker
+
+if should_skip_test_group(group_name="TEST_LORA"):
+    pytest.skip("TEST_LORA=DISABLE, skipping lora test group",
+                allow_module_level=True)
 
 
 @patch.dict(os.environ, {"RANK": "0"})

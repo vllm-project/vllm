@@ -33,10 +33,15 @@ from itertools import cycle
 import pytest
 from transformers import AutoTokenizer
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import SamplingParams
 
 from .conftest import (get_output_from_llm_generator,
                        run_greedy_equality_correctness_test)
+
+if should_skip_test_group(group_name="TEST_SPEC_DECODE"):
+    pytest.skip("TEST_SPEC_DECODE=DISABLE, skipping spec decode group",
+                allow_module_level=True)
 
 
 @pytest.mark.parametrize(

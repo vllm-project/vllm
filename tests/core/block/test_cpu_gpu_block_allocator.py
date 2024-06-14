@@ -1,7 +1,12 @@
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.utils import Device, chunk_list
+
+if should_skip_test_group(group_name="TEST_CORE"):
+    pytest.skip("TEST_CORE=DISABLE, skipping core test group",
+                allow_module_level=True)
 
 
 @pytest.mark.parametrize("num_cpu_blocks", [0, 512])

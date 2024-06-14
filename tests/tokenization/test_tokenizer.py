@@ -1,7 +1,12 @@
 import pytest
 from transformers import PreTrainedTokenizerBase
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.transformers_utils.tokenizer import get_tokenizer
+
+if should_skip_test_group(group_name="TEST_TOKENIZATION"):
+    pytest.skip("TEST_TOKENIZATION=DISABLE, skipping tokenization test group",
+                allow_module_level=True)
 
 TOKENIZER_NAMES = [
     "facebook/opt-125m",

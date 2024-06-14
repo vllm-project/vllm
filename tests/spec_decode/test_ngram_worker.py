@@ -1,10 +1,16 @@
+import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
 
 from .utils import create_seq_group_metadata_from_prompts, create_worker
+
+if should_skip_test_group(group_name="TEST_SPEC_DECODE"):
+    pytest.skip("TEST_SPEC_DECODE=DISABLE, skipping spec decode group",
+                allow_module_level=True)
 
 
 def test_ngram_algo_correctness_for_single_no_match():

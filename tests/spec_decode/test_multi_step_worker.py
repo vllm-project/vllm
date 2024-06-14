@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
@@ -13,6 +14,10 @@ from vllm.worker.worker import Worker
 from .utils import (assert_logprobs_dict_allclose, create_batch,
                     create_seq_group_metadata_from_prompts, create_worker,
                     patch_execute_model_with_seeds, zero_kv_cache)
+
+if should_skip_test_group(group_name="TEST_SPEC_DECODE"):
+    pytest.skip("TEST_SPEC_DECODE=DISABLE, skipping spec decode group",
+                allow_module_level=True)
 
 
 @pytest.mark.parametrize('num_steps', list(range(1, 17)))

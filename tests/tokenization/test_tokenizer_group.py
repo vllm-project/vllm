@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
 from vllm.transformers_utils.tokenizer_group.ray_tokenizer_group import (
     RayTokenizerGroupPool)
@@ -12,6 +13,10 @@ from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
     TokenizerGroup)
 
 from ..conftest import get_tokenizer_pool_config
+
+if should_skip_test_group(group_name="TEST_TOKENIZATION"):
+    pytest.skip("TEST_TOKENIZATION=DISABLE, skipping tokenization test group",
+                allow_module_level=True)
 
 
 @pytest.mark.asyncio

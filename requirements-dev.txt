@@ -31,6 +31,8 @@ peft
 requests==2.31
 ray
 sentence-transformers # required for embedding
+optimum     # required for hf gptq baselines
+auto-gptq   # required for hf gptq baselines
 
 # Benchmarking
 aiohttp

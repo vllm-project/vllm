@@ -5,7 +5,12 @@ Run `pytest tests/samplers/test_ignore_eos.py`.
 
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import SamplingParams
+
+if should_skip_test_group(group_name="TEST_SAMPLERS"):
+    pytest.skip("TEST_SAMPLERS=DISABLE, skipping sampler test group",
+                allow_module_level=True)
 
 # We also test with llama because it has generation_config to specify EOS
 # (past regression).

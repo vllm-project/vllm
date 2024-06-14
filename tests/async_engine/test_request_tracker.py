@@ -1,7 +1,12 @@
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.engine.async_llm_engine import RequestTracker
 from vllm.outputs import RequestOutput
+
+if should_skip_test_group(group_name="TEST_ASYNC_ENGINE"):
+    pytest.skip("TEST_ASYNC_ENGINE=DISABLE, skipping async engine test group",
+                allow_module_level=True)
 
 
 @pytest.mark.asyncio

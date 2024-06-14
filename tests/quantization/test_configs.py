@@ -7,7 +7,12 @@ from dataclasses import dataclass
 
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.config import ModelConfig
+
+if should_skip_test_group(group_name="TEST_QUANTIZATION"):
+    pytest.skip("TEST_QUANTIZATION=DISABLE, skipping quantization test group",
+                allow_module_level=True)
 
 
 @dataclass

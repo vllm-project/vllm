@@ -4,7 +4,13 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
+
 from .utils import check_logprobs_close
+
+if should_skip_test_group(group_name="TEST_MODELS"):
+    pytest.skip("TEST_MODELS=DISABLE, skipping model test group",
+                allow_module_level=True)
 
 MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.1",

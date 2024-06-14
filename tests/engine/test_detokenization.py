@@ -1,7 +1,12 @@
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
+
+if should_skip_test_group(group_name="TEST_ENGINE"):
+    pytest.skip("TEST_ENGINE=DISABLE, skipping engine test group",
+                allow_module_level=True)
 
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])

@@ -8,9 +8,15 @@ pytest tests/basic_correctness/test_preemption.py`.
 import pytest
 from prometheus_client import REGISTRY
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import SamplingParams
 from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
                                  ENABLE_ARTIFICIAL_PREEMPT)
+
+if should_skip_test_group(group_name="TEST_BASIC_CORRECTNESS"):
+    pytest.skip(
+        "TEST_BASIC_CORRECTNESS=DISABLE, skipping basic correctness test group",
+        allow_module_level=True)
 
 MODELS = [
     "facebook/opt-125m",

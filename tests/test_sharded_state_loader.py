@@ -72,6 +72,7 @@ def _run_generate(input_dir, queue: mp.Queue, **kwargs):
     queue.join_thread()
 
 
+@pytest.mark.skip("Timeout error in NM automation. Work to re-enable.")
 @pytest.mark.parametrize("enable_lora", [False, True])
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,

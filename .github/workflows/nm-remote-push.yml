@@ -21,7 +21,7 @@ jobs:
             test_label_solo: gcp-k8s-l4-solo
             test_label_multi: ignore
             test_timeout: 480
-            test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
+            test_skip_env_vars: neuralmagic/tests/test_skip_env_vars/smoke.txt
 
             benchmark_label: gcp-k8s-l4-solo
             benchmark_config_list_file: ./.github/data/nm_benchmark_remote_push_configs_list.txt
@@ -37,7 +37,7 @@ jobs:
             test_label_solo: gcp-k8s-l4-solo
             test_label_multi: ignore
             test_timeout: 480
-            test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
+            test_skip_env_vars: neuralmagic/tests/test_skip_env_vars/smoke.txt
 
             benchmark_label: gcp-k8s-l4-solo
             benchmark_config_list_file: ./.github/data/nm_benchmark_remote_push_configs_list.txt
@@ -53,7 +53,7 @@ jobs:
             test_label_solo: gcp-k8s-l4-solo
             test_label_multi: ignore
             test_timeout: 480
-            test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
+            test_skip_env_vars: neuralmagic/tests/test_skip_env_vars/smoke.txt
 
             benchmark_label: gcp-k8s-l4-solo
             benchmark_config_list_file: ./.github/data/nm_benchmark_remote_push_configs_list.txt
@@ -69,7 +69,7 @@ jobs:
             test_label_solo: gcp-k8s-l4-solo
             test_label_multi: ignore
             test_timeout: 480
-            test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
+            test_skip_env_vars: neuralmagic/tests/test_skip_env_vars/smoke.txt
 
             benchmark_label: gcp-k8s-l4-solo
             benchmark_config_list_file: ./.github/data/nm_benchmark_remote_push_configs_list.txt

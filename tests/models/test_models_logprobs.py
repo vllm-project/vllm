@@ -5,6 +5,11 @@ Run `pytest tests/models/test_models_logprobs.py --forked`.
 import pytest
 
 from tests.models.utils import check_logprobs_close
+from tests.nm_utils.utils_skip import should_skip_test_group
+
+if should_skip_test_group(group_name="TEST_MODELS"):
+    pytest.skip("TEST_MODELS=DISABLE, skipping model test group",
+                allow_module_level=True)
 
 MODEL_MAX_LEN = 1024
 

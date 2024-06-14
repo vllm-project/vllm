@@ -1,12 +1,17 @@
 import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
+
+if should_skip_test_group(group_name="TEST_WORKER"):
+    pytest.skip("TEST_WORKER=DISABLE, skipping worker test group",
+                allow_module_level=True)
 
 
 def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:

@@ -3,12 +3,17 @@ from unittest.mock import MagicMock
 
 import pytest  # noqa
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import Logprob, SequenceGroup
 
 from .utils import create_dummy_prompt
+
+if should_skip_test_group(group_name="TEST_CORE"):
+    pytest.skip("TEST_CORE=DISABLE, skipping core test group",
+                allow_module_level=True)
 
 
 def get_sequence_groups(scheduler_output):

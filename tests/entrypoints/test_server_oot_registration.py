@@ -5,10 +5,15 @@ import pytest
 import torch
 from openai import OpenAI, OpenAIError
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import ModelRegistry
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.utils import get_open_port
+
+if should_skip_test_group(group_name="TEST_ENTRYPOINTS"):
+    pytest.skip("TEST_ENTRYPOINTS=DISABLE, skipping entrypoints group",
+                allow_module_level=True)
 
 pytestmark = pytest.mark.openai
 

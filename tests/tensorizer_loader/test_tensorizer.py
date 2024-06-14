@@ -7,6 +7,7 @@ import openai
 import pytest
 import ray
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from tests.utils import ServerRunner
 from vllm import SamplingParams
 # yapf: disable
@@ -19,6 +20,10 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
 
 # yapf conflicts with isort for this docstring
 
+
+if should_skip_test_group(group_name="TEST_TENSORIZER_LOADER"):
+    pytest.skip("TEST_TENSORIZER=DISABLE, skipping tensorizer group",
+                allow_module_level=True)
 
 prompts = [
     "Hello, my name is",

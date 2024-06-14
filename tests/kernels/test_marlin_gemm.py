@@ -5,6 +5,7 @@ Run `pytest tests/kernels/marlin/test_marlin_gemm.py`.
 import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
@@ -19,6 +20,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_quantize, marlin_weights)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, quantize_weights, sort_weights)
+
+if should_skip_test_group(group_name="TEST_KERNELS"):
+    pytest.skip("TEST_KERNELS=DISABLE, skipping kernels test group",
+                allow_module_level=True)
 
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]

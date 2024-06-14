@@ -23,8 +23,8 @@ on:
         description: "whl to test (variable appears late binding so unusable outside 'download artifact')"
         type: string
         required: true
-      test_skip_list:
-        description: 'file containing tests to skip'
+      test_skip_env_vars:
+        description: 'file containing tests env vars for test skipping'
         type: string
         required: true
 
@@ -51,8 +51,8 @@ on:
         description: "whl to test (variable appears late binding so unusable outside 'download artifact')"
         type: string
         required: true
-      test_skip_list:
-        description: 'file containing tests to skip'
+      test_skip_env_vars:
+        description: 'file containing tests env vars for test skipping'
         type: string
         required: true
 
@@ -131,12 +131,17 @@ jobs:
             - name: run buildkite script
               run: |
                 cd tests && sudo bash ../.buildkite/download-images.sh
+            
+            - name: setenv test skip
+              id: setenv_test_skip
+              uses: ./.github/actions/nm-set-env-test-skip
+              with:
+                test_skip_env_vars: ${{ inputs.test_skip_env_vars }}
 
             - name: run tests
               id: test
               uses: ./.github/actions/nm-test-whl/
               with:
-                test_skip_list: ${{ inputs.test_skip_list }}
                 test_directory: tests
                 test_results: test-results
 

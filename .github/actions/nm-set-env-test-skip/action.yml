@@ -1,0 +1,15 @@
+name: set test skip env vars
+description: 'sets env variables for test skipping. See tests/utils_skip.py'
+inputs:
+  test_skip_env_vars:
+    description: 'file with list of env vars controlling which tests to run.'
+    required: true
+
+runs:
+  using: composite
+  steps:
+  - run: |
+      cat "${ENV_VAR_FILE}" >> $GITHUB_ENV
+    env:
+        ENV_VAR_FILE: ${{ inputs.test_skip_env_vars }}
+    shell: bash

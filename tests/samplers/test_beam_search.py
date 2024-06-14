@@ -5,6 +5,12 @@ Run `pytest tests/samplers/test_beam_search.py`.
 
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
+
+if should_skip_test_group(group_name="TEST_SAMPLERS"):
+    pytest.skip("TEST_SAMPLERS=DISABLE, skipping sampler test group",
+                allow_module_level=True)
+
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
 #   2. Increase beam_width to 8.

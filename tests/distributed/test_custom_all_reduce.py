@@ -6,12 +6,17 @@ import ray
 import torch
 import torch.distributed as dist
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from tests.utils import (init_test_distributed_environment,
                          multi_process_tensor_parallel)
 from vllm.distributed.communication_op import (  # noqa
     graph_capture, tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
                                              get_tp_ca_communicator)
+
+if should_skip_test_group(group_name="TEST_DISTRIBUTED"):
+    pytest.skip("TEST_DISTRIBUTED=DISABLE, skipping distributed test group",
+                allow_module_level=True)
 
 random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for _ in range(8)]

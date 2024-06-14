@@ -7,9 +7,14 @@ import pytest
 from transformers import AutoModelForCausalLM
 
 import vllm
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.lora.request import LoRARequest
 
 from .conftest import cleanup
+
+if should_skip_test_group(group_name="TEST_LORA"):
+    pytest.skip("TEST_LORA=DISABLE, skipping lora test group",
+                allow_module_level=True)
 
 MODEL_PATH = "Felladrin/Llama-68M-Chat-v1"
 PROMPTS = [

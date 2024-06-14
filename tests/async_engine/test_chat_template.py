@@ -4,9 +4,14 @@ from dataclasses import dataclass
 
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.transformers_utils.tokenizer import get_tokenizer
+
+if should_skip_test_group(group_name="TEST_ASYNC_ENGINE"):
+    pytest.skip("TEST_ASYNC_ENGINE=DISABLE, skipping async engine test group",
+                allow_module_level=True)
 
 chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(
     __file__))).parent.parent / "examples/template_chatml.jinja"

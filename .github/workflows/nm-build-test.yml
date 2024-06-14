@@ -45,8 +45,8 @@ on:
         description: "git commit hash or branch name"
         type: string
         required: true
-      test_skip_list:
-        description: 'file containing tests to skip'
+      test_skip_env_vars:
+        description: 'file with list of env vars controlling which tests to run'
         type: string
         required: true
       # benchmark related parameters
@@ -91,7 +91,7 @@ jobs:
             gitref: ${{ github.ref }}
             python: ${{ inputs.python }}
             whl: ${{ needs.BUILD.outputs.whl }}
-            test_skip_list: ${{ inputs.test_skip_list }}
+            test_skip_env_vars: ${{ inputs.test_skip_env_vars }}
         secrets: inherit
 
     # TODO: re-enable
@@ -105,7 +105,7 @@ jobs:
     #         gitref: ${{ github.ref }}
     #         python: ${{ inputs.python }}
     #         whl: ${{ needs.BUILD.outputs.whl }}
-    #         test_skip_list: ${{ inputs.test_skip_list }}
+    #         test_skip_env_vars: ${{ inputs.test_skip_env_vars }}
     #     secrets: inherit
 
     UPLOAD:

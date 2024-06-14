@@ -7,8 +7,13 @@ import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.attention.backends.xformers import _make_alibi_bias
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
+
+if should_skip_test_group(group_name="TEST_KERNELS"):
+    pytest.skip("TEST_KERNELS=DISABLE, skipping kernels test group",
+                allow_module_level=True)
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 8, 64]

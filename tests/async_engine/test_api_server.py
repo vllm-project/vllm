@@ -7,6 +7,12 @@ from pathlib import Path
 import pytest
 import requests
 
+from tests.nm_utils.utils_skip import should_skip_test_group
+
+if should_skip_test_group(group_name="TEST_ASYNC_ENGINE"):
+    pytest.skip("TEST_ASYNC_ENGINE=DISABLE, skipping async engine test group",
+                allow_module_level=True)
+
 
 def _query_server(prompt: str, max_tokens: int = 5) -> dict:
     response = requests.post("http://localhost:8000/generate",

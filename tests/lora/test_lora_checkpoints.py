@@ -1,7 +1,12 @@
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.lora.models import LoRAModel
 from vllm.model_executor.models.baichuan import BaiChuanBaseForCausalLM
+
+if should_skip_test_group(group_name="TEST_LORA"):
+    pytest.skip("TEST_LORA=DISABLE, skipping lora test group",
+                allow_module_level=True)
 
 lora_lst = ["baichuan7B", "baichuan7B-zero", "chatglm3-6b"]
 

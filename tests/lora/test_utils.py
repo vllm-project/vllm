@@ -3,8 +3,13 @@ from collections import OrderedDict
 import pytest
 from torch import nn
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
 from vllm.utils import LRUCache
+
+if should_skip_test_group(group_name="TEST_LORA"):
+    pytest.skip("TEST_LORA=DISABLE, skipping lora test group",
+                allow_module_level=True)
 
 
 def test_parse_fine_tuned_lora_name_valid():

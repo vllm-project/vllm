@@ -5,7 +5,13 @@ Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 import pytest
 
 from tests.conftest import cleanup
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import LLM
+
+if should_skip_test_group(group_name="TEST_PREFIX_CACHING"):
+    pytest.skip(
+        "TEST_PREFIX_CACHING=DISABLE, skipping prefix caching test group",
+        allow_module_level=True)
 
 MODEL_LEN_LEN = [
     # Example models with sliding window.

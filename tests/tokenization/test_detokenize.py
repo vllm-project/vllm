@@ -3,10 +3,15 @@ from typing import Dict, List
 import pytest
 from transformers import AutoTokenizer
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 from vllm.transformers_utils.detokenizer import (Detokenizer,
                                                  detokenize_incrementally)
 from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
+
+if should_skip_test_group(group_name="TEST_TOKENIZATION"):
+    pytest.skip("TEST_TOKENIZATION=DISABLE, skipping tokenization test group",
+                allow_module_level=True)
 
 TRUTH = [
     "Hello here, this is a simple test",

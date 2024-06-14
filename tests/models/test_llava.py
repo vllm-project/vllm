@@ -3,9 +3,14 @@ from typing import List, Tuple
 import pytest
 from transformers import AutoTokenizer
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.config import VisionLanguageConfig
 
 from ..conftest import IMAGE_FILES
+
+if should_skip_test_group(group_name="TEST_MODELS"):
+    pytest.skip("TEST_MODELS=DISABLE, skipping model test group",
+                allow_module_level=True)
 
 pytestmark = pytest.mark.llava
 

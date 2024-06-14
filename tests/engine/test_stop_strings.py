@@ -2,7 +2,12 @@ from typing import Any, List, Optional
 
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import CompletionOutput, LLMEngine, SamplingParams
+
+if should_skip_test_group(group_name="TEST_ENGINE"):
+    pytest.skip("TEST_ENGINE=DISABLE, skipping engine test group",
+                allow_module_level=True)
 
 MODEL = "meta-llama/llama-2-7b-hf"
 MAX_TOKENS = 200

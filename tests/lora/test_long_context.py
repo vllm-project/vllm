@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 import vllm
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import SamplingParams
 from vllm.lora.layers import LinearScalingRotaryEmbeddingWithLora
 from vllm.lora.request import LoRARequest
@@ -12,6 +13,10 @@ from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding)
 
 from .data.long_context_test_data import prompts_and_responses
+
+if should_skip_test_group(group_name="TEST_LORA"):
+    pytest.skip("TEST_LORA=DISABLE, skipping lora test group",
+                allow_module_level=True)
 
 context_len_to_scaling_factor = {
     "16k": 4,

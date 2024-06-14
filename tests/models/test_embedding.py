@@ -6,6 +6,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.nm_utils.utils_skip import should_skip_test_group
+
+if should_skip_test_group(group_name="TEST_MODELS"):
+    pytest.skip("TEST_MODELS=DISABLE, skipping model test group",
+                allow_module_level=True)
+
 MODELS = [
     "intfloat/e5-mistral-7b-instruct",
 ]

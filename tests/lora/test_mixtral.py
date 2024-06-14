@@ -2,7 +2,12 @@ import pytest
 import torch
 
 import vllm
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.lora.request import LoRARequest
+
+if should_skip_test_group(group_name="TEST_LORA"):
+    pytest.skip("TEST_LORA=DISABLE, skipping lora test group",
+                allow_module_level=True)
 
 MODEL_PATH = "mistralai/Mixtral-8x7B-Instruct-v0.1"
 

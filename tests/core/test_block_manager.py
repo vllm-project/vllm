@@ -4,6 +4,7 @@ from typing import List
 
 import pytest
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm import SamplingParams
 from vllm.block import PhysicalTokenBlock
 from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
@@ -15,6 +16,10 @@ from vllm.sequence import Logprob, Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
 from .utils import create_dummy_prompt, create_dummy_prompt_encoder_decoder
+
+if should_skip_test_group(group_name="TEST_CORE"):
+    pytest.skip("TEST_CORE=DISABLE, skipping core test group",
+                allow_module_level=True)
 
 
 def test_block_allocator_allocate():

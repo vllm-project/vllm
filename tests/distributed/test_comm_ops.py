@@ -8,11 +8,16 @@ import pytest
 import ray
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from tests.utils import (init_test_distributed_environment,
                          multi_process_tensor_parallel)
 from vllm.distributed import (broadcast_tensor_dict,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
+
+if should_skip_test_group(group_name="TEST_DISTRIBUTED"):
+    pytest.skip("TEST_DISTRIBUTED=DISABLE, skipping distributed test group",
+                allow_module_level=True)
 
 
 @ray.remote(num_gpus=1, max_calls=1)

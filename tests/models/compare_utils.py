@@ -34,4 +34,5 @@ def check_logprobs_close(outputs_0_lst, outputs_1_lst, name_0, name_1):
                 # Break out since sequences will now diverge.
                 # as long as we got this far with the output tokens being the
                 # same, or close, the responses are close enough
+                print(f"INFO: BREAK IN CHECK LOGPROBS CLOSE AT IDX: {idx}\n\n")
                 break

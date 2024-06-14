@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
@@ -16,6 +17,10 @@ from vllm.spec_decode.spec_decode_worker import (SpecDecodeWorker,
                                                  split_num_cache_blocks_evenly)
 
 from .utils import create_batch, create_sampler_output_list, mock_worker
+
+if should_skip_test_group(group_name="TEST_SPEC_DECODE"):
+    pytest.skip("TEST_SPEC_DECODE=DISABLE, skipping spec decode group",
+                allow_module_level=True)
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])

@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.config import LoRAConfig
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
@@ -37,6 +38,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.utils import set_random_seed
 
 from .utils import DummyLoRAManager
+
+if should_skip_test_group(group_name="TEST_LORA"):
+    pytest.skip("TEST_LORA=DISABLE, skipping lora test group",
+                allow_module_level=True)
 
 TOLERANCES = {
     torch.float16: (5e-3, 5e-3),

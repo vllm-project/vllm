@@ -2,7 +2,14 @@ import subprocess
 import sys
 import tempfile
 
+import pytest
+
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.entrypoints.openai.protocol import BatchRequestOutput
+
+if should_skip_test_group(group_name="TEST_ENTRYPOINTS"):
+    pytest.skip("TEST_ENTRYPOINTS=DISABLE, skipping entrypoints group",
+                allow_module_level=True)
 
 # ruff: noqa: E501
 INPUT_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "NousResearch/Meta-Llama-3-8B-Instruct", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "Hello world!"}],"max_tokens": 1000}}
