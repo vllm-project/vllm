@@ -60,7 +60,8 @@ class ShmRingBuffer:
         while True:
             with self.metadata as buffer:
                 read_count = sum(buffer[1:])
-                if buffer[0] and read_count != self.world_size - 1:
+                written_flag = buffer[0]
+                if written_flag and read_count != self.world_size - 1:
                     # this block is written and not read by all readers
                     # try to write to the next block
                     self.current_idx = (self.current_idx + 1) % self.max_chunks
@@ -85,7 +86,8 @@ class ShmRingBuffer:
         while True:
             with self.metadata as buffer:
                 read_flag = buffer[self.rank]
-                if not buffer[0] or read_flag:
+                written_flag = buffer[0]
+                if not written_flag or read_flag:
                     # this block is either
                     # (1) not written
                     # (2) already read by this reader
