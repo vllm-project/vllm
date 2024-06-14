@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
-
+exit 2
 if [[ "${BUILDKITE_BRANCH}" == "main" ]]; then
     echo "Run full tests on main"
     exit 0

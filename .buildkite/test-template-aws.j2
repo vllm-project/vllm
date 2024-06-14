@@ -12,6 +12,7 @@ steps:
       - exit_status: 2
 
   - label: ":docker: build image"
+    depends_on: diff_check
     agents:
       queue: cpu_queue
     commands:
