@@ -165,7 +165,7 @@ if __name__ == '__main__':
                         choices=["v1", "v2"],
                         default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--seq_len", type=int, default=4096)
+    parser.add_argument("--seq-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
     parser.add_argument("--head-size",

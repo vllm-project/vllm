@@ -327,7 +327,7 @@ if __name__ == "__main__":
         "--quantization-param-path <filename>). This is only used "
         "if the KV cache dtype is FP8 and on ROCm (AMD GPU).")
     parser.add_argument(
-        "--quantized_model",
+        "--quantized-model",
         help="Specify the directory containing a single quantized HF model. "
         "It is expected that the quantization format is FP8_E4M3, for use "
         "on ROCm (AMD GPU).",
@@ -339,18 +339,18 @@ if __name__ == "__main__":
         choices=["auto", "safetensors", "npz", "pt"],
         default="auto")
     parser.add_argument(
-        "--output_dir",
+        "--output-dir",
         help="Optionally specify the output directory. By default the "
         "KV cache scaling factors will be saved in the model directory, "
         "however you can override this behavior here.",
         default=None)
     parser.add_argument(
-        "--output_name",
+        "--output-name",
         help="Optionally specify the output filename.",
         # TODO: Change this once additional scaling factors are enabled
         default="kv_cache_scales.json")
     parser.add_argument(
-        "--tp_size",
+        "--tp-size",
         help="Optionally specify the tensor-parallel (TP) size that the "
         "quantized model should correspond to. If specified, during KV "
         "cache scaling factor extraction the observed TP size will be "
