@@ -8,10 +8,13 @@ ARG CUDA_VERSION
 ARG PYTHON_VERSION
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:{CUDA_VERSION}-devel-ubuntu22.04 AS dev
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git curl sudo
+    && apt-get install -y python3-pip git curl sudo software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -85,7 +88,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && export SCCACHE_BUCKET=vllm-build-sccache \
         && export SCCACHE_REGION=us-west-2 \
         && sccache --show-stats \
-        && python3 setup.py bdist_wheel --dist-dir=dist \
+        && python${PYTHON_VERSION} setup.py bdist_wheel --dist-dir=dist \
         && sccache --show-stats; \
     fi
 
@@ -93,7 +96,7 @@ ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" != "1" ]; then \
-        python3 setup.py bdist_wheel --dist-dir=dist; \
+        python${PYTHON_VERSION} setup.py bdist_wheel --dist-dir=dist; \
     fi
 
 # check the size of the wheel, we cannot upload wheels larger than 100MB
@@ -104,7 +107,7 @@ RUN python3 check-wheel-size.py dist
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:{CUDA_VERSION}-base-ubuntu22.04 AS vllm-base
+FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04 AS vllm-base
 WORKDIR /vllm-workspace
 
 RUN apt-get update -y \
