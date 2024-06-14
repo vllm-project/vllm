@@ -98,6 +98,7 @@ class GroupCoordinator:
     # communicators are only created for world size > 1
     pynccl_comm: Optional[Any]  # PyNccl communicator
     ca_comm: Optional[Any]  # Custom allreduce communicator
+    shm_broadcaster: Optional[Any]  # shared memory broadcaster
 
     def __init__(
         self,
@@ -161,6 +162,12 @@ class GroupCoordinator:
             )
         else:
             self.ca_comm = None
+
+        from vllm.distributed.device_communicators.shm_broadcast import (
+            ShmRingBuffer)
+        self.shm_broadcaster: Optional[ShmRingBuffer] = None
+        if is_in_the_same_node(self.cpu_group):
+            self.shm_broadcaster = ShmRingBuffer(self.cpu_group, 1 << 20, 2)
 
     @property
     def first_rank(self):
@@ -324,6 +331,30 @@ class GroupCoordinator:
                                     group=self.device_group)
         return input_
 
+    def broadcast_object(self, obj: Optional[Any] = None, src: int = 0):
+        """Broadcast the input object.
+        NOTE: `src` is the local rank of the source rank.
+        """
+        assert src < self.world_size, f"Invalid src rank ({src})"
+
+        # Bypass the function if we are using only 1 GPU.
+        if self.world_size == 1:
+            return obj
+        if self.shm_broadcaster is not None:
+            assert src == 0, "Shared memory broadcaster only supports src=0"
+            return self.shm_broadcaster.broadcast_object(obj)
+        if self.rank_in_group == src:
+            torch.distributed.broadcast_object_list([obj],
+                                                    src=self.ranks[src],
+                                                    group=self.cpu_group)
+            return obj
+        else:
+            recv = [None]
+            torch.distributed.broadcast_object_list(recv,
+                                                    src=self.ranks[src],
+                                                    group=self.cpu_group)
+            return recv[0]
+
     def broadcast_object_list(self,
                               obj_list: List[Any],
                               src: int = 0,
@@ -371,9 +402,7 @@ class GroupCoordinator:
             # `metadata_list` lives in CPU memory.
             # `broadcast_object_list` has serialization & deserialization,
             # all happening on CPU. Therefore, we can use the CPU group.
-            torch.distributed.broadcast_object_list([metadata_list],
-                                                    src=src,
-                                                    group=metadata_group)
+            self.broadcast_object(metadata_list, src=src)
             async_handles = []
             for tensor in tensor_list:
                 if tensor.numel() == 0:
@@ -396,14 +425,10 @@ class GroupCoordinator:
                 async_handle.wait()
 
         else:
-            recv_metadata_list = [None]
-            torch.distributed.broadcast_object_list(recv_metadata_list,
-                                                    src=src,
-                                                    group=metadata_group)
-            assert recv_metadata_list[0] is not None
+            metadata_list = self.broadcast_object(None, src=src)
             tensor_dict = {}
             async_handles = []
-            for key, value in recv_metadata_list[0]:
+            for key, value in metadata_list:
                 if isinstance(value, TensorMetadata):
                     tensor = torch.empty(value.size,
                                          dtype=value.dtype,

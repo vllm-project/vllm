@@ -1,13 +1,10 @@
-import time
-import multiprocessing
-from multiprocessing import shared_memory, resource_tracker
-from multiprocessing import Array, Value
-import contextlib
-from contextlib import contextmanager
-from torch.distributed import ProcessGroup
-import torch
-import torch.distributed as dist
 import pickle
+from contextlib import contextmanager
+from multiprocessing import shared_memory
+from unittest.mock import patch
+
+import torch.distributed as dist
+from torch.distributed import ProcessGroup
 
 
 class ShmRingBuffer:
@@ -38,9 +35,12 @@ class ShmRingBuffer:
             recv = [None]
             dist.broadcast_object_list(recv, src=global_ranks[0])
             name = recv[0]
-            self.shared_memory = shared_memory.SharedMemory(name=name)
-            resource_tracker.unregister(self.shared_memory._name,
-                                        "shared_memory") # noqa
+            # fix to https://stackoverflow.com/q/62748654/9191338
+            # Python incorrectly tracks shared memory even if it is not
+            # created by the process. The following patch is a workaround.
+            with patch("multiprocessing.resource_tracker.register",
+                       lambda *args, **kwargs: None):
+                self.shared_memory = shared_memory.SharedMemory(name=name)
 
     @property
     def buffer(self):
@@ -66,7 +66,9 @@ class ShmRingBuffer:
                     self.current_idx += 1
                     self.current_idx %= self.max_chunks
                     continue
-                # found a block that is (1) not written or (2) read by all readers
+                # found a block that is either
+                # (1) not written
+                # (2) read by all readers
                 # let caller write to the buffer
                 with self.buffer as buf:
                     yield buf
@@ -85,7 +87,9 @@ class ShmRingBuffer:
             with self.metadata as buffer:
                 read_flag = buffer[self.rank]
                 if not buffer[0] or read_flag:
-                    # this block is (1) not written or (2) already read by this reader
+                    # this block is either
+                    # (1) not written
+                    # (2) already read by this reader
                     # try to read the next block
                     self.current_idx += 1
                     self.current_idx %= self.max_chunks
