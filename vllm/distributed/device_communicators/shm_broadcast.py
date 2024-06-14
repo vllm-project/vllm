@@ -1,4 +1,5 @@
 import pickle
+import time
 from contextlib import contextmanager
 from multiprocessing import shared_memory
 from unittest.mock import patch
@@ -57,6 +58,7 @@ class ShmRingBuffer:
     @contextmanager
     def acquire_write(self):
         assert self.is_writer, "Only writers can acquire write"
+        start_index = self.current_idx
         while True:
             with self.metadata as metadata_buffer:
                 read_count = sum(metadata_buffer[1:])
@@ -65,6 +67,10 @@ class ShmRingBuffer:
                     # this block is written and not read by all readers
                     # try to write to the next block
                     self.current_idx = (self.current_idx + 1) % self.max_chunks
+                    if self.current_idx == start_index:
+                        # no empty block found
+                        # wait for a while (0.1 us)
+                        time.sleep(1e-7)
                     continue
                 # found a block that is either
                 # (1) not written
@@ -83,6 +89,7 @@ class ShmRingBuffer:
     @contextmanager
     def acquire_read(self):
         assert self.is_reader, "Only readers can acquire read"
+        start_index = self.current_idx
         while True:
             with self.metadata as metadata_buffer:
                 read_flag = metadata_buffer[self.rank]
@@ -93,6 +100,10 @@ class ShmRingBuffer:
                     # (2) already read by this reader
                     # try to read the next block
                     self.current_idx = (self.current_idx + 1) % self.max_chunks
+                    if self.current_idx == start_index:
+                        # no block found
+                        # wait for a while (0.1 us)
+                        time.sleep(1e-7)
                     continue
                 # found a block that is not read by this reader
                 # let caller read from the buffer
