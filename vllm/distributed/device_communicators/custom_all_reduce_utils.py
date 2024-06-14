@@ -1,7 +1,7 @@
 import ctypes
 import json
 import os
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -14,7 +14,7 @@ from vllm.utils import cuda_device_count_stateless
 logger = init_logger(__name__)
 
 
-def producer(i: int,
+def producer(batch_is: List[int],
              producer_queue,
              consumer_queue,
              result_queue,
@@ -23,26 +23,28 @@ def producer(i: int,
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
 
     lib = CudaRTLibrary()
-    lib.cudaSetDevice(i)
-    pointer = lib.cudaMalloc(1024)
-    lib.cudaMemset(pointer, 1, 1024)
-    lib.cudaDeviceSynchronize()
-    handle = lib.cudaIpcGetMemHandle(pointer)
-    producer_queue.put(handle)
-    open_success = consumer_queue.get()
-    if open_success:
-        producer_queue.put(0)
-        consumer_queue.get()
-        host_data = (ctypes.c_char * 1024)()
-        lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
-        for i in range(1024):
-            if ord(host_data[i]) != 2:
-                open_success = False
-                break
-    result_queue.put(open_success)
+    for i in batch_is:
+        lib.cudaSetDevice(i)
+        pointer = lib.cudaMalloc(1024)
+        lib.cudaMemset(pointer, 1, 1024)
+        lib.cudaDeviceSynchronize()
+        handle = lib.cudaIpcGetMemHandle(pointer)
+        producer_queue.put(handle)
+        open_success = consumer_queue.get()
+        if open_success:
+            producer_queue.put(0)
+            consumer_queue.get()
+            host_data = (ctypes.c_char * 1024)()
+            lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
+            for i in range(1024):
+                if ord(host_data[i]) != 2:
+                    open_success = False
+                    break
+        result_queue.put(open_success)
+        lib.cudaDeviceReset()
 
 
-def consumer(j: int,
+def consumer(batch_js: List[int],
              producer_queue,
              consumer_queue,
              result_queue,
@@ -51,31 +53,33 @@ def consumer(j: int,
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
 
     lib = CudaRTLibrary()
-    lib.cudaSetDevice(j)
-    handle = producer_queue.get()
-    open_success = False
-    try:
-        pointer = lib.cudaIpcOpenMemHandle(handle)  # type: ignore
-        open_success = True
-    except RuntimeError:
-        # cannot error out here, because the producer process
-        # is still waiting for the response.
-        pass
-    consumer_queue.put(open_success)
-    if open_success:
-        lib.cudaMemset(pointer, 2, 1024)
-        producer_queue.get()
-        consumer_queue.put(0)
-        host_data = (ctypes.c_char * 1024)()
-        lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
-        for i in range(1024):
-            if ord(host_data[i]) != 2:
-                open_success = False
-                break
-    result_queue.put(open_success)
+    for j in batch_js:
+        lib.cudaSetDevice(j)
+        handle = producer_queue.get()
+        open_success = False
+        try:
+            pointer = lib.cudaIpcOpenMemHandle(handle)  # type: ignore
+            open_success = True
+        except RuntimeError:
+            # cannot error out here, because the producer process
+            # is still waiting for the response.
+            pass
+        consumer_queue.put(open_success)
+        if open_success:
+            lib.cudaMemset(pointer, 2, 1024)
+            producer_queue.get()
+            consumer_queue.put(0)
+            host_data = (ctypes.c_char * 1024)()
+            lib.cudaMemcpy(host_data, pointer, 1024)  # type: ignore
+            for i in range(1024):
+                if ord(host_data[i]) != 2:
+                    open_success = False
+                    break
+        result_queue.put(open_success)
+        lib.cudaDeviceReset()
 
 
-def can_actually_p2p(i, j):
+def can_actually_p2p(batch_is, batch_js):
     """
     Usually, checking if P2P access is enabled can be done by
     `torch.cuda.can_device_access_peer(i, j)`. However, sometimes
@@ -111,19 +115,22 @@ def can_actually_p2p(i, j):
     consumer_queue = smp.Queue()
     result_queue = smp.Queue()
     pi = smp.Process(target=producer,
-                     args=(i, producer_queue, consumer_queue, result_queue,
-                           cuda_visible_devices))
+                     args=(batch_is, producer_queue, consumer_queue,
+                           result_queue, cuda_visible_devices))
     pj = smp.Process(target=consumer,
-                     args=(j, producer_queue, consumer_queue, result_queue,
-                           cuda_visible_devices))
+                     args=(batch_js, producer_queue, consumer_queue,
+                           result_queue, cuda_visible_devices))
     pi.start()
     pj.start()
     pi.join()
     pj.join()
-    a = result_queue.get()
-    b = result_queue.get()
-    assert a == b
-    return a
+    result = []
+    for i, j in zip(batch_is, batch_js):
+        a = result_queue.get()
+        b = result_queue.get()
+        assert a == b
+        result.append(a)
+    return result
 
 
 # why do we need this cache?
