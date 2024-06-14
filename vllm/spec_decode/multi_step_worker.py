@@ -47,6 +47,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         logger.info(f"{rank=}, {draft_ranks=}, {self._is_dummy=}")
 
+        logger.info(f"{kwargs=}")
+
         super().__init__(**kwargs)
 
         # Lazy initialization list.
@@ -91,8 +93,9 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         )
 
     def set_include_gpu_probs_tensor(self):
-        # Need include_gpu_probs_tensor for multi_step_worker
-        self.model_runner.model.sampler.include_gpu_probs_tensor = True
+        if not self._is_dummy:
+            # Need include_gpu_probs_tensor for multi_step_worker
+            self.model_runner.model.sampler.include_gpu_probs_tensor = True
 
     def load_model(self):
         if not self._is_dummy:
@@ -100,9 +103,11 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 super().load_model()
 
     def determine_num_available_blocks(self):
-        if not self._is_dummy:
-            with self._patch_tensor_parallel_group():
-                return super().determine_num_available_blocks()
+        if self._is_dummy:
+            return -1, -1
+
+        with self._patch_tensor_parallel_group():
+            return super().determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int):
         if not self._is_dummy:
