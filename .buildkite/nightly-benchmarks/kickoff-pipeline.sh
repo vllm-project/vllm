@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# NOTE(simon): this script runs inside a buildkite agent with CPU only access.
 set -euo pipefail
 
 # Install system packages
@@ -23,4 +24,4 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
 fi
 
 # Upload sample.yaml
-buildkite-agent pipeline upload .buildkite/nightly-benchmarks/sample.yaml
+buildkite-agent pipeline upload .buildkite/nightly-benchmarks/benchmark-pipeline.yaml
