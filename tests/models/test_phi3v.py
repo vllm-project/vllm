@@ -37,7 +37,8 @@ def iter_phi3v_configs(model_name: str):
 
 
 model_and_vl_config = [
-    *iter_phi3v_configs("microsoft/Phi-3-vision-128k-instruct"),
+    # *iter_phi3v_configs("microsoft/Phi-3-vision-128k-instruct"),
+    *iter_phi3v_configs("/data/LLM-model/Phi-3-vision-128k-instruct"),
 ]
 
 
@@ -83,7 +84,10 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     """
     model_id, vlm_config = model_and_config
 
-    with hf_runner(model_id, dtype=dtype) as hf_model:
+    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
+    hf_model_kwargs = {"_attn_implementation": "eager"}
+    with hf_runner(model_id, dtype=dtype,
+                   model_kwargs=hf_model_kwargs) as hf_model:
         hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
                                               max_tokens,
                                               images=hf_images)
