@@ -8,7 +8,7 @@
 ARG CUDA_VERSION
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS dev
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
 ARG CUDA_VERSION
 ENV CUDA_VERSION=${CUDA_VERSION}
 ARG PYTHON_VERSION
@@ -40,13 +40,6 @@ COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python${PYTHON_VERSION} -m pip install -r requirements-cuda.txt
 
-# install development dependencies
-COPY requirements-lint.txt requirements-lint.txt
-COPY requirements-test.txt requirements-test.txt
-COPY requirements-dev.txt requirements-dev.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python${PYTHON_VERSION} -m pip install -r requirements-dev.txt
-
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
 # explicitly set the list to avoid issues with torch 2.2
@@ -57,7 +50,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 
 #################### WHEEL BUILD IMAGE ####################
-FROM dev AS build
+FROM base AS build
 ARG PYTHON_VERSION
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 # install build dependencies
@@ -110,6 +103,14 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 RUN python3 check-wheel-size.py dist
 
+################### Dev image ##################################
+FROM base as dev
+# install development dependencies
+COPY requirements-lint.txt requirements-lint.txt
+COPY requirements-test.txt requirements-test.txt
+COPY requirements-dev.txt requirements-dev.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python${PYTHON_VERSION} -m pip install -r requirements-dev.txt
 #################### EXTENSION Build IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
