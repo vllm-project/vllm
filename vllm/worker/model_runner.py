@@ -581,6 +581,10 @@ class ModelRunner:
                      dim=0,
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
+        torch.cumsum(query_lens_tensor,
+                         dim=0,
+                         dtype=query_start_loc.dtype,
+                         out=query_start_loc[1:])
 
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
@@ -655,21 +659,6 @@ class ModelRunner:
             )
 
         else:
-            context_lens_tensor = torch.tensor(context_lens,
-                                               dtype=torch.int,
-                                               device=self.device)
-            query_lens_tensor = torch.tensor(query_lens,
-                                             dtype=torch.long,
-                                             device=self.device)
-            query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                          dtype=torch.int32,
-                                          device=self.device)
-
-            torch.cumsum(query_lens_tensor,
-                         dim=0,
-                         dtype=query_start_loc.dtype,
-                         out=query_start_loc[1:])
-
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=num_prefills,
                 slot_mapping=slot_mapping_tensor,
@@ -974,6 +963,10 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
+        # For flashinfer, different batch sizes will share the same workspace buffer
+        decode_workspace_buffer = torch.empty(128 * 1024 * 1024,
+                                                dtype=torch.uint8,
+                                                device=self.device)
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
@@ -987,9 +980,6 @@ class ModelRunner:
                 last_page_len_buffer = torch.empty(batch_size,
                                                    dtype=torch.int32,
                                                    device=self.device)
-                decode_workspace_buffer = torch.empty(128 * 1024 * 1024,
-                                                      dtype=torch.uint8,
-                                                      device=self.device)
                 decode_wrapper = CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
                     decode_workspace_buffer, indptr_buffer, indices_buffer,
                     last_page_len_buffer, "NHD")
