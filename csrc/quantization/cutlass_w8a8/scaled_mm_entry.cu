@@ -24,10 +24,10 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales);
 void cutlass_scaled_mm_bias_sm90(torch::Tensor& c, torch::Tensor const& a,
-                                    torch::Tensor const& b,
-                                    torch::Tensor const& a_scales,
-                                    torch::Tensor const& b_scales,
-                                    torch::Tensor const& bias);
+                                 torch::Tensor const& b,
+                                 torch::Tensor const& a_scales,
+                                 torch::Tensor const& b_scales,
+                                 torch::Tensor const& bias);
 #endif
 
 void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
@@ -65,13 +65,13 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
     // Guard against compilation issues for sm90 kernels
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
     cutlass_scaled_mm_bias_sm90(c, a, b, a_scales, b_scales,
-                                    reinterpret_cast<const at::Tensor&>(bias));
+                                reinterpret_cast<const at::Tensor&>(bias));
 #else
-      TORCH_CHECK(0);
+    TORCH_CHECK(0);
 #endif
   } else {
     if (version_num >= 90) {
-#if defined CUDA_VERSION && CUDA_VERSION >= 12000      
+#if defined CUDA_VERSION && CUDA_VERSION >= 12000
       cutlass_scaled_mm_sm90(c, a, b, a_scales, b_scales);
 #else
       cutlass_scaled_mm_sm80(c, a, b, a_scales, b_scales);

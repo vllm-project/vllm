@@ -33,7 +33,8 @@ def cutlass_fp8_gemm_helper(m: int,
                             per_token_act_quant: bool,
                             per_out_channel_weight_quant: bool,
                             out_dtype: Type[torch.dtype] = torch.bfloat16,
-                            device: str = "cuda"):
+                            device: str = "cuda",
+                            bias: bool = False):
     # Test for a cutlass kernel with per-token activation quantization
     # and per-output channel weight quantization.
     a = to_fp8(torch.randn((m, k), device=device))
@@ -50,35 +51,16 @@ def cutlass_fp8_gemm_helper(m: int,
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b * b.to(dtype=torch.float32)).to(out_dtype)
-
-    assert torch.allclose(out, baseline, rtol=1e-2, atol=1e-1)
-
-
-def cutlass_fp8_gemm_bias_helper(m: int,
-                                 n: int,
-                                 k: int,
-                                 per_token_act_quant: bool,
-                                 per_out_channel_weight_quant: bool,
-                                 out_dtype: Type[torch.dtype] = torch.bfloat16,
-                                 device: str = "cuda"):
-    # Test for a cutlass kernel with per-token activation quantization
-    # and per-output channel weight quantization.
-    a = to_fp8(torch.randn((m, k), device=device))
-    b = to_fp8(torch.randn((n, k), device=device).t())
-    bias = torch.randn((n, ), device=device, dtype=out_dtype)
-
-    m_a_scales = m if per_token_act_quant else 1
-    n_b_scales = n if per_out_channel_weight_quant else 1
-
-    scale_a = (torch.randn(
-        (m_a_scales, 1), device=device, dtype=torch.float32) / 10)
-    scale_b = (torch.randn(
-        (1, n_b_scales), device=device, dtype=torch.float32) / 10)
-
-    out = ops.cutlass_scaled_mm_dq(a, b, scale_a, scale_b, out_dtype, bias)
-    baseline = (torch.mm(scale_a * a.to(dtype=torch.float32),
-                         scale_b * b.to(dtype=torch.float32)) +
-                bias).to(out_dtype)
+    if bias:
+        bias = torch.randn((n, ), device=device, dtype=out_dtype)
+        out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+        baseline = (torch.mm(scale_a * a.to(dtype=torch.float32),
+                             scale_b * b.to(dtype=torch.float32)) +
+                    bias).to(out_dtype)
+    else:
+        out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
+        baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
+                            scale_b * b.to(dtype=torch.float32)).to(out_dtype)
 
     assert torch.allclose(out, baseline, rtol=1e-2, atol=1e-1)
 
@@ -116,23 +98,12 @@ def cutlass_int8_gemm_helper(m: int,
 @pytest.mark.parametrize("k", [128, 496, 1024])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.skipif(capability < 89,
-                    reason="FP8 is not supported on this GPU type.")
-def test_cutlass_fp8_gemm_bias(m: int, n: int, k: int, per_act_token: bool,
-                               per_out_ch: bool):
-    cutlass_fp8_gemm_bias_helper(m, n, k, per_act_token, per_out_ch)
-
-
-@pytest.mark.parametrize("m", [512, 222, 100, 33, 1])
-@pytest.mark.parametrize("n", [2048, 256, 1024])
-@pytest.mark.parametrize("k", [128, 496, 1024])
-@pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
-                          per_out_ch: bool):
-    cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch)
+                          per_out_ch: bool, bias: bool):
+    cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, bias=bias)
 
 
 @pytest.mark.parametrize("m", [512, 222, 33, 1])
