@@ -11,10 +11,6 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.attention.backends.utils import (
-    assert_no_encdec_chunked_prefill_assuming_supported_backend,
-    fail_encoder_decoder_prefix_caching,
-    is_encoder_decoder_metadata_assuming_supported_backend)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -125,7 +121,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     # Attention type enum.
     #
-    # * Impact on XFormersImpl.forward(): 
+    # * Impact on XFormersImpl.forward():
     #
     #       * DECODER: normal decoder-only behavior;
     #         use decoder self-attention block table
@@ -139,7 +135,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     #         will match encoder sequence lengths, pass encoder sequence
     #         attributes to kernel (encoder_seq_lens/encoder_seq_lens_tensor/
     #         max_encoder_seq_len)
-    #         
+    #
     _attn_type: AttentionType = AttentionType.DECODER
 
     # Encoder sequence lengths representation
@@ -489,11 +485,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # seqlen datastructures we utilize
         attn_type = attn_metadata.attention_type
 
-        # Raise NotImplementedError for unsupported encoder/decoder
-        # scenarios (has no effect on decoder-only models)
-        assert_no_encdec_chunked_prefill_assuming_supported_backend(
-            attn_metadata)
-
         if (attn_type != AttentionType.ENCODER and \
             kv_cache is not None):
             # KV-cache during decoder-self- or
@@ -571,9 +562,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
             else:
-                if is_encoder_decoder_metadata_assuming_supported_backend(
-                        attn_metadata):
-                    fail_encoder_decoder_prefix_caching()
 
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None

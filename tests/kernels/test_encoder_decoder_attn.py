@@ -17,9 +17,7 @@ import torch
 from tests.kernels.utils import *
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
-from vllm.attention.backends.utils import (
-    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL, STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING,
-    STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
 from vllm.utils import is_hip, make_causal_mask, maybe_make_long_tensor
 
 HEAD_SIZES = [64, 256]
@@ -149,7 +147,6 @@ def _make_test_resources(test_pt: TestPoint) -> TestResources:
 
 def _encoder_attn_setup(test_pt: TestPoint, test_rsrcs: TestResources) \
                           -> PhaseTestParameters:
-
     '''
     Set up test vectors & data structures for encoder attention test.
 
