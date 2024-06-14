@@ -55,7 +55,6 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         if self._tp_groups is not None:
             return patch_tensor_parallel_group(self._tp_groups[0],
                                                self._tp_groups[1])
-        return None
 
     def init_device(self):
         if self._is_dummy:
