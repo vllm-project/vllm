@@ -40,11 +40,12 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
              the GPU ranks written in this value participaten in draft generation
         """
         rank = kwargs['rank']
-        self.is_dummy = rank not in draft_ranks
-        if draft_ranks is not None and not self.is_dummy:
-            self._ranks = draft_ranks
+        self.is_dummy = False
+        if draft_ranks is not None:
+            self._draft_ranks = draft_ranks
+            self.is_dummy = rank not in draft_ranks
             self._tp_groups = None
-            logger.info(f"{self._ranks=}, {self._tp_groups=}")
+            logger.info(f"{self._draft_ranks=}, {self._tp_groups=}")
         logger.inf(f"{rank=}, {draft_ranks=}, {self.is_dummy=}")
 
         super().__init__(**kwargs)
@@ -62,27 +63,26 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         if self.is_dummy:
             return
 
-        if self._ranks:
+        if self._draft_ranks:
             local_rank = get_world_group().local_rank
             world_backend = torch.distributed.get_backend(
                 get_world_group().device_group)
             tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
 
             world_group = GroupCoordinator(
-                group_ranks=[self._ranks],
+                group_ranks=[self._draft_ranks],
                 local_rank=local_rank,
                 torch_distributed_backend=world_backend,
                 use_pynccl=False,
                 use_custom_allreduce=False,
             )
             tp_group = GroupCoordinator(
-                group_ranks=[self._ranks],
+                group_ranks=[self._draft_ranks],
                 local_rank=local_rank,
                 torch_distributed_backend=tp_backend,
                 use_pynccl=True,
                 use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
             )
-
             self._tp_groups = world_group, tp_group
 
         with self._patch_tensor_parallel_group():
