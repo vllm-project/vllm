@@ -38,14 +38,14 @@ WORKDIR /workspace
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-cuda.txt
+    python${PYTHON_VERSION} -m pip install -r requirements-cuda.txt
 
 # install development dependencies
 COPY requirements-lint.txt requirements-lint.txt
 COPY requirements-test.txt requirements-test.txt
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-dev.txt
+    python${PYTHON_VERSION} -m pip install -r requirements-dev.txt
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -63,7 +63,7 @@ ENV PYTHON_VERSION=${PYTHON_VERSION}
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-build.txt
+    python${PYTHON_VERSION} -m pip install -r requirements-build.txt
 # files and directories related to build wheels
 COPY csrc csrc
 COPY setup.py setup.py
