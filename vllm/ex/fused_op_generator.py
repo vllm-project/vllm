@@ -54,8 +54,6 @@ as it is fused.
 In addition to generating the CUDA/C++ code, the FusedOpGenerator also needs
 to register the schemas and meta functions for torch.compile support.
 """
-
-
 class FusedOpGenerator:
     # A unique id to prevent multiple instances of the same torch library being created.
     N = 0
@@ -86,7 +84,7 @@ class FusedOpGenerator:
         self.fused_op.append(
             'inline torch::Tensor to_tensor(py::object obj) { return THPVariable_Unpack(obj.release().ptr()); }'
         )
-        self.fused_op.append('namespace py = pybind11;')
+        #self.fused_op.append('namespace py = pybind11;')
 
     # 'mangle' a python name so it can be used with C++.
     def mangle(self, s: str, rep: str = '_P_') -> str:
@@ -193,20 +191,23 @@ class FusedOpGenerator:
         return user_to_last_uses
 
     def delete_unused_values(self, user_to_last_uses,
-                             user: torch.fx.Node) -> str:
+                             user: torch.fx.Node,
+                             outputs: List[torch.fx.Node]) -> str:
         """
         Delete values after their last use. This ensures that values that are
         not used in the remainder of the code are freed and the memory usage
         of the code is optimal.
         """
         if user.op == 'placeholder':
-            return
+            return ''
         if user.op == 'output':
-            return
+            return ''
         nodes_to_delete = user_to_last_uses.get(user, [])
         to_delete_str = ''
         sep = '  '
         for n in nodes_to_delete:
+            if n in outputs:
+                continue
             to_delete_str = to_delete_str + sep + self.mangle(
                 n.name, '_') + " = torch::Tensor();"
         return to_delete_str
@@ -232,7 +233,7 @@ class FusedOpGenerator:
         logger.debug(f"make_fused_op: {fns}")
 
         # assume unary output for now
-        assert len(outputs) == 1
+        #assert len(outputs) == 1
 
         fn_names = [self.rename(node_function_target(n)) for n in nodes]
 
@@ -252,9 +253,12 @@ class FusedOpGenerator:
         oc = '{'
         cc = '}'
 
-        self.fused_op.append(f'torch::Tensor {op}({cxx_arg_sig})')
+        if len(outputs) == 1:
+            self.fused_op.append(f'torch::Tensor {op}({cxx_arg_sig})')
+        else:
+            self.fused_op.append(f'std::tuple<{", ".join(["torch::Tensor" for output in outputs])}> {op}({cxx_arg_sig})')
         self.fused_op.append('{')
-        self.fused_op.append('  pybind11::gil_scoped_acquire gil_lock;')
+        #self.fused_op.append('  pybind11::gil_scoped_acquire gil_lock;')  # try to get rid of pybind dependency
 
         # TODO: this debug logging/print is a hack, remove it later.
         #if _default_handler.level == logging.DEBUG:
@@ -294,10 +298,13 @@ class FusedOpGenerator:
 
             self.fused_op.append(comment_str)
             self.fused_op.append(call_str)
-            #self.fused_op.append(self.delete_unused_values(user_to_last_uses, n))
+            self.fused_op.append(self.delete_unused_values(user_to_last_uses, n, outputs))
 
-        self.fused_op.append(f"  // {str(extract_node_type(outputs[0]))}")
-        self.fused_op.append(f"  return {self.mangle(outputs[0].name, '_')};")
+        self.fused_op.append(f"  // {', '.join([str(extract_node_type(output)) for output in outputs])}")
+        if len(outputs) == 1:
+            self.fused_op.append(f"  return {self.mangle(outputs[0].name, '_')};")
+        else:
+            self.fused_op.append(f"  return {oc}{', '.join([self.mangle(output.name, '_') for output in outputs])}{cc};")
 
         self.fused_op.append('}')
         self.fused_op.append(

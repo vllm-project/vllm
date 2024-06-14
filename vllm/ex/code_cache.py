@@ -16,7 +16,6 @@ class CodeCache:
 
     Note: the CodeCache can be initialized with pre-compiled functions.
     """
-
     def __init__(self):
         self.cache = dict()
 
@@ -28,7 +27,6 @@ class CodeCache:
     returned instead of a Callable.  This will prevent any failed generators
     from being called repeatedly.
     """
-
     def lookup_or_create(self, mangled_name: str,
                          generator: Callable) -> Optional[Callable]:
         if not mangled_name in self.cache:
@@ -43,7 +41,6 @@ class CodeCache:
     Add a new entry to the cache.  Return False if an entry with the
     given name already exists.
     """
-
     def add(mangled_name: str, fn: Optional[Callable]) -> bool:
         if mangled_name in self.cache:
             return False

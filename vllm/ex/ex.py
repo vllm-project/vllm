@@ -32,8 +32,6 @@ logger = init_logger(__name__)
 A callback for the fx CapabilityBasedPartitioner.  Nodes that are "supported"
 are partitioned into new submodules.
 """
-
-
 def is_node_supported(
     submodules: Mapping[str, torch.nn.Module],
     node: torch.fx.Node,
@@ -56,8 +54,6 @@ def is_node_supported(
 Partition 'gm' into submodules based on the 'is_node_supported' callback.
 Modules containing "supported" nodes will be optimized by the backend.
 """
-
-
 def partition_graph(
     gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]
 ) -> Tuple[torch.fx.GraphModule, List[Partition]]:
@@ -83,8 +79,6 @@ def partition_graph(
 Inline all submodules in 'mod' by running the tracer on them.
 TBD
 """
-
-
 def inline_submodules(mod: torch.fx.GraphModule) -> torch.fx.GraphModule:
     return mod
 
@@ -97,8 +91,6 @@ def inline_submodules(mod: torch.fx.GraphModule) -> torch.fx.GraphModule:
 """
 Run optimizer on the given module.
 """
-
-
 def optimize(
     cc: CodeCache,
     fgen: FusedOpGenerator,
@@ -112,11 +104,13 @@ def optimize(
     return mod
 
 
+def maybe_name(gm: torch.fx.GraphModule) -> Optional[str]:
+    return gm.name if hasattr(gm, 'name') else None
+
+
 """
 Compile a module with the given backend.
 """
-
-
 def backend_compile(gm: torch.fx.GraphModule,
                     example_inputs: List[torch.Tensor],
                     backend: Optional[str] = 'inductor') -> Callable:
@@ -125,10 +119,10 @@ def backend_compile(gm: torch.fx.GraphModule,
 
     try:
         backend = lookup_backend(backend)
-        #logger.debug(f"attempting {backend} on {gm.name}")  # TODO can have no name
+        logger.debug(f"attempting {backend} on {maybe_name(gm)}")  # TODO can have no name
         backend_compiled = backend(gm, example_inputs)
         if backend_compiled is not None:
-            #logger.debug(f"{backend} compiled {gm.name}.")
+            logger.debug(f"{backend} compiled {maybe_name(gm)}.")
             return backend_compiled
     except Exception as ex:
         logger.warning(f"backend_compile failed: {ex}")
@@ -153,6 +147,8 @@ def module_in_partitions(parts: List[Partition],
 
 #torch._dynamo.config.accumulated_cache_size_limit = 128
 
+graph_counter = 0
+
 class backend_class:
     """
     A custom backend for torch.compile.
@@ -169,11 +165,18 @@ class backend_class:
     def __init__(self, backend: Optional[str] = 'inductor'):
         self.backend = backend
 
+    #
+    # Remember that torch._dynamo.mark_dynamic(x, 0) can be used on example_inputs to mark dynamic
+    # dimensions to prevent recompiles, these would go on the M dim (also kv_caches?)
+    # Use TORCH_LOGS="recompiles" to see why things recompile
+    #
+    # TODO: if nothing is optimized, return original gm/gm.forward function
+    #
     def __call__(self, gm: torch.fx.GraphModule,
                  example_inputs: List[torch.Tensor]) -> Callable:
 
         # Nop for baseline testing
-        #print(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
+        #print(f"Original module {gm} ({maybe_name(gm)}):\n{graph_print_tabular(gm.graph)}")
         #return backend_compile(gm, example_inputs, backend=self.backend)
 
         #logger.info("BACKEND")
@@ -190,6 +193,12 @@ class backend_class:
 
         logger.debug(f"Original module {gm}:\n{graph_print_tabular(gm.graph)}")
         logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")
+
+        if False:
+            global graph_counter
+            torch.fx.passes.graph_drawer.FxGraphDrawer(gm, "original").get_dot_graph().write_svg(f"original{graph_counter}.svg")
+            torch.fx.passes.graph_drawer.FxGraphDrawer(gm, "original").get_dot_graph().write_png(f"original{graph_counter}.png")
+            graph_counter = graph_counter + 1
 
         # See torch/_subclasses/function_tensor.py FunctionalTensor, FunctionalTensorMode
         # trace with FunctionTensor args???
@@ -291,8 +300,6 @@ class backend_class:
 """
 The default custom backend function for use with torch.compile.
 """
-
-
 def backend(gm: torch.fx.GraphModule,
             example_inputs: List[torch.Tensor]) -> Callable:
     return backend_class()(gm, example_inputs)
@@ -303,7 +310,5 @@ Construct a custom torch.compile backend with optional 'final' backend for
 optimized subgraphs. The default 'final' backend is the inductor. None can
 be used instead to leave optimized subgraphs as interpreted.
 """
-
-
 def make_backend(backend: Optional[str] = 'inductor') -> backend_class:
     return backend_class(backend)

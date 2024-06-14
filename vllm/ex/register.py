@@ -30,11 +30,10 @@ SUPPORTED: Dict[str, Optional[Set[str]]] = dict()
 # the value indicates whether the operation is "compute" (e.g. gemm) or
 # not.
 FUSABLE = dict()
+
 """
 Extract a string operator name from a Callable (or string).
 """
-
-
 def operator_name(
         op: Union[str, Callable]) -> Tuple[Optional[str], Optional[str]]:
     if isinstance(op, str):
@@ -54,8 +53,6 @@ def operator_name(
 Register 'op' as an operation supported by the backend.
 Can be used as a function decorator.
 """
-
-
 def register_supported(op: Union[str, Callable]):
     class_name, op_name = operator_name(op)
     if op_name is None:
@@ -73,8 +70,6 @@ def register_supported(op: Union[str, Callable]):
 Register 'op' as an operation that can be fused with other fusable ops.
 Can be used as a function decorator.
 """
-
-
 def register_fusable(op: Union[str, Callable], is_compute: bool = False):
     class_name, op_name = operator_name(op)
     if op_name is None:
@@ -90,8 +85,6 @@ def register_fusable(op: Union[str, Callable], is_compute: bool = False):
 """
 Register default supported operations.
 """
-
-
 def register_defaults():
     logger.debug("REGISTER DEFAULTS")
     register_fusable(torch.Tensor.to)

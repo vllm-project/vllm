@@ -4,6 +4,7 @@
 #
 ###############################################################################
 
+import operator
 import torch
 
 from .code_cache import CodeCache
@@ -28,7 +29,7 @@ def fuse_graph_nodes(
     outputs = sub.outputs
     inputs = sub.inputs
 
-    if len(outputs) != 1:
+    if False and len(outputs) != 1:
         #raise FusionFail("only single output supported currently.")
         logger.warning("only single output supported currently.")
         return
@@ -85,19 +86,27 @@ def fuse_graph_nodes(
     cf = sub.module.graph.call_function(fn, args=tuple(inputs), kwargs=kwargs)
     logger.debug(f"fused op: {cf.format_node()}")
 
+    new_sub = [cf]
+
     # Note: assumes single output
-    outputs[0].replace_all_uses_with(cf, propagate_meta=True)
+    if len(outputs) == 1:
+        outputs[0].replace_all_uses_with(cf, propagate_meta=True)
+    else:
+        cf_idx = cf
+        for i, output in enumerate(outputs):
+            sub.module.graph.inserting_after(cf_idx)
+            cf_idx = sub.module.graph.call_function(operator.getitem, args=(cf, i))
+            output.replace_all_uses_with(cf_idx, propagate_meta=True)
+            new_sub.append(cf_idx)
 
     sub.erase()
-    sub.build([cf])  # not necessary but nice for debugging
+    sub.build(new_sub)  # not necessary but nice for debugging
 
 
 """
 Determine whether or not node is a fusable operations.
 TODO: Smarter filter for 'getitem'.
 """
-
-
 def is_fusable(node: torch.fx.Node) -> bool:
     if not is_call(node):
         return False
@@ -114,8 +123,6 @@ def is_fusable(node: torch.fx.Node) -> bool:
 """
 Determine whether or not node is a fusable compute operation, e.g. gemm.
 """
-
-
 def is_compute(node: torch.fx.Node) -> bool:
     if not is_call(node):
         return False
@@ -137,8 +144,6 @@ def is_getitem(a: torch.fx.Node) -> bool:
 Are nodes a and b fusable together?
 This function assumes 'b' is a direct successor of 'a'.
 """
-
-
 def is_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
     return is_fusable(a) and is_fusable(b)
 
@@ -147,8 +152,6 @@ def is_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
 Are nodes 'a' and 'b' fusable together and is 'a' optionally a compute op?
 This function assumes 'b' is a direct successor of 'a'.
 """
-
-
 def is_compute_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
     return (is_fusable(a) or is_compute(a)) and is_fusable(b)
 
@@ -156,8 +159,6 @@ def is_compute_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
 """
 Determine if any kwargs associated with 'node' are supported.
 """
-
-
 def supported_kwargs(node: torch.fx.Node,
                      allow_const_kwargs: bool = False) -> bool:
     if allow_const_kwargs:
@@ -173,8 +174,6 @@ def supported_kwargs(node: torch.fx.Node,
 1. create Partition objects from sequences of fusable nodes
 2. use fuse_partitions to recreate the graph torch._inductor.fx_passes.group_batch_fusion
 """
-
-
 def pointwise_fusion(cc: CodeCache,
                      fgen: FusedOpGenerator,
                      mod: torch.fx.GraphModule,
@@ -253,6 +252,7 @@ def pointwise_fusion(cc: CodeCache,
         return all([is_fusable(n) and not is_compute(n) for n in nodes])
 
     if fuse_with_compute:
+        num_fused_compute = 0
         for n in mod.graph.nodes:
             if not is_call(n):
                 continue
@@ -262,7 +262,7 @@ def pointwise_fusion(cc: CodeCache,
             else:
                 nodes = fg.successors(n)
 
-            if not is_compute(n):
+            if not is_compute(n) or num_fused_compute == 1:
                 continue
 
             if not same_partition(nodes):
@@ -272,6 +272,7 @@ def pointwise_fusion(cc: CodeCache,
             fuse_part = next(iter(nodes))
 
             if only_pointwise(fuse_part):
+                num_fused_compute = num_fused_compute + 1
                 node_map[n] = node_map[fuse_part]
 
     logger.debug(f"final node_map = {node_map}")
@@ -297,8 +298,13 @@ def pointwise_fusion(cc: CodeCache,
             logger.debug(f"Reject empty/singleton subgraph:\n{sub.tabular()}")
             continue
         logger.debug(f"Fusing sub-module:\n{sub.tabular()}")
+        #print(f"Fusing sub-module:\n{sub.tabular()}")
         fuse_graph_nodes(cc, fgen, sub)
         logger.debug(f"Post fusion sub-module:\n{sub.tabular()}")
+        #print(f"Post fusion sub-module:\n{sub.tabular()}")
+
+    # toposort the module
+    torch.fx.passes.tools_common.legalize_graph(mod)
 
     logger.debug(f"Post fusion module:\n{graph_print_tabular(mod.graph)}")
 
