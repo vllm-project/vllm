@@ -26,6 +26,8 @@ steps:
         agents:
           queue: amd
         command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" ; ")) | safe }}"
+        concurrency: 1
+        concurrency_group: "{$BUILDKITE_COMMIT}"
         env:
           DOCKER_BUILDKIT: "1"
         soft_fail: true
