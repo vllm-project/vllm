@@ -12,8 +12,16 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS dev
 ARG CUDA_VERSION
 ENV CUDA_VERSION=${CUDA_VERSION}
 
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y ccache software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${python_version} 1
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git curl sudo
+    && apt-get install -y git curl sudo
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -61,9 +69,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y ccache software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} \
-    && python${PYTHON_VERSION} --version
-RUN python${PYTHON_VERSION} --version
+    && apt-get install -y python${PYTHON_VERSION}
 # files and directories related to build wheels
 COPY csrc csrc
 COPY setup.py setup.py
