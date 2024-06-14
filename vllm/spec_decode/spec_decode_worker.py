@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.config import SpeculativeConfig, ParallelConfig
+from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler

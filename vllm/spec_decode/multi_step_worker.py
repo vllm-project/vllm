@@ -1,6 +1,6 @@
 import copy
 import weakref
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -15,9 +15,6 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 class MultiStepWorker(Worker, ProposerWorkerBase):
