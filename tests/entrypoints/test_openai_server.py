@@ -655,7 +655,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
     [MODEL_NAME, "zephyr-lora"],
 )
 async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
-    # test using text and token IDs
+    # test both text and token IDs
     for prompts in (["Hello, my name is"] * 2, [[0, 0, 0, 0, 0]] * 2):
         # test simple list
         batch = await client.completions.create(
