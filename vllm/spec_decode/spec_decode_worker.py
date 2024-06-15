@@ -7,8 +7,8 @@ from vllm.config import SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
+                           SamplerOutput, SequenceGroupMetadata)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
@@ -20,7 +20,6 @@ from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
-from vllm.worker.model_input import ModelInput
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
@@ -234,29 +233,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                               num_cpu_blocks=num_cpu_blocks)
 
     @torch.inference_mode()
-    def prepare_model_input_local(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        raise NotImplementedError(
-            "SpecDecodeWorker does not allow direct calls to "
-            "prepare_model_input_local")
-
-    @torch.inference_mode()
-    def prepare_model_input(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> List[SamplerOutput]:
-        raise NotImplementedError(
-            "SpecDecodeWorker does not allow direct calls to "
-            "prepare_model_input")
-
-    @torch.inference_mode()
-    def execute_model_local(self,
-                            model_input: ModelInput) -> List[SamplerOutput]:
-        raise NotImplementedError(
-            "SpecDecodeWorker does not allow direct calls to "
-            "execute_model_local")
-
-    @torch.inference_mode()
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
@@ -388,9 +364,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # We run the proposer once per lookahead slot. In the future we should
         # delegate how many times it runs to the proposer.
         for _ in range(max(num_lookahead_slots, 1)):
-            self.proposer_worker.execute_model(execute_model_req=None)
+            self.proposer_worker.execute_model()
 
-        self.scorer_worker.execute_model(execute_model_req=None)
+        self.scorer_worker.execute_model()
         return True
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
@@ -540,13 +516,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         topk_indices_by_step = topk_indices_by_step.tolist()
 
         # Construct the output on a per-step, per-sequence basis.
-        sampler_output_list = []
+        sampler_output_list: List[SamplerOutput] = []
         for step_index in range(num_steps):
             if all(token_id == -1
                    for token_id in accepted_token_ids_by_step[step_index]):
                 break
 
-            step_output_token_ids = []
+            step_output_token_ids: List[CompletionSequenceGroupOutput] = []
             for sequence_index in range(batch_size):
                 # Each sequence may have a different num_logprobs; retrieve it.
                 num_logprobs = num_logprobs_per_seq[sequence_index]

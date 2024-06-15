@@ -14,6 +14,9 @@ class ModelRunnerBase(ABC, Generic[T]):
     Model runner interface that abstracts a particular hardware and/or type of
     model. Model execution may communicate data with model runners in other
     processes, but it should not include control plane metadata communication.
+
+    Each ModelRunnerBase subclass should define a corresponding ModelInput
+    subclass.
     """
 
     @staticmethod

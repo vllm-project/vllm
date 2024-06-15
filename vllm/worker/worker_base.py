@@ -108,10 +108,12 @@ class LoraNotSupportedWorkerBase(WorkerBase):
 
 class LocalOrDistributedWorkerBase(WorkerBase):
     """
-    Partial implementation of WorkerBase that has a default execute_model
+    Partial implementation of WorkerBase that has a default `execute_model`
     definition to perform metadata transfer between workers when in distributed
-    mode. Subclasses of this interface should only need to implement
-    worker-local logic.
+    mode. Subclasses of this interface should use model runners that inherit
+    from ModelRunnerBase, and should only need to implement worker-local logic.
+    If custom control plane logic is needed to transfer metadata, or if the
+    model runner cannot inherit from ModelRunnerBase, use WorkerBase instead.
     """
 
     @property
@@ -142,7 +144,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         Get the worker's model runner. Used by the default `execute_model`. If
         the worker's model runner does not follow the ModelRunnerBase
-        interface, then this method should raise NotImplementedError.
+        interface, then inherit from WorkerBase instead.
         """
         raise NotImplementedError
 
@@ -152,8 +154,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         Get the kv cache to pass to the worker's model runner. Used by the
         default `execute_model`. If the worker's model runner does not follow
-        the ModelRunnerBase interface, then this method should raise
-        NotImplementedError.
+        the ModelRunnerBase interface, then inherit from WorkerBase instead.
         """
         raise NotImplementedError
 

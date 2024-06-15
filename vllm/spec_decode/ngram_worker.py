@@ -7,7 +7,6 @@ from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.model_input import ModelInput
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 
 
@@ -49,7 +48,7 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
-    ) -> Tuple[Optional[List[SamplerOutput]], bool]:
+    ) -> Tuple[Optional[List[Optional[SamplerOutput]]], bool]:
         """NGram match algo to pick proposal candidate. Returns the list of
         sampler output, one per SequenceGroupMetadata.
 
@@ -59,8 +58,8 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
         self._raise_if_unsupported(execute_model_req)
 
         has_spec_out = False
-        token_id_list = []
-        token_prob_list = []
+        token_id_list: List[Optional[torch.Tensor]] = []
+        token_prob_list: List[Optional[torch.Tensor]] = []
         for idx, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
@@ -162,23 +161,3 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
                 execute_model_req.seq_group_metadata_list):
             raise NotImplementedError(
                 "NGramWorker does not support beam search.")
-
-    @torch.inference_mode()
-    def prepare_model_input_local(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        raise NotImplementedError("NGramWorker does not allow direct calls to "
-                                  "prepare_model_input_local")
-
-    @torch.inference_mode()
-    def prepare_model_input(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> List[SamplerOutput]:
-        raise NotImplementedError("NGramWorker does not allow direct calls to "
-                                  "prepare_model_input")
-
-    @torch.inference_mode()
-    def execute_model_local(self,
-                            model_input: ModelInput) -> List[SamplerOutput]:
-        raise NotImplementedError("NGramWorker does not allow direct calls to "
-                                  "execute_model_local")
