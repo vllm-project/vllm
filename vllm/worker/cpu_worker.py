@@ -262,7 +262,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return self._is_driver_worker
 
     @property
-    def do_broadcast(self) -> bool:
+    def do_metadata_broadcast(self) -> bool:
         return self.parallel_config.tensor_parallel_size > 1
 
     @property

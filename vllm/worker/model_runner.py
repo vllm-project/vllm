@@ -45,6 +45,9 @@ TGPUModelInput = TypeVar('TGPUModelInput', bound="GPUModelInput")
 
 
 class GPUModelRunnerBase(ModelRunnerBase[TGPUModelInput]):
+    """
+    Helper class for shared methods between GPU model runners.
+    """
 
     def __init__(
         self,
@@ -831,6 +834,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TGPUModelInput]):
 
 
 class ModelRunner(GPUModelRunnerBase[GPUModelInputWithSamplingMetadata]):
+    """
+    GPU model runner with sampling step.
+    """
 
     @staticmethod
     def model_input_cls() -> Type[GPUModelInputWithSamplingMetadata]:

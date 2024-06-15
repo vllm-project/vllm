@@ -107,6 +107,12 @@ class LoraNotSupportedWorkerBase(WorkerBase):
 
 
 class LocalOrDistributedWorkerBase(WorkerBase):
+    """
+    Partial implementation of WorkerBase that has a default execute_model
+    definition to perform metadata transfer between workers when in distributed
+    mode. Subclasses of this interface should only need to implement
+    worker-local logic.
+    """
 
     @property
     @abstractmethod
@@ -121,7 +127,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     @property
     @abstractmethod
-    def do_broadcast(self) -> bool:
+    def do_metadata_broadcast(self) -> bool:
         """
         Used by the default `execute_model` to check whether broadcast is
         needed to transfer request inputs from the driver worker to other
@@ -175,7 +181,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         sequences are provided."""
         if self.is_driver_worker:
             if execute_model_req is None:
-                if self.do_broadcast:
+                if self.do_metadata_broadcast:
                     # This signals that there's no more requests to process for
                     # now. All workers are running infinite loop with
                     # broadcast_tensor_dict, and it stops the loop when the
@@ -189,13 +195,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             model_input: ModelInput = self.model_runner.prepare_model_input(
                 execute_model_req.seq_group_metadata_list)
 
-            if self.do_broadcast:
+            if self.do_metadata_broadcast:
                 broadcast_data = worker_input.as_broadcastable_tensor_dict()
                 broadcast_data.update(
                     model_input.as_broadcastable_tensor_dict())
                 broadcast_tensor_dict(broadcast_data, src=0)
         else:
-            assert self.do_broadcast
+            assert self.do_metadata_broadcast
             broadcast_data = broadcast_tensor_dict(src=0)
             if not broadcast_data:
                 return None

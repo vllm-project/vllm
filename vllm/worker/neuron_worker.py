@@ -81,7 +81,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return True
 
     @property
-    def do_broadcast(self) -> bool:
+    def do_metadata_broadcast(self) -> bool:
         return False
 
     @property
