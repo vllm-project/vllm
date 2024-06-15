@@ -108,15 +108,6 @@ def _image_pixel_processor(
 @MULTIMODAL_REGISTRY.register_image_pixel_input(_image_pixel_processor)
 @MULTIMODAL_REGISTRY.register_dummy_data(_get_dummy_image_data)
 class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
-    """
-    Args to `forward()`:
-        input_ids: Flattened (concatenated) input_ids corresponding to a
-            batch.
-        pixel_values: For PIXEL_VALUES, expects a batch with shape
-            [1, num_patches, 3, 336, 336].
-        image_features: For IMAGE_FEATURES, expects a batch with shape
-            [1, num_patches, 1176, 1024].
-    """
 
     def __init__(self,
                  config: LlavaNextConfig,
@@ -355,7 +346,7 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         attn_metadata: AttentionMetadata,
         **kwargs: object,
     ) -> SamplerOutput:
-        """Run forward pass for Llava 1.5.
+        """Run forward pass for LlaVA-NeXT.
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted image embeddings.
@@ -375,22 +366,19 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
 
-        The model takes two types of image inputs:
-        PIXEL_VALUES and IMAGE_FEATURES.
-        The following shows how each maps to huggingface implementation.
-        PIXEL_VALUES:
-        - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L353
-        IMAGE_FEATURES:
-        - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L430
-        before going through the multi modal projector.
-
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
-            pixel_values: For PIXEL_VALUES, expects a batch with shape
-                [1, 3, 336, 336].
-            image_features: For IMAGE_FEATURES, expects a batch with shape
-                [1, 576, 1024].
+            pixel_values: The pixels in each grid patch for each input image.
+                Expects a batch with shape `[1, num_patches, 3, 336, 336]`.
+            image_sizes: The original `(width, height)` for each input image.
+                Expects a batch with shape `[1, 2]`.
+
+        See also:
+            Each input maps to huggingface implementation, as follows:
+
+            - `pixel_values`: https://github.com/huggingface/transformers/blob/v4.41.1/src/transformers/models/llava_next/modeling_llava_next.py#L690
+            - `image_sizes`: https://github.com/huggingface/transformers/blob/v4.41.1/src/transformers/models/llava_next/modeling_llava_next.py#L691
         """
         image_input = self._parse_and_validate_image_input(**kwargs)
 

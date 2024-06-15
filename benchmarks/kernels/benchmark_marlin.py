@@ -1,4 +1,5 @@
 import argparse
+from typing import List
 
 import torch
 import torch.utils.benchmark as benchmark
@@ -23,8 +24,9 @@ ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 
 
-def bench_run(results, model, act_order, is_k_full, num_bits, group_size,
-              size_m, size_k, size_n):
+def bench_run(results: List[benchmark.Measurement], model: str,
+              act_order: bool, is_k_full: bool, num_bits: int, group_size: int,
+              size_m: int, size_k: int, size_n: int):
     label = "Quant Matmul"
 
     sub_label = ("{}, act={} k_full={}, b={}, g={}, "
@@ -156,7 +158,7 @@ def main(args):
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
 
-    results = []
+    results: List[benchmark.Measurement] = []
 
     for model in args.models:
         for layer in WEIGHT_SHAPES[model]:
