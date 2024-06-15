@@ -27,6 +27,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-cuda.txt
 
 # install development dependencies
+COPY requirements-lint.txt requirements-lint.txt
+COPY requirements-test.txt requirements-test.txt
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-dev.txt
