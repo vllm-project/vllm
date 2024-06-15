@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y \
     unzip \
     nvidia-cuda-toolkit \
     tmux \
+    ccache \
  && rm -rf /var/lib/apt/lists/*
 
 ### Mount Point ###
@@ -102,12 +103,15 @@ ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 
 ENV VLLM_NCCL_SO_PATH=/opt/rocm/lib/librccl.so
 
-RUN --mount=type=cache,target=/root/.cache/pip \
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
     pip install -U -r requirements-rocm.txt \
     && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch \
     && python3 setup.py install \
-    && cp build/lib.linux-x86_64-cpython-39/vllm/_C.cpython-39-x86_64-linux-gnu.so vllm/ \
-    && cp build/lib.linux-x86_64-cpython-39/vllm/_punica_C.cpython-39-x86_64-linux-gnu.so vllm/ \
+    && cp build/lib.linux-x86_64-cpython-39/vllm/_C.abi3.so vllm/ \
+    && cp build/lib.linux-x86_64-cpython-39/vllm/_punica_C.abi3.so vllm/ \
+    && cp build/lib.linux-x86_64-cpython-39/vllm/_moe_C.abi3.so vllm/ \
     && cd ..
 
 

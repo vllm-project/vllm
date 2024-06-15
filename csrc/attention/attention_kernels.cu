@@ -17,7 +17,7 @@
  * limitations under the License.
  */
 
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
@@ -754,6 +754,9 @@ void paged_attention_v1_launcher(
     case 128:
       LAUNCH_PAGED_ATTENTION_V1(128);
       break;
+    case 192:
+      LAUNCH_PAGED_ATTENTION_V1(192);
+      break;
     case 256:
       LAUNCH_PAGED_ATTENTION_V1(256);
       break;
@@ -805,16 +808,17 @@ void paged_attention_v1(
     torch::Tensor&
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
     torch::Tensor&
-        value_cache,   // [num_blocks, num_heads, head_size, block_size]
-    int num_kv_heads,  // [num_heads]
-    float scale,
+        value_cache,       // [num_blocks, num_heads, head_size, block_size]
+    int64_t num_kv_heads,  // [num_heads]
+    double scale,
     torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
     torch::Tensor& seq_lens,      // [num_seqs]
-    int block_size, int max_seq_len,
+    int64_t block_size, int64_t max_seq_len,
     const c10::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, float kv_scale, const int tp_rank,
-    const int blocksparse_local_blocks, const int blocksparse_vert_stride,
-    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
+    const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step) {
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
 
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
@@ -911,6 +915,9 @@ void paged_attention_v2_launcher(
     case 128:
       LAUNCH_PAGED_ATTENTION_V2(128);
       break;
+    case 192:
+      LAUNCH_PAGED_ATTENTION_V2(192);
+      break;
     case 256:
       LAUNCH_PAGED_ATTENTION_V2(256);
       break;
@@ -966,16 +973,17 @@ void paged_attention_v2(
     torch::Tensor&
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
     torch::Tensor&
-        value_cache,   // [num_blocks, num_heads, head_size, block_size]
-    int num_kv_heads,  // [num_heads]
-    float scale,
+        value_cache,       // [num_blocks, num_heads, head_size, block_size]
+    int64_t num_kv_heads,  // [num_heads]
+    double scale,
     torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
     torch::Tensor& seq_lens,      // [num_seqs]
-    int block_size, int max_seq_len,
+    int64_t block_size, int64_t max_seq_len,
     const c10::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, float kv_scale, const int tp_rank,
-    const int blocksparse_local_blocks, const int blocksparse_vert_stride,
-    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
+    const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step) {
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
                              CALL_V2_LAUNCHER_BLOCK_SIZE)

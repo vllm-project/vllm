@@ -1,5 +1,5 @@
 import time
-from typing import AsyncIterator, List, Tuple
+from typing import AsyncIterator, List, Optional, Tuple
 
 from fastapi import Request
 
@@ -25,7 +25,7 @@ def request_output_to_embedding_response(
     created_time: int,
     model_name: str,
 ) -> EmbeddingResponse:
-    data = []
+    data: List[EmbeddingResponseData] = []
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
         assert final_res is not None
@@ -100,11 +100,16 @@ class OpenAIServingEmbedding(OpenAIServing):
 
                 prompt_ids, prompt_text = prompt_formats
 
-                generators.append(
-                    self.engine.generate(prompt_text,
-                                         pooling_params,
-                                         f"{request_id}-{i}",
-                                         prompt_token_ids=prompt_ids))
+                generator = self.engine.encode(
+                    {
+                        "prompt": prompt_text,
+                        "prompt_token_ids": prompt_ids
+                    },
+                    pooling_params,
+                    f"{request_id}-{i}",
+                )
+
+                generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -113,16 +118,21 @@ class OpenAIServingEmbedding(OpenAIServing):
             int, EmbeddingRequestOutput]] = merge_async_iterators(*generators)
 
         # Non-streaming response
-        final_res_batch: EmbeddingRequestOutput = [None] * len(prompts)
-        async for i, res in result_generator:
-            if await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await self.engine.abort(f"{request_id}-{i}")
-                # TODO: Use a vllm-specific Validation Error
-                return self.create_error_response("Client disconnected")
-            final_res_batch[i] = res
-        response = request_output_to_embedding_response(
-            final_res_batch, request_id, created_time, model_name)
+        final_res_batch: List[Optional[EmbeddingRequestOutput]]
+        final_res_batch = [None] * len(prompts)
+        try:
+            async for i, res in result_generator:
+                if await raw_request.is_disconnected():
+                    # Abort the request if the client disconnects.
+                    await self.engine.abort(f"{request_id}-{i}")
+                    # TODO: Use a vllm-specific Validation Error
+                    return self.create_error_response("Client disconnected")
+                final_res_batch[i] = res
+            response = request_output_to_embedding_response(
+                final_res_batch, request_id, created_time, model_name)
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
         return response
 
