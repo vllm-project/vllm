@@ -16,7 +16,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_gather)
 from vllm.distributed.utils import divide
-from vllm.lora.punica import add_lora, add_lora_slice, bgmv
+from vllm.lora.sgmv import add_lora, sgmv
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -66,8 +66,11 @@ def _apply_lora(
     x: torch.Tensor,
     lora_a_stacked: torch.Tensor,
     lora_b_stacked: torch.Tensor,
-    indices: torch.Tensor,
     output: torch.Tensor,
+    indices: torch.LongTensor,
+    ranks: torch.LongTensor,
+    repeats: torch.LongTensor,
+    max_repeats: int
 ):
     """Applies lora to each input.
 
@@ -79,16 +82,21 @@ def _apply_lora(
 
     Input shapes:
         x:               (batch_size, hidden_dim)
-        lora_a_stacked:  (num_loras, lora_rank, hidden_dim)
-        lora_b_stacked:  (num_loras, output_dim, lora_rank)
-        indices:         (batch_size)
+        lora_a_stacked:  (num_loras, 1, lora_rank, hidden_dim)
+        lora_b_stacked:  (num_loras, 1, output_dim, lora_rank)
         output:          (batch_size, output_dim)
+        indices:         (num_lora_token_groups)
+        ranks:           (num_lora_token_groups)
+        repeats:         (num_lora_token_groups)
     """
     org_output = output
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
-    add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
+    add_lora(
+        output, x, lora_a_stacked, lora_b_stacked, indices,
+        ranks, repeats, max_repeats, 0, 1.0
+    )
     return output.view_as(org_output)
 
 
@@ -96,9 +104,11 @@ def _apply_lora_packed_nslice(
     x: torch.Tensor,
     lora_a_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     lora_b_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    indices: torch.Tensor,
     output: torch.Tensor,
-    output_slices: Tuple[int, ...],
+    indices: torch.Tensor,
+    ranks: torch.LongTensor,
+    repeats: torch.LongTensor,
+    max_repeats: int,
 ):
     """Applies lora to each input.
 
@@ -113,23 +123,25 @@ def _apply_lora_packed_nslice(
 
     Input shapes:
         x:                 (batch_size, hidden_dim)
-        lora_a_stacked:    3 element tuple of (num_loras, lora_rank, hidden_dim)
-        lora_b_stacked:    3 element tuple of (num_loras, output_dim, lora_rank)
-        indices:           (batch_size)
+        lora_a_stacked:    3 element tuple of (num_loras, 1, lora_rank, hidden_dim)
+        lora_b_stacked:    3 element tuple of (num_loras, 1, output_dim, lora_rank)
         output:            (batch_size, q_slice_size + 2*kv_slice_size)
-        output_slices:     n-1 element tuple of (slice_size...),
-                           where n is number of slices
+        indices:           (num_lora_token_groups)
+        ranks:             (num_lora_token_groups)
+        repeats:           (num_lora_token_groups)
     """
     org_output = output
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
     offset_left = 0
-    for slice_idx in range(len(output_slices)):
-        add_lora_slice(output, x, lora_a_stacked[slice_idx],
-                       lora_b_stacked[slice_idx], indices, 0, 1.0, offset_left,
-                       output_slices[slice_idx])
-        offset_left += output_slices[slice_idx]
+    for slice_idx in range(len(lora_a_stacked)):
+        add_lora(
+            output, x, lora_a_stacked[slice_idx],
+            lora_b_stacked[slice_idx], indices, ranks, repeats, max_repeats,
+            offset_left, 1.0
+        )
+        offset_left += lora_b_stacked.shape[2]
     return output.view_as(org_output)
 
 
@@ -269,6 +281,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.indices: torch.Tensor
         self.indices_len: List[int]
         self.embeddings_indices: torch.Tensor
+        self.ranks: torch.Tensor
+        self.repeats: torch.Tensor
+        self.max_repeats: int
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -278,8 +293,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
         lora_b: torch.Tensor,
+        lora_a: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
     ):
         self.reset_lora(index)
@@ -311,10 +326,15 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         embeddings_indices: torch.Tensor,
         long_lora_indices: torch.Tensor,
         indices_len: List[int],
+        ranks: torch.Tensor,
+        repeats: torch.Tensor,
     ):
         self.indices = base_indices
         self.embeddings_indices = embeddings_indices
         self.indices_len = indices_len
+        self.ranks = ranks
+        self.repeats = repeats
+        self.max_repeats = repeats.max()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = x > self.base_layer.org_vocab_size - 1
@@ -336,8 +356,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             full_lora_a_embeddings = full_lora_a_embeddings.view(
                 full_lora_a_embeddings.shape[0] *
                 full_lora_a_embeddings.shape[1], -1)
-        bgmv(full_output, full_lora_a_embeddings, self.lora_b_stacked,
-             self.indices[:self.indices_len[0]], 0, 1.0)
+        sgmv(full_output, full_lora_a_embeddings, self.lora_b_stacked,
+             self.indices[:self.indices_len[0]])
+        # bgmv(full_output, full_lora_a_embeddings, self.lora_b_stacked,
+        #      self.indices[:self.indices_len[0]], 0, 1.0)
         return full_output.view_as(full_output_org)
 
     @classmethod
