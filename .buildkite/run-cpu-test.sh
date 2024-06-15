@@ -18,7 +18,7 @@ docker exec cpu-test bash -c "python3 examples/offline_inference.py"
 
 # Run basic model test
 docker exec cpu-test bash -c "cd tests;
-  pip install pytest Pillow protobuf
+  pip install pytest Pillow protobuf ray
   cd ../
   pytest -v -s tests/models -m \"not llava\" --ignore=tests/models/test_embedding.py --ignore=tests/models/test_registry.py
-  pytest -v -s tests/lora/test_lora.py"
+  pytest -v -s tests/lora/test_llama.py"
