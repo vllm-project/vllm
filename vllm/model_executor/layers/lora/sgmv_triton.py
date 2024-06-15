@@ -20,6 +20,7 @@ MAX_REPEATS_PER_BLOCK = 32
         triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=8),
     ],
     key=['R', 'H', 'BLOCK_SIZE_INPUT_PER_LORA'],
+    restore_value=['o_ptr']
 )
 @triton.jit
 def sgmv_shrink_multi_lora_rank(
@@ -152,6 +153,7 @@ def sgmv_shrink(x, weights, out, ranks, indices, repeats, max_repeats):
         triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=8),
     ],
     key=['R', 'H', 'BLOCK_SIZE_INPUT_PER_LORA'],
+    restore_value=['o_ptr']
 )
 @triton.jit
 def sgmv_expand_multi_lora_rank(

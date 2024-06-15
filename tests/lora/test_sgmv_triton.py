@@ -71,18 +71,6 @@ def test_correct(S, R, H, dtype, repeats_per_lora, seed):
                out[:, out_col_offset:].to(dtype=torch.float32)).to(dtype=dtype)
     # but this does not (likely depends on torch version)
 
-    # run the autotuner, add to a tmp output
-    sgmv.sgmv_expand(buffer,
-                     weights,
-                     torch.rand((S, H + out_col_offset),
-                                device='cuda',
-                                dtype=dtype),
-                     ranks,
-                     indices,
-                     repeats,
-                     repeats_per_lora,
-                     out_col_offset=out_col_offset)
-
     sgmv.sgmv_expand(buffer,
                      weights,
                      out,
@@ -122,10 +110,6 @@ def test_correct(S, R, H, dtype, repeats_per_lora, seed):
 
     ref_out = torch.cat(ref_outs, dim=0)
     ref_out += out
-
-    # run the autotuner, add to a tmp output
-    sgmv.sgmv_shrink(x, weights, torch.rand_like(out), ranks, indices, repeats,
-                     repeats_per_lora)
 
     sgmv.sgmv_shrink(x, weights, out, ranks, indices, repeats,
                      repeats_per_lora)
