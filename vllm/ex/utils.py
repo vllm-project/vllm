@@ -5,6 +5,7 @@
 ###############################################################################
 
 import collections
+import copy
 import functools
 import torch
 import torch.utils.cpp_extension
@@ -29,6 +30,10 @@ def trunc(x) -> str:
     lim = 30
     if isinstance(x, tuple):
         return tuple(map(trunc, x))
+    elif isinstance(x, list):
+        return [trunc(y) for y in x]
+    elif isinstance(x, dict):
+        return {trunc(k): trunc(v) for k,v in x.items()}
     xs = str(x)
     return xs if len(xs) <= lim else xs[:lim]
 
@@ -240,7 +245,7 @@ def nth_arg_or_kwarg(n: torch.fx.Node, arg: Union[int, str]):
 
 
 def node_users(n: torch.fx.Node) -> Dict[torch.fx.Node, None]:
-    users = n.users
+    users = copy.copy(n.users)
 
     in_place = mutable_function_args(n)
 
@@ -441,12 +446,14 @@ class SubGraph:
         return first
 
     def erase(self):
-        try:
-            for n in reversed(self.nodes):
-                self.module.graph.erase_node(n)
-        except RuntimeError as ex:
-            print(f"{ex}: failed to delete: {str(reversed(self.nodes))}")
-            print(f"{self.tabular('users', lambda n: n.users)}")
+        for n in reversed(self.nodes):
+            self.module.graph.erase_node(n)
+        #try:
+        #    for n in reversed(self.nodes):
+        #        self.module.graph.erase_node(n)
+        #except RuntimeError as ex:
+        #    print(f"\n{ex}: failed to delete: {list(reversed(self.nodes))}")
+        #    print(f"{self.tabular('users', lambda n: list(n.users.keys()))}")
 
     def tabular(self,
                 col: Optional[str] = None,
@@ -463,13 +470,16 @@ class SubGraph:
 
         headers = ['opcode', 'name', 'target', 'args', 'kwargs']
 
+        if col_get:
+            headers.append(col)
+
         def mcol_get(x):
             if col_get:
-                return [col_get(x)]
+                return [trunc(col_get(x))]
             else:
                 return []
 
-        node_specs = [['placeholder*', n.name, n.target,
+        node_specs = [['placeholder*', trunc(n.name), trunc(n.target),
                        tuple(),
                        dict(), *mcol_get(n)] for n in self.inputs]
 
@@ -478,7 +488,7 @@ class SubGraph:
 
         node_specs = node_specs + [[
             'output*', 'output*', 'output*',
-            (n, ), dict(), *mcol_get(n),
+            (trunc(n), ), dict(), *mcol_get(n),
         ] for n in self.outputs]
 
         return tabulate(node_specs, headers=headers)
