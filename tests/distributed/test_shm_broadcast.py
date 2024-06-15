@@ -1,6 +1,10 @@
-from vllm.distributed.device_communicators.shm_broadcast import ShmRingBuffer
-import torch.distributed as dist
 import multiprocessing
+
+import torch.distributed as dist
+
+from vllm.distributed.device_communicators.shm_broadcast import ShmRingBuffer
+from vllm.utils import update_environment_variables
+
 
 def distributed_run(fn, world_size):
     number_of_processes = world_size
@@ -23,6 +27,7 @@ def distributed_run(fn, world_size):
     for p in processes:
         assert p.exitcode == 0
 
+
 def worker_fn_wrapper(fn):
     # `multiprocessing.Process` cannot accept environment variables directly
     # so we need to pass the environment variables as arguments
@@ -33,6 +38,7 @@ def worker_fn_wrapper(fn):
         fn()
 
     return wrapped_fn
+
 
 @worker_fn_wrapper
 def worker_fn():
@@ -45,6 +51,7 @@ def worker_fn():
         b = broadcaster.broadcast_object(None)
         assert a == 0
         assert b == 1
+
 
 def test_shm_broadcast():
     distributed_run(worker_fn, 4)
