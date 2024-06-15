@@ -88,7 +88,7 @@ def consumer(batch_tgt: Sequence[int],
 def can_actually_p2p(
     batch_src: Sequence[int],
     batch_tgt: Sequence[int],
-) -> bool:
+) -> Sequence[bool]:
     """
     Usually, checking if P2P access is enabled can be done by
     `torch.cuda.can_device_access_peer(src, tgt)`. However, sometimes
@@ -138,7 +138,7 @@ def can_actually_p2p(
     p_tgt.start()
     p_src.join()
     p_tgt.join()
-    result = []
+    result: Sequence[bool] = []
     for src, tgt in zip(batch_src, batch_tgt):
         a = result_queue.get()
         b = result_queue.get()
