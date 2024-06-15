@@ -7,7 +7,7 @@ steps:
       queue: cpu_queue
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
+      - "docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
     env:
       DOCKER_BUILDKIT: "1"
@@ -19,17 +19,48 @@ steps:
           limit: 5
   - wait
 
+  - group: "AMD Tests"
+    depends_on: ~
+    steps:
+    {% for step in steps %}
+    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
+      - label: "AMD: {{ step.label }}"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" ; ")) | safe }}"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        soft_fail: true
+    {% endif %}
+    {% endfor %}
+
+  - label: "Neuron Test"
+    depends_on: ~
+    agents:
+      queue: neuron
+    command: bash .buildkite/run-neuron-test.sh
+    soft_fail: false
+
+  - label: "Intel Test"
+    depends_on: ~
+    agents:
+      queue: intel
+    command: bash .buildkite/run-cpu-test.sh
+
   {% for step in steps %}
   - label: "{{ step.label }}"
     agents:
-      {% if step.no_gpu %}
+      {% if step.label == "Documentation Build" %}
+      queue: small_cpu_queue
+      {% elif step.no_gpu %}
       queue: cpu_queue
       {% elif step.num_gpus == 2 or step.num_gpus == 4 %}
       queue: gpu_4_queue
       {% else %}
       queue: gpu_1_queue
       {% endif %}
-    soft_fail: true
+    soft_fail: {{ step.soft_fail or false }}
     {% if step.parallelism %}
     parallelism: {{ step.parallelism }}
     {% endif %}
@@ -46,6 +77,9 @@ steps:
           propagate-environment: true
           {% if not step.no_gpu %}
           gpus: all
+          {% endif %}
+          {% if step.label == "Benchmarks" %}
+          mount-buildkite-agent: true
           {% endif %}
           command: ["bash", "-c", "cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
           environment:
