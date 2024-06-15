@@ -195,11 +195,12 @@ if __name__ == "__main__":
                 ))
             f.write(serving_md_table)
             f.write("\n")
-
+            
+        f.write("\n")
         # serialize the results to json
         f.write(
             read_markdown(
-                "./.buildkite/nightly-benchmarks/tests/raw-json-header.md"))
+                "../.buildkite/nightly-benchmarks/tests/raw-json-header.md"))
 
         f.write(
             f"Markdown table in json:```json\n{processed_results_json}\n```\n\n"
