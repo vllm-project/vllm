@@ -13,11 +13,11 @@ class MockAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        pass
+        raise NotImplementedError
 
     @staticmethod
     def get_impl_cls():
-        pass
+        raise NotImplementedError
 
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
@@ -30,7 +30,7 @@ class MockAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        pass
+        raise NotImplementedError
 
     @staticmethod
     def swap_blocks(
@@ -81,9 +81,9 @@ def test_gpu_model_input():
             assert field.name not in tensor_dict
     # Broadcast should contain all non-empty fields defined by the developer
     # for this input type.
-    for field in model_input.broadcastable_fields:
-        if getattr(model_input, field) is not None:
-            assert field in tensor_dict
+    for field_name in model_input.broadcastable_fields:
+        if getattr(model_input, field_name, None) is not None:
+            assert field_name in tensor_dict
 
     # Check that received copy has correct values.
     for field in dataclasses.fields(AttentionMetadata):
