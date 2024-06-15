@@ -786,7 +786,8 @@ class SpeculativeConfig:
             speculative_model (Optional[str]): The name of the speculative
                 model, if provided.
             num_speculative_tokens (Optional[int]): The number of speculative
-                tokens, if provided.
+                tokens, if provided. Will default to the number in the draft
+                model config if present, otherwise is required.
             speculative_max_model_len (Optional[int]): The maximum model len of
                 the speculative model. Used when testing the ability to skip
                 speculation for some sequences.
@@ -809,23 +810,17 @@ class SpeculativeConfig:
                 the necessary conditions are met, else None.
         """
 
-        if speculative_model is None and num_speculative_tokens is None:
+        if speculative_model is None:
+            if num_speculative_tokens is not None:
+                raise ValueError("num_speculative_tokens was provided without "
+                                 "speculative_model.")
             return None
-
-        if speculative_model is not None and num_speculative_tokens is None:
-            raise ValueError(
-                "Expected both speculative_model and "
-                "num_speculative_tokens to be provided, but found "
-                f"{speculative_model=} and {num_speculative_tokens=}.")
 
         if (speculative_disable_by_batch_size is not None
                 and speculative_disable_by_batch_size < 2):
             raise ValueError("Expect the batch size threshold of disabling "
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
-
-        assert (speculative_model is not None
-                and num_speculative_tokens is not None)
 
         if enable_chunked_prefill:
             raise ValueError(
@@ -880,6 +875,20 @@ class SpeculativeConfig:
                 max_logprobs=target_model_config.max_logprobs,
             )
 
+            n_predict = getattr(draft_model_config.hf_config, "n_predict",
+                                None)
+            if n_predict is not None:
+                if num_speculative_tokens is None:
+                    # Default to max value defined in draft model config.
+                    num_speculative_tokens = n_predict
+                elif num_speculative_tokens > n_predict:
+                    # Verify provided value doesn't exceed the maximum
+                    # supported by the draft model.
+                    raise ValueError(
+                        "Expected both speculative_model and "
+                        "num_speculative_tokens to be provided, but found "
+                        f"{speculative_model=} and {num_speculative_tokens=}.")
+
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
                     speculative_max_model_len,
@@ -890,6 +899,12 @@ class SpeculativeConfig:
             draft_parallel_config = (
                 SpeculativeConfig.create_draft_parallel_config(
                     target_parallel_config))
+
+        if num_speculative_tokens is None:
+            raise ValueError(
+                "num_speculative_tokens must be provided with "
+                "speculative_model unless the draft model config contains an "
+                "n_predict parameter.")
 
         return SpeculativeConfig(
             draft_model_config,

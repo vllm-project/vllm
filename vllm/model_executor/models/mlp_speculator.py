@@ -55,26 +55,30 @@ class MLPSpeculator(nn.Module):
         self.emb_dim = config.emb_dim
         self.inner_dim = config.inner_dim if config.inner_dim != 0 \
             else config.emb_dim
+
+        self.max_speculative_tokens = getattr(config, "max_speculative_tokens",
+                                              self.n_predict)
+
         self.emb = nn.ModuleList([
             VocabParallelEmbedding(config.vocab_size,
                                    self.inner_dim,
                                    org_num_embeddings=config.vocab_size)
-            for _ in range(config.n_predict)
+            for _ in range(self.max_speculative_tokens)
         ])
 
         self.proj = nn.ModuleList([
             nn.Linear((self.emb_dim if i == 0 else self.inner_dim),
                       self.inner_dim,
-                      bias=False) for i in range(config.n_predict)
+                      bias=False) for i in range(self.max_speculative_tokens)
         ])
 
         self.head = nn.ModuleList([
             nn.Linear(self.inner_dim, self.vocab_size, bias=False)
-            for _ in range(config.n_predict)
+            for _ in range(self.max_speculative_tokens)
         ])
         self.ln = nn.ModuleList([
             MLPSpeculatorLayerNorm(self.inner_dim)
-            for _ in range(config.n_predict)
+            for _ in range(self.max_speculative_tokens)
         ])
 
         self.state_weight = 0.5**(0.5 / config.n_predict)
@@ -93,9 +97,9 @@ class MLPSpeculator(nn.Module):
         num_predict_tokens: int,
         sampling_metadata: SamplingMetadata,
     ) -> List[SamplerOutput]:
-        if num_predict_tokens > self.n_predict:
-            raise ValueError(f"Speculator model can predict at most "
-                             f"{self.n_predict} future tokens, "
+        if num_predict_tokens > self.max_speculative_tokens:
+            raise ValueError(f"Max speculative tokens for model is "
+                             f"{self.max_speculative_tokens}, but "
                              f"{num_predict_tokens} were requested")
 
         # b x 1 x d
