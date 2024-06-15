@@ -166,7 +166,7 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.shm_broadcast import (
             ShmRingBuffer)
         self.shm_broadcaster: Optional[ShmRingBuffer] = None
-        if is_in_the_same_node(self.cpu_group):
+        if self.world_size > 1 and is_in_the_same_node(self.cpu_group):
             self.shm_broadcaster = ShmRingBuffer(self.cpu_group, 1 << 20, 6)
 
     @property
