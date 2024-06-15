@@ -31,7 +31,7 @@ import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncGenerator, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
@@ -200,12 +200,12 @@ def calculate_metrics(
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
 ) -> Tuple[BenchmarkMetrics, List[int]]:
-    actual_output_lens = []
+    actual_output_lens: List[int] = []
     total_input = 0
     completed = 0
-    itls = []
-    tpots = []
-    ttfts = []
+    itls: List[float] = []
+    tpots: List[float] = []
+    ttfts: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             # We use the tokenizer to count the number of output tokens for all
@@ -265,7 +265,7 @@ async def benchmark(
     disable_tqdm: bool,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
-        request_func = ASYNC_REQUEST_FUNCS.get(backend)
+        request_func = ASYNC_REQUEST_FUNCS[backend]
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -292,7 +292,7 @@ async def benchmark(
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     benchmark_start_time = time.perf_counter()
-    tasks = []
+    tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len = request
         request_func_input = RequestFuncInput(
@@ -310,7 +310,7 @@ async def benchmark(
                              pbar=pbar)))
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if not disable_tqdm:
+    if pbar is not None:
         pbar.close()
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
@@ -466,7 +466,7 @@ def main(args: argparse.Namespace):
 
     # Save config and results to json
     if args.save_result:
-        result_json = {}
+        result_json: Dict[str, Any] = {}
 
         # Setup
         current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
