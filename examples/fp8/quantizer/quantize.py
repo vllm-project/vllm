@@ -332,7 +332,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model_dir",
+    parser.add_argument("--model-dir",
                         help="Specify where the HuggingFace model is",
                         required=True)
     parser.add_argument("--device", default="cuda")
@@ -346,19 +346,19 @@ if __name__ == "__main__":
             "full_prec"
         ],
     )
-    parser.add_argument("--batch_size",
+    parser.add_argument("--batch-size",
                         help="Batch size for calibration.",
                         type=int,
                         default=1)
-    parser.add_argument("--calib_size",
+    parser.add_argument("--calib-size",
                         help="Number of samples for calibration.",
                         type=int,
                         default=512)
-    parser.add_argument("--output_dir", default="exported_model")
-    parser.add_argument("--tp_size", type=int, default=1)
-    parser.add_argument("--pp_size", type=int, default=1)
-    parser.add_argument("--awq_block_size", type=int, default=128)
-    parser.add_argument("--kv_cache_dtype",
+    parser.add_argument("--output-dir", default="exported_model")
+    parser.add_argument("--tp-size", type=int, default=1)
+    parser.add_argument("--pp-size", type=int, default=1)
+    parser.add_argument("--awq-block-size", type=int, default=128)
+    parser.add_argument("--kv-cache-dtype",
                         help="KV Cache dtype.",
                         default=None,
                         choices=["int8", "fp8", None])
