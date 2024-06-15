@@ -122,12 +122,9 @@ def get_quant_config(model_config: ModelConfig,
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)
     if hf_quant_config is None:
-        compression_config = getattr(model_config.hf_config,
-                                     "compression_config", None)
-        if compression_config is not None:
-            hf_quant_config = compression_config.get("quantization_config",
-                                                     None)
-
+        # compressed-tensors uses a compressions_config
+        hf_quant_config = getattr(model_config.hf_config, "compression_config",
+                                  None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
     # In case of bitsandbytes/QLoRA, get quant config from the adapter model.
@@ -332,7 +329,7 @@ def np_cache_weights_iterator(
     # dumping the same model weights to numpy at the same time.
     with get_lock(model_name_or_path, cache_dir):
         if not os.path.exists(weight_names_file):
-            weight_names = []
+            weight_names: List[str] = []
             for bin_file in hf_weights_files:
                 state = torch.load(bin_file, map_location="cpu")
                 for name, param in state.items():
