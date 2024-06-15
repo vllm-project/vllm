@@ -1092,6 +1092,8 @@ class LoRAConfig:
                 "Due to limitations of the custom LoRA CUDA kernel, "
                 "max_num_batched_tokens must be <= 65528 when "
                 "LoRA is enabled.")
+        if scheduler_config.chunked_prefill_enabled:
+            raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
 @dataclass
