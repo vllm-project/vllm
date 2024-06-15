@@ -12,11 +12,11 @@ latency_column_mapping = {
     "test_name": "Test name",
     "gpu_type": "GPU",
     "avg_latency": "Average latency (s)",
-    "P10": "P10 (s)",
-    "P25": "P25 (s)",
+    # "P10": "P10 (s)",
+    # "P25": "P25 (s)",
     "P50": "P50 (s)",
-    "P75": "P75 (s)",
-    "P90": "P90 (s)",
+    # "P75": "P75 (s)",
+    # "P90": "P90 (s)",
 }
 
 # thoughput tests and the keys that will be printed into markdown
@@ -24,11 +24,11 @@ throughput_results = []
 throughput_results_column_mapping = {
     "test_name": "Test name",
     "gpu_type": "GPU",
-    "num_requests": "# of req.",
-    "total_num_tokens": "Total # of tokens",
-    "elapsed_time": "Elapsed time (s)",
+    # "num_requests": "# of req.",
+    # "total_num_tokens": "Total # of tokens",
+    # "elapsed_time": "Elapsed time (s)",
     "requests_per_second": "Tput (req/s)",
-    "tokens_per_second": "Tput (tok/s)",
+    # "tokens_per_second": "Tput (tok/s)",
 }
 
 # serving results and the keys that will be printed into markdown
@@ -36,17 +36,17 @@ serving_results = []
 serving_column_mapping = {
     "test_name": "Test name",
     "gpu_type": "GPU",
-    "completed": "# of req.",
+    # "completed": "# of req.",
     "request_throughput": "Tput (req/s)",
-    "input_throughput": "Input Tput (tok/s)",
-    "output_throughput": "Output Tput (tok/s)",
+    # "input_throughput": "Input Tput (tok/s)",
+    # "output_throughput": "Output Tput (tok/s)",
     "mean_ttft_ms": "Mean TTFT (ms)",
     # do not say TTFT again to avoid the table getting too wide
     "median_ttft_ms": "Median",
     "p99_ttft_ms": "P99",
-    "mean_tpot_ms": "Mean TPOT (ms)",
-    "median_tpot_ms": "Median",
-    "p99_tpot_ms": "P99",
+    # "mean_tpot_ms": "Mean TPOT (ms)",
+    # "median_tpot_ms": "Median",
+    # "p99_tpot_ms": "P99",
     "mean_itl_ms": "Mean ITL (ms)",
     "median_itl_ms": "Median",
     "p99_itl_ms": "P99",
