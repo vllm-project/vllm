@@ -499,6 +499,8 @@ def main(args: argparse.Namespace):
         # Save to file
         base_model_id = model_id.split("/")[-1]
         file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"  #noqa
+        if args.result_filename:
+            file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
         with open(file_name, "w") as outfile:
@@ -638,6 +640,15 @@ if __name__ == "__main__":
         default=None,
         help="Specify directory to save benchmark json results."
         "If not specified, results are saved in the current directory.",
+    )
+    parser.add_argument(
+        "--result-filename",
+        type=str,
+        default=None,
+        help="Specify the filename to save benchmark json results."
+        "If not specified, results will be saved in "
+        "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
+        " format.",
     )
 
     args = parser.parse_args()

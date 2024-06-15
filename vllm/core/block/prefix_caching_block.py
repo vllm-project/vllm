@@ -176,14 +176,17 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
             self._refcounter.incr(block_id)
 
-            # the block comes from evictor already contain computed result
+            # Now this block is pop from evictor and ready to write
+            # with new content which most probably different with
+            # original content. So need to tell worker to recompute
+            # its kvcache
             block = self._create_block(
                 prev_block=prev_block,
                 token_ids=[],
                 block_size=self._block_size,
                 allocator=self,
                 block_id=block_id,
-                computed=True,
+                computed=False,
             )
             assert block.content_hash is None
 

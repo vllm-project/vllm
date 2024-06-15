@@ -24,7 +24,8 @@ def test_cuda_device_count_stateless():
 
     actor = _CUDADeviceCountStatelessTestActor.options(  # type: ignore
         num_gpus=2).remote()
-    assert ray.get(actor.get_cuda_visible_devices.remote()) == "0,1"
+    assert sorted(ray.get(
+        actor.get_cuda_visible_devices.remote()).split(",")) == ["0", "1"]
     assert ray.get(actor.get_count.remote()) == 2
     ray.get(actor.set_cuda_visible_devices.remote("0"))
     assert ray.get(actor.get_count.remote()) == 1
