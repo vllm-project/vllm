@@ -21,7 +21,7 @@ The following :ref:`engine arguments <engine_args>` are specific to VLMs:
 
     * Only single image input is supported per text prompt.
 
-    We are continuously improving user & developer experience for VLMs. Please raise an issue on GitHub if you have any feedback or feature requests.
+    We are continuously improving user & developer experience for VLMs. Please `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ if you have any feedback or feature requests.
 
 Offline Batched Inference
 -------------------------
