@@ -134,6 +134,9 @@ class ShmRingBuffer:
             return obj
         else:
             with self.acquire_read() as buf:
+                # no need to know the size of serialized object
+                # pickle format itself contains the size information internally
+                # see https://docs.python.org/3/library/pickle.html
                 obj = pickle.loads(buf)
             return obj
 
