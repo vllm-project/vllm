@@ -98,6 +98,7 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     ]
 
     with vllm_runner(model_id,
+                     max_model_len=2048,
                      dtype=dtype,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
