@@ -59,37 +59,27 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
             return ModelInput.empty(self.device)
 
         input_tokens: List[int] = []
-
         seq_lens: List[int] = []
         query_lens: List[int] = []
 
         for seq_group_metadata in seq_group_metadata_list:
-            seq_ids = list(seq_group_metadata.seq_data.keys())
             is_prompt = seq_group_metadata.is_prompt
 
-            for seq_id in seq_ids:
-                seq_data = seq_group_metadata.seq_data[seq_id]
+            for seq_data in seq_group_metadata.seq_data.values():
+                seq_data_len = seq_data.get_len()
                 if is_prompt:
                     context_len = seq_data.get_num_computed_tokens()
-                else:
-                    # get_num_computed_tokens is incorrect for spec decoding.
-                    # So, we should have a special logic here.
-                    # TODO(sang): Fix it.
-                    context_len = seq_data.get_len() - 1
-
-                seq_len = min(
-                    seq_data.get_len(),
-                    context_len + seq_group_metadata.token_chunk_size)
-                if is_prompt:
+                    seq_len = min(
+                        seq_data_len,
+                        context_len + seq_group_metadata.token_chunk_size)
                     tokens = seq_data.get_token_ids()[context_len:seq_len]
+                    seq_lens.append(seq_len)
+                    input_tokens.extend(tokens)
+                    query_lens.append(seq_len - context_len)
                 else:
-                    # Optimization. get_token_ids requires the entire copy of
-                    # tokens.
-                    tokens = [seq_data.get_last_token_id()]
-
-                seq_lens.append(seq_len)
-                query_lens.append(seq_len - context_len)
-                input_tokens.extend(tokens)
+                    seq_lens.append(seq_data_len)
+                    input_tokens.append(seq_data.get_last_token_id())
+                    query_lens.append(1)
 
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
