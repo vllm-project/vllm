@@ -98,7 +98,7 @@ def main(args: argparse.Namespace):
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
         latencies.append(run_to_completion(profile_dir=None))
     latencies = np.array(latencies)
-    percentages = [10, 25, 50, 75, 90]
+    percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
     print(f'Avg latency: {np.mean(latencies)} seconds')
     for percentage, percentile in zip(percentages, percentiles):
