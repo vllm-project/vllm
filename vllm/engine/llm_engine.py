@@ -2,7 +2,7 @@ import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, ClassVar, Iterable, List, Optional
 from typing import Sequence as GenericSequence
-from typing import Type, TypeVar, Union
+from typing import Set, Type, TypeVar, Union
 
 from transformers import GenerationConfig, PreTrainedTokenizer
 
@@ -973,7 +973,7 @@ class LLMEngine:
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_executor.remove_lora(lora_id)
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         return self.model_executor.list_loras()
 
     def check_health(self) -> None:

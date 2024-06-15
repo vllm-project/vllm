@@ -1,3 +1,5 @@
+from typing import List
+
 import pytest
 import torch
 
@@ -62,21 +64,22 @@ def test_get_prompt_logprobs(
         for logprobs in result.outputs[0].logprobs:
             assert len(logprobs) == num_top_logprobs
         output_text = result.outputs[0].text
-        output_string_from_most_likely_tokens = []
+        output_string_from_most_likely_tokens_lst: List[str] = []
         for top_logprobs in result.outputs[0].logprobs:
             top_logprob = next(iter(top_logprobs.values()))
-            output_string_from_most_likely_tokens.append(
+            output_string_from_most_likely_tokens_lst.append(
                 top_logprob.decoded_token)
 
         if detokenize:
             output_string_from_most_likely_tokens = "".join(
-                output_string_from_most_likely_tokens)
+                output_string_from_most_likely_tokens_lst)
             assert output_text == output_string_from_most_likely_tokens, (
                 "The output text from the top logprob for each token position "
                 "should be the same as the output text in the result.")
         else:
             assert output_text == ''
-            assert output_string_from_most_likely_tokens == [None] * max_tokens
+            assert output_string_from_most_likely_tokens_lst == ([None] *
+                                                                 max_tokens)
 
         # The first prompt logprob is always None
         assert result.prompt_logprobs[0] is None

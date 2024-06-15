@@ -108,8 +108,8 @@ def run_vllm(
     )
 
     # Add the requests to the engine.
-    prompts = []
-    sampling_params = []
+    prompts: List[str] = []
+    sampling_params: List[SamplingParams] = []
     for prompt, _, output_len in requests:
         prompts.append(prompt)
         sampling_params.append(
