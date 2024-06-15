@@ -12,8 +12,15 @@ from unittest.mock import patch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class ShmRingBuffer:
+
+    # seconds to wait before warning about a potential blocking call
+    WARNING_INTERVAL = 60
 
     def __init__(self, pg: ProcessGroup, max_chunk_bytes, max_chunks):
         self.rank = dist.get_rank(pg)
@@ -64,6 +71,7 @@ class ShmRingBuffer:
     def acquire_write(self):
         assert self.is_writer, "Only writers can acquire write"
         start_index = self.current_idx
+        start_time = time.time()
         while True:
             with self.metadata as metadata_buffer:
                 read_count = sum(metadata_buffer[1:])
@@ -74,6 +82,10 @@ class ShmRingBuffer:
                     self.current_idx = (self.current_idx + 1) % self.max_chunks
                     if self.current_idx == start_index:
                         # no empty block found
+                        if time.time() - start_time > self.WARNING_INTERVAL:
+                            logger.warning(
+                                "No available block found in %s second. ",
+                                self.WARNING_INTERVAL)
                         # wait for a while (0.1 us)
                         time.sleep(1e-7)
                     continue
@@ -95,6 +107,7 @@ class ShmRingBuffer:
     def acquire_read(self):
         assert self.is_reader, "Only readers can acquire read"
         start_index = self.current_idx
+        start_time = time.time()
         while True:
             with self.metadata as metadata_buffer:
                 read_flag = metadata_buffer[self.rank]
@@ -107,6 +120,10 @@ class ShmRingBuffer:
                     self.current_idx = (self.current_idx + 1) % self.max_chunks
                     if self.current_idx == start_index:
                         # no block found
+                        if time.time() - start_time > self.WARNING_INTERVAL:
+                            logger.warning(
+                                "No available block found in %s second. ",
+                                self.WARNING_INTERVAL)
                         # wait for a while (0.1 us)
                         time.sleep(1e-7)
                     continue
