@@ -1,10 +1,12 @@
+from typing import List
+
 import vllm
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "google/gemma-7b"
 
 
-def do_sample(llm, lora_path: str, lora_id: int) -> str:
+def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     prompts = [
         "Quote: Imagination is",
         "Quote: Be yourself;",
@@ -17,7 +19,7 @@ def do_sample(llm, lora_path: str, lora_id: int) -> str:
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
         if lora_id else None)
     # Print the outputs.
-    generated_texts = []
+    generated_texts: List[str] = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text.strip()
