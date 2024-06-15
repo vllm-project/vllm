@@ -35,6 +35,9 @@ Here are some common issues that can cause hangs:
 
     # save it as `test.py` , and run it with `NCCL_DEBUG=TRACE torchrun --nproc-per-node=8 test.py`
     # adjust `--nproc-per-node` to the number of GPUs you want to use.
+    # for multi-node test, run it with `NCCL_DEBUG=TRACE MASTER_IP=xxx.xxx.xxx.xxx torchrun --nnodes 2 --nproc-per-node=8 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_IP test.py` in every node.
+    # adjust `--nnodes` and `--nproc-per-node` to the number of nodes and GPUs you want to use.
+    # also make sure `MASTER_IP` is the correct IP address of the master node, and it is reachable from all nodes.
     import torch
     import torch.distributed as dist
     dist.init_process_group(backend="nccl")
