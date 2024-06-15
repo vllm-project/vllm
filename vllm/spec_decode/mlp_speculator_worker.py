@@ -11,6 +11,10 @@ from vllm.worker.model_runner import ModelInput
 
 
 class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
+    """Worker for MLPSpeculator models.
+
+    Not currently compatible with LoRA or chunked prefill.
+    """
 
     @torch.inference_mode()
     def sampler_output(
