@@ -2,7 +2,7 @@ import ctypes
 import json
 import os
 from itertools import product
-from typing import Dict, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -138,7 +138,7 @@ def can_actually_p2p(
     p_tgt.start()
     p_src.join()
     p_tgt.join()
-    result: Sequence[bool] = []
+    result: List[bool] = []
     for src, tgt in zip(batch_src, batch_tgt):
         a = result_queue.get()
         b = result_queue.get()
