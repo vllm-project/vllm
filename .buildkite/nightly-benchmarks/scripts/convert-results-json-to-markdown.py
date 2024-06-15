@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import os
 
 import pandas as pd
 from tabulate import tabulate
@@ -11,12 +12,13 @@ latency_results = []
 latency_column_mapping = {
     "test_name": "Test name",
     "gpu_type": "GPU",
-    "avg_latency": "Average latency (s)",
+    "avg_latency": "Mean latency (ms)",
     # "P10": "P10 (s)",
     # "P25": "P25 (s)",
-    "P50": "P50 (s)",
+    "P50": "Median",
     # "P75": "P75 (s)",
     # "P90": "P90 (s)",
+    "P99": "P99",
 }
 
 # thoughput tests and the keys that will be printed into markdown
@@ -84,9 +86,11 @@ for test_file in results_folder.glob("*.json"):
         raw_result.update({"test_name": test_file.stem})
 
         # get different percentiles
-        for perc in [10, 25, 50, 75, 90]:
+        for perc in [10, 25, 50, 75, 90, 99]:
+            # Multiply 1000 to convert the time unit from s to ms
             raw_result.update(
-                {f"P{perc}": raw_result["percentiles"][str(perc)]})
+                {f"P{perc}": 1000 * raw_result["percentiles"][str(perc)]})
+        raw_result["avg_latency"] = raw_result["avg_latency"] * 1000
 
         # add the result to raw_result
         latency_results.append(raw_result)
@@ -139,17 +143,26 @@ throughput_md_table = tabulate(throughput_results,
                                tablefmt='pipe',
                                showindex=False)
 
+
+def read_markdown(file):
+    if os.path.exists(file):
+        with open(file, "r") as f:
+            return f.read()
+    else:
+        return ""
+
 # document the result
 with open(results_folder / "benchmark_results.md", "w") as f:
     if not latency_results.empty:
-        f.write("## Latency tests\n")
+        f.write(read_markdown("../.buildkite/nightly-benchmarks/tests/latency-tests-header.md"))
         f.write(latency_md_table)
         f.write("\n")
     if not throughput_results.empty:
-        f.write("## Throughput tests\n")
+        f.write(read_markdown("../.buildkite/nightly-benchmarks/tests/throughput-tests-header.md"))
         f.write(throughput_md_table)
         f.write("\n")
     if not serving_results.empty:
+        f.write(read_markdown("../.buildkite/nightly-benchmarks/tests/serving-tests-header.md"))
         f.write("## Serving tests\n")
         f.write(serving_md_table)
         f.write("\n")
