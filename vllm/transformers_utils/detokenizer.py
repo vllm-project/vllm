@@ -44,7 +44,7 @@ class Detokenizer:
         read_offset = 0
         next_iter_prefix_offset = 0
         next_iter_read_offset = 0
-        next_iter_tokens = []
+        next_iter_tokens: List[str] = []
         prev_tokens = None
 
         for token_position, prompt_logprobs_for_token in enumerate(

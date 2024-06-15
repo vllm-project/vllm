@@ -5,7 +5,7 @@ distributively on a multi-nodes cluster.
 Learn more about Ray Data in https://docs.ray.io/en/latest/data/data.html
 """
 
-from typing import Dict
+from typing import Any, Dict, List
 
 import numpy as np
 import ray
@@ -40,8 +40,8 @@ class LLMPredictor:
         # The output is a list of RequestOutput objects that contain the prompt,
         # generated text, and other information.
         outputs = self.llm.generate(batch["text"], sampling_params)
-        prompt = []
-        generated_text = []
+        prompt: List[str] = []
+        generated_text: List[str] = []
         for output in outputs:
             prompt.append(output.prompt)
             generated_text.append(' '.join([o.text for o in output.outputs]))
@@ -71,7 +71,7 @@ def scheduling_strategy_fn():
         pg, placement_group_capture_child_tasks=True))
 
 
-resources_kwarg = {}
+resources_kwarg: Dict[str, Any] = {}
 if tensor_parallel_size == 1:
     # For tensor_parallel_size == 1, we simply set num_gpus=1.
     resources_kwarg["num_gpus"] = 1

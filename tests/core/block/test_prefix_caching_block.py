@@ -123,7 +123,7 @@ class TestPrefixCachingBlock:
                      num_empty_trailing_blocks=0) -> List[PrefixCachingBlock]:
         """Helper method which creates a chain of blocks.
         """
-        blocks = []
+        blocks: List[PrefixCachingBlock] = []
         num_blocks = math.ceil(
             len(token_ids) / block_size) + num_empty_trailing_blocks
 
@@ -608,7 +608,7 @@ class TestPrefixCachingBlockAllocator:
     ) -> List[PrefixCachingBlock]:
         """Helper method which creates a chain of blocks.
         """
-        blocks = []
+        blocks: List[Block] = []
         num_blocks = math.ceil(len(token_ids) / block_size)
 
         if num_blocks == 0:

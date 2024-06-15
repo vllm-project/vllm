@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import sys
 from io import StringIO
+from typing import Awaitable, List
 
 import aiohttp
 
@@ -114,7 +115,7 @@ async def main(args):
     )
 
     # Submit all requests in the file to the engine "concurrently".
-    response_futures = []
+    response_futures: List[Awaitable[BatchRequestOutput]] = []
     for request_json in (await read_file(args.input_file)).strip().split("\n"):
         request = BatchRequestInput.model_validate_json(request_json)
         response_futures.append(run_request(openai_serving_chat, request))

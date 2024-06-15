@@ -1,3 +1,5 @@
+from typing import List
+
 import pytest
 import torch
 
@@ -35,8 +37,8 @@ def test_prepare_prompt(batch_size):
         enable_chunked_prefill=False,
     )
 
-    seq_lens = []
-    seq_group_metadata_list = []
+    seq_lens: List[int] = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
     block_tables = {0: [1]}
     for i in range(batch_size):
         # make sure all tokens fit into one block
@@ -151,15 +153,14 @@ def test_prepare_decode_cuda_graph(batch_size):
         enable_chunked_prefill=False,
     )
 
-    context_lens = []
-    seq_group_metadata_list = []
+    context_lens: List[int] = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
     # Assume each seq group finishes prefill.
     for i in range(batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
-        seq_data = list(range(context_len))
-        seq_data = SequenceData(seq_data)
+        seq_data = SequenceData(list(range(context_len)))
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
         seq_data.append_token_id(1, 0)
@@ -257,7 +258,7 @@ def test_empty_seq_group():
         dtype="float16",
         enforce_eager=False,
     )
-    seq_group_metadata_list = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
     model_input = model_runner._prepare_model_input(seq_group_metadata_list)
     input_tokens, input_positions, attn_metadata, slot_mapping = (
         model_input.input_tokens,
@@ -310,10 +311,10 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     )
 
     # Add prefill requests.
-    seq_lens = []
-    seq_group_metadata_list = []
-    prefill_metadata_list = []
-    decode_metadata_list = []
+    seq_lens: List[int] = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    prefill_metadata_list: List[SequenceGroupMetadata] = []
+    decode_metadata_list: List[SequenceGroupMetadata] = []
     block_tables = {0: [1]}
     prefill_batch_size = batch_size // 2
     decode_batch_size = batch_size - prefill_batch_size

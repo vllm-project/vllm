@@ -1,7 +1,7 @@
 import argparse
 import random
 import time
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
@@ -54,14 +54,17 @@ def main(
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
-    block_tables = []
+    block_tables_lst: List[List[int]] = []
     for _ in range(num_seqs):
         block_table = [
             random.randint(0, NUM_BLOCKS - 1)
             for _ in range(max_num_blocks_per_seq)
         ]
-        block_tables.append(block_table)
-    block_tables = torch.tensor(block_tables, dtype=torch.int, device=device)
+        block_tables_lst.append(block_table)
+
+    block_tables = torch.tensor(block_tables_lst,
+                                dtype=torch.int,
+                                device=device)
 
     # Create the KV cache.
     key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,

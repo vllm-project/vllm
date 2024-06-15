@@ -68,7 +68,7 @@ def _get_model_initialization_kwargs(
         vision_language_config: Optional[VisionLanguageConfig]
 ) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
-    extra_kwargs = {}
+    extra_kwargs: Dict[str, Any] = {}
     if hasattr(model_class, "supported_lora_modules"):
         extra_kwargs["lora_config"] = lora_config
     elif lora_config:
@@ -446,7 +446,8 @@ class ShardedStateLoader(BaseModelLoader):
         Filter out all tensors that share the same memory or a subset of the
         memory of another tensor.
         """
-        same_storage_groups = collections.defaultdict(list)
+        same_storage_groups: Dict[Any, List[Tuple[
+            str, torch.Tensor]]] = collections.defaultdict(list)
         for key, tensor in tensors.items():
             if tensor.numel():
                 ptr = tensor.untyped_storage().data_ptr()
@@ -455,7 +456,7 @@ class ShardedStateLoader(BaseModelLoader):
         def get_end_ptr(tensor: torch.Tensor) -> int:
             return tensor.view(-1)[-1].data_ptr() + tensor.element_size()
 
-        result = {}
+        result: Dict[str, torch.Tensor] = {}
         for group in same_storage_groups.values():
             for k, t in group:
                 a, b = t.data_ptr(), get_end_ptr(t)

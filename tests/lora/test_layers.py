@@ -109,7 +109,7 @@ def populate_loras(
 
     for slot_idx, lora_id in enumerate(id_to_index):
         if lora_id is not None:
-            subloras = []
+            subloras: List[LoRALayerWeights] = []
             sublora_len = layer_weights.shape[0] // repeats
             for i in range(repeats):
                 sublora = DummyLoRAManager().init_random_lora(
@@ -158,7 +158,10 @@ def create_random_inputs(
 
     low, high = input_range
 
-    inputs, index_mapping, prompt_mapping = [], [], []
+    inputs: List[torch.Tensor] = []
+    index_mapping: List[int] = []
+    prompt_mapping: List[int] = []
+
     for _ in range(num_inputs):
         if input_type == torch.int:
             inputs.append(
@@ -222,7 +225,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size) -> None:
 
         lora_result = lora_embedding(torch.cat(inputs))
 
-        expected_results = []
+        expected_results: List[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = embedding(input_)
@@ -356,7 +359,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
 
         lora_result = lora_embedding(torch.cat(original_inputs))
 
-        expected_results = []
+        expected_results: List[torch.Tensor] = []
         for input_, original_input_, lora_id in zip(inputs, original_inputs,
                                                     prompt_mapping):
             lora = lora_dict[lora_id]
@@ -482,7 +485,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
 
         logits_processor.org_vocab_size = (vocab_size +
                                            lora_config.lora_extra_vocab_size)
-        expected_results = []
+        expected_results: List[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = logits_processor._get_logits(hidden_states=input_,
@@ -598,7 +601,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
 
         lora_result = lora_linear(torch.cat(inputs))[0]
 
-        expected_results = []
+        expected_results: List[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = linear(input_)[0]
@@ -729,7 +732,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
 
         lora_result = lora_linear(torch.cat(inputs))[0]
 
-        expected_results = []
+        expected_results: List[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             result = linear(input_)[0]
             subloras = sublora_dict[lora_id]
@@ -885,9 +888,9 @@ def test_vocab_parallel_embedding_indices(tp_size, seed):
     computed_added_vocab_size = 0
     vocab_size_padded = -1
 
-    all_org_tokens = []
-    all_added_tokens = []
-    token_ids = []
+    all_org_tokens: List[int] = []
+    all_added_tokens: List[int] = []
+    token_ids: List[int] = []
 
     for tp_rank in range(tp_size):
         with patch(

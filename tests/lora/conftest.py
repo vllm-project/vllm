@@ -2,6 +2,7 @@ import contextlib
 import gc
 import tempfile
 from collections import OrderedDict
+from typing import Dict, List, TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,7 +25,18 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
 
-LONG_LORA_INFOS = [{
+
+class ContextIDInfo(TypedDict):
+    lora_id: int
+    context_length: str
+
+
+class ContextInfo(TypedDict):
+    lora: str
+    context_length: str
+
+
+LONG_LORA_INFOS: List[ContextIDInfo] = [{
     "lora_id": 1,
     "context_length": "16k",
 }, {
@@ -207,7 +219,7 @@ def long_context_infos(long_context_lora_files_16k_1,
                        long_context_lora_files_16k_2,
                        long_context_lora_files_32k):
     cleanup()
-    infos = {}
+    infos: Dict[int, ContextInfo] = {}
     for lora_checkpoint_info in LONG_LORA_INFOS:
         lora_id = lora_checkpoint_info["lora_id"]
         if lora_id == 1:
@@ -226,7 +238,7 @@ def long_context_infos(long_context_lora_files_16k_1,
 
 
 @pytest.fixture
-def llama_2_7b_engine_extra_embeddings() -> nn.Module:
+def llama_2_7b_engine_extra_embeddings():
     cleanup()
     get_model_old = get_model
 
@@ -244,7 +256,6 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
 
 
 @pytest.fixture
-def llama_2_7b_model_extra_embeddings(
-        llama_2_7b_engine_extra_embeddings) -> nn.Module:
+def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
     yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
            model_runner.model)

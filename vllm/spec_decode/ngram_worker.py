@@ -48,7 +48,7 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
-    ) -> Tuple[Optional[List[SamplerOutput]], bool]:
+    ) -> Tuple[Optional[List[Optional[SamplerOutput]]], bool]:
         """NGram match algo to pick proposal candidate. Returns the list of
         sampler output, one per SequenceGroupMetadata.
 
@@ -58,8 +58,8 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
         self._raise_if_unsupported(execute_model_req)
 
         has_spec_out = False
-        token_id_list = []
-        token_prob_list = []
+        token_id_list: List[Optional[torch.Tensor]] = []
+        token_prob_list: List[Optional[torch.Tensor]] = []
         for idx, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
             seq_data = next(iter(seq_group_metadata.seq_data.values()))

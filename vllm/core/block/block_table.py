@@ -252,7 +252,7 @@ class BlockTable:
     def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
                                        token_ids: List[int],
                                        device: Device) -> List[Block]:
-        blocks = []
+        blocks: List[Block] = []
         for block_token_ids in chunk_list(token_ids, self._block_size):
             if len(block_token_ids) == self._block_size:
                 # If the block is full, create an immutable block.

@@ -165,7 +165,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
             model = self._lora_manager.model
             supported_lora_modules = model.supported_lora_modules
             packed_modules_mapping = model.packed_modules_mapping
-            expected_lora_modules = []
+            expected_lora_modules: List[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
                     expected_lora_modules.extend(

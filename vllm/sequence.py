@@ -123,7 +123,7 @@ class SequenceData:
             output_token_ids = []
 
         self.prompt_token_ids = prompt_token_ids
-        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
+        self._prompt_token_ids_tuple = tuple(prompt_token_ids)
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).

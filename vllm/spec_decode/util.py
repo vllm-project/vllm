@@ -26,10 +26,10 @@ def get_all_num_logprobs(
     sequence.
     """
 
-    all_num_logprobs = []
+    all_num_logprobs: List[int] = []
     for seq_group_metadata in seq_group_metadata_list:
         num_logprobs = seq_group_metadata.sampling_params.logprobs
-        if seq_group_metadata.sampling_params.logprobs is None:
+        if num_logprobs is None:
             num_logprobs = 0
         all_num_logprobs.append(num_logprobs)
 

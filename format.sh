@@ -111,7 +111,7 @@ mypy vllm/spec_decode --config-file pyproject.toml
 mypy vllm/model_executor  --config-file pyproject.toml
 mypy vllm/lora --config-file pyproject.toml
 mypy vllm/logging --config-file pyproject.toml
-mypy vllm/model_executor --config-file pyproject.toml
+mypy tests --config-file pyproject.toml
 
 
 # If git diff returns a file that is in the skip list, the file may be checked anyway:

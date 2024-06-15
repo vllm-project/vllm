@@ -1,6 +1,6 @@
 import itertools
 import random
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -49,8 +49,8 @@ def _do_sample(
     sampling_params: SamplingParams,
     device: str,
 ):
-    seq_group_metadata_list = []
-    seq_lens = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    seq_lens: List[int] = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -212,7 +212,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         batch_size = random.randint(1, 128)
 
         expected_penalization = []
-        sequence_metadata_list = []
+        sequence_metadata_list: List[SequenceGroupMetadata] = []
         # 20% chance to generate seq group metadata list with all prompts
         is_prompt = random.random() < 0.2
         while batch_size > 0:
@@ -232,8 +232,8 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 eos_token_id=eos_token_id,
                 stop_token_ids=stop_token_ids)
 
-            seq_data = {}
-            seq_group_penalization = []
+            seq_data: Dict[int, SequenceData] = {}
+            seq_group_penalization: List[bool] = []
             for _ in range(num_seqs):
                 num_input = random.randint(1, 100)
                 num_generated = 0 if is_prompt else random.randint(1, 100)
@@ -392,17 +392,16 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     else:
         test_cases = [generate_test_case()]
 
-    def run_test_case(*,
-                      expected_penalization=None,
-                      seq_group_metadata_list=None):
+    def run_test_case(*, expected_penalization: List[bool],
+                      seq_group_metadata_list: List[SequenceGroupMetadata]):
         assert expected_penalization, \
             "Invalid test case, need expected_penalization"
         assert seq_group_metadata_list, \
             "Invalid test case, need seq_group_metadata_list"
 
         batch_size = 0
-        seq_lens = []
-        sampling_params_per_row = []
+        seq_lens: List[int] = []
+        sampling_params_per_row: List[SamplingParams] = []
         for sgm in seq_group_metadata_list:
             sampling_params = sgm.sampling_params
 
@@ -472,15 +471,15 @@ def test_sampler_mixed(seed: int, device: str):
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler = _prepare_test(batch_size)
 
-    seq_group_metadata_list = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
     expected_tokens: List[Optional[List[int]]] = []
-    seq_lens = []
+    seq_lens: List[int] = []
     for i in range(batch_size):
         expected: Optional[List[int]] = None
         sampling_type = random.randint(0, 3)
         if sampling_type == 0:
             sampling_params = SamplingParams(temperature=0)
-            expected = [torch.argmax(fake_logits[i], dim=-1).item()]
+            expected = [int(torch.argmax(fake_logits[i], dim=-1).item())]
         elif sampling_type in (1, 2):
             n = random.randint(1, 10)
             sampling_params = SamplingParams(
@@ -536,15 +535,18 @@ def test_sampler_mixed(seed: int, device: str):
                 ]
                 continue
 
+            expected_tokens_item = expected_tokens[i]
+            assert expected_tokens_item is not None
+
             for n, nth_output in enumerate(sequence_output.samples):
                 if (metadata.sampling_params.temperature == 0
                         or metadata.sampling_params.seed is not None):
                     # Ensure exact matches for greedy or random with seed
-                    assert nth_output.output_token == expected_tokens[i][n]
+                    assert nth_output.output_token == expected_tokens_item[n]
                 else:
                     # For non-seeded random check that one of the high-logit
                     # tokens were chosen
-                    assert nth_output.output_token in expected_tokens[i]
+                    assert nth_output.output_token in expected_tokens_item
 
     # Test batch
     test_sampling()
@@ -588,8 +590,8 @@ def test_sampler_top_k_top_p(seed: int, device: str):
     warpers = generation_model._get_logits_warper(generation_config)
     assert len(warpers) == 2  # top_p and top_k
 
-    seq_group_metadata_list = []
-    seq_lens = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    seq_lens: List[int] = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -622,6 +624,9 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 
     with patch("vllm.model_executor.layers.sampler._sample", mock_sample):
         sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
+
+    assert sample_probs is not None
+
     hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
     assert torch.allclose(hf_probs, sample_probs, atol=1e-5)

@@ -453,8 +453,8 @@ class ArcticForCausalLM(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        mlp_params_mapping = []
-        expert_params_mapping = []
+        mlp_params_mapping: List[Tuple[str, str, int]] = []
+        expert_params_mapping: List[Tuple[str, str, int]] = []
         num_layers = self.config.num_hidden_layers
 
         for layer in range(num_layers):
