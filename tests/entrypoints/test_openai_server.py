@@ -114,6 +114,7 @@ def client(server):
     return server.get_async_client()
 
 
+@pytest.mark.asyncio
 async def test_check_models(client: openai.AsyncOpenAI):
     models = await client.models.list()
     models = models.data
