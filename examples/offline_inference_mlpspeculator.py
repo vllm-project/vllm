@@ -5,7 +5,8 @@ from typing import List
 from vllm import LLM, SamplingParams
 
 
-def time_generation(llm: LLM, prompts: List[str], sampling_params: SamplingParams):
+def time_generation(llm: LLM, prompts: List[str],
+                    sampling_params: SamplingParams):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     # Warmup first
@@ -37,9 +38,7 @@ if __name__ == "__main__":
     sampling_params = SamplingParams(temperature=0.0, max_tokens=200)
 
     # Create an LLM without spec decoding
-    llm = LLM(
-        model="meta-llama/Llama-2-13b-chat-hf",
-    )
+    llm = LLM(model="meta-llama/Llama-2-13b-chat-hf")
 
     print("Without speculation")
     time_generation(llm, prompts, sampling_params)
