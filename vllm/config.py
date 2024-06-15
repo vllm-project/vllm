@@ -11,7 +11,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
+from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
+                        is_hip, is_neuron, is_tpu)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -93,6 +94,7 @@ class ModelConfig:
         revision: Optional[str] = None,
         code_revision: Optional[str] = None,
         rope_scaling: Optional[dict] = None,
+        rope_theta: Optional[float] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
@@ -113,6 +115,7 @@ class ModelConfig:
         self.revision = revision
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
+        self.rope_theta = rope_theta
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
             self.tokenizer_revision = revision
@@ -132,7 +135,7 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling)
+                                    code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(
@@ -210,7 +213,7 @@ class ModelConfig:
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
             if (self.quantization
-                    not in ["marlin", "gptq_marlin_24", "gptq_marlin"]):
+                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin")):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -601,9 +604,24 @@ class ParallelConfig:
                                  f"'{self.distributed_executor_backend}'.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
+            # We use multiprocessing by default if world_size fits on the
+            # current node and we aren't in a ray placement group.
+
             from vllm.executor import ray_utils
+            backend = "mp"
             ray_found = ray_utils.ray is not None
-            self.distributed_executor_backend = "ray" if ray_found else "mp"
+            if cuda_device_count_stateless() < self.world_size:
+                if not ray_found:
+                    raise ValueError("Unable to load Ray which is "
+                                     "required for multi-node inference")
+                backend = "ray"
+            elif ray_found:
+                from ray.util import get_current_placement_group
+                if self.placement_group or get_current_placement_group():
+                    backend = "ray"
+            self.distributed_executor_backend = backend
+            logger.info("Defaulting to use %s for distributed inference",
+                        backend)
 
         self._verify_args()
 
@@ -730,6 +748,8 @@ class DeviceConfig:
             # Automated device type detection
             if is_neuron():
                 self.device_type = "neuron"
+            elif is_tpu():
+                self.device_type = "tpu"
             elif is_cpu():
                 self.device_type = "cpu"
             else:
@@ -743,6 +763,8 @@ class DeviceConfig:
         # Some device types require processing inputs on CPU
         if self.device_type in ["neuron"]:
             self.device = torch.device("cpu")
+        elif self.device_type in ["tpu"]:
+            self.device = None
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
@@ -1070,6 +1092,8 @@ class LoRAConfig:
                 "Due to limitations of the custom LoRA CUDA kernel, "
                 "max_num_batched_tokens must be <= 65528 when "
                 "LoRA is enabled.")
+        if scheduler_config.chunked_prefill_enabled:
+            raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
 @dataclass

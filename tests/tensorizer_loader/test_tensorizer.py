@@ -1,24 +1,31 @@
 import json
 import os
+import pathlib
 import subprocess
 from unittest.mock import MagicMock, patch
 
 import openai
 import pytest
 import ray
+import torch
+from tensorizer import EncryptionParams
 
 from vllm import SamplingParams
+from vllm.engine.arg_utils import EngineArgs
 # yapf: disable
 from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          TensorSerializer,
                                                          is_vllm_tensorized,
                                                          load_with_tensorizer,
                                                          open_stream,
-                                                         serialize_vllm_model)
+                                                         serialize_vllm_model,
+                                                         tensorize_vllm_model)
 
-from ..utils import ServerRunner
+from ..conftest import VllmRunner, cleanup
+from ..utils import RemoteOpenAIServer
 
 # yapf conflicts with isort for this docstring
+
 
 
 prompts = [
@@ -42,6 +49,20 @@ def is_curl_installed():
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
+def get_torch_model(vllm_runner: VllmRunner):
+    return vllm_runner \
+            .model \
+            .llm_engine \
+            .model_executor \
+            .driver_worker \
+            .model_runner \
+            .model
+
+def write_keyfile(keyfile_path: str):
+    encryption_params = EncryptionParams.random()
+    pathlib.Path(keyfile_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(keyfile_path, 'wb') as f:
+        f.write(encryption_params.key)
 
 @pytest.fixture(autouse=True)
 def tensorizer_config():
@@ -88,12 +109,17 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
     with vllm_runner(model_ref) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
         key_path = tmp_path / (model_ref + ".key")
+        write_keyfile(key_path)
+
         outputs = vllm_model.generate(prompts, sampling_params)
 
-        config_for_serializing = TensorizerConfig(tensorizer_uri=model_path)
-        serialize_vllm_model(vllm_model.model.llm_engine,
-                            config_for_serializing,
-                            encryption_key_path=key_path)
+        config_for_serializing = TensorizerConfig(
+            tensorizer_uri=model_path,
+            encryption_keyfile=key_path
+        )
+        serialize_vllm_model(get_torch_model(vllm_model),
+                            config_for_serializing)
+
 
     config_for_deserializing = TensorizerConfig(tensorizer_uri=model_path,
                                                 encryption_keyfile=key_path)
@@ -145,7 +171,7 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     with vllm_runner(model_ref, ) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
 
-        serialize_vllm_model(vllm_model.model.llm_engine,
+        serialize_vllm_model(get_torch_model(vllm_model),
                             TensorizerConfig(tensorizer_uri=model_path))
 
     with vllm_runner(
@@ -180,7 +206,7 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
     with vllm_runner(model_ref, ) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
 
-        serialize_vllm_model(vllm_model.model.llm_engine,
+        serialize_vllm_model(get_torch_model(vllm_model),
                             TensorizerConfig(tensorizer_uri=model_path))
 
         model_loader_extra_config = {
@@ -191,18 +217,13 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
     openai_args = [
         "--model", model_ref, "--dtype", "float16", "--load-format",
         "tensorizer", "--model-loader-extra-config",
-        json.dumps(model_loader_extra_config), "--port", "8000"
+        json.dumps(model_loader_extra_config),
     ]
 
-    server = ServerRunner.remote(openai_args)
-
-    assert ray.get(server.ready.remote())
+    server = RemoteOpenAIServer(openai_args)
     print("Server ready.")
 
-    client = openai.OpenAI(
-        base_url="http://localhost:8000/v1",
-        api_key="token-abc123",
-    )
+    client = server.get_client()
     completion = client.completions.create(model=model_ref,
                                            prompt="Hello, my name is",
                                            max_tokens=5,
@@ -224,7 +245,9 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner):
             model_loader_extra_config=TensorizerConfig(tensorizer_uri="test"))
 
 
-def test_tensorizer_with_tp(vllm_runner):
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Requires 2 GPUs")
+def test_tensorizer_with_tp_path_without_template(vllm_runner):
     with pytest.raises(ValueError):
         model_ref = "EleutherAI/pythia-1.4b"
         tensorized_path = f"s3://tensorized/{model_ref}/fp16/model.tensors"
@@ -238,7 +261,61 @@ def test_tensorizer_with_tp(vllm_runner):
                 s3_endpoint="object.ord1.coreweave.com",
             ),
             tensor_parallel_size=2,
+            disable_custom_all_reduce=True,
         )
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Requires 2 GPUs")
+def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
+                                                                    tmp_path):
+    model_ref = "EleutherAI/pythia-1.4b"
+    # record outputs from un-sharded un-tensorized model
+    base_model = vllm_runner(
+        model_ref,
+        disable_custom_all_reduce=True,
+        enforce_eager=True,
+    )
+    outputs = base_model.generate(prompts, sampling_params)
+
+    base_model.model.llm_engine.model_executor.shutdown()
+    del base_model
+    cleanup()
+    ray.shutdown()
+
+    # load model with two shards and serialize with encryption
+    model_path = str(tmp_path / (model_ref + "-%02d.tensors"))
+    key_path = tmp_path / (model_ref + ".key")
+
+    tensorizer_config = TensorizerConfig(
+        tensorizer_uri=model_path,
+        encryption_keyfile=key_path,
+    )
+
+    tensorize_vllm_model(
+        engine_args=EngineArgs(
+                model=model_ref,
+                tensor_parallel_size=2,
+                disable_custom_all_reduce=True,
+                enforce_eager=True,
+            ),
+        tensorizer_config=tensorizer_config,
+    )
+    assert os.path.isfile(model_path % 0), "Serialization subprocess failed"
+    assert os.path.isfile(model_path % 1), "Serialization subprocess failed"
+    cleanup()
+    ray.shutdown()
+
+    loaded_vllm_model = vllm_runner(
+        model_ref,
+        tensor_parallel_size=2,
+        load_format="tensorizer",
+        disable_custom_all_reduce=True,
+        enforce_eager=True,
+        model_loader_extra_config=tensorizer_config)
+
+    deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
+
+    assert outputs == deserialized_outputs
 
 
 def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
@@ -248,7 +325,7 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
 
     with vllm_runner(model_ref) as vllm_model:
         outputs = vllm_model.generate(prompts, sampling_params)
-        serialize_vllm_model(vllm_model.model.llm_engine, config)
+        serialize_vllm_model(get_torch_model(vllm_model), config)
 
         assert is_vllm_tensorized(config)
 

@@ -20,12 +20,13 @@ from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
 import numpy as np
 import psutil
 import torch
+import torch.types
+from typing_extensions import ParamSpec
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
-T = TypeVar("T")
 logger = init_logger(__name__)
 
 STR_DTYPE_TO_TORCH_DTYPE = {
@@ -36,6 +37,10 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
 }
+
+P = ParamSpec('P')
+K = TypeVar("K")
+T = TypeVar("T")
 
 
 class Device(enum.Enum):
@@ -147,6 +152,15 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_tpu() -> bool:
+    try:
+        import libtpu
+    except ImportError:
+        libtpu = None
+    return libtpu is not None
+
+
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     max_shared_mem = (
@@ -167,7 +181,7 @@ def random_uuid() -> str:
 
 
 @lru_cache(maxsize=None)
-def get_vllm_instance_id():
+def get_vllm_instance_id() -> str:
     """
     If the environment variable VLLM_INSTANCE_ID is set, return it.
     Otherwise, return a random UUID.
@@ -183,7 +197,7 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(uname()).lower()
 
 
-def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
+def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
     This function prevents the blocking function from blocking the
@@ -191,7 +205,7 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
     The code in this function needs to be thread safe.
     """
 
-    def _async_wrapper(*args, **kwargs) -> asyncio.Future:
+    def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future:
         loop = asyncio.get_event_loop()
         p_func = partial(func, *args, **kwargs)
         return loop.run_in_executor(executor=None, func=p_func)
@@ -316,7 +330,7 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
-def chunk_list(lst, chunk_size):
+def chunk_list(lst: List[T], chunk_size: int) -> List[List[T]]:
     """Yield successive chunk_size chunks from lst."""
     return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
 
@@ -327,7 +341,7 @@ def cdiv(a: int, b: int) -> int:
 
 
 def _generate_random_fp8(
-    tensor: torch.tensor,
+    tensor: torch.Tensor,
     low: float,
     high: float,
 ) -> None:
@@ -389,7 +403,10 @@ def create_kv_caches_with_random_flash(
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
     scale = head_size**-0.5
-    key_caches, value_caches = [], []
+
+    key_caches: List[torch.Tensor] = []
+    value_caches: List[torch.Tensor] = []
+
     for _ in range(num_layers):
         key_value_cache = torch.empty(size=key_value_cache_shape,
                                       dtype=torch_dtype,
@@ -420,7 +437,7 @@ def create_kv_caches_with_random(
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
-    key_caches = []
+    key_caches: List[torch.Tensor] = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape,
                                 dtype=torch_dtype,
@@ -435,7 +452,7 @@ def create_kv_caches_with_random(
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
-    value_caches = []
+    value_caches: List[torch.Tensor] = []
     for _ in range(num_layers):
         value_cache = torch.empty(size=value_cache_shape,
                                   dtype=torch_dtype,
@@ -475,7 +492,7 @@ def is_pin_memory_available() -> bool:
 
 class CudaMemoryProfiler:
 
-    def __init__(self, device=None):
+    def __init__(self, device: Optional[torch.types.Device] = None):
         self.device = device
 
     def current_memory_usage(self) -> float:
@@ -546,13 +563,18 @@ def maybe_expand_dim(tensor: torch.Tensor,
     return tensor
 
 
-def merge_dicts(dict1: Dict[Any, List[Any]],
-                dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
+def get_dtype_size(dtype: torch.dtype) -> int:
+    """Get the size of the data type in bytes."""
+    return torch.tensor([], dtype=dtype).element_size()
+
+
+def merge_dicts(dict1: Dict[K, List[T]],
+                dict2: Dict[K, List[T]]) -> Dict[K, List[T]]:
     """Merge 2 dicts that have key -> List of items.
 
     When a key conflicts, the values in dict1 is prioritized.
     """
-    merged_dict = defaultdict(list)
+    merged_dict: Dict[K, List[T]] = defaultdict(list)
 
     for key, value in dict1.items():
         merged_dict[key].extend(value)
@@ -563,7 +585,7 @@ def merge_dicts(dict1: Dict[Any, List[Any]],
     return dict(merged_dict)
 
 
-def init_cached_hf_modules():
+def init_cached_hf_modules() -> None:
     """
     Lazy initialization of the Hugging Face modules.
     """
@@ -599,7 +621,7 @@ def find_library(lib_name: str) -> str:
     return locs[0]
 
 
-def find_nccl_library():
+def find_nccl_library() -> str:
     """
     We either use the library file specified by the `VLLM_NCCL_SO_PATH`
     environment variable, or we find the library file brought by PyTorch.
@@ -679,3 +701,38 @@ def deprecate_kwargs(
         return inner  # type: ignore
 
     return wrapper
+
+
+@lru_cache(maxsize=8)
+def _cuda_device_count_stateless(
+        cuda_visible_devices: Optional[str] = None) -> int:
+    # Note: cuda_visible_devices is not used, but we keep it as an argument for
+    # LRU Cache purposes.
+
+    # Code below is based on
+    # https://github.com/pytorch/pytorch/blob/
+    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+    # torch/cuda/__init__.py#L831C1-L831C17
+    import torch.cuda
+    import torch.version
+
+    if not torch.cuda._is_compiled():
+        return 0
+    # bypass _device_count_nvml() if rocm (not supported)
+    nvml_count = -1 if torch.version.hip else torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if nvml_count < 0 else nvml_count
+    return r
+
+
+def cuda_device_count_stateless() -> int:
+    """Get number of CUDA devices, caching based on the value of
+    CUDA_VISIBLE_DEVICES at the time of call.
+    
+    This should be used instead of torch.cuda.device_count()
+    unless CUDA_VISIBLE_DEVICES has already been set to the desired
+    value."""
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released.
+
+    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
