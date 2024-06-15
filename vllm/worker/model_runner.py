@@ -395,6 +395,7 @@ class ModelRunner:
                             block_table = block_table[
                                 -curr_sliding_window_blocks:]
                         if self.attn_backend.get_name() == "flashinfer":
+                            # flashinfer wrong indexing bug fix
                             block_table_bound = seq_data.get_len(
                             ) // self.block_size + 1 if seq_data.get_len(
                             ) % self.block_size != 0 else seq_data.get_len(
