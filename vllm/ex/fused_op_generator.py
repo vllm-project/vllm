@@ -12,6 +12,7 @@ import types
 
 from .utils import extract_node_type, compose, build_extension, mangle_name, argument_type_str, node_function_target
 
+from pathlib import Path
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
 from vllm.logger import init_logger  #, _default_handler
 
@@ -73,7 +74,9 @@ class FusedOpGenerator:
         self.callables = dict()
         self.fused_op = []
         self.fused_op.append(f'#include <torch/extension.h>')
-        self.fused_op.append(f'#include <iostream>')
+        ops_header = Path(__file__).parent.parent.parent / "csrc" / "ops.h"
+        #self.fused_op.append(f'#include <iostream>')
+        self.fused_op.append(f'#include "{ops_header}"')
         self.fused_op.append('#define _operator_add(a, b) ((a) + (b))')
         self.fused_op.append('#define _operator_mul(a, b) ((a) * (b))')
         self.fused_op.append(
@@ -96,8 +99,8 @@ class FusedOpGenerator:
         if s == 'torch._C._nn.linear':
             # Hack to map vllm ops to the standard torch linear op.
             return 'torch::nn::functional::linear'
-        elif s.startswith('torch.ops.vllm.'):
-            return s.replace('torch.ops.vllm.', '')
+        elif s.startswith('torch.ops._C.'):
+            return s.replace('torch.ops._C.', '')
         elif s == 'torch::float16':
             return 'torch::kFloat16'
         elif s == 'torch::float32':
@@ -265,14 +268,18 @@ class FusedOpGenerator:
         #self.fused_op.append(f'  std::cout << "Executing: {op}" << std::endl;')
 
         for n, fn in zip(nodes, fn_names):
-            comment_str = f"  // ({', '.join([argument_type_str(inp) for inp in n.args])}) -> {str(extract_node_type(n))}"
+            return_type = extract_node_type(n)
+            comment_str = f"  // ({', '.join([argument_type_str(inp) for inp in n.args])}) -> {str(return_type)}"
 
             if fn == '_operator_getitem':
                 call_str = self.translate_getitem(n)
                 assert kwargs.get(n.name) is None or len(kwargs.get(
                     n.name)) == 0
             else:
-                call_str = f"  auto {self.mangle(n.name, '_')} = "
+                if return_type is None:
+                    call_str = "  "
+                else:
+                    call_str = f"  auto {self.mangle(n.name, '_')} = "
                 first_arg = 0
                 if n.op == 'call_method':
                     call_str = call_str + f"{self.mangle(n.args[0].name, '::')}."

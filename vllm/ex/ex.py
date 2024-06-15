@@ -6,6 +6,7 @@ from .code_cache import CodeCache
 from .fusion import FusedOpGenerator, pointwise_fusion
 from .register import SUPPORTED
 from .rewrite_quantized_gemms import rewrite_quantized_gemms
+from .quantization import move_quantization
 from .utils import ModuleInputGenerator, graph_print_tabular, is_call, call_method_class, tag_side_effects
 
 from torch._dynamo import register_backend, lookup_backend
@@ -98,6 +99,7 @@ def optimize(
     example_inputs: List[torch.Tensor],
 ) -> torch.fx.GraphModule:
     mod = rewrite_quantized_gemms(mod, example_inputs)
+    mod = move_quantization(mod, example_inputs)
     mod = pointwise_fusion(cc, fgen, mod, example_inputs)
     # TODO: should we re-trace here to inline?  or will inductor handle it?
     # mod = inline_submodules(mod)
@@ -292,6 +294,7 @@ class backend_class:
         part_gm.recompile()
 
         logger.debug(f"Final module: {part_gm.print_readable(False)}")
+        #print(f"Final module: {part_gm.print_readable(False)}")
 
         # TODO: Add option for backend for the final graph?
         return part_gm.forward

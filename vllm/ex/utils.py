@@ -18,7 +18,7 @@ from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.passes.tools_common import get_node_target
 from torch._subclasses.fake_tensor import FakeTensorMode, FakeTensor
 
-from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
+from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set, Union
 
 from vllm.logger import init_logger
 
@@ -185,6 +185,96 @@ class ModuleInputGenerator(torch.fx.passes.fake_tensor_prop.FakeTensorProp):
         return super().call_module(target, args, kwargs)
 
 
+def mutable_function_args(n: torch.fx.Node) -> List[Union[int, str]]:
+    mutable_arg_indices = []
+
+    if n.op != 'call_function':
+        return mutable_arg_indices
+
+    sigs, schemas = torch.fx.operator_schemas.get_signature_for_torch_op(
+        n.target, return_schemas=True)
+
+    if schemas is None or not any([s.is_mutable for s in schemas]):
+        return mutable_arg_indices
+
+    matched_schemas = []
+    for candidate_signature, schema in zip(sigs, schemas):
+        try:
+            candidate_signature.bind(*n.args, **n.kwargs)
+            matched_schemas.append((candidate_signature, schema))
+        except TypeError as e:
+            continue
+
+    if len(matched_schemas) == 0:
+        # Did not match any schema. Cannot check for mutation
+        return mutable_arg_indices
+
+    # What to do here?
+    if len(matched_schemas) != 1:
+        raise Exception("ambiguous sig failure")
+
+    _, s = matched_schemas[0]
+    if not s.is_mutable:
+        return mutable_arg_indices
+
+    num_outputs = len([a for a in s.arguments if a.is_out])
+
+    for i, a in enumerate(s.arguments):
+        if a.alias_info and a.alias_info.is_write:
+            if not a.kwarg_only:
+                mutable_arg_indices.append(i - num_outputs)
+            else:
+                mutable_arg_indices.append(a.name)
+
+    return mutable_arg_indices
+
+
+def nth_arg_or_kwarg(n: torch.fx.Node, arg: Union[int, str]):
+    if isinstance(arg, int):
+        if arg >= len(n.args):
+            return list(n.kwargs.values())[arg - len(n.args)]  #????
+        else:
+            return n.args[arg]
+    else:
+        return n.kwargs[arg]
+
+
+def node_users(n: torch.fx.Node) -> Dict[torch.fx.Node, None]:
+    users = n.users
+
+    in_place = mutable_function_args(n)
+
+    for i in in_place:
+        arg = nth_arg_or_kwarg(n, i)
+        if isinstance(arg, torch.fx.Node):
+            for u in arg.users:
+                if n != u:
+                    users[u] = None
+        elif isinstance(arg, tuple):
+            for sub_arg in arg:
+                if isinstance(sub_arg, torch.fx.Node):
+                    for u in sub_arg.users:
+                        if n != u:
+                            users[u] = None
+
+    return users
+
+
+def gather_all_input_nodes(nodes: List[torch.fx.Node]) -> Dict[torch.fx.Node, List[torch.fx.Node]]:
+    all_input_nodes = dict()
+    for n in nodes:
+        all_input_nodes[n] = n.all_input_nodes
+
+    for n in nodes:
+        for user in node_users(n):
+            if not user in all_input_nodes:
+                all_input_nodes[user] = list()
+            if not n in all_input_nodes[user]:
+                all_input_nodes[user].append(n)
+
+    return all_input_nodes
+
+
 """
 The FlowGraph is a dataflow graph for a fx.GraphModule.
 The nodes are fx.Nodes and the edges represent the producers (inputs) and
@@ -195,7 +285,7 @@ It can be regenerated at any time by calling the `build` method.
 
 TODO: turn getitems into "reader views"?
 
-TODO: might be able to use Node.all_input_nodes + Node.users instead
+TODO: might be able to use Node.all_input_nodes + Node.users instead (doesn't work with inplace)
 """
 class FlowGraph:
 
@@ -225,13 +315,15 @@ class FlowGraph:
         visited = set()
         q = self.outputs
 
+        all_input_nodes = gather_all_input_nodes(self.module.graph.nodes)
+
         while len(q) > 0:
             n = q.pop()
             if n in visited:
                 continue
 
             visited.add(n)
-            for input in n.all_input_nodes:
+            for input in all_input_nodes[n]:
                 self.add_edge(input, n)
                 q.append(input)
 
@@ -264,6 +356,14 @@ class FlowGraph:
             fn(n)
             q = list(self.successors(n)) + q
 
+    def dump(self) -> str:
+        res = ""
+        oc = '{'
+        cc = '}'
+        for n in self.module.graph.nodes:
+            res = res + f"{n} ({n.op}) {oc}\n  preds={str(self.predecessors(n))}\n  succs={str(self.successors(n))}\n{cc}\n"
+        return res
+
 
 class SubGraph:
 
@@ -281,15 +381,17 @@ class SubGraph:
         inputs = []
         outputs = []
 
+        all_input_nodes = gather_all_input_nodes(self.nodes)
+
         for n in self.nodes:
             new_inputs = [
-                inp for inp in n.all_input_nodes if not self.in_subgraph(inp)
+                inp for inp in all_input_nodes[n] if not self.in_subgraph(inp)
             ]
             for inp in new_inputs:
                 if inp not in inputs:
                     inputs.append(inp)
 
-            if any([user for user in n.users if not self.in_subgraph(user)
+            if any([user for user in node_users(n) if not self.in_subgraph(user)
                     ]) and n not in outputs:
                 outputs.append(n)
 
@@ -300,9 +402,11 @@ class SubGraph:
         in_degree = dict()
         worklist: collections.deque = collections.deque()
 
+        all_input_nodes = gather_all_input_nodes(self.nodes)
+
         for n in self.nodes:
             count = len(
-                [inp for inp in n.all_input_nodes if self.in_subgraph(inp)])
+                [inp for inp in all_input_nodes[n] if self.in_subgraph(inp)])
             in_degree[n] = count
             if count == 0:
                 worklist.append(n)
@@ -311,7 +415,7 @@ class SubGraph:
             n = worklist.popleft()
             order.append(n)
 
-            for u in n.users:
+            for u in node_users(n):
                 if not self.in_subgraph(u):
                     continue
                 in_degree[u] = in_degree[u] - 1
@@ -337,10 +441,16 @@ class SubGraph:
         return first
 
     def erase(self):
-        for n in reversed(self.nodes):
-            self.module.graph.erase_node(n)
+        try:
+            for n in reversed(self.nodes):
+                self.module.graph.erase_node(n)
+        except RuntimeError as ex:
+            print(f"{ex}: failed to delete: {str(reversed(self.nodes))}")
+            print(f"{self.tabular('users', lambda n: n.users)}")
 
-    def tabular(self) -> str:
+    def tabular(self,
+                col: Optional[str] = None,
+                col_get: Optional[Callable] = None) -> str:
         try:
             from tabulate import tabulate
         except ImportError:
@@ -349,18 +459,26 @@ class SubGraph:
                   "install tabulate` to install the library.")
             raise
 
+        assert (col and col_get) or (not col and not col_get)
+
         headers = ['opcode', 'name', 'target', 'args', 'kwargs']
+
+        def mcol_get(x):
+            if col_get:
+                return [col_get(x)]
+            else:
+                return []
 
         node_specs = [['placeholder*', n.name, n.target,
                        tuple(),
-                       dict()] for n in self.inputs]
+                       dict(), *mcol_get(n)] for n in self.inputs]
 
-        node_specs = node_specs + [[n.op, trunc(n.name), trunc(n.target), trunc(n.args), n.kwargs]
+        node_specs = node_specs + [[n.op, trunc(n.name), trunc(n.target), trunc(n.args), n.kwargs, *mcol_get(n)]
                                    for n in self.nodes]
 
         node_specs = node_specs + [[
             'output*', 'output*', 'output*',
-            (n, ), dict()
+            (n, ), dict(), *mcol_get(n),
         ] for n in self.outputs]
 
         return tabulate(node_specs, headers=headers)
@@ -381,6 +499,10 @@ def build_extension(lib_name: str,
         sources=sources,
         extra_cflags=[
             opt, f'-DLIBRARY_NAME={lib_name}', f'-I{vllm_root}/csrc'
+        ],
+        # Note: this is a total hack to get naive C++ fused ops working.
+        extra_ldflags=[
+            f'{vllm_root}/vllm/_C.abi3.so'
         ],
         verbose=verbose,
         is_python_module=False,
