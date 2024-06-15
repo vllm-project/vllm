@@ -6,15 +6,16 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
-from vllm.distributed import disable_communication
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.worker.model_input import ModelInputForNeuron
+from vllm.sequence import ExecuteModelRequest
+from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.neuron_model_runner import NeuronModelRunner
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
+                                     LoraNotSupportedWorkerBase)
+from vllm.worker.worker_input import WorkerInput
 
 
-class NeuronWorker(LoraNotSupportedWorkerBase):
+class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
     """
 
@@ -36,15 +37,15 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner = NeuronModelRunner(model_config, parallel_config,
-                                              scheduler_config, device_config)
+        self._model_runner = NeuronModelRunner(model_config, parallel_config,
+                                               scheduler_config, device_config)
 
     def init_device(self) -> None:
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        self.model_runner.load_model()
+        self._model_runner.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
@@ -75,35 +76,27 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    @property
+    def is_driver_worker(self) -> bool:
+        return True
+
+    @property
+    def do_broadcast(self) -> bool:
+        return False
+
+    @property
+    def model_runner(self) -> ModelRunnerBase:
+        return self._model_runner
+
+    @property
+    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+        return None
+
     @torch.inference_mode()
-    @disable_communication
-    def prepare_model_input_local(
-            self,
-            execute_model_req: ExecuteModelRequest) -> ModelInputForNeuron:
-        model_input = self.model_runner.prepare_model_input_tensors(
-            execute_model_req.seq_group_metadata_list)
-        return model_input.replace(num_seq_groups=len(
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        return WorkerInput(num_seq_groups=len(
             execute_model_req.seq_group_metadata_list), )
-
-    def prepare_model_input(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> ModelInputForNeuron:
-        assert execute_model_req is not None
-        return self.prepare_model_input_local(execute_model_req)
-
-    @torch.inference_mode()
-    @disable_communication
-    def execute_model_local(
-            self, model_input: ModelInputForNeuron) -> List[SamplerOutput]:
-        # If there is no input, we don't need to execute the model.
-        if model_input.num_seq_groups == 0:
-            return []
-
-        output = self.model_runner.execute_model(model_input)
-
-        # Neuron worker only supports single-step output. Wrap the output in a
-        # list to conform to interface.
-        return [output]
 
     def get_cache_block_size_bytes(self) -> int:
         """Determine the size in bytes of a cache block.

@@ -351,8 +351,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
         seq_group_metadata_list.append(seq_group_metadata)
         decode_metadata_list.append(seq_group_metadata)
 
-    model_input = model_runner.prepare_model_input_tensors(
-        seq_group_metadata_list)
+    model_input = model_runner.prepare_model_input(seq_group_metadata_list)
     (input_tokens, input_positions, attn_metadata) = (
         model_input.input_tokens,
         model_input.input_positions,

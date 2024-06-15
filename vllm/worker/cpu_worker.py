@@ -8,16 +8,17 @@ from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict, disable_communication,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.cpu_model_runner import CPUModelRunner
-from vllm.worker.model_input import CPUModelInput
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+from vllm.worker.model_runner_base import ModelRunnerBase
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
+                                     LoraNotSupportedWorkerBase)
+from vllm.worker.worker_input import WorkerInput
 
 logger = init_logger(__name__)
 
@@ -111,7 +112,7 @@ class CPUCacheEngine:
         return dtype_size * total
 
 
-class CPUWorker(LoraNotSupportedWorkerBase):
+class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a CPU socket.
 
     Each worker is associated with a single CPU socket. The worker is 
@@ -147,15 +148,15 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.vision_language_config = vision_language_config
-        self.is_driver_worker = is_driver_worker
-        if self.is_driver_worker:
+        self._is_driver_worker = is_driver_worker
+        if self._is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self.model_runner = CPUModelRunner(
+        self._model_runner = CPUModelRunner(
             model_config,
             parallel_config,
             scheduler_config,
@@ -177,7 +178,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        self.model_runner.load_model()
+        self._model_runner.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of blocks available for the KV cache.
@@ -248,7 +249,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                                            self.parallel_config,
                                            self.device_config)
         self.cpu_cache = self.cache_engine.cpu_cache
-        self.model_runner.block_size = self.cache_engine.block_size
+        self._model_runner.block_size = self.cache_engine.block_size
 
         assert self.cpu_cache is not None
 
@@ -256,22 +257,34 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         for layer_cache in self.cpu_cache:
             layer_cache.fill_(0)
 
-    def cache_copy(
+    @property
+    def is_driver_worker(self) -> bool:
+        return self._is_driver_worker
+
+    @property
+    def do_broadcast(self) -> bool:
+        return self.parallel_config.tensor_parallel_size > 1
+
+    @property
+    def model_runner(self) -> ModelRunnerBase:
+        return self._model_runner
+
+    @property
+    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+        return self.cpu_cache
+
+    def execute_worker(
         self,
-        blocks_to_copy: torch.Tensor,
+        worker_input: WorkerInput,
     ) -> None:
-        if blocks_to_copy.numel() > 0:
-            self.cache_engine.copy(blocks_to_copy)
+        if (worker_input.blocks_to_copy is not None
+                and worker_input.blocks_to_copy.numel() > 0):
+            self.cache_engine.copy(worker_input.blocks_to_copy)
 
     @torch.inference_mode()
-    @disable_communication
-    def prepare_model_input_local(
-            self, execute_model_req: ExecuteModelRequest) -> CPUModelInput:
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
         assert execute_model_req is not None
-
-        model_input = self.model_runner.prepare_model_input_tensors(
-            execute_model_req.seq_group_metadata_list)
-
         num_seq_groups: int = len(execute_model_req.seq_group_metadata_list)
         blocks_to_copy = execute_model_req.blocks_to_copy
         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
@@ -279,56 +292,10 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                                       dtype=torch.int64).view(-1, 2)
         assert len(execute_model_req.blocks_to_swap_in) == 0
         assert len(execute_model_req.blocks_to_swap_out) == 0
-        return model_input.replace(
+        return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_copy=blocks_to_copy,
         )
-
-    @torch.inference_mode()
-    def prepare_model_input(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[CPUModelInput]:
-        if self.is_driver_worker:
-            if execute_model_req is None:
-                if self.parallel_config.tensor_parallel_size > 1:
-                    # This signals that there's no more requests to process for
-                    # now. All workers are running infinite loop with
-                    # broadcast_tensor_dict, and it stops the loop when the
-                    # driver broadcasts an empty input. Send an empty input to
-                    # notify all other workers to stop their execution loop.
-                    broadcast_tensor_dict({}, src=0)
-                return None
-
-            model_input = self.prepare_model_input_local(execute_model_req)
-            if self.parallel_config.tensor_parallel_size > 1:
-                metadata_dict = model_input.as_broadcastable_tensor_dict()
-                broadcast_tensor_dict(metadata_dict, src=0)
-        else:
-            metadata_dict = broadcast_tensor_dict(src=0)
-            if not metadata_dict:
-                return None
-
-            model_input = self.model_runner.get_empty_model_input()
-            model_input = model_input.new(
-                attn_backend=self.model_runner.attn_backend, **metadata_dict)
-        return model_input
-
-    @torch.inference_mode()
-    @disable_communication
-    def execute_model_local(
-        self,
-        model_input: CPUModelInput,
-    ) -> List[SamplerOutput]:
-        self.cache_copy(model_input.blocks_to_copy)
-
-        # If there is no input, we don't need to execute the model.
-        if model_input.num_seq_groups == 0:
-            return []
-
-        output = self.model_runner.execute_model(model_input, self.cpu_cache)
-
-        # CPU worker only supports single-step execution.
-        return [output]
 
     def init_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

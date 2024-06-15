@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Type
 
 import torch
 from torch import nn
@@ -11,11 +11,12 @@ from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.worker.model_input import ModelInputForNeuron
+from vllm.worker.model_runner_base import ModelRunnerBase
 
 logger = init_logger(__name__)
 
 
-class NeuronModelRunner:
+class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
     def __init__(
         self,
@@ -140,7 +141,11 @@ class NeuronModelRunner:
 
         return input_tokens, input_positions, input_block_ids
 
-    def prepare_model_input_tensors(
+    @staticmethod
+    def model_input_cls() -> Type[ModelInputForNeuron]:
+        return ModelInputForNeuron
+
+    def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> ModelInputForNeuron:
@@ -174,6 +179,7 @@ class NeuronModelRunner:
     def execute_model(
         self,
         model_input: ModelInputForNeuron,
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> Optional[SamplerOutput]:
         hidden_states = self.model(
             input_ids=model_input.input_tokens,

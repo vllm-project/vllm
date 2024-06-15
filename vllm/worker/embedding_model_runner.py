@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -10,12 +10,13 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_input import GPUModelInputWithPoolingMetadata
-from vllm.worker.model_runner import ModelRunner
+from vllm.worker.model_runner import GPUModelRunnerBase
 
 logger = init_logger(__name__)
 
 
-class EmbeddingModelRunner(ModelRunner):
+class EmbeddingModelRunner(GPUModelRunnerBase[GPUModelInputWithPoolingMetadata]
+                           ):
 
     def __init__(
         self,
@@ -40,9 +41,6 @@ class EmbeddingModelRunner(ModelRunner):
                          kv_cache_dtype=kv_cache_dtype,
                          is_driver_worker=is_driver_worker,
                          vision_language_config=vision_language_config)
-
-    def get_empty_model_input(self) -> GPUModelInputWithPoolingMetadata:
-        return GPUModelInputWithPoolingMetadata.new()
 
     @torch.inference_mode()
     def execute_model(
@@ -88,7 +86,11 @@ class EmbeddingModelRunner(ModelRunner):
         return self.model.pooler(hidden_states=hidden_states,
                                  pooling_metadata=model_input.pooling_metadata)
 
-    def prepare_model_input_tensors(
+    @staticmethod
+    def model_input_cls() -> Type[GPUModelInputWithPoolingMetadata]:
+        return GPUModelInputWithPoolingMetadata
+
+    def prepare_model_input(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> GPUModelInputWithPoolingMetadata:
@@ -100,10 +102,7 @@ class EmbeddingModelRunner(ModelRunner):
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
                                                  model_input.seq_lens)
 
-        return GPUModelInputWithPoolingMetadata.new(
-            clone=model_input,
-            pooling_metadata=pooling_metadata,
-        )
+        return model_input.replace(pooling_metadata=pooling_metadata)
 
     def _prepare_pooling(
         self,

@@ -105,29 +105,26 @@ class ModelInput:
         raise NotImplementedError()
 
     @classmethod
-    def _get_init_kwargs(cls, **kwargs) -> Dict[str, Any]:
+    def _get_init_kwargs(cls: Type[T], **kwargs) -> Dict[str, Any]:
         """
         Helper method to extract all dataclass fields from the given kwargs.
         Override for fields that require some custom deserialization.
         """
-        return kwargs
+        init_kwargs = {}
+        for field in dataclasses.fields(cls):
+            val = kwargs.get(field.name, None)
+            if val is not None:
+                init_kwargs[field.name] = val
+        return init_kwargs
 
     @classmethod
-    def new(cls: Type[T], clone: Optional["ModelInput"] = None, **kwargs) -> T:
+    def new(cls: Type[T], **kwargs) -> T:
         """
-        Create a new instance of this class. Copy fields from `clone` if
-        provided. Populate the new instance with the given kwargs.
+        Create a new instance of this class. Populate the new instance with
+        the given kwargs.
         """
-        clone_kwargs = {}
-        if clone is not None:
-            for field in dataclasses.fields(clone):
-                val = getattr(clone, field.name)
-                if val is not None:
-                    clone_kwargs[field.name] = val
-            clone_kwargs = cls._get_init_kwargs(**clone_kwargs)
-
         kwargs = cls._get_init_kwargs(**kwargs)
-        return cls(**clone_kwargs, **kwargs)
+        return cls(**kwargs)
 
     def replace(self: T, **kwargs) -> T:
         """
@@ -156,9 +153,6 @@ class CPUModelInput(ModelInput):
     """
     Used by the CPUModelRunner.
     """
-    num_seq_groups: Optional[int] = None
-    blocks_to_copy: Optional[torch.Tensor] = None
-
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
@@ -169,8 +163,6 @@ class CPUModelInput(ModelInput):
     @property
     def broadcastable_fields(self) -> Tuple[str, ...]:
         return (
-            "num_seq_groups",
-            "blocks_to_copy",
             "input_tokens",
             "input_positions",
             "multi_modal_kwargs",
@@ -200,11 +192,6 @@ class GPUModelInput(ModelInput):
     runners that run additional steps should subclass this method to add
     additional fields.
     """
-    num_seq_groups: Optional[int] = None
-    blocks_to_swap_in: Optional[torch.Tensor] = None
-    blocks_to_swap_out: Optional[torch.Tensor] = None
-    blocks_to_copy: Optional[torch.Tensor] = None
-
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     seq_lens: Optional[List[int]] = None
@@ -218,10 +205,6 @@ class GPUModelInput(ModelInput):
     @property
     def broadcastable_fields(self) -> Tuple[str, ...]:
         return (
-            "num_seq_groups",
-            "blocks_to_swap_in",
-            "blocks_to_swap_out",
-            "blocks_to_copy",
             "input_tokens",
             "input_positions",
             "lora_requests",
@@ -276,8 +259,6 @@ class ModelInputForNeuron(ModelInput):
     """
     Used by the NeuronModelRunner.
     """
-    num_seq_groups: Optional[int] = None
-
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     input_block_ids: Optional[torch.Tensor] = None

@@ -5,20 +5,23 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 
-from vllm.distributed import disable_communication
+from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 from vllm.worker.model_input import ModelInput
+from vllm.worker.model_runner_base import ModelRunnerBase
+from vllm.worker.worker_input import WorkerInput
 
 logger = init_logger(__name__)
 
 
 class WorkerBase(ABC):
     """Worker interface that allows vLLM to cleanly separate implementations for
-    different hardware.
+    different hardware. Also abstracts control plane communication, e.g., to
+    communicate request metadata to other workers.
     """
 
     @abstractmethod
@@ -63,51 +66,9 @@ class WorkerBase(ABC):
                 return None
 
     @abstractmethod
-    @disable_communication
-    def prepare_model_input_local(
-            self, execute_model_req: ExecuteModelRequest) -> ModelInput:
-        """
-        Prepare a model execution request locally. This method may move data to
-        the worker's local device. It is not allowed to communicate with
-        other workers or devices. Subclasses should keep the
-        @disable_communication decorator to enforce this.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def prepare_model_input(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[ModelInput]:
-        """
-        Prepare a model execution request. Communication with other workers
-        may occur to produce the model input that should be passed to
-        execute_model.
-        """
-        raise NotImplementedError
-
     def execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
     ) -> Optional[List[SamplerOutput]]:
-        """Executes at least one model step on the given sequences, unless no
-        sequences are provided. Communication with other workers
-        may occur to produce the model input that should be passed to
-        the model runner."""
-        model_input: Optional[ModelInput] = self.prepare_model_input(
-            execute_model_req=execute_model_req)
-        if model_input is None:
-            return None
-
-        return self.execute_model_local(model_input)
-
-    @abstractmethod
-    @disable_communication
-    def execute_model_local(self,
-                            model_input: ModelInput) -> List[SamplerOutput]:
-        """Executes at least one model step on the given sequences, unless no
-        sequences are provided. This method is not allowed to communciate
-        metadata to other workers. Subclasses should keep the
-        @disable_communication decorator to enforce this.
-        """
         raise NotImplementedError
 
     @abstractmethod
@@ -143,6 +104,116 @@ class LoraNotSupportedWorkerBase(WorkerBase):
 
     def list_loras(self) -> Set[int]:
         raise ValueError(f"{type(self)} does not support LoRA")
+
+
+class LocalOrDistributedWorkerBase(WorkerBase):
+
+    @property
+    @abstractmethod
+    def is_driver_worker(self) -> bool:
+        """
+        Used by the default `execute_model` to check whether this is the driver
+        worker. The driver worker is responsible for broadcasting request
+        inputs to other workers in its TP group. If WorkerBase subclass only
+        supports single-worker execution, then this method should return True.
+        """
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def do_broadcast(self) -> bool:
+        """
+        Used by the default `execute_model` to check whether broadcast is
+        needed to transfer request inputs from the driver worker to other
+        workers in the TP group. If WorkerBase subclass only supports
+        single-worker execution, then this method should return False.
+        """
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def model_runner(self) -> ModelRunnerBase:
+        """
+        Get the worker's model runner. Used by the default `execute_model`. If
+        the worker's model runner does not follow the ModelRunnerBase
+        interface, then this method should raise NotImplementedError.
+        """
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+        """
+        Get the kv cache to pass to the worker's model runner. Used by the
+        default `execute_model`. If the worker's model runner does not follow
+        the ModelRunnerBase interface, then this method should raise
+        NotImplementedError.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        """
+        Prepare the inputs to WorkerBase.execute_worker from an execution
+        request. This method may move data to the worker's local device. It is
+        not allowed to communicate with other workers or devices.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        """
+        Process an execution request.
+        """
+        raise NotImplementedError
+
+    def execute_model(
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
+        """Executes at least one model step on the given sequences, unless no
+        sequences are provided."""
+        if self.is_driver_worker:
+            if execute_model_req is None:
+                if self.do_broadcast:
+                    # This signals that there's no more requests to process for
+                    # now. All workers are running infinite loop with
+                    # broadcast_tensor_dict, and it stops the loop when the
+                    # driver broadcasts an empty input. Send an empty input to
+                    # notify all other workers to stop their execution loop.
+                    broadcast_tensor_dict({}, src=0)
+                return None
+
+            worker_input: WorkerInput = self.prepare_worker_input(
+                execute_model_req=execute_model_req)
+            model_input: ModelInput = self.model_runner.prepare_model_input(
+                execute_model_req.seq_group_metadata_list)
+
+            if self.do_broadcast:
+                broadcast_data = worker_input.as_broadcastable_tensor_dict()
+                broadcast_data.update(
+                    model_input.as_broadcastable_tensor_dict())
+                broadcast_tensor_dict(broadcast_data, src=0)
+        else:
+            assert self.do_broadcast
+            broadcast_data = broadcast_tensor_dict(src=0)
+            if not broadcast_data:
+                return None
+
+            worker_input = WorkerInput.new(**broadcast_data)
+            model_input_cls = self.model_runner.model_input_cls()
+            model_input = model_input_cls.new(**broadcast_data)
+
+        self.execute_worker(worker_input)
+
+        # If there is no input, we don't need to execute the model.
+        if worker_input.num_seq_groups == 0:
+            return []
+
+        output = self.model_runner.execute_model(model_input, self.kv_cache)
+        # Worker only supports single-step execution. Wrap the output in a
+        # list to conform to interface.
+        return [output]
 
 
 class WorkerWrapperBase:

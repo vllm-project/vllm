@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 from torch import nn
@@ -15,13 +15,14 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_input import CPUModelInput
+from vllm.worker.model_runner_base import ModelRunnerBase
 
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
 
 
-class CPUModelRunner:
+class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
 
     def __init__(
         self,
@@ -270,7 +271,11 @@ class CPUModelRunner:
             attn_metadata,
         )
 
-    def prepare_model_input_tensors(
+    @staticmethod
+    def model_input_cls() -> Type[CPUModelInput]:
+        return CPUModelInput
+
+    def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> CPUModelInput:
@@ -302,9 +307,6 @@ class CPUModelRunner:
             attn_metadata=attn_metadata,
             sampling_metadata=sampling_metadata,
         )
-
-    def get_empty_model_input(self) -> CPUModelInput:
-        return CPUModelInput.new()
 
     @torch.inference_mode()
     def execute_model(
