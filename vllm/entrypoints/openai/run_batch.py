@@ -10,7 +10,9 @@ from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
-                                              ChatCompletionResponse)
+                                              BatchResponseData,
+                                              ChatCompletionResponse,
+                                              ErrorResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -77,20 +79,27 @@ async def run_request(chat_serving: OpenAIServingChat,
                       request: BatchRequestInput) -> BatchRequestOutput:
     chat_request = request.body
     chat_response = await chat_serving.create_chat_completion(chat_request)
+
     if isinstance(chat_response, ChatCompletionResponse):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
-            response=chat_response,
+            response=BatchResponseData(
+                body=chat_response, request_id=f"vllm-batch-{random_uuid()}"),
             error=None,
         )
-    else:
+    elif isinstance(chat_response, ErrorResponse):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
-            response=None,
+            response=BatchResponseData(
+                status_code=chat_response.code,
+                request_id=f"vllm-batch-{random_uuid()}"),
             error=chat_response,
         )
+    else:
+        raise ValueError("Request must not be sent in stream mode")
+
     return batch_output
 
 
