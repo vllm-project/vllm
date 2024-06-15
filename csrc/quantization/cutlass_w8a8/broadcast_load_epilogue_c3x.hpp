@@ -153,7 +153,7 @@ struct Sm90RowOrScalarBroadcast {
 
     CUTLASS_DEVICE void
     begin(uint64_t* full_mbarrier_ptr, int load_iteration, bool issue_tma_load) {
-      if (params.ptr_row == nullptr) {
+      if (!params.row_broadcast) {
         return;
       }
 
