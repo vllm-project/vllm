@@ -271,7 +271,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """
         source_blocks = get_all_blocks_recursively(last_block)
 
-        forked_blocks = []
+        forked_blocks: List[Block] = []
         prev_block = None
         for block in source_blocks:
             refcount = self._refcounter.incr(block.block_id)

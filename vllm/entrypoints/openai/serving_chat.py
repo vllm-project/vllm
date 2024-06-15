@@ -487,7 +487,7 @@ class OpenAIServingChat(OpenAIServing):
             final_res = res
         assert final_res is not None
 
-        choices = []
+        choices: List[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
