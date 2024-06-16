@@ -201,6 +201,7 @@ if __name__ == "__main__":
         f.write(
             read_markdown(
                 "../.buildkite/nightly-benchmarks/tests/raw-json-header.md"))
+        f.write("\n")
 
         f.write(
             f"Markdown table in json:```json\n{processed_results_json}\n```\n\n"
