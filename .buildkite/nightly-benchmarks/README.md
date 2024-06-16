@@ -18,7 +18,7 @@ This benchmark will be *triggered* upon:
 
 ## Configuring the workload
 
-The workload of contains three parts:
+The benchmarking workload contains three parts:
 - Latency tests in `latency-tests.json`, please refer to [latency-tests-header.md](tests/latency-tests-header.md) for a brief description.
 - Throughput tests in `throughput-tests.json`, please refer to [throughput-tests-header.md](tests/throughput-tests-header.md) for a brief description.
 - Serving tests in `serving-tests.json`, please refer to [serving-tests-header.md](tests/serving-tests-header.md) for a brief description.
