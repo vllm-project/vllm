@@ -202,10 +202,8 @@ if __name__ == "__main__":
             read_markdown(
                 "../.buildkite/nightly-benchmarks/tests/raw-json-header.md"))
         f.write("\n")
-
-        f.write(
-            f"Markdown table in json:\n```json\n{processed_results_json}\n```\n\n"
-        )
+        f.write("Markdown table in json:\n")
+        f.write(f"```json\n{processed_results_json}\n```\n\n")
 
         # The raw results are waaaay to big. Commenting out for now.
         # f.write(f"Raw results in json:```json\n{raw_results_json}\n```\n\n")
