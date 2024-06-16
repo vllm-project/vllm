@@ -33,18 +33,23 @@ Here are some common issues that can cause hangs:
 
 .. code-block:: python
 
-    # save it as `test.py` , and run it with `NCCL_DEBUG=TRACE torchrun --nproc-per-node=8 test.py`
-    # adjust `--nproc-per-node` to the number of GPUs you want to use.
-    # for multi-node test, run it with `NCCL_DEBUG=TRACE MASTER_IP=xxx.xxx.xxx.xxx torchrun --nnodes 2 --nproc-per-node=8 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_IP test.py` in every node.
-    # adjust `--nnodes` and `--nproc-per-node` to the number of nodes and GPUs you want to use.
-    # also make sure `MASTER_IP` is the correct IP address of the master node, and it is reachable from all nodes.
     import torch
     import torch.distributed as dist
     dist.init_process_group(backend="nccl")
-    data = torch.FloatTensor([1,] * 128).to(f"cuda:{dist.get_rank()}")
+    local_rank = dist.get_rank() % torch.cuda.device_count()
+    data = torch.FloatTensor([1,] * 128).to(f"cuda:{local_rank}")
     dist.all_reduce(data, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
     value = data.mean().item()
     assert value == dist.get_world_size()
+
+.. tip::
+
+    Save the script as ``test.py``. If you are testing in a single-node, run it with ``NCCL_DEBUG=TRACE torchrun --nproc-per-node=8 test.py``, adjust `--nproc-per-node` to the number of GPUs you want to use.
+    
+    If you are testing with multi-nodes, run it with the following command: ``NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR test.py``. Adjust ``--nproc-per-node`` and ``--nnodes`` according to your setup. Make sure ``MASTER_ADDR``:
+    - is the correct IP address of the master node
+    - is reachable from all nodes
+    - is set before running the script.
 
 If the problem persists, feel free to `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_, with a detailed description of the issue, your environment, and the logs.
