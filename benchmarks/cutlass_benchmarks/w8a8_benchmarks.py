@@ -136,7 +136,7 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
 
     timers = []
 
-    # pytorch impl
+    # pytorch impl w. bf16
     timers.append(
         bench_fn(a.to(dtype=torch.bfloat16, device="cuda"),
                  b.to(dtype=torch.bfloat16, device="cuda"), scale_a, scale_b,
