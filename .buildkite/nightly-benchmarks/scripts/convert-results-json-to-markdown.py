@@ -177,7 +177,7 @@ if __name__ == "__main__":
 
         results = read_markdown(
             "../.buildkite/nightly-benchmarks/tests/descriptions.md")
-        results.format(
+        results = results.format(
             latency_tests_markdown_table=latency_md_table,
             throughput_tests_markdown_table=throughput_md_table,
             serving_tests_markdown_table=serving_md_table,
