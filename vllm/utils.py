@@ -493,12 +493,18 @@ class CudaMemoryProfiler:
         mem = torch.cuda.max_memory_allocated(self.device)
         return mem
 
+    def peak_memory_usage(self) -> float:
+        # Return the memory usage in bytes.
+        return torch.cuda.max_memory_allocated(self.device)
+
     def __enter__(self):
         self.initial_memory = self.current_memory_usage()
         # This allows us to call methods of the context manager if needed
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.peak_memory = self.peak_memory_usage() - self.initial_memory
+
         self.final_memory = self.current_memory_usage()
         self.consumed_memory = self.final_memory - self.initial_memory
 
