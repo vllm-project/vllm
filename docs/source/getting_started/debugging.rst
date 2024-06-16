@@ -45,9 +45,12 @@ Here are some common issues that can cause hangs:
 
 .. tip::
 
-    Save the script as ``test.py``. If you are testing in a single-node, run it with ``NCCL_DEBUG=TRACE torchrun --nproc-per-node=8 test.py``, adjust `--nproc-per-node` to the number of GPUs you want to use.
+    Save the script as ``test.py``.
+    
+    If you are testing in a single-node, run it with ``NCCL_DEBUG=TRACE torchrun --nproc-per-node=8 test.py``, adjust `--nproc-per-node` to the number of GPUs you want to use.
     
     If you are testing with multi-nodes, run it with the following command: ``NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR test.py``. Adjust ``--nproc-per-node`` and ``--nnodes`` according to your setup. Make sure ``MASTER_ADDR``:
+  
     - is the correct IP address of the master node
     - is reachable from all nodes
     - is set before running the script.
