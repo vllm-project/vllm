@@ -204,7 +204,7 @@ if __name__ == "__main__":
         f.write("\n")
 
         f.write(
-            f"Markdown table in json:```json\n{processed_results_json}\n```\n\n"
+            f"Markdown table in json:\n```json\n{processed_results_json}\n```\n\n"
         )
 
         # The raw results are waaaay to big. Commenting out for now.
