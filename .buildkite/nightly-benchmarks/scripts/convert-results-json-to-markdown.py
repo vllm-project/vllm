@@ -174,36 +174,12 @@ if __name__ == "__main__":
 
     # document the result
     with open(results_folder / "benchmark_results.md", "w") as f:
-        if not latency_results.empty:
-            f.write(
-                read_markdown(
-                    "../.buildkite/nightly-benchmarks/tests/latency-tests-header.md"
-                ))
-            f.write(latency_md_table)
-            f.write("\n")
-        if not throughput_results.empty:
-            f.write(
-                read_markdown(
-                    "../.buildkite/nightly-benchmarks/tests/throughput-tests-header.md"
-                ))
-            f.write(throughput_md_table)
-            f.write("\n")
-        if not serving_results.empty:
-            f.write(
-                read_markdown(
-                    "../.buildkite/nightly-benchmarks/tests/serving-tests-header.md"
-                ))
-            f.write(serving_md_table)
-            f.write("\n")
 
-        f.write("\n")
-        # serialize the results to json
-        f.write(
-            read_markdown(
-                "../.buildkite/nightly-benchmarks/tests/raw-json-header.md"))
-        f.write("\n")
-        f.write("Markdown table in json:\n")
-        f.write(f"```json\n{processed_results_json}\n```\n\n")
-
-        # The raw results are waaaay to big. Commenting out for now.
-        # f.write(f"Raw results in json:```json\n{raw_results_json}\n```\n\n")
+        results = read_markdown(
+            "../.buildkite/nightly-benchmarks/tests/descriptions.md")
+        results.format(
+            latency_tests_markdown_table=latency_md_table,
+            throughput_tests_markdown_table=throughput_md_table,
+            serving_tests_markdown_table=serving_md_table,
+            benchmarking_results_in_json_string=processed_results_json)
+        f.write(results)

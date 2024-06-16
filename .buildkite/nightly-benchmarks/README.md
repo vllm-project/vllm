@@ -19,9 +19,11 @@ This benchmark will be *triggered* upon:
 ## Configuring the workload
 
 The benchmarking workload contains three parts:
-- Latency tests in `latency-tests.json`, please refer to [latency-tests-header.md](tests/latency-tests-header.md) for a brief description.
-- Throughput tests in `throughput-tests.json`, please refer to [throughput-tests-header.md](tests/throughput-tests-header.md) for a brief description.
-- Serving tests in `serving-tests.json`, please refer to [serving-tests-header.md](tests/serving-tests-header.md) for a brief description.
+- Latency tests in `latency-tests.json`.
+- Throughput tests in `throughput-tests.json`.
+- Serving tests in `serving-tests.json`.
+
+See [descriptions.md](tests/descriptions.md) for detailed descriptions. 
 
 ### Latency test
 
@@ -94,7 +96,7 @@ The number of this test is less stable compared to the delay and latency benchma
 WARNING: The benchmarking script will save json results by itself, so please do not configure `--save-results` or other results-saving-related parameters in `serving-tests.json`.
 
 ## Visualizing the results
-The `convert-results-json-to-markdown.py` helps you put the benchmarking results inside a markdown table.
+The `convert-results-json-to-markdown.py` helps you put the benchmarking results inside a markdown table, by formatting [descriptions.md](tests/descriptions.md) with real benchmarking results.
 You can find the result presented as a table inside the `buildkite/performance-benchmark` job page.
 If you do not see the table, please wait till the benchmark finish running.
 The json version of the table (together with the json version of the benchmark) will be also attached to the markdown file.
