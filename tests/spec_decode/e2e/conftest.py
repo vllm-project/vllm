@@ -212,10 +212,11 @@ def get_output_from_llm_generator(
     token_ids = []
     for llm in llm_generator():
         maybe_assert_ngram_worker(llm)
-
-        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-        token_ids = [output.outputs[0].token_ids for output in outputs]
-        tokens = [output.outputs[0].text for output in outputs]
+        for _ in range(100):
+            prompts_copy = prompts
+            outputs = llm.generate(prompts_copy, sampling_params, use_tqdm=True)
+            token_ids = [output.outputs[0].token_ids for output in outputs]
+            tokens = [output.outputs[0].text for output in outputs]
         del llm
 
     return tokens, token_ids
@@ -284,11 +285,11 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
             spec_tokens) in enumerate(
                 zip(baseline_batch_token_ids, baseline_batch_tokens,
                     spec_batch_token_ids, spec_batch_tokens)):
-        if print_tokens:
-            print(f'{i=} {baseline_tokens=}')
-            print(f'{i=}     {spec_tokens=}')
-        print(f'{i=} {baseline_token_ids=}')
-        print(f'{i=}     {spec_token_ids=}')
+        #if print_tokens:
+        #    print(f'{i=} {baseline_tokens=}')
+        #    print(f'{i=}     {spec_tokens=}')
+        #print(f'{i=} {baseline_token_ids=}')
+        #print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
 
 

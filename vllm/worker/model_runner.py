@@ -27,6 +27,8 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 
+
+
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
@@ -142,6 +144,11 @@ class ModelRunner:
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+        self.last_log_time = time.time()
+        self.num_prefill_for_logs = 0
+        self.num_decode_for_logs = 0
+        self.prefill_time_ms_for_logs = 0
+        self.decode_time_ms_for_logs = 0
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -741,11 +748,17 @@ class ModelRunner:
         prefill_meta = attn_metadata.prefill_metadata
         decode_meta = attn_metadata.decode_metadata
         if prefill_meta is None and decode_meta.use_cuda_graph:
+            #print('In 1')
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
+            #print('In 2')
             model_executable = self.model
 
+        start = torch.cuda.Event(enable_timing=True)
+        stop = torch.cuda.Event(enable_timing=True)
+        start.record()
+        
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
@@ -753,6 +766,30 @@ class ModelRunner:
             attn_metadata=attn_metadata,
             **multi_modal_kwargs,
         )
+
+        stop.record()
+        # Synchronize to wait for the event to be completed
+        stop.synchronize()
+
+        # Calculate the elapsed time
+        milliseconds = start.elapsed_time(stop)
+        if prefill_meta:
+            if self.num_prefill_for_logs != 0:
+                self.prefill_time_ms_for_logs += milliseconds
+            self.num_prefill_for_logs += 1
+        else:
+            self.decode_time_ms_for_logs += milliseconds
+            self.num_decode_for_logs += 1
+
+        
+        if (time.time() - self.last_log_time > 0.5):
+            if (self.num_prefill_for_logs - 1) > 0:
+                print(f"Time taken by kernel: {self.prefill_time_ms_for_logs / (self.num_prefill_for_logs - 1)} ms for prefill ")
+                print(f"Total {self.prefill_time_ms_for_logs} ms from {self.num_prefill_for_logs - 1} prefills")
+            if self.num_decode_for_logs:
+                print(f"Time taken by kernel: {self.decode_time_ms_for_logs / self.num_decode_for_logs} ms for decode ")
+                print(f"Total {self.decode_time_ms_for_logs} ms from {self.num_decode_for_logs} decodes")
+            self.last_log_time = time.time()
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
