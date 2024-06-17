@@ -34,8 +34,8 @@ def test_ngram_algo_correctness_for_single_no_match():
         max_proposal_len=20,
     )
 
-    # set ngram window (0, 3], which is window=1/2/3
-    ngram_worker.set_ngram_window_size(0, 3)
+    # set ngram window [1, 3], which is window=1/2/3
+    ngram_worker.set_ngram_window_size(1, 3)
 
     prompts = [
         # shall find no candidate
@@ -50,9 +50,10 @@ def test_ngram_algo_correctness_for_single_no_match():
         block_size,
         final_prompt_lens=final_prompt_lens)
 
-    proposals = proposer.get_proposals(execute_model_req=ExecuteModelRequest(
-        seq_group_metadata_list=seq_group_metadata_list,
-        num_lookahead_slots=proposal_len), )
+    proposals = proposer.get_spec_proposals(
+        execute_model_req=ExecuteModelRequest(
+            seq_group_metadata_list=seq_group_metadata_list,
+            num_lookahead_slots=proposal_len), )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -90,8 +91,8 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
         max_proposal_len=20,
     )
 
-    # set ngram window (0, 3], which is window=1/2/3
-    ngram_worker.set_ngram_window_size(0, 3)
+    # set ngram window [1, 3], which is window=1/2/3
+    ngram_worker.set_ngram_window_size(1, 3)
 
     prompts = [
         # shall find no candidate
@@ -117,9 +118,10 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
         block_size,
         final_prompt_lens=final_prompt_lens)
 
-    proposals = proposer.get_proposals(execute_model_req=ExecuteModelRequest(
-        seq_group_metadata_list=seq_group_metadata_list,
-        num_lookahead_slots=proposal_len), )
+    proposals = proposer.get_spec_proposals(
+        execute_model_req=ExecuteModelRequest(
+            seq_group_metadata_list=seq_group_metadata_list,
+            num_lookahead_slots=proposal_len), )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -128,11 +130,12 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
     assert proposals.proposal_probs.shape[:-1] == torch.Size([5, proposal_len])
     assert proposals.proposal_lens.shape == torch.Size([5])
 
+    # the first sequence has no match so proposal_len should be overwritten to 0
     assert proposals.proposal_lens.tolist(
-    ) == [proposal_len for _ in range(4)] + [0]
+    ) == [0] + [proposal_len for _ in range(3)] + [0]
 
     for i in range(proposal_len):
-        assert proposals.proposal_token_ids[0][i] == 0
+        assert proposals.proposal_token_ids[0][i] == -1
         assert proposals.proposal_token_ids[1][i] == prompts[1][i + 1]
         assert proposals.proposal_token_ids[2][i] == prompts[2][i + 3]
         assert proposals.proposal_token_ids[3][i] == prompts[3][i + 5]
@@ -167,8 +170,8 @@ def test_ngram_algo_correctness_for_batches_match_all():
         max_proposal_len=20,
     )
 
-    # set ngram window (0, 3], which is window=1/2/3
-    ngram_worker.set_ngram_window_size(0, 3)
+    # set ngram window [0, 3], which is window=1/2/3
+    ngram_worker.set_ngram_window_size(1, 3)
 
     prompts = [
         # shall find candidate 12,13,14,15,16
@@ -187,9 +190,10 @@ def test_ngram_algo_correctness_for_batches_match_all():
         block_size,
         final_prompt_lens=final_prompt_lens)
 
-    proposals = proposer.get_proposals(execute_model_req=ExecuteModelRequest(
-        seq_group_metadata_list=seq_group_metadata_list,
-        num_lookahead_slots=proposal_len), )
+    proposals = proposer.get_spec_proposals(
+        execute_model_req=ExecuteModelRequest(
+            seq_group_metadata_list=seq_group_metadata_list,
+            num_lookahead_slots=proposal_len), )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)

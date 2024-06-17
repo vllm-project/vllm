@@ -1,4 +1,5 @@
 """Token blocks."""
+
 from itertools import takewhile
 from os.path import commonprefix
 from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
@@ -8,6 +9,7 @@ from vllm.core.block.common import (CopyOnWriteTracker,
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
+from vllm.utils import cdiv
 
 PrefixHash = int
 
@@ -160,32 +162,31 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # If the evictor has blocks available for eviction, evict a block
         # and return it.
         if self.evictor.num_blocks > 0:
+            # here we get an evicted block, which is only added
+            # into evictor if its ref counter is 0
+            # and since its content would be changed, we need
+            # to remove it from _cached_blocks's tracking list
             block_id, content_hash_to_evict = self.evictor.evict()
 
-            # Here we may have scenario that several blocks have
-            # the same content hash, but due to the latter coming block
-            # is coming from mutable to immutable path, their physical
-            # block is added into evictor.
-            # However in this case, we shall not pop the _cached_blocks,
-            # as the same content is still used by others, which means
-            # we need to check ref before decide to pop the list.
-
             _block_id = self._cached_blocks[content_hash_to_evict]
-            refcount = self._refcounter.get(_block_id)
-            if refcount == 1:
-                self._cached_blocks.pop(content_hash_to_evict)
-                assert _block_id == block_id
+            assert self._refcounter.get(_block_id) == 0
+            assert _block_id == block_id
+
+            self._cached_blocks.pop(content_hash_to_evict)
 
             self._refcounter.incr(block_id)
 
-            # the block comes from evictor already contain computed result
+            # Now this block is pop from evictor and ready to write
+            # with new content which most probably different with
+            # original content. So need to tell worker to recompute
+            # its kvcache
             block = self._create_block(
                 prev_block=prev_block,
                 token_ids=[],
                 block_size=self._block_size,
                 allocator=self,
                 block_id=block_id,
-                computed=True,
+                computed=False,
             )
             assert block.content_hash is None
 
@@ -199,7 +200,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def _incr_refcount_cached_block(self, block: Block,
                                     block_id: BlockId) -> None:
-        # since block is already computed, mark it
+        # now _incr_refcount_cached_block comes from two place
+        # allocate_immutable/promote_to_immutable_block where hit
+        # _cached_blocks hash key.
+        # In both cases, it means that already exists a already
+        # computed block which shared with block now
         block.computed = True
 
         refcount = self._refcounter.incr(block_id)
@@ -228,13 +233,19 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                  block: Block) -> None:
         assert isinstance(block, PrefixCachingBlock)
 
-        if block.content_hash is None:
+        # if we comes from promote_to_immutable_block, it means that
+        # block.content_hash is never None.
+        # However we need to release the same content block, so that
+        # physical block could get reused.
+        if block.block_id != block_id or block.content_hash is None:
             refcount = self._refcounter.get(block_id)
             # We have fork case where block would get more than one ref,
             # so we cannot free it from tracking if ref cnt large than 1
-            if refcount <= 1:
-                assert block.block_id is not None
+            assert block.block_id is not None
+            refcount = self._refcounter.get(block.block_id)
+            if refcount == 1:
                 del self._blocks[block.block_id]
+
             return self._hashless_allocator.free(block)
 
         refcount = self._refcounter.decr(block_id)
@@ -260,7 +271,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """
         source_blocks = get_all_blocks_recursively(last_block)
 
-        forked_blocks = []
+        forked_blocks: List[Block] = []
         prev_block = None
         for block in source_blocks:
             refcount = self._refcounter.incr(block.block_id)
@@ -288,9 +299,28 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def get_num_total_blocks(self) -> int:
         return self._hashless_allocator.get_num_total_blocks()
 
+    def get_physical_block_id(self, absolute_id: int) -> int:
+        """Returns the zero-offset block id on certain block allocator
+        given the absolute block id.
+
+        Args:
+            absolute_id (int): The absolute block id for the block 
+                in whole allocator.
+
+        Returns:
+            int: The rzero-offset block id on certain device.
+        """
+        return sorted(self.all_block_ids).index(absolute_id)
+
     @property
     def all_block_ids(self) -> FrozenSet[int]:
         return self._hashless_allocator.all_block_ids
+
+    def is_block_cached(self, block: Block) -> bool:
+        assert block.content_hash is not None
+        if block.content_hash in self._cached_blocks:
+            return True
+        return False
 
     def promote_to_immutable_block(self, block: Block) -> BlockId:
         """Once a mutable block is full, it can be promoted to an immutable
@@ -317,7 +347,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         if block.content_hash not in self._cached_blocks:
             self._cached_blocks[block.content_hash] = block.block_id
         else:
-            self._free_block_id_for_block(block.block_id, block)
+            self._free_block_id_for_block(
+                self._cached_blocks[block.content_hash], block)
             self._incr_refcount_cached_block(
                 block, self._cached_blocks[block.content_hash])
 
@@ -403,6 +434,63 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             ids for ids in ids_list  # type: ignore
             if ids != []
         ])
+
+    def get_num_blocks_touched(self,
+                               blocks: List[Block],
+                               num_lookahead_slots: int = 0) -> int:
+        """Determine the number of blocks that will be touched by
+        swapping in/out the given blocks from certain sequence
+        group with the provided num_lookahead_slots.
+
+        Args:
+            blocks (List[Block]): The potential blocks to swap.
+            num_lookahead_slots (int): number of lookahead slots (0 for 
+                swap out).
+        
+        Returns:
+            int: the number of blocks that will be touched by
+                swapping in/out the given blocks and num_lookahead_slots.
+        """
+        num_touched_blocks = 0
+        for block in blocks:
+            if not block.is_full:
+                if block.num_empty_slots >= num_lookahead_slots:
+                    num_touched_blocks += 1
+                else:
+                    num_touched_blocks += cdiv(
+                        num_lookahead_slots - block.num_empty_slots,
+                        self._block_size)
+            else:
+                if not self.is_block_cached(block):
+                    num_touched_blocks += 1
+        return num_touched_blocks
+
+    def swap_out(self, blocks: List[Block]) -> None:
+        """Execute the swap out actions. Basically just free the 
+        given blocks.
+
+        Args:
+            blocks: List of blocks to be swapped out.
+        """
+        for block in blocks:
+            self.free(block)
+
+    def swap_in(self, blocks: List[Block]) -> None:
+        """Execute the swap int actions. Change the block id from 
+        old allocator to current allocator for each block to finish 
+        the block table update. 
+
+        Args:
+            blocks: List of blocks to be swapped in.
+        """
+        for block in blocks:
+            if block.is_full:
+                alloc = self.allocate_immutable(block.prev_block,
+                                                block.token_ids)
+            else:
+                alloc = self.allocate_mutable(block.prev_block)
+                alloc.append_token_ids(block.token_ids)
+            block.block_id = alloc.block_id
 
 
 class PrefixCachingBlock(Block):

@@ -122,6 +122,7 @@ class RejectionSampler(nn.Module):
             draft_token_ids,
             bonus_token_ids,
         )
+
         return output_token_ids
 
     def _batch_modified_rejection_sampling(
@@ -305,8 +306,10 @@ class RejectionSampler(nn.Module):
 
         # Fill in the first k columns of the output tensor using masks and data
         # tensors.
-        output[:, :k] = torch.where(accepted_mask, draft_token_ids,
-                                    -torch.ones_like(draft_token_ids))
+        torch.where(accepted_mask,
+                    draft_token_ids,
+                    -torch.ones_like(draft_token_ids),
+                    out=output)
 
         # Fill the last column.
         # We check output directly as accepted may have True values inconsistent

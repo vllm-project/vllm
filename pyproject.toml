@@ -59,9 +59,17 @@ exclude = [
 ]
 
 [tool.codespell]
-ignore-words-list = "dout, te, indicies"
-skip = "./tests/prompts,./benchmarks/sonnet.txt"
+ignore-words-list = "dout, te, indicies, subtile"
+skip = "./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
 
 [tool.isort]
 use_parentheses = true
 skip_gitignore = true
+
+[tool.pytest.ini_options]
+markers = [
+    "skip_global_cleanup",
+    "llm: run tests for vLLM API only",
+    "openai: run tests for OpenAI API only",
+    "llava: run tests for LLaVA models only",
+]

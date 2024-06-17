@@ -16,13 +16,21 @@ Alongside each architecture, we include some popular models that use it.
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
   * - :code:`AquilaForCausalLM`
-    - Aquila
+    - Aquila & Aquila2
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
     - ✅︎
+  * - :code:`ArcticForCausalLM`
+    - Arctic
+    - :code:`Snowflake/snowflake-arctic-base`, :code:`Snowflake/snowflake-arctic-instruct`, etc.
+    -
   * - :code:`BaiChuanForCausalLM`
-    - Baichuan
+    - Baichuan & Baichuan2
     - :code:`baichuan-inc/Baichuan2-13B-Chat`, :code:`baichuan-inc/Baichuan-7B`, etc.
     - ✅︎
+  * - :code:`BloomForCausalLM`
+    - BLOOM, BLOOMZ, BLOOMChat
+    - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
+    -
   * - :code:`ChatGLMModel`
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
@@ -39,10 +47,6 @@ Alongside each architecture, we include some popular models that use it.
     - DeciLM
     - :code:`Deci/DeciLM-7B`, :code:`Deci/DeciLM-7B-instruct`, etc.
     -
-  * - :code:`BloomForCausalLM`
-    - BLOOM, BLOOMZ, BLOOMChat
-    - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
-    -
   * - :code:`FalconForCausalLM`
     - Falcon
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
@@ -58,7 +62,7 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`GPTBigCodeForCausalLM`
     - StarCoder, SantaCoder, WizardCoder
     - :code:`bigcode/starcoder`, :code:`bigcode/gpt_bigcode-santacoder`, :code:`WizardLM/WizardCoder-15B-V1.0`, etc.
-    -
+    - ✅︎
   * - :code:`GPTJForCausalLM`
     - GPT-J
     - :code:`EleutherAI/gpt-j-6b`, :code:`nomic-ai/gpt4all-j`, etc.
@@ -83,6 +87,14 @@ Alongside each architecture, we include some popular models that use it.
     - LLaMA, Llama 2, Meta Llama 3, Vicuna, Alpaca, Yi
     - :code:`meta-llama/Meta-Llama-3-8B-Instruct`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
     - ✅︎
+  * - :code:`LlavaForConditionalGeneration`
+    - LLaVA-1.5
+    - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
+    -
+  * - :code:`LlavaNextForConditionalGeneration`
+    - LLaVA-NeXT
+    - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
+    -
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
     - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, etc.
@@ -114,10 +126,14 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`PhiForCausalLM`
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
-    -
+    - ✅︎
   * - :code:`Phi3ForCausalLM`
     - Phi-3
     - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, etc.
+    -
+  * - :code:`Phi3SmallForCausalLM`
+    - Phi-3-Small
+    - :code:`microsoft/Phi-3-small-8k-instruct`, :code:`microsoft/Phi-3-small-128k-instruct`, etc.
     -
   * - :code:`QWenLMHeadModel`
     - Qwen
@@ -135,6 +151,15 @@ Alongside each architecture, we include some popular models that use it.
     - StableLM
     - :code:`stabilityai/stablelm-3b-4e1t/` , :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.
     -
+  * - :code:`Starcoder2ForCausalLM`
+    - Starcoder2
+    - :code:`bigcode/starcoder2-3b`, :code:`bigcode/starcoder2-7b`, :code:`bigcode/starcoder2-15b`, etc.
+    -
+  * - :code:`XverseForCausalLM`
+    - Xverse
+    - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.
+    -
+
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.

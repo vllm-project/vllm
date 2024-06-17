@@ -2,4 +2,5 @@
 -r requirements-common.txt
 
 # Dependencies for AMD GPUs
-ray == 2.9.3
+ray >= 2.10.0
+pytest-asyncio

@@ -10,6 +10,7 @@ Table of contents:
 #. :ref:`Requirements <cpu_backend_requirements>`
 #. :ref:`Quick start using Dockerfile <cpu_backend_quick_start_dockerfile>`
 #. :ref:`Build from source <build_cpu_backend_from_source>`
+#. :ref:`Intel Extension for PyTorch <ipex_guidance>`
 #. :ref:`Performance tips <cpu_backend_performance_tips>`
 
 .. _cpu_backend_requirements:
@@ -18,7 +19,7 @@ Requirements
 ------------
 
 * OS: Linux
-* Compiler: gcc/g++>=12.3.0 (recommended)
+* Compiler: gcc/g++>=12.3.0 (optional, recommended)
 * Instruction set architecture (ISA) requirement: AVX512 is required.
 
 .. _cpu_backend_quick_start_dockerfile:
@@ -41,7 +42,7 @@ Quick start using Dockerfile
 Build from source
 -----------------
 
-- First, install required compiler. We recommend to use ``gcc/g++ >= 12.3.0`` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
+- First, install recommended compiler. We recommend to use ``gcc/g++ >= 12.3.0`` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
 
 .. code-block:: console
 
@@ -54,7 +55,7 @@ Build from source
 .. code-block:: console
 
     $ pip install --upgrade pip
-    $ pip install wheel packaging ninja setuptools>=49.4.0 numpy
+    $ pip install wheel packaging ninja "setuptools>=49.4.0" numpy
     $ pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 - Finally, build and install vLLM CPU backend: 
@@ -70,12 +71,30 @@ Build from source
     
     - If you want to force enable AVX512_BF16 for the cross-compilation, please set environment variable VLLM_CPU_AVX512BF16=1 before the building.    
 
+.. _ipex_guidance:
+
+Intel Extension for PyTorch
+---------------------------
+
+- `Intel Extension for PyTorch (IPEX) <https://github.com/intel/intel-extension-for-pytorch>`_ extends PyTorch with up-to-date features optimizations for an extra performance boost on Intel hardware.
+
+- IPEX after the ``2.3.0`` can be enabled in the CPU backend by default if it is installed.
+
 .. _cpu_backend_performance_tips:
 
 Performance tips
 -----------------
 
 - vLLM CPU backend uses environment variable ``VLLM_CPU_KVCACHE_SPACE`` to specify the KV Cache size (e.g, ``VLLM_CPU_KVCACHE_SPACE=40`` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
+
+- We highly recommend to use TCMalloc for high performance memory allocation and better cache locality. For example, on Ubuntu 22.4, you can run:
+
+.. code-block:: console
+
+    $ sudo apt-get install libtcmalloc-minimal4 # install TCMalloc library
+    $ find / -name *libtcmalloc* # find the dynamic link library path
+    $ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD # prepend the library to LD_PRELOAD
+    $ python examples/offline_inference.py # run vLLM
 
 - vLLM CPU backend uses OpenMP for thread-parallel computation. If you want the best performance on CPU, it will be very critical to isolate CPU cores for OpenMP threads with other thread pools (like web-service event-loop), to avoid CPU oversubscription. 
 
