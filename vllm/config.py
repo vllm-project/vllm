@@ -616,9 +616,14 @@ class ParallelConfig:
                                      "required for multi-node inference")
                 backend = "ray"
             elif ray_found:
-                from ray.util import get_current_placement_group
-                if self.placement_group or get_current_placement_group():
+                if self.placement_group:
                     backend = "ray"
+                else:
+                    from ray import is_initialized as ray_is_initialized
+                    if ray_is_initialized():
+                        from ray.util import get_current_placement_group
+                        if get_current_placement_group():
+                            backend = "ray"
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
@@ -1094,6 +1099,8 @@ class LoRAConfig:
                 "Due to limitations of the custom LoRA CUDA kernel, "
                 "max_num_batched_tokens must be <= 65528 when "
                 "LoRA is enabled.")
+        if scheduler_config.chunked_prefill_enabled:
+            raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
 @dataclass
@@ -1282,7 +1289,10 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None and rope_scaling["type"] != "su":
+    # The correct one should be "longrope", kept "su" here
+    # to be backward compatible
+    if rope_scaling is not None and rope_scaling["type"] != "su" \
+        and rope_scaling["type"] != "longrope":
         if disable_sliding_window:
             # TODO(robertgshaw): Find a model that supports rope_scaling
             # with sliding window to see if this case should be allowed.
