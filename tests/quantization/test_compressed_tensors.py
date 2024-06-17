@@ -8,8 +8,8 @@ import torch
 
 from vllm import SamplingParams
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsW4A16Sparse24, CompressedTensorsLinearMethod,
-    CompressedTensorsW4A16, CompressedTensorsW8A8DynamicToken,
+    CompressedTensorsLinearMethod, CompressedTensorsW4A16,
+    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8DynamicToken,
     CompressedTensorsW8A8StaticTensor)
 
 
