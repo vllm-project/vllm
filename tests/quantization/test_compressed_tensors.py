@@ -16,7 +16,8 @@ from vllm.utils import is_hip
 
 def test_compressed_tensors_w8a8_static_setup(vllm_runner):
     if is_hip():
-        pytest.skip("compressed-tensors quantization is currently not supported in ROCm.")  # noqa: E501
+        pytest.skip(
+            "compressed-tensors quantization currently not supported in ROCm.")
 
     model_path = "nm-testing/tinyllama-oneshot-w8a8-static-v2"
     with vllm_runner(model_path, enforce_eager=True) as llm:
@@ -48,7 +49,8 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner):
 
 def test_compressed_tensors_no_enforce_eager(vllm_runner):
     if is_hip():
-        pytest.skip("compressed-tensors quantization is currently not supported in ROCm.")  # noqa: E501
+        pytest.skip(
+            "compressed-tensors quantization currently not supported in ROCm.")
 
     model_path = "nm-testing/tinyllama-oneshot-w8a8-static-v2"
     with vllm_runner(model_path) as llm:
@@ -59,7 +61,8 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
 
 def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner):
     if is_hip():
-        pytest.skip("compressed-tensors quantization is currently not supported in ROCm.")  # noqa: E501
+        pytest.skip(
+            "compressed-tensors quantization currently not supported in ROCm.")
 
     model_path = "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2"
     with vllm_runner(model_path, dtype=torch.float16) as llm:
@@ -79,7 +82,8 @@ def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner):
 ])
 def test_compressed_tensors_w4a16(vllm_runner, w4a16_args):
     if is_hip():
-        pytest.skip("compressed-tensors quantization is currently not supported in ROCm.")  # noqa: E501
+        pytest.skip(
+            "compressed-tensors quantization currently not supported in ROCm.")
 
     model, strategy, group = w4a16_args
     with vllm_runner(model) as llm:
@@ -100,7 +104,8 @@ def test_compressed_tensors_w4a16(vllm_runner, w4a16_args):
 
 def test_compressed_tensors_w4a16_marlin24(vllm_runner):
     if is_hip():
-        pytest.skip("compressed-tensors quantization is currently not supported in ROCm.")  # noqa: E501
+        pytest.skip(
+            "compressed-tensors quantization currently not supported in ROCm.")
 
     model_path = "nm-testing/llama7b-one-shot-2_4-w4a16-marlin24-t"
     with vllm_runner(model_path) as llm:
