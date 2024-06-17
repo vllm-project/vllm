@@ -616,9 +616,14 @@ class ParallelConfig:
                                      "required for multi-node inference")
                 backend = "ray"
             elif ray_found:
-                from ray.util import get_current_placement_group
-                if self.placement_group or get_current_placement_group():
+                if self.placement_group:
                     backend = "ray"
+                else:
+                    from ray import is_initialized as ray_is_initialized
+                    if ray_is_initialized():
+                        from ray.util import get_current_placement_group
+                        if get_current_placement_group():
+                            backend = "ray"
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
@@ -1104,6 +1109,8 @@ class LoRAConfig:
                 "Due to limitations of the custom LoRA CUDA kernel, "
                 "max_num_batched_tokens must be <= 65528 when "
                 "LoRA is enabled.")
+        if scheduler_config.chunked_prefill_enabled:
+            raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
 @dataclass

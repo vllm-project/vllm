@@ -580,21 +580,9 @@ class AsyncLLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
-        if self.engine_use_ray:
-            processed_inputs = await self.engine.process_model_inputs_async \
-                .remote(  # type: ignore
-                    request_id=request_id,
-                    inputs=inputs,
-                    lora_request=lora_request)
-        else:
-            processed_inputs = await self.engine.process_model_inputs_async(
-                request_id=request_id,
-                inputs=inputs,
-                lora_request=lora_request)
-
         stream = self._request_tracker.add_request(
             request_id,
-            inputs=processed_inputs,
+            inputs=inputs,
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
