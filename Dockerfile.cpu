@@ -21,6 +21,10 @@ WORKDIR /workspace/vllm
 
 RUN pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
+# Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
+ARG VLLM_CPU_DISABLE_AVX512
+ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
+
 RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install
 
 WORKDIR /workspace/
