@@ -174,6 +174,7 @@ class LLMEngine:
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s)",
             VLLM_VERSION,
+            model_config.model,
             speculative_config,
             model_config.tokenizer,
             model_config.skip_tokenizer_init,
