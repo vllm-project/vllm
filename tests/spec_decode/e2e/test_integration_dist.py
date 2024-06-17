@@ -98,8 +98,8 @@ def test_target_model_tp_gt_1(baseline_llm_generator, test_llm_generator,
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seed", [1])
 def test_draft_model_tp_lt_target_model(test_llm_generator,
-                                              baseline_llm_generator,
-                                              batch_size: int):
+                                        baseline_llm_generator,
+                                        batch_size: int):
     """Verify spec decode works well with smaller tp for draft models.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
