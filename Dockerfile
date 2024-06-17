@@ -54,7 +54,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### WHEEL BUILD IMAGE ####################
 FROM base AS build
 
-ARG PYTHON_VERSION=3.10
+ARG PYTHON_VERSION=3
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 # install build dependencies
