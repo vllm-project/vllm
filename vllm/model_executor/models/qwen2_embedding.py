@@ -33,6 +33,7 @@ from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
 
+
 class Qwen2EmbeddingModel(nn.Module):
     """A model that uses Qwen2 with additional embedding functionalities.
 
@@ -81,6 +82,11 @@ class Qwen2EmbeddingModel(nn.Module):
         ]
         params_dict = dict(self.model.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
+            # Sometimes the checkpoint is within a root "model" module
+            prefix = "model."
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+
             if "rotary_emb.inv_freq" in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
