@@ -1,11 +1,34 @@
 """Token blocks."""
-from typing import List
+from collections import defaultdict
+from typing import Dict, List
 
 from vllm.utils import Device
 
 _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
+
+TOKEN_BLOCKS = List[int]
+
+
+class BlockPool:
+    """A pool of physical blocks.
+    """
+
+    def __init__(self) -> None:
+        # block size to list of token blocks
+        self.pool: Dict[int, List[TOKEN_BLOCKS]] = defaultdict(list)
+
+    def alloc_block(self, block_size: int) -> TOKEN_BLOCKS:
+        if block_size in self.pool:
+            return self.pool[block_size].pop()
+        return [_BLANK_TOKEN_ID] * block_size
+
+    def del_block(self, block: TOKEN_BLOCKS) -> None:
+        self.pool[len(block)].append(block)
+
+
+_BLOCK_POOL = BlockPool()
 
 
 class LogicalTokenBlock:
@@ -23,7 +46,7 @@ class LogicalTokenBlock:
         self.block_number = block_number
         self.block_size = block_size
 
-        self.token_ids = [_BLANK_TOKEN_ID] * block_size
+        self.token_ids = _BLOCK_POOL.alloc_block(block_size)
         self.num_tokens = 0
 
     def is_empty(self) -> bool:
@@ -47,6 +70,9 @@ class LogicalTokenBlock:
     def get_last_token_id(self) -> int:
         assert self.num_tokens > 0
         return self.token_ids[self.num_tokens - 1]
+
+    def __del__(self) -> None:
+        _BLOCK_POOL.del_block(self.token_ids)
 
 
 class PhysicalTokenBlock:
