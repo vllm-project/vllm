@@ -142,8 +142,13 @@ def can_actually_p2p(
     for src, tgt in zip(batch_src, batch_tgt):
         a = result_queue.get()
         b = result_queue.get()
-        assert a == b
-        result.append(a)
+        if a != b:
+            logger.warning(
+                "Two processes do not agree on the P2P access"
+                " status on %d -> %d, treat as disabled.", src, tgt)
+            result.append(False)
+        else:
+            result.append(a)
     return result
 
 
