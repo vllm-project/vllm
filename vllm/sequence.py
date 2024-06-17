@@ -664,8 +664,7 @@ class SequenceGroupMetadata:
 
         if self._token_chunk_size is None:
             if is_prompt:
-                self._token_chunk_size = next(iter(
-                    seq_data.values())).get_len()
+                self._token_chunk_size = list(seq_data.values())[0].get_len()
             else:
                 self._token_chunk_size = 1
 

@@ -386,7 +386,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         for _ in range(max(num_lookahead_slots, 1)):
             self.proposer_worker.execute_model()
 
-        self.scorer_worker.execute_model()  #TODO hidden states tbd
+        self.scorer_worker.execute_model()
         return True
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
