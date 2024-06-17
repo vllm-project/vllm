@@ -1287,7 +1287,10 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None and rope_scaling["type"] != "su":
+    # The correct one should be "longrope", kept "su" here
+    # to be backward compatible
+    if rope_scaling is not None and rope_scaling["type"] != "su" \
+        and rope_scaling["type"] != "longrope":
         if disable_sliding_window:
             # TODO(robertgshaw): Find a model that supports rope_scaling
             # with sliding window to see if this case should be allowed.
