@@ -17,9 +17,7 @@ import torch
 from tests.kernels.utils import *
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
-from vllm.attention.backends.utils import (
-    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL, STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING,
-    STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
 from vllm.utils import is_hip, make_causal_mask, maybe_make_long_tensor
 
 HEAD_SIZES = [64, 256]
@@ -149,9 +147,6 @@ def _make_test_resources(test_pt: TestPoint) -> TestResources:
 
 def _encoder_attn_setup(test_pt: TestPoint, test_rsrcs: TestResources) \
                           -> PhaseTestParameters:
-    (num_heads, head_size, _, batch_size, _, _, max_q_seq_len, _) = test_pt
-
-    scale = test_rsrcs.scale
     '''
     Set up test vectors & data structures for encoder attention test.
 
@@ -180,6 +175,10 @@ def _encoder_attn_setup(test_pt: TestPoint, test_rsrcs: TestResources) \
       tensors, (2) the ideal output of attention computed using a naive
       implementation, and (3) KVCache field set to None
     '''
+
+    (num_heads, head_size, _, batch_size, _, _, max_q_seq_len, _) = test_pt
+
+    scale = test_rsrcs.scale
 
     max_kv_seq_len = max_q_seq_len
 
@@ -222,7 +221,7 @@ def _decoder_attn_setup(
     test_pt: TestPoint,
     test_rsrcs: TestResources,
     block_base_addr: int = 0,
-) -> tuple[QKVInputs, PhaseTestParameters, PhaseTestParameters, int]:
+) -> Tuple[QKVInputs, PhaseTestParameters, PhaseTestParameters, int]:
     '''
     Set up test vectors & data structures for self-attention test.
 
@@ -391,8 +390,8 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
                                             PhaseTestParameters,
                                            test_pt: TestPoint,
                                            test_rsrcs: TestResources,
-                                           block_base_addr: Optional[int]=0) \
-                                            -> tuple[PhaseTestParameters,
+                                           block_base_addr: int=0) \
+                                            -> Tuple[PhaseTestParameters,
                                                      PhaseTestParameters]:
     '''
     Set up test vectors & data structures for cross-attention test.
@@ -457,6 +456,9 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
       for decode phase.
     '''
 
+    assert encoder_test_params.packed_qkvo.packed_qkv is not None
+    assert prefill_decoder_phase_test_params.packed_qkvo.packed_qkv is not None
+
     (num_heads, head_size, _, batch_size, block_size, max_decoder_seq_len,
      max_encoder_seq_len, _) = test_pt
 
@@ -468,6 +470,7 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
     prefill_q_seq_lens = \
       prefill_decoder_phase_test_params.packed_qkvo.packed_qkv.q_seq_lens
 
+    assert prefill_q_seq_lens is not None
 
     cross_kv, \
     _, \
@@ -592,6 +595,7 @@ def _run_encoder_attention_test(attn: Attention,
     assert attn_metadata.num_decode_tokens == 0
     attn_metadata.attention_type = AttentionType.ENCODER
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
+    assert packed_qkv is not None
     return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value,
                         None, attn_metadata)
 
@@ -625,6 +629,7 @@ def _run_decoder_self_attention_test(test_rsrcs: TestResources,
     kv_cache = test_rsrcs.kv_cache
     attn_metadata.attention_type = AttentionType.DECODER
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
+    assert packed_qkv is not None
     return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value,
                         kv_cache, attn_metadata)
 
@@ -665,6 +670,8 @@ def _run_encoder_decoder_cross_attention_test(
     * Attention.forward() applied to packed_{query,key,value}, kv_cache
       & attn_metadata
     '''
+    assert decoder_test_params.packed_qkvo.packed_qkv is not None
+
     attn_metadata.attention_type = AttentionType.ENCODER_DECODER
     attn = test_rsrcs.attn
     kv_cache = test_rsrcs.kv_cache
@@ -679,6 +686,60 @@ def _run_encoder_decoder_cross_attention_test(
                 cross_pckd_qkv.value
     return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query, key,
                         value, kv_cache, attn_metadata)
+
+
+@pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("max_dec_seq_len", MAX_DEC_SEQ_LENS)
+@pytest.mark.parametrize("max_enc_seq_len", MAX_ENC_SEQ_LENS)
+def test_encoder_only(num_heads: int, head_size: int, backend_name: str,
+                      batch_size: int, block_size: int, max_dec_seq_len: int,
+                      max_enc_seq_len: int, monkeypatch):
+
+    # Force Attention wrapper backend
+    override_backend_env_variable(monkeypatch, backend_name)
+
+    # Note: KV cache size of 4096 is arbitrary & chosen intentionally
+    # to be more than necessary, since exceeding the kv cache size
+    # is not part of this test
+    test_pt = TestPoint(num_heads, head_size, backend_name, batch_size,
+                        block_size, max_dec_seq_len, max_enc_seq_len, 4096)
+
+    # Attention scale factor, attention backend instance, attention wrapper
+    # instance, KV cache init
+    test_rsrcs = _make_test_resources(test_pt)
+
+    # Construct encoder attention test params (only used
+    # during prefill)
+
+    enc_test_params = _encoder_attn_setup(test_pt, test_rsrcs)
+
+    # Shared prefill metadata structure
+
+    prephase_attn_metadata: AttentionMetadata = make_test_metadata(
+        test_rsrcs.attn_backend,
+        True,
+        None,
+        decoder_test_params=None,
+        encoder_test_params=enc_test_params,
+        cross_test_params=None,
+        default_attn_type=AttentionType.ENCODER,
+        device=CUDA_DEVICE)
+
+    # PREFILL: encoder attention
+
+    enc_pckd_act_out: torch.Tensor = \
+      _run_encoder_attention_test(
+        test_rsrcs.attn,
+        enc_test_params,
+        prephase_attn_metadata)
+
+    # - Is encoder attention result correct?
+    assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
 
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
@@ -786,7 +847,7 @@ def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
                                               cross_block_base_addr)
 
     # Shared prefill metadata structure
-
+    assert prephase_dec_test_params.packed_qkvo.packed_qkv is not None
     prephase_attn_metadata: AttentionMetadata = make_test_metadata(
         test_rsrcs.attn_backend,
         True,
@@ -869,249 +930,3 @@ def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
     # - Is decode-phase encoder/decoder cross-attention correct?
     assert_actual_matches_ideal(decphase_cross_test_params,
                                 decphase_cross_pckd_act_out)
-
-
-@pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES_FOR_UNSUPP)
-@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
-@pytest.mark.parametrize("batch_size", BATCH_SIZES)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("max_dec_seq_len", MAX_DEC_SEQ_LENS)
-@pytest.mark.parametrize("max_enc_seq_len", MAX_ENC_SEQ_LENS)
-def test_backend_fails_for_chunked_prefill_enc_dec(num_heads: int,
-                                                   head_size: int,
-                                                   backend_name: str,
-                                                   batch_size: int,
-                                                   block_size: int,
-                                                   max_dec_seq_len: int,
-                                                   max_enc_seq_len: int,
-                                                   monkeypatch) -> None:
-    '''
-    Confirm encoder/decoder models will fail with NotImplemented
-    if chunked prefill is enabled.
-
-    This test 
-    1. Executes a subset of test setup code from
-     test_e2e_enc_dec_attn() (everything up to encoder
-     execution); see test_e2e_enc_dec_attn() for more context
-     on how this code works.
-
-    2. Modifies the prefill-phase attention metadata structure
-       to imply a chunked-prefill scenario
-
-    3. Attempts to execute decoder self-attention
-
-    4. Asserts that that decoder self-attention fails & with the correct
-       error message
-
-    Note on ROCm/HIP: currently encoder/decoder models are not supported on
-    AMD GPUs, therefore this test simply is skipped if is_hip(). 
-    '''
-
-    # Force Attention wrapper backend
-    override_backend_env_variable(monkeypatch, backend_name)
-
-    test_pt = TestPoint(num_heads, head_size, backend_name, batch_size,
-                        block_size, max_dec_seq_len, max_enc_seq_len, 4096)
-
-    # Attention scale factor, attention backend instance, attention wrapper
-    # instance, KV cache init
-    test_rsrcs = _make_test_resources(test_pt)
-
-    # Encoder attention setup
-
-    enc_test_params = _encoder_attn_setup(test_pt, test_rsrcs)
-
-    # Decoder self-attention setup
-
-    dec_qkv, \
-    prephase_dec_test_params, \
-    _, \
-    cross_block_base_addr = _decoder_attn_setup(test_pt,test_rsrcs)
-
-    # Cross-attention setup
-
-    prephase_cross_test_params, \
-    _, \
-    = _enc_dec_cross_attn_setup_reuses_query(dec_qkv,
-                                             enc_test_params,
-                                             prephase_dec_test_params,
-                                             test_pt,
-                                             test_rsrcs,
-                                             block_base_addr = \
-                                              cross_block_base_addr)
-
-    # Shared prefill metadata structure
-
-    prephase_attn_metadata: AttentionMetadata = make_test_metadata(
-        test_rsrcs.attn_backend,
-        True,
-        prephase_dec_test_params.packed_qkvo.packed_qkv.q_seq_lens,
-        decoder_test_params=prephase_dec_test_params,
-        encoder_test_params=enc_test_params,
-        cross_test_params=prephase_cross_test_params,
-        default_attn_type=AttentionType.ENCODER,
-        device=CUDA_DEVICE)
-
-    # PREFILL: encoder attention
-
-    enc_packed_actual_output: torch.Tensor = \
-      _run_encoder_attention_test(
-        test_rsrcs.attn,
-        enc_test_params,
-        prephase_attn_metadata)
-
-    # - Is encoder attention result correct?
-    assert_actual_matches_ideal(enc_test_params, enc_packed_actual_output)
-
-    # Meat of the test: require that chunked prefill triggers failure.
-    #
-    # Set up a contrived scenario where the attention metadata
-    # is configured for chunked prefill & decoder self-
-    # attention. Required that this triggers a NotImplementedError.
-    #
-    # We assume that decode_attn_metadata.num_prefill_tokens > 1
-    # already; the line below sets up a chunked prefill
-    # metadata configuration where there is nominally a mix
-    # of prefill and decode tokens.
-    prephase_attn_metadata.num_decode_tokens = 1
-    with pytest.raises(NotImplementedError) as exc_info:
-
-        # Doomed decoder self-attention
-        _run_decoder_self_attention_test(test_rsrcs, prephase_dec_test_params,
-                                         prephase_attn_metadata)
-
-    # "Encoder decoder models do not currently support chunked prefill"
-    # or something to that effect
-    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL
-
-
-@pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES_FOR_UNSUPP)
-@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
-@pytest.mark.parametrize("batch_size", BATCH_SIZES)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("max_dec_seq_len", MAX_DEC_SEQ_LENS)
-@pytest.mark.parametrize("max_enc_seq_len", MAX_ENC_SEQ_LENS)
-def test_backend_fails_for_prefix_caching_enc_dec(num_heads: int,
-                                                  head_size: int,
-                                                  backend_name: str,
-                                                  batch_size: int,
-                                                  block_size: int,
-                                                  max_dec_seq_len: int,
-                                                  max_enc_seq_len: int,
-                                                  monkeypatch) -> None:
-    '''
-    Confirm encoder/decoder models will fail with NotImplemented
-    if prefix caching is enabled.
-
-    This test 
-    1. Executes a subset of test setup code from
-     test_e2e_enc_dec_attn() (everything up to encoder
-     execution); see test_e2e_enc_dec_attn() for more context
-     on how this code works.
-
-    2. Modifies the prefill-phase attention metadata structure
-       to imply a prefix caching scenario
-
-    3. Attempts to execute decoder self-attention
-
-    4. Asserts that that decoder self-attention fails & with the correct
-       error message
-
-    Note on ROCm/HIP: currently encoder/decoder models are not supported on
-    AMD GPUs, therefore this test simply is skipped if is_hip(). 
-    '''
-
-    # Force Attention wrapper backend
-    override_backend_env_variable(monkeypatch, backend_name)
-
-    test_pt = TestPoint(num_heads, head_size, backend_name, batch_size,
-                        block_size, max_dec_seq_len, max_enc_seq_len, 4096)
-
-    # Attention scale factor, attention backend instance, attention wrapper
-    # instance, KV cache init
-    test_rsrcs = _make_test_resources(test_pt)
-
-    # Encoder attention setup
-
-    enc_test_params = _encoder_attn_setup(test_pt, test_rsrcs)
-
-    # Decoder self-attention setup
-
-    dec_qkv, \
-    prephase_dec_test_params, \
-    _, \
-    cross_block_base_addr = _decoder_attn_setup(test_pt,test_rsrcs)
-
-    # Cross-attention setup
-
-    prephase_cross_test_params, \
-    _, \
-    = _enc_dec_cross_attn_setup_reuses_query(dec_qkv,
-                                             enc_test_params,
-                                             prephase_dec_test_params,
-                                             test_pt,
-                                             test_rsrcs,
-                                             block_base_addr = \
-                                              cross_block_base_addr)
-
-    # Shared prefill metadata structure
-
-    prephase_attn_metadata: AttentionMetadata = make_test_metadata(
-        test_rsrcs.attn_backend,
-        True,
-        prephase_dec_test_params.packed_qkvo.packed_qkv.q_seq_lens,
-        decoder_test_params=prephase_dec_test_params,
-        encoder_test_params=enc_test_params,
-        cross_test_params=prephase_cross_test_params,
-        default_attn_type=AttentionType.ENCODER,
-        device=CUDA_DEVICE)
-
-    # PREFILL: encoder attention
-
-    enc_packed_actual_output: torch.Tensor = \
-      _run_encoder_attention_test(
-        test_rsrcs.attn,
-        enc_test_params,
-        prephase_attn_metadata)
-
-    # - Is encoder attention result correct?
-    assert_actual_matches_ideal(enc_test_params, enc_packed_actual_output)
-
-    # Meat of the test: require that prefix caching triggers failure.
-    #
-    # Set up a contrived scenario where the attention metadata
-    # is configured for prefix caching & decoder self-
-    # attention. Require that this triggers a NotImplementedError.
-    with pytest.raises(NotImplementedError) as exc_info:
-        # In XFormers backend, the trigger for utilizing the
-        # prefix caching kernel is
-        #
-        # kv_cache is not None and prefill_meta.block_tables.numel() > 0
-        #
-        # We can shallowly emulate a prefix caching scenario by passing
-        # in a non-None KV cache in test_rsrcs (already the
-        # case) and then tweaking the cached prefill attention metadata
-        # from the encoder run to have a non-empty (gibberish) block
-        # table. This block table will never actually be used, because
-        # its presence will signify to the backend a prefix-caching
-        # scenario and (given that the attention metadata structure
-        # is configured for an encoder/decoder scenario too) trigger
-        # a NotImplemented a exception.
-
-        num_seqs = len(
-            prephase_dec_test_params.packed_qkvo.packed_qkv.q_seq_lens)
-
-        prephase_attn_metadata._cached_prefill_metadata.block_tables = \
-          torch.randint(
-            0, 10, (num_seqs, 1))
-
-        _run_decoder_self_attention_test(test_rsrcs, prephase_dec_test_params,
-                                         prephase_attn_metadata)
-
-    # "Encoder decoder models do not currently support prefix caching"
-    # or something to that effect
-    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_PREFIX_CACHING
