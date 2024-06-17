@@ -38,6 +38,7 @@ from torch import nn
 from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
+from PIL import Image
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
@@ -47,6 +48,8 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import get_dummy_image_data
 from vllm.sequence import SamplerOutput
 
 _KEYS_TO_MODIFY_MAPPING = {
@@ -213,6 +216,8 @@ class Resampler(nn.Module):
         return query.unsqueeze(1).repeat(1, N, 1)
 
 
+@MULTIMODAL_REGISTRY.register_image_pixel_input()
+@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class MiniCPMV(nn.Module):
 
     def __init__(
@@ -236,6 +241,22 @@ class MiniCPMV(nn.Module):
         self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
         self.resampler.to(device="cuda", dtype=param_dtype)
         self.sampler = Sampler()
+        self.img2tensor_transform, self.tensor2img_transform = self.init_transform()
+
+    def init_transform(self):
+        return transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=IMAGENET_INCEPTION_MEAN, std=IMAGENET_INCEPTION_STD
+                ),
+            ]
+            ), \
+            transforms.Compose(
+                [
+                    transforms.ToPILImage()
+                ]
+            )
 
     def init_vision_module(self):
         default_dtype = torch.get_default_dtype()
@@ -359,21 +380,22 @@ class MiniCPMV(nn.Module):
                 patch = image[:, i:i + grid_y, j:j + grid_x]
                 images.append(patch)
             patches.append(images)
-
         return patches
 
     def slice_image(self,
-                    image: torch.Tensor,
+                    image_tensor: torch.Tensor,
                     max_slice_nums=9,
                     scale_resolution=448,
                     patch_size=14,
                     never_split=False):
-        original_size = (image.shape[-1], image.shape[-2])
+        original_size = (image_tensor.shape[-1], image_tensor.shape[-2])
         original_width, original_height = original_size
         log_ratio = math.log(original_width / original_height)
         ratio = original_width * original_height / (scale_resolution *
                                                     scale_resolution)
         multiple = min(math.ceil(ratio), max_slice_nums)
+
+        image = self.tensor2img_transform(image_tensor)
 
         source_image = None
         best_grid = None
@@ -382,14 +404,19 @@ class MiniCPMV(nn.Module):
         if multiple <= 1 or never_split:
             best_size = self.find_best_resize(original_size, scale_resolution,
                                               patch_size)
-            resize_transform = transforms.Compose([
-                transforms.Resize((best_size[::-1]),
-                                  InterpolationMode.BICUBIC,
-                                  antialias=True),
-                transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN,
-                                     std=IMAGENET_INCEPTION_STD)
-            ])
-            source_image = resize_transform(image)
+            # The resizing of torchvision is also avaliable in this funciton. 
+            # But there are slight deviations between the results of torchvision resizing and pillow image resizing.
+            # For the consistency with MiniCPM-V-2 in HF, we choose PIL resizing and this may take a little more time.
+            #
+            # resize_transform = transforms.Compose([
+            #     transforms.Resize((best_size[::-1]),
+            #                       InterpolationMode.BICUBIC,
+            #                       antialias=True),
+            #     transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN,
+            #                          std=IMAGENET_INCEPTION_STD)
+            # ])
+            # source_image = resize_transform(image)
+            source_image = self.img2tensor_transform(image.resize(best_size, Image.Resampling.BICUBIC)).to(image_tensor.device)
         else:
             candidate_split_grids_nums = []
             for i in [multiple - 1, multiple, multiple + 1]:
@@ -399,14 +426,16 @@ class MiniCPMV(nn.Module):
 
             best_resize = self.find_best_resize(original_size,
                                                 scale_resolution, patch_size)
-            resize_transform = transforms.Compose([
-                transforms.Resize(best_resize[::-1],
-                                  InterpolationMode.BICUBIC,
-                                  antialias=True),
-                transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN,
-                                     std=IMAGENET_INCEPTION_STD)
-            ])
-            source_image = resize_transform(image.clone())
+            # resize_transform = transforms.Compose([
+            #     transforms.Resize(best_resize[::-1],
+            #                       InterpolationMode.BICUBIC,
+            #                       antialias=True),
+            #     transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN,
+            #                          std=IMAGENET_INCEPTION_STD)
+            # ])
+            # source_image = resize_transform(image_tensor.clone())
+            source_image = self.img2tensor_transform(image.copy().resize(best_resize, Image.Resampling.BICUBIC)).to(image_tensor.device)
+
             candidate_grids = []
 
             # find best grid
@@ -431,14 +460,15 @@ class MiniCPMV(nn.Module):
                                                patch_size,
                                                allow_upscale=True)
 
-            resize_transform = transforms.Compose([
-                transforms.Resize(refine_size[::-1],
-                                  InterpolationMode.BICUBIC,
-                                  antialias=True),
-                transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN,
-                                     std=IMAGENET_INCEPTION_STD)
-            ])
-            refine_image = resize_transform(image.clone())
+            # resize_transform = transforms.Compose([
+            #     transforms.Resize(refine_size[::-1],
+            #                       InterpolationMode.BICUBIC,
+            #                       antialias=True),
+            #     transforms.Normalize(mean=IMAGENET_INCEPTION_MEAN,
+            #                          std=IMAGENET_INCEPTION_STD)
+            # ])
+            # refine_image = resize_transform(image.clone())
+            refine_image = self.img2tensor_transform(image.copy().resize(refine_size, Image.Resampling.BICUBIC)).to(image_tensor.device)
             patches = self.split_to_patches(refine_image, best_grid)
 
         return source_image, patches, best_grid
@@ -564,12 +594,15 @@ class MiniCPMV(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        image_input: Optional[torch.Tensor] = None,
+        **kwargs: object,
     ):
+        image_input = kwargs.pop("pixel_values", None)
+        if image_input is not None:
+            image_input = image_input.float()
         vllm_embeddings, vision_hidden_states = self.get_embedding(
             {
-                'pixel_values': image_input,
-                'input_ids': input_ids
+                "pixel_values": image_input,
+                "input_ids": input_ids
             }, self.config.im_start_token_id, self.config.im_end_token_id,
             self.config.unk_token_id)
         output = self.llm(input_ids=None,

@@ -1,12 +1,20 @@
-import math
+from typing import List, Tuple
 
+import math
 import torch
+import pytest
 from PIL import Image
 from torchvision import transforms
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer, AutoConfig, AutoModel
 
 from vllm import LLM, SamplingParams
+from vllm.config import VisionLanguageConfig
 from vllm.multimodal.image import ImagePixelData
+
+from ..conftest import IMAGE_FILES
+
+
+IMAGE_PROMPT = "What is in this image?"
 
 
 def slice_image(image,
@@ -122,23 +130,47 @@ class MiniCPMV_VLLM:
         return outputs[0].outputs[0].text
 
 
-if __name__ == '__main__':
-    model = MiniCPMV_VLLM("openbmb/MiniCPM-V-2")
+model_names = [
+    "/data1/hezhihui/projects/MiniCPM-V-2"
+]
 
-    sampling_params = SamplingParams(
-        temperature=0.7,
-        top_p=0.8,
-        top_k=100,
-        seed=3472,
-        max_tokens=1024,
-        min_tokens=150,
-        # temperature=0,
-        # use_beam_search=True,
-        # length_penalty=1.2,
-        # best_of=3
+
+def get_hf_results(model_name, image, question):
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    hf_model = AutoModel.from_pretrained(model_name, trust_remote_code=True, torch_dtype=torch.bfloat16)
+    hf_model = hf_model.to(device='cuda', dtype=torch.bfloat16)
+    hf_model.eval()
+    msgs = [{'role': 'user', 'content': question}]
+    res, _, _ = hf_model.chat(
+        image=image,
+        msgs=msgs,
+        context=None,
+        tokenizer=tokenizer,
+        sampling=False
     )
+    return res
 
-    image = Image.open('./images/example.png').convert('RGB')
-    question = "What is in this image?"
-    response = model.generate(image, question, sampling_params)
-    print(response)
+
+def get_vllm_results(model_name, image, question):
+    model = MiniCPMV_VLLM(model_name)
+    sampling_params = SamplingParams(
+        use_beam_search=True,
+        length_penalty=1.2,
+        best_of=3,
+        max_tokens=1024,
+        temperature=0
+    )
+    res = model.generate(image, question, sampling_params)
+    return res
+
+
+@pytest.mark.parametrize("model_name", model_names)
+@pytest.mark.parametrize("image", IMAGE_FILES)
+def test_models(model_name, image) -> None:
+    if not torch.cuda.is_available():
+        return
+    image = Image.open(image).convert("RGB")
+    hf_outputs = get_hf_results(model_name, image, IMAGE_PROMPT)
+    vllm_outputs = get_vllm_results(model_name, image, IMAGE_PROMPT)
+    # print(hf_outputs)
+    # print(vllm_outputs)
