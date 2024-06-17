@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 
 
 def test_compressed_tensors_w8a8_static_setup(vllm_runner):
-    model_path = "nm-testing/tinyllama-oneshot-w8a8-static-v2"
+    model_path = "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change"
     with vllm_runner(model_path, enforce_eager=True) as llm:
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         layer = model.model.layers[0]
@@ -43,15 +43,19 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner):
 
 
 def test_compressed_tensors_no_enforce_eager(vllm_runner):
-    model_path = "nm-testing/tinyllama-oneshot-w8a8-static-v2"
+    model_path = "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change"
     with vllm_runner(model_path) as llm:
         sampling_params = SamplingParams()
         output = llm.generate("Hello world!", sampling_params=sampling_params)
         assert output
 
 
-def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner):
-    model_path = "nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2"
+@pytest.mark.parametrize("model_args", [
+    ("nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2", "tensor"),
+    ("nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2", "channel"),
+])
+def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner, model_args):
+    model_path, strategy = model_args
     with vllm_runner(model_path, dtype=torch.float16) as llm:
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         layer = model.model.layers[0]
@@ -60,6 +64,7 @@ def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner):
 
         assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
         assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8DynamicToken)
+        assert qkv_proj.scheme.strategy == strategy
         assert qkv_proj.weight.dtype is torch.int8
 
 

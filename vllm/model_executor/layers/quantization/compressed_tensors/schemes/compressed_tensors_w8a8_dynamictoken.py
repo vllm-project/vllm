@@ -37,8 +37,6 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         # update loaded weight with copies for broadcast.
         loaded_weight = loaded_weight.repeat(size)
         # parameter defined for scale is 2D; expand
-        if len(loaded_weight.shape) == 1:
-            loaded_weight = torch.unsqueeze(loaded_weight, -1)
         return param[offset:offset + size], loaded_weight
 
     def create_weights(self, layer: torch.nn.Module,
@@ -59,9 +57,11 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
             is_tensor_partitioned
             or self.strategy == QuantizationStrategy.CHANNEL) else 1
 
-        weight_scale = Parameter(torch.empty(weight_scale_dim,
-                                             1,
-                                             dtype=torch.float32),
+        shape: Union[Tuple[int], Tuple[int, int]] = (weight_scale_dim, )
+        if self.strategy == QuantizationStrategy.CHANNEL:
+            shape = (weight_scale_dim, 1)
+
+        weight_scale = Parameter(torch.empty(*shape, dtype=torch.float32),
                                  requires_grad=False)
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),

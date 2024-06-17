@@ -134,8 +134,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return CompressedTensorsW8A8StaticTensor()
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-              return CompressedTensorsW8A8DynamicToken(
-                  strategy=weight_quant.strategy)
+                return CompressedTensorsW8A8DynamicToken(
+                    strategy=weight_quant.strategy)
 
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
