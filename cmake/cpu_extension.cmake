@@ -36,6 +36,8 @@ endfunction()
 find_isa(${CPUINFO} "avx2" AVX2_FOUND)
 find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
 
+message(STATUS "CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
+
 if (AVX512_FOUND)
     list(APPEND CXX_COMPILE_FLAGS
         "-mavx512f"
@@ -57,8 +59,15 @@ if (AVX512_FOUND)
 elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
+elseif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "ppc64")
+    message(STATUS "PowerPC detected")
+    # Check for PowerPC VSX support
+    list(APPEND CXX_COMPILE_FLAGS
+        "-mvsx"
+        "-mcpu=native"
+        "-mtune=native")
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512 or AVX2 ISA support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512 or AVX2 or VSX ISA support.")
 endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
