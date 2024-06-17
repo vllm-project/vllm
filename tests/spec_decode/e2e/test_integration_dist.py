@@ -78,19 +78,26 @@ def test_target_model_tp_gt_1(baseline_llm_generator, test_llm_generator,
         # Required for spec decode.
         "use_v2_block_manager": True,
         "tensor_parallel_size": 2,
+
+        # Use AsyncLLM engine, so that the engine runs in its own process.
+        # Otherwise, since vLLM does not follow true SPMD, the test runner
+        # process will have both the engine and the rank0 worker. NCCL is not
+        # cleaned up properly, and its server host thread leaks, causing the
+        # second run of the test to fail with internal NCCL error.
+        "use_async": True,
     }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [
+@pytest.mark.parametrize("test_llm_kwargs", [
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
         "speculative_tensor_parallel_size": 1,
     },
 ])
-@pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seed", [1])
-def test_spec_decode_e2e_with_small_draft_tps(test_llm_generator,
+def test_draft_model_tp_lt_target_model(test_llm_generator,
                                               baseline_llm_generator,
                                               batch_size: int):
     """Verify spec decode works well with smaller tp for draft models.
