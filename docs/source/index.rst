@@ -66,6 +66,7 @@ Documentation
    getting_started/cpu-installation
    getting_started/neuron-installation
    getting_started/tpu-installation
+   getting_started/xpu-installation
    getting_started/quickstart
    getting_started/debugging
    getting_started/examples/examples_index

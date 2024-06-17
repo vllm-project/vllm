@@ -347,6 +347,14 @@ class LLMEngine:
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor
+        elif engine_config.device_config.device_type == "xpu":
+            if distributed_executor_backend == "ray":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.ray_xpu_executor import RayXPUExecutor
+                executor_class = RayXPUExecutor
+            else:
+                from vllm.executor.xpu_executor import XPUExecutor
+                executor_class = XPUExecutor
         elif distributed_executor_backend == "ray":
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
