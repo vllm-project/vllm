@@ -1,4 +1,5 @@
 """Token blocks."""
+import weakref
 from collections import defaultdict
 from typing import Dict, List
 
@@ -47,6 +48,12 @@ class LogicalTokenBlock:
         self.block_size = block_size
 
         self.token_ids = _BLOCK_POOL.alloc_block(block_size)
+        # this finalizer is used to return the block to the pool when the object is deleted # noqa
+        # NOTE: don't use __del__ because it cannot guarantee the order of finalization, # noqa
+        # i.e. `self.token_ids` may be deleted before `self`, and we lose
+        #  the opportunity to return the block to the pool
+        self._finalizer = weakref.finalize(self, _BLOCK_POOL.del_block,
+                                           self.token_ids)
         self.num_tokens = 0
 
     def is_empty(self) -> bool:
@@ -70,9 +77,6 @@ class LogicalTokenBlock:
     def get_last_token_id(self) -> int:
         assert self.num_tokens > 0
         return self.token_ids[self.num_tokens - 1]
-
-    def __del__(self) -> None:
-        _BLOCK_POOL.del_block(self.token_ids)
 
 
 class PhysicalTokenBlock:
