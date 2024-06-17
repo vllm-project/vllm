@@ -495,7 +495,8 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
                     rotary_dim != head_size ({rotary_dim}!={head_size}).")
         if is_neox_style is False:
             raise ValueError(
-                "`Phi3LongRoPEScaledRotaryEmbedding` only supports neox_style.")
+                "`Phi3LongRoPEScaledRotaryEmbedding` only supports neox_style."
+            )
 
         self.head_size = head_size
         self.max_position_embeddings = max_position_embeddings
