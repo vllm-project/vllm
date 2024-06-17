@@ -246,8 +246,8 @@ def test_rejection_sampling_approximates_target_distribution(
         draft_and_target_probs_equal)
 
     sample_sizes = [10, 100, 1_000, 10_000, 100_000]
-    distance_wrt_reference = []
-    distance_wrt_target = []
+    distance_wrt_reference: List[float] = []
+    distance_wrt_target: List[float] = []
 
     for num_samples in sample_sizes:
         (reference_vs_rejsample_dist,
