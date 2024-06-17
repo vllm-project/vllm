@@ -58,9 +58,9 @@ class Worker(WorkerBase):
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
-        if parallel_config and is_driver_worker:
-            assert rank % parallel_config.tensor_parallel_size == 0, \
-                   "Driver worker should be rank 0 of tensor parallel group."
+        #if parallel_config and is_driver_worker:
+        #    assert rank % parallel_config.tensor_parallel_size == 0, \
+        #           "Driver worker should be rank 0 of tensor parallel group."
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -241,8 +241,10 @@ class Worker(WorkerBase):
     @torch.inference_mode()
     def execute_model(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+        do_metadata_broadcast: bool = True,
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
+        assert not do_metadata_broadcast
         if not self.is_driver_worker:
             self._execute_model_non_driver()
             return []
@@ -277,14 +279,15 @@ class Worker(WorkerBase):
         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                       device=self.device,
                                       dtype=torch.int64).view(-1, 2)
-        data: Dict[str, Any] = {
-            "num_seq_groups": num_seq_groups,
-            "blocks_to_swap_in": blocks_to_swap_in,
-            "blocks_to_swap_out": blocks_to_swap_out,
-            "blocks_to_copy": blocks_to_copy,
-            "virtual_engine": virtual_engine,
-        }
-        broadcast_tensor_dict(data, src=0)
+        if do_metadata_broadcast:
+            data: Dict[str, Any] = {
+                "num_seq_groups": num_seq_groups,
+                "blocks_to_swap_in": blocks_to_swap_in,
+                "blocks_to_swap_out": blocks_to_swap_out,
+                "blocks_to_copy": blocks_to_copy,
+                "virtual_engine": virtual_engine,
+            }
+            broadcast_tensor_dict(data, src=0)
 
         self.cache_swap(virtual_engine, blocks_to_swap_in, blocks_to_swap_out,
                         blocks_to_copy)
@@ -295,7 +298,8 @@ class Worker(WorkerBase):
 
         output = self.model_runner.execute_model(
             seq_group_metadata_list, self.gpu_cache[virtual_engine],
-            virtual_engine)
+            virtual_engine,
+            do_metadata_broadcast=do_metadata_broadcast)
 
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.

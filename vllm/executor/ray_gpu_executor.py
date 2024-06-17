@@ -40,10 +40,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._init_workers_ray(placement_group)
 
         self.forward_dag = None
-        if USE_RAY_COMPILED_DAG:
-            self.forward_dag = self._compiled_ray_dag()
-            self.extra_execute_model_run_workers_kwargs[
-                "use_ray_compiled_dag"] = True
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:
@@ -131,7 +127,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         # Get the set of GPU IDs used on each node.
         worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
-                                                    use_dummy_driver=True)
+                use_dummy_driver=True,
+                use_local_driver=False)
 
         node_workers = defaultdict(list)
         node_gpus = defaultdict(list)
@@ -167,26 +164,27 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 distributed_init_method=distributed_init_method,
             ) for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids)
         ]
-        self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
+        if USE_RAY_COMPILED_DAG:
+            for kwargs in init_worker_all_kwargs:
+                kwargs["is_driver_worker"] = True
 
+        self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
         self._run_workers("init_device")
+
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
 
-        self.tp_driver_workers = []
-        self.tp_parallel_workers = []
+    def execute_model(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        all_outputs = self._run_workers(
+            "execute_model",
+            driver_kwargs={"execute_model_req": execute_model_req},
+            use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 
-        for pp_rank in range(self.parallel_config.pipeline_parallel_size):
-            for tp_rank in range(self.parallel_config.tensor_parallel_size):
-                rank = (pp_rank *
-                        self.parallel_config.tensor_parallel_size) + tp_rank
-                if rank == 0:
-                    pass
-                elif rank % self.parallel_config.tensor_parallel_size == 0:
-                    self.tp_driver_workers.append(self.workers[rank - 1])
-                else:
-                    self.tp_parallel_workers.append(self.workers[rank - 1])
+        # Only the driver worker returns the sampling results.
+        return all_outputs[0]
 
     def _driver_execute_model(
         self,
@@ -197,17 +195,23 @@ class RayGPUExecutor(DistributedGPUExecutor):
         Passing None will cause the driver to stop the model execution
         loop running in each of the remote workers.
         """
-        return self.driver_worker.execute_method("execute_model",
-                                                 execute_model_req)
+        raise NotImplementedError
+
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
+        raise NotImplementedError
 
     def _run_workers(
         self,
         method: str,
         *args,
-        async_run_tensor_parallel_workers_only: bool = False,
+        driver_args: Optional[Tuple[Any, ...]] = None,
+        driver_kwargs: Optional[Dict[str, Any]] = None,
         all_args: Optional[List[Tuple[Any, ...]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
         use_dummy_driver: bool = False,
+        use_local_driver: bool = True,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
         **kwargs,
@@ -215,89 +219,77 @@ class RayGPUExecutor(DistributedGPUExecutor):
         """Runs the given method on all workers. Can be used in the following
         ways:
 
-        Args:
-        - async_run_tensor_parallel_workers_only: If True the method will be
-          run only in the remote TP workers, not the driver worker.
-          It will also be run asynchronously and return a list of futures
-          rather than blocking on the results.
         - args/kwargs: All workers share the same args/kwargs
+        - args/kwargs and driver_args/driver_kwargs: Driver worker has
+          different args
         - all_args/all_kwargs: args/kwargs for each worker are specified
           individually
         """
+        if use_ray_compiled_dag:
+            # Ray DAG already includes the task for the dummy driver
+            # worker.
+            use_dummy_driver = False
+            # The physical driver does not participate either.
+            use_local_driver = False
+        elif USE_RAY_COMPILED_DAG:
+            # Worker setup: Whatever is normally executed on the local driver
+            # should instead be executed on the "dummy" driver worker.
+            if use_local_driver:
+                use_dummy_driver = use_local_driver
+            use_local_driver = False
 
         if max_concurrent_workers:
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
 
-        count = len(self.workers) if not \
-            async_run_tensor_parallel_workers_only \
-            else len(self.tp_parallel_workers)
+        if driver_args is None:
+            driver_args = args if all_args is None else all_args[0]
+        if driver_kwargs is None:
+            driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
+
+        count = len(self.workers)
         all_worker_args = repeat(args, count) if all_args is None \
             else islice(all_args, 1, None)
         all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
             else islice(all_kwargs, 1, None)
 
         if use_ray_compiled_dag:
-            # Right now, compiled DAG can only accept a single
-            # input. TODO(sang): Fix it.
-            assert self.forward_dag is not None
-            output_channels = self.forward_dag.execute(1)
-            ray_worker_outputs = []
+            if self.forward_dag is None:
+                self.forward_dag = self._compiled_ray_dag()
+
+            output_channels = self.forward_dag.execute(driver_kwargs.pop("execute_model_req"))
         else:
             # Start the ray workers first.
-            if async_run_tensor_parallel_workers_only:
-                ray_worker_outputs = [
-                    worker.execute_method.remote(method, *worker_args,
-                                                 **worker_kwargs)
-                    for (worker, worker_args, worker_kwargs
-                         ) in zip(self.tp_parallel_workers, all_worker_args,
-                                  all_worker_kwargs)
-                ]
-            else:
-                ray_worker_outputs = [
-                    worker.execute_method.remote(method, *worker_args,
-                                                 **worker_kwargs)
-                    for (worker, worker_args, worker_kwargs) in zip(
-                        self.workers, all_worker_args, all_worker_kwargs)
-                ]
+            ray_worker_outputs = [
+                worker.execute_method.remote(method, *worker_args,
+                                             **worker_kwargs)
+                for (worker, worker_args, worker_kwargs
+                     ) in zip(self.workers, all_worker_args, all_worker_kwargs)
+            ]
 
-        if async_run_tensor_parallel_workers_only:
-            # Just return futures
-            return ray_worker_outputs
-
-        driver_args = args if all_args is None else all_args[0]
-        driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
-
+        driver_worker_output = []
         # Start the driver worker after all the ray workers.
-        if not use_dummy_driver:
-            driver_worker_output = self.driver_worker.execute_method(
-                method, *driver_args, **driver_kwargs)
-        else:
+        if use_dummy_driver:
             assert self.driver_dummy_worker is not None
-            driver_worker_output = ray.get(
+            driver_worker_output.append(ray.get(
                 self.driver_dummy_worker.execute_method.remote(
-                    method, *driver_args, **driver_kwargs))
+                    method, *driver_args, **driver_kwargs)))
+        if use_local_driver:
+            driver_worker_output.append(self.driver_worker.execute_method(
+                method, *driver_args, **driver_kwargs))
+
         # Get the results of the ray workers.
         if self.workers:
             if use_ray_compiled_dag:
                 try:
-                    ray_worker_outputs = [
-                        pickle.loads(chan.begin_read())
-                        for chan in output_channels
-                    ]
+                    ray_worker_outputs = output_channels.begin_read()
                 finally:
                     # Has to call end_read in order to reuse the DAG.
-                    for chan in output_channels:
-                        chan.end_read()
+                    output_channels.end_read()
             else:
                 ray_worker_outputs = ray.get(ray_worker_outputs)
 
-        return [driver_worker_output] + ray_worker_outputs
-
-    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
-        """Wait for futures returned from _run_workers() with
-        async_run_remote_workers_only to complete."""
-        ray.get(parallel_worker_tasks)
+        return driver_worker_output + ray_worker_outputs
 
     def _compiled_ray_dag(self):
         import pkg_resources

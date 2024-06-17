@@ -665,6 +665,7 @@ class ModelRunner:
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        do_metadata_broadcast: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
         if self.is_driver_worker:
@@ -688,23 +689,25 @@ class ModelRunner:
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
 
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-                "lora_requests": lora_requests,
-                "lora_mapping": lora_mapping,
-                "multi_modal_kwargs": multi_modal_kwargs,
-                "num_prefill_tokens": num_prefill_tokens,
-                "num_decode_tokens": num_decode_tokens,
-                "slot_mapping": slot_mapping,
-                "num_prefills": num_prefills,
-            }
-            if attn_metadata:
-                metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
+            if do_metadata_broadcast:
+                metadata_dict = {
+                    "input_tokens": input_tokens,
+                    "input_positions": input_positions,
+                    "selected_token_indices":
+                    sampling_metadata.selected_token_indices,
+                    "lora_requests": lora_requests,
+                    "lora_mapping": lora_mapping,
+                    "multi_modal_kwargs": multi_modal_kwargs,
+                    "num_prefill_tokens": num_prefill_tokens,
+                    "num_decode_tokens": num_decode_tokens,
+                    "slot_mapping": slot_mapping,
+                    "num_prefills": num_prefills,
+                }
+                if attn_metadata:
+                    metadata_dict.update(attn_metadata.asdict_zerocopy())
+                broadcast_tensor_dict(metadata_dict, src=0)
         else:
+            assert do_metadata_broadcast
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
@@ -735,10 +738,12 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
         virtual_engine: int = 0,
+        do_metadata_broadcast: bool = True,
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_kwargs
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+         ) = self.prepare_input_tensors(seq_group_metadata_list,
+                 do_metadata_broadcast)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -767,9 +772,7 @@ class ModelRunner:
                                                sampling_metadata)
         else:
             return None
-
-        # Only perform sampling in the first TP worker.
-        if not self.is_driver_worker:
+        if logits is None:
             return None
 
         # Sample the next token.
@@ -852,7 +855,8 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        self.execute_model(seqs, kv_caches)
+        self.execute_model(seqs, kv_caches,
+                do_metadata_broadcast=False)
         torch.cuda.synchronize()
         return
 
