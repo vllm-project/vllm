@@ -109,15 +109,21 @@ class RayGPUExecutor(DistributedGPUExecutor):
             )
 
             worker_ip = ray.get(worker.get_node_ip.remote())
-            if worker_ip == driver_ip and self.driver_dummy_worker is None:
-                # If the worker is on the same node as the driver, we use it
-                # as the resource holder for the driver process.
-                self.driver_dummy_worker = worker
-                self.driver_worker = RayWorkerWrapper(
-                    worker_module_name=worker_module_name,
-                    worker_class_name=worker_class_name,
-                    trust_remote_code=self.model_config.trust_remote_code,
-                )
+            if self.driver_dummy_worker is None:
+                if not self.parallel_config.use_dummy_driver:
+                    if worker_ip == driver_ip:
+                        # If the worker is on the same node as the driver,
+                        # use it as the resource holder for the driver process.
+                        self.driver_dummy_worker = worker
+                        self.driver_worker = RayWorkerWrapper(
+                            worker_module_name=worker_module_name,
+                            worker_class_name=worker_class_name,
+                            trust_remote_code=self.model_config.
+                            trust_remote_code,
+                        )
+                else:
+                    self.driver_dummy_worker = worker
+                    driver_ip = worker_ip
             else:
                 # Else, added to the list of workers.
                 self.workers.append(worker)
@@ -242,7 +248,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
 
         # Start the driver worker after all the ray workers.
-        if not use_dummy_driver:
+        if not use_dummy_driver and not self.parallel_config.use_dummy_driver:
             driver_worker_output = self.driver_worker.execute_method(
                 method, *driver_args, **driver_kwargs)
         else:

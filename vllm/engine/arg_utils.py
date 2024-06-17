@@ -36,6 +36,7 @@ class EngineArgs:
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
+    use_dummy_driver: bool = False
     distributed_executor_backend: Optional[str] = None
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
@@ -292,6 +293,11 @@ class EngineArgs:
             help='Backend to use for distributed serving. When more than 1 GPU '
             'is used, will be automatically set to "ray" if installed '
             'or "mp" (multiprocessing) otherwise.')
+        parser.add_argument(
+            '--use-dummy-driver',
+            action='store_true',
+            help='Use dummy driver to call the rank-0 worker on ray '
+            'rather than the local driver_worker')
         parser.add_argument(
             '--worker-use-ray',
             action='store_true',
@@ -669,7 +675,8 @@ class EngineArgs:
                 self.tokenizer_pool_extra_config,
             ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
-            distributed_executor_backend=self.distributed_executor_backend)
+            distributed_executor_backend=self.distributed_executor_backend,
+            use_dummy_driver=self.use_dummy_driver)
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
