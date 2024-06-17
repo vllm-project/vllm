@@ -91,9 +91,13 @@ class Phi3ImageEmbeddingBase(nn.Module):
 class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
     """Phi3 Image embedding with HD transform."""
 
-    def __init__(self, config: PretrainedConfig, wte=None) -> None:
+    def __init__(self,
+                 vision_language_config: VisionLanguageConfig,
+                 config: PretrainedConfig,
+                 wte=None) -> None:
         super().__init__(wte)
 
+        self.image_token_id = vision_language_config.image_token_id
         # n_embed or hidden_size
         hidden_size = config.n_embd if hasattr(
             config, 'n_embd') else config.hidden_size
@@ -142,7 +146,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
                 image_sizes=None) -> torch.FloatTensor:
         """process and merge text embeddings with image embeddings."""
 
-        MAX_INPUT_ID = int(1e9)
         img_embeds = pixel_values
         img_sizes = image_sizes
 
@@ -156,8 +159,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
 
-        positions = torch.nonzero(
-            (input_ids < 0) & (input_ids > -MAX_INPUT_ID), as_tuple=False)
+        positions = input_ids == self.image_token_id
 
         select = False
 
@@ -261,8 +263,10 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 class Phi3VImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
+    """Shape: (batch_size, 1 + num_patches, num_channels, height, width)"""
+
     image_sizes: torch.Tensor
-    """Shape: (batch_size, num_channels, height, width)"""
+    """Shape: (batch_size, 2)"""
 
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input()
@@ -278,7 +282,7 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
         self.config = config
         self.model = LlamaModel(config, cache_config, quant_config)
         self.vision_embed_tokens = Phi3HDImageEmbedding(
-            config, self.model.embed_tokens)
+            vision_language_config, config, self.model.embed_tokens)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
