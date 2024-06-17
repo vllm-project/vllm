@@ -23,6 +23,9 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip \
     && if [ "${PYTHON_VERSION}" != "3" ]; then update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; fi
+    && update-alternatives --display python3
+    && python3 --version
+    && python3 -m pip --version
 
 RUN apt-get update -y \
     && apt-get install -y python3-pip git curl sudo
@@ -117,7 +120,7 @@ COPY requirements-lint.txt requirements-lint.txt
 COPY requirements-test.txt requirements-test.txt
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python${PYTHON_VERSION} -m pip install -r requirements-dev.txt
+    python3 -m pip install -r requirements-dev.txt
 
 #################### DEV IMAGE ####################
 
@@ -138,7 +141,7 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 # install vllm wheel first, so that torch etc will be installed
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
-    pip install dist/*.whl --verbose
+    python3 -m pip install dist/*.whl --verbose
 #################### vLLM installation IMAGE ####################
 
 
@@ -151,7 +154,7 @@ ADD . /vllm-workspace/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-dev.txt
+    python3 -m pip install -r requirements-dev.txt
 
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
