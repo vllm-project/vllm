@@ -11,9 +11,7 @@ ARG CUDA_VERSION=12.4.1
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
 
 ARG CUDA_VERSION
-ENV CUDA_VERSION=${CUDA_VERSION}
 ARG PYTHON_VERSION=3
-ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -41,7 +39,7 @@ WORKDIR /workspace
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python${PYTHON_VERSION} -m pip install -r requirements-cuda.txt
+    python3 -m pip install -r requirements-cuda.txt
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -55,12 +53,11 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 FROM base AS build
 
 ARG PYTHON_VERSION=3
-ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python${PYTHON_VERSION} -m pip install -r requirements-build.txt
+    python3 -m pip install -r requirements-build.txt
 
 # install compiler cache to speed up compilation leveraging local or remote caching
 RUN apt-get update -y && apt-get install -y ccache
@@ -96,7 +93,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && export SCCACHE_BUCKET=vllm-build-sccache \
         && export SCCACHE_REGION=us-west-2 \
         && sccache --show-stats \
-        && python${PYTHON_VERSION} setup.py bdist_wheel --dist-dir=dist \
+        && python3 setup.py bdist_wheel --dist-dir=dist \
         && sccache --show-stats; \
     fi
 
@@ -104,7 +101,7 @@ ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" != "1" ]; then \
-        python${PYTHON_VERSION} setup.py bdist_wheel --dist-dir=dist; \
+        python3 setup.py bdist_wheel --dist-dir=dist; \
     fi
 
 # check the size of the wheel, we cannot upload wheels larger than 100MB
