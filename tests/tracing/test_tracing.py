@@ -1,7 +1,7 @@
 import os
 import threading
 from concurrent import futures
-from typing import Iterable
+from typing import Callable, Dict, Iterable, Literal
 
 import grpc
 import pytest
@@ -18,9 +18,12 @@ from vllm.tracing import SpanAttributes
 
 FAKE_TRACE_SERVER_ADDRESS = "localhost:4317"
 
+FieldName = Literal['bool_value', 'string_value', 'int_value', 'double_value',
+                    'array_value']
+
 
 def decode_value(value: AnyValue):
-    field_decoders = {
+    field_decoders: Dict[FieldName, Callable] = {
         "bool_value": (lambda v: v.bool_value),
         "string_value": (lambda v: v.string_value),
         "int_value": (lambda v: v.int_value),
