@@ -12,7 +12,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
 
 ARG CUDA_VERSION
 ENV CUDA_VERSION=${CUDA_VERSION}
-ARG PYTHON_VERSION
+ARG PYTHON_VERSION=3.10
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -54,7 +54,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### WHEEL BUILD IMAGE ####################
 FROM base AS build
 
-ARG PYTHON_VERSION
+ARG PYTHON_VERSION=3.10
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 # install build dependencies
