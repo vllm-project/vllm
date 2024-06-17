@@ -118,7 +118,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.hd_transform_order = config.embd_layer.get(
             'hd_transform_order', 'glb_sub')
         # with_hd_transform and with_learnable_separator should have same value
-        assert self.use_hd_transform & self.with_learnable_separator
+        assert self.use_hd_transform and self.with_learnable_separator
 
         # 1024 * 4, merge spatial to channel dimension
         self.glb_GN = nn.Parameter(torch.empty([1, 1, self.image_dim_out * 4]))
@@ -159,7 +159,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
 
-        positions = input_ids == self.image_token_id
+        positions = torch.nonzero(input_ids == self.image_token_id)
 
         select = False
 
