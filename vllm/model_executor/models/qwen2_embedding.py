@@ -33,7 +33,6 @@ from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
 
-
 class Qwen2EmbeddingModel(nn.Module):
     """A model that uses Qwen2 with additional embedding functionalities.
 
@@ -80,16 +79,9 @@ class Qwen2EmbeddingModel(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-        params_dict = dict(self.model.named_parameters())
+        params_dict = dict(self.model.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
-                continue
-            if self.config.tie_word_embeddings and "lm_head.weight" in name:
-                continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
