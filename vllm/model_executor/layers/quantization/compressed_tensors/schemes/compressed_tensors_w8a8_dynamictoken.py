@@ -36,7 +36,6 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         size = logical_widths[shard_id]
         # update loaded weight with copies for broadcast.
         loaded_weight = loaded_weight.repeat(size)
-        # parameter defined for scale is 2D; expand
         return param[offset:offset + size], loaded_weight
 
     def create_weights(self, layer: torch.nn.Module,
