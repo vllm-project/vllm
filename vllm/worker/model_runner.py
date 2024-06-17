@@ -980,38 +980,43 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
-        # For flashinfer, different batch sizes will share the
-        # same workspace buffer.
-        decode_workspace_buffer = \
-        torch.empty(FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                                              dtype=torch.uint8,
+        if self.attn_backend.get_name() == "flashinfer":
+            # For flashinfer, different batch sizes will share the
+            # same workspace buffer.
+            decode_workspace_buffer = \
+            torch.empty(FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                                                dtype=torch.uint8,
                                               device=self.device)
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
-                indptr_buffer = torch.empty(batch_size + 1,
-                                            dtype=torch.int32,
-                                            device=self.device)
-                indices_buffer = torch.empty(self.cache_config.num_gpu_blocks,
-                                             dtype=torch.int32,
-                                             device=self.device)
-                last_page_len_buffer = torch.empty(batch_size,
-                                                   dtype=torch.int32,
-                                                   device=self.device)
-                decode_wrapper = CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
-                    decode_workspace_buffer, indptr_buffer, indices_buffer,
-                    last_page_len_buffer, "NHD")
+                if self.attn_backend.get_name() == "flashinfer":
+                    indptr_buffer = torch.empty(batch_size + 1,
+                                                dtype=torch.int32,
+                                                device=self.device)
+                    indices_buffer = torch.empty(
+                        self.cache_config.num_gpu_blocks,
+                        dtype=torch.int32,
+                        device=self.device)
+                    last_page_len_buffer = torch.empty(batch_size,
+                                                       dtype=torch.int32,
+                                                       device=self.device)
+                    decode_wrapper = \
+                        CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
+                        decode_workspace_buffer, indptr_buffer, indices_buffer,
+                        last_page_len_buffer, "NHD")
+                    kv_cache_dtype = get_kv_cache_torch_dtype(
+                        self.kv_cache_dtype, self.model_config.dtype)
 
-                kv_cache_dtype = get_kv_cache_torch_dtype(
-                    self.kv_cache_dtype, self.model_config.dtype)
-                paged_kv_indptr_tensor_host = torch.arange(0, batch_size +
-                                                           1).int()
-                paged_kv_indices_tensor_host = torch.arange(0,
-                                                            batch_size).int()
-                paged_kv_last_page_len_tensor_host = torch.full(
-                    (batch_size, ), self.block_size, dtype=torch.int32)
-                query_start_loc_host = torch.arange(0, batch_size + 1).int()
+                    paged_kv_indptr_tensor_host = torch.arange(
+                        0, batch_size + 1).int()
+                    paged_kv_indices_tensor_host = torch.arange(
+                        0, batch_size).int()
+                    paged_kv_last_page_len_tensor_host = torch.full(
+                        (batch_size, ), self.block_size, dtype=torch.int32)
+                    query_start_loc_host = torch.arange(0,
+                                                        batch_size + 1).int()
 
                 # Create dummy attn_metadata.
                 if self.attn_backend.get_name() == "flashinfer":
