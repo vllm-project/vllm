@@ -444,6 +444,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        user_id: Optional[str] = None,
     ) -> None:
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -475,7 +476,7 @@ class LLMEngine:
                 "Either SamplingParams or PoolingParams must be provided.")
 
         # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+        self.scheduler.add_seq_group(seq_group, user_id)
 
     def process_model_inputs(
         self,

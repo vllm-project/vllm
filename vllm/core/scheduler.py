@@ -317,7 +317,8 @@ class Scheduler:
         """The number of new tokens."""
         return 1
 
-    def add_seq_group(self, seq_group: SequenceGroup) -> None:
+    def add_seq_group(self, seq_group: SequenceGroup, user_id: Optional[str] = None) -> None:
+        logger.debug(f"Received new seq group {seq_group.request_id} from user {user_id}")
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
 

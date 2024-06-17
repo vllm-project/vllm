@@ -133,6 +133,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params,
                     f"{request_id}-{i}",
                     lora_request=lora_request,
+                    user_id=request.user,
                 )
 
                 generators.append(generator)
