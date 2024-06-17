@@ -82,7 +82,7 @@ struct enable_sm90_or_later : Kernel {
 */
 template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
 struct ScaledEpilogue {
- private:
+ protected:
   using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
 
   using ScaleA = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
@@ -122,6 +122,43 @@ struct ScaledEpilogue {
     ScaleB_Args b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
 
     return ArgumentType{a_args, {b_args}};
+  }
+};
+
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueAzp
+    : private ScaledEpilogue<ElementAcc, ElementD, EpilogueDescriptor> {
+ private:
+  using SUPER = ScaledEpilogue<ElementAcc, ElementD, EpilogueDescriptor>;
+  using ScaleA = typename SUPER::ScaleA;
+  using ScaleB = typename SUPER::ScaleB;
+  using EVTCompute0 = typename SUPER::EVTCompute0;
+
+  using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiply_add, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using Bias = cutlass::epilogue::fusion::Sm90RowBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, float,
+      Stride<Int<0>, Int<1>, Int<0>>>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<Compute1, ScaleA, EVTCompute0, Bias>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales,
+                                   torch::Tensor const& bias_azp) {
+    using ScaleA_Args = typename ScaleA::Arguments;
+    using ScaleB_Args = typename ScaleB::Arguments;
+    using Bias_Args = typename Bias::Arguments;
+
+    ScaleA_Args a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
+    ScaleB_Args b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
+    Bias_Args bias_args{bias_azp.data_ptr<float>(), bias_azp.numel() != 1, {}};
+
+    return ArgumentType{a_args, {b_args}, bias_args};
   }
 };
 
@@ -316,16 +353,9 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   }
 }
 
-void cutlass_scaled_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
-                            torch::Tensor const& b,
-                            torch::Tensor const& a_scales,
-                            torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias_azp) {
-  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
-  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
-
-  TORCH_CHECK(!bias_azp, "Bias AZP not supported on Hopper yet");
-
+template <template<typename, typename, typename> typename Epilogue, typename ...EpilogueArgs>
+void cutlass_scaled_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor const& a,
+                            torch::Tensor const& b, EpilogueArgs&& ...epilogue_args) {
   if (a.dtype() == torch::kInt8) {
     TORCH_CHECK(b.dtype() == torch::kInt8);
 
@@ -337,15 +367,15 @@ void cutlass_scaled_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_caller<cutlass_3x_gemm<
-          int8_t, cutlass::bfloat16_t, ScaledEpilogue, TileShape, ClusterShape,
-          KernelSchedule, EpilogueSchedule>>(out, a, b, a_scales, b_scales);
+          int8_t, cutlass::bfloat16_t, Epilogue, TileShape, ClusterShape,
+          KernelSchedule, EpilogueSchedule>>(out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
 
       return cutlass_gemm_caller<
-          cutlass_3x_gemm<int8_t, cutlass::half_t, ScaledEpilogue, TileShape,
+          cutlass_3x_gemm<int8_t, cutlass::half_t, Epilogue, TileShape,
                           ClusterShape, KernelSchedule, EpilogueSchedule>>(
-          out, a, b, a_scales, b_scales);
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   } else {
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
@@ -353,14 +383,31 @@ void cutlass_scaled_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_sm90_fp8_dispatch<
-          cutlass::float_e4m3_t, cutlass::bfloat16_t, ScaledEpilogue>(
-          out, a, b, a_scales, b_scales);
+          cutlass::float_e4m3_t, cutlass::bfloat16_t, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
-                                            cutlass::half_t, ScaledEpilogue>(
-          out, a, b, a_scales, b_scales);
+                                            cutlass::half_t, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     }
+  }
+}
+
+void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
+                            torch::Tensor const& b,
+                            torch::Tensor const& a_scales,
+                            torch::Tensor const& b_scales,
+                            c10::optional<torch::Tensor> const& bias_azp) {
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+  if (bias_azp) {
+    TORCH_CHECK(bias_azp->dtype() == torch::kFloat32);
+    return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueAzp>(
+        c, a, b, a_scales, b_scales, *bias_azp);
+  } else {
+    return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogue>(c, a, b, a_scales,
+                                                           b_scales);
   }
 }
 

@@ -100,8 +100,6 @@ def cutlass_int8_gemm_helper(m: int, n: int, k: int, per_token_act_quant: bool, 
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
                           per_out_ch: bool, azp: bool):
-    if azp and capability > 89:
-        pytest.skip()
     cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, azp)
 
 
@@ -113,8 +111,6 @@ def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
 @pytest.mark.parametrize("azp", [True, False])
 def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
                            per_out_ch: bool, azp: bool):
-    if azp and capability > 89:
-        pytest.skip()
     cutlass_int8_gemm_helper(m, n, k, per_act_token, per_out_ch, azp)
 
 
@@ -124,8 +120,6 @@ def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
 @pytest.mark.parametrize("azp", [True, False])
 def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                         out_dtype: Type[torch.dtype], azp: bool):
-    if azp and capability > 89:
-        pytest.skip()
     cutlass_int8_gemm_helper(512, 512, 512, per_act_token, per_out_ch, azp, out_dtype=out_dtype)
 
 
@@ -137,8 +131,6 @@ def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                        out_dtype: Type[torch.dtype], azp: bool):
-    if azp and capability > 89:
-        pytest.skip()
     cutlass_fp8_gemm_helper(512, 512, 512, per_act_token, per_out_ch, azp, out_dtype=out_dtype)
 
 
@@ -149,8 +141,6 @@ def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_devices(per_act_token: bool, per_out_ch: bool, azp: bool, device: str):
-    if azp and capability > 89:
-        pytest.skip()
     cutlass_fp8_gemm_helper(512, 512, 512, per_act_token, per_out_ch, azp, torch.bfloat16, device)
 
 
@@ -160,8 +150,6 @@ def test_cutlass_fp8_gemm_devices(per_act_token: bool, per_out_ch: bool, azp: bo
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_cutlass_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
                                    azp: bool, device: str):
-    if azp and capability > 89:
-        pytest.skip()
     cutlass_int8_gemm_helper(512, 512, 512, per_act_token, per_out_ch, azp, out_dtype=torch.bfloat16, device=device)
 
 
@@ -176,8 +164,6 @@ def test_cutlass_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool, azp: bool):
-    if azp and capability > 89:
-        pytest.skip()
     for nk in range(32, 128, 32):
         for m in range(1, 128):
             cutlass_fp8_gemm_helper(m, nk, nk, per_act_token, per_out_ch, azp)
@@ -187,8 +173,6 @@ def test_cutlass_fp8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool, azp: bo
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("azp", [True, False])
 def test_cutlass_int8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool, azp: bool):
-    if azp and capability > 89:
-        pytest.skip()
     for nk in range(32, 128, 32):
         for m in range(1, 128):
             cutlass_int8_gemm_helper(m, nk, nk, per_act_token, per_out_ch, azp)
