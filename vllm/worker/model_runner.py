@@ -7,9 +7,17 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
-from flashinfer import BatchDecodeWithPagedKVCacheWrapper
-from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
-from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+
+try:
+    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+except ImportError:
+    BatchDecodeWithPagedKVCacheWrapper = None
+    CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
+    BatchPrefillWithPagedKVCacheWrapper = None
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
@@ -145,11 +153,11 @@ class ModelRunner:
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
         # Flashinfer fields
-        self.paged_kv_indptr_tensor = None
-        self.paged_kv_indices_tensor = None
-        self.paged_kv_last_page_len_tensor = None
-        self.prefill_wrapper = None
-        self.decode_wrapper = None
+        self.flashinfer_prefill_wrapper: Optional[
+            BatchPrefillWithPagedKVCacheWrapper] = None
+        self.flashinfer_decode_wrapper: Optional[
+            Union[BatchDecodeWithPagedKVCacheWrapper,
+                  CUDAGraphBatchDecodeWithPagedKVCacheWrapper]] = None
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -494,8 +502,14 @@ class ModelRunner:
                     slot = block_number * self.block_size + block_offset
                     slot_mapping.append(slot)
 
+                # Prepare input tensors for flashinfer
                 if self.attn_backend.get_name() == "flashinfer":
                     seq_len = seq_data.get_len()
+                    # Get the number of valid blocks based on sequence length.
+                    # If seq_len = 16, block_size = 16,
+                    # block_table_bound is 1 with 1 valid block.
+                    # If seq_len = 15, block_size = 16,
+                    # block_table_bound is 0 + 1 with 1 valid block.
                     block_table_bound = seq_len // self.block_size + 1 \
                                         if seq_len % self.block_size != 0 \
                                         else seq_len // self.block_size
@@ -532,8 +546,8 @@ class ModelRunner:
                 block_tables.append([])
                 lora_index_mapping.append(0)
 
-                last_paged_kv_indptr = paged_kv_indptr[-1]
                 if self.attn_backend.get_name() == "flashinfer":
+                    last_paged_kv_indptr = paged_kv_indptr[-1]
                     paged_kv_indptr.append(last_paged_kv_indptr)
                     paged_kv_last_page_len.append(0)
 
@@ -582,9 +596,9 @@ class ModelRunner:
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
         torch.cumsum(query_lens_tensor,
-                         dim=0,
-                         dtype=query_start_loc.dtype,
-                         out=query_start_loc[1:])
+                     dim=0,
+                     dtype=query_start_loc.dtype,
+                     out=query_start_loc[1:])
 
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
@@ -613,22 +627,25 @@ class ModelRunner:
 
             if num_decode_tokens:
                 if use_captured_graph and not is_profile_run:
-                    self.decode_wrapper = self.graph_runners[
-                        batch_size].decode_wrapper
-                elif self.decode_wrapper is None:
-                    self.decode_workspace_buffer = torch.empty(
-                        128 * 1024 * 1024,
+                    self.flashinfer_decode_wrapper = self.graph_runners[
+                        batch_size].flashinfer_decode_wrapper
+                elif self.flashinfer_decode_wrapper is None:
+                    self.flashinfer_decode_workspace_buffer = torch.empty(
+                        FLASHINFER_WORKSPACE_BUFFER_SIZE,
                         dtype=torch.uint8,
                         device=self.device)
-                    self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-                        self.decode_workspace_buffer, "NHD")
+                    self.flashinfer_decode_wrapper = \
+                        BatchDecodeWithPagedKVCacheWrapper(
+                        self.flashinfer_decode_workspace_buffer, "NHD")
 
-            if num_prefill_tokens and self.prefill_wrapper is None:
-                self.prefill_workspace_buffer = torch.empty(128 * 1024 * 1024,
-                                                            dtype=torch.uint8,
-                                                            device=self.device)
-                self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self.prefill_workspace_buffer, "NHD")
+            if num_prefill_tokens and self.flashinfer_prefill_wrapper is None:
+                self.flashinfer_prefill_workspace_buffer = torch.empty(
+                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                    dtype=torch.uint8,
+                    device=self.device)
+                self.flashinfer_prefill_wrapper = \
+                    BatchPrefillWithPagedKVCacheWrapper(
+                    self.flashinfer_prefill_workspace_buffer, "NHD")
 
             kv_cache_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype,
                                                       self.model_config.dtype)
@@ -654,8 +671,8 @@ class ModelRunner:
                 device=self.device,
                 data_type=kv_cache_dtype,
                 use_cuda_graph=use_captured_graph,
-                decode_wrapper=self.decode_wrapper,
-                prefill_wrapper=self.prefill_wrapper,
+                decode_wrapper=self.flashinfer_decode_wrapper,
+                prefill_wrapper=self.flashinfer_prefill_wrapper,
             )
 
         else:
@@ -963,10 +980,12 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
-        # For flashinfer, different batch sizes will share the same workspace buffer
-        decode_workspace_buffer = torch.empty(128 * 1024 * 1024,
-                                                dtype=torch.uint8,
-                                                device=self.device)
+        # For flashinfer, different batch sizes will share the
+        # same workspace buffer.
+        decode_workspace_buffer = \
+        torch.empty(FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                                              dtype=torch.uint8,
+                                              device=self.device)
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
@@ -1048,11 +1067,15 @@ class ModelRunner:
                 graph_runner = CUDAGraphRunner(self.model,
                                                self.attn_backend.get_name())
 
-                graph_runner.indptr_buffer = indptr_buffer
-                graph_runner.indices_buffer = indices_buffer
-                graph_runner.last_page_len_buffer = last_page_len_buffer
-                graph_runner.decode_workspace_buffer = decode_workspace_buffer
-                graph_runner.decode_wrapper = decode_wrapper
+                if self.attn_backend.get_name() == "flashinfer":
+                    graph_runner.flashinfer_indptr_buffer = indptr_buffer
+                    graph_runner.flashinfer_indices_buffer = indices_buffer
+                    graph_runner.flashinfer_last_page_len_buffer = \
+                        last_page_len_buffer
+                    graph_runner.flashinfer_decode_workspace_buffer = \
+                            decode_workspace_buffer
+                    graph_runner.flashinfer_decode_wrapper = \
+                        decode_wrapper
 
                 graph_runner.capture(
                     input_tokens[:batch_size],
@@ -1088,12 +1111,12 @@ class CUDAGraphRunner:
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
 
-        # Flashinfer fields
-        self.decode_workspace_buffer = None
-        self.indptr_buffer = None
-        self.indices_buffer = None
-        self.last_page_len_buffer = None
-        self.decode_wrapper = None
+        self.flashinfer_decode_workspace_buffer: Optional[torch.Tensor] = None
+        self.flashinfer_indptr_buffer: Optional[torch.Tensor] = None
+        self.flashinfer_indices_buffer: Optional[torch.Tensor] = None
+        self.flashinfer_last_page_len_buffer: Optional[torch.Tensor] = None
+        self.flashinfer_decode_wrapper: Optional[
+            CUDAGraphBatchDecodeWithPagedKVCacheWrapper] = None
 
     @property
     def graph(self):
