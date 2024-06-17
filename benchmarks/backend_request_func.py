@@ -4,10 +4,12 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import aiohttp
 from tqdm.asyncio import tqdm
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                          PreTrainedTokenizerFast)
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -386,6 +388,13 @@ def remove_prefix(text: str, prefix: str) -> str:
     if text.startswith(prefix):
         return text[len(prefix):]
     return text
+
+
+def get_tokenizer(
+    pretrained_model_name_or_path: str, trust_remote_code: bool
+) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    return AutoTokenizer.from_pretrained(pretrained_model_name_or_path,
+                                         trust_remote_code=trust_remote_code)
 
 
 ASYNC_REQUEST_FUNCS = {
