@@ -13,7 +13,7 @@ from vllm.model_executor.utils import set_weight_attrs
 __all__ = ["CompressedTensors24"]
 
 
-class CompressedTensors24(CompressedTensorsScheme):
+class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
 
     def __init__(self,
                  strategy: str,

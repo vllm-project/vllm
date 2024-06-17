@@ -8,8 +8,9 @@ import torch
 
 from vllm import SamplingParams
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensors24, CompressedTensorsLinearMethod, CompressedTensorsW4A16,
-    CompressedTensorsW8A8DynamicToken, CompressedTensorsW8A8StaticTensor)
+    CompressedTensorsW4A16Sparse24, CompressedTensorsLinearMethod,
+    CompressedTensorsW4A16, CompressedTensorsW8A8DynamicToken,
+    CompressedTensorsW8A8StaticTensor)
 
 
 def test_compressed_tensors_w8a8_static_setup(vllm_runner):
@@ -93,7 +94,7 @@ def test_compressed_tensors_w4a16_marlin24(vllm_runner):
         qkv_proj = layer.self_attn.qkv_proj
 
         assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-        assert isinstance(qkv_proj.scheme, CompressedTensors24)
+        assert isinstance(qkv_proj.scheme, CompressedTensorsW4A16Sparse24)
         assert qkv_proj.weight_packed.dtype is torch.int32
 
         sampling_params = SamplingParams()

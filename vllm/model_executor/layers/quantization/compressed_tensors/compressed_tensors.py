@@ -7,8 +7,9 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensors24, CompressedTensorsScheme, CompressedTensorsW4A16,
-    CompressedTensorsW8A8DynamicToken, CompressedTensorsW8A8StaticTensor)
+    CompressedTensorsW4A16Sparse24, CompressedTensorsScheme,
+    CompressedTensorsW4A16, CompressedTensorsW8A8DynamicToken,
+    CompressedTensorsW8A8StaticTensor)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     find_first_name_or_class_match)
@@ -117,9 +118,10 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if self._is_w4a16(weight_quant, input_quant):
             if self.quant_format == CompressionFormat.marlin_24.value:
-                return CompressedTensors24(strategy=weight_quant.strategy,
-                                           num_bits=weight_quant.num_bits,
-                                           group_size=weight_quant.group_size)
+                return CompressedTensorsW4A16Sparse24(
+                    strategy=weight_quant.strategy,
+                    num_bits=weight_quant.num_bits,
+                    group_size=weight_quant.group_size)
             if self.quant_format == CompressionFormat.pack_quantized.value:
                 return CompressedTensorsW4A16(
                     num_bits=weight_quant.num_bits,
