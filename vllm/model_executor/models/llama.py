@@ -289,7 +289,9 @@ class LlamaModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
+        prev_layer_output=None,
     ) -> torch.Tensor:
+        # print(f"my pp rank {get_pipeline_model_parallel_rank()}, my tp rank {get_tensor_model_parallel_rank()}.")
         if is_pipeline_model_parallel_first_rank():
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -297,12 +299,8 @@ class LlamaModel(nn.Module):
                 hidden_states = self.get_input_embeddings(input_ids)
             residual = None
         else:
-            if inputs_embeds is not None:
-                sizes = list(inputs_embeds.size())
-            else:
-                sizes = list(input_ids.size()) + [self.config.hidden_size]
-            hidden_states, residual = recv_prev_rank(
-                2, torch.Size(sizes), self.embed_tokens.weight.dtype)
+            assert prev_layer_output is not None
+            hidden_states, residual = prev_layer_output
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
@@ -314,10 +312,10 @@ class LlamaModel(nn.Module):
                 residual,
             )
 
-        if is_pipeline_model_parallel_last_rank():
-            hidden_states, _ = self.norm(hidden_states, residual)
-        else:
-            send_next_rank([hidden_states, residual])
+        if not is_pipeline_model_parallel_last_rank():
+            return (hidden_states, residual)
+
+        hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
@@ -386,15 +384,27 @@ class LlamaForCausalLM(nn.Module):
                                                 config.vocab_size, logit_scale)
         self.sampler = Sampler()
 
+    def make_empty_intermediate_output(self, batch_size: int,
+            dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+        if is_pipeline_model_parallel_first_rank():
+            return None
+
+        return (
+                torch.zeros((batch_size, self.config.hidden_size), dtype=dtype, device="cuda"),
+                torch.zeros((batch_size, self.config.hidden_size), dtype=dtype, device="cuda"),
+                )
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        prev_layer_output=None
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata)
+                                   attn_metadata,
+                                   prev_layer_output=prev_layer_output)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

@@ -28,6 +28,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
+import vllm.envs as envs
 
 logger = init_logger(__name__)
 
@@ -41,6 +42,8 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 _NUM_WARMUP_ITERS = 2
 
+
+USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
 
 class ModelInput(NamedTuple):
     input_tokens: torch.Tensor
@@ -667,7 +670,7 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
-        if self.is_driver_worker:
+        if self.is_driver_worker or USE_RAY_COMPILED_DAG:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
             (
@@ -688,23 +691,25 @@ class ModelRunner:
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
 
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-                "lora_requests": lora_requests,
-                "lora_mapping": lora_mapping,
-                "multi_modal_kwargs": multi_modal_kwargs,
-                "num_prefill_tokens": num_prefill_tokens,
-                "num_decode_tokens": num_decode_tokens,
-                "slot_mapping": slot_mapping,
-                "num_prefills": num_prefills,
-            }
-            if attn_metadata:
-                metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
+            if not USE_RAY_COMPILED_DAG:
+                metadata_dict = {
+                    "input_tokens": input_tokens,
+                    "input_positions": input_positions,
+                    "selected_token_indices":
+                    sampling_metadata.selected_token_indices,
+                    "lora_requests": lora_requests,
+                    "lora_mapping": lora_mapping,
+                    "multi_modal_kwargs": multi_modal_kwargs,
+                    "num_prefill_tokens": num_prefill_tokens,
+                    "num_decode_tokens": num_decode_tokens,
+                    "slot_mapping": slot_mapping,
+                    "num_prefills": num_prefills,
+                }
+                if attn_metadata:
+                    metadata_dict.update(attn_metadata.asdict_zerocopy())
+                broadcast_tensor_dict(metadata_dict, src=0)
         else:
+            assert not USE_RAY_COMPILED_DAG
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
@@ -735,6 +740,7 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
         virtual_engine: int = 0,
+        prev_layer_output=None,
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_kwargs
@@ -753,23 +759,22 @@ class ModelRunner:
         else:
             model_executable = self.model
 
-        hidden_states = model_executable(
+        hidden_states_or_intermediate = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
+            prev_layer_output=prev_layer_output,
             **multi_modal_kwargs,
         )
 
         # Compute the logits in the last pipeline stage.
-        if is_pipeline_model_parallel_last_rank():
-            logits = self.model.compute_logits(hidden_states,
-                                               sampling_metadata)
-        else:
-            return None
+        if not is_pipeline_model_parallel_last_rank():
+            return hidden_states_or_intermediate
 
-        # Only perform sampling in the first TP worker.
-        if not self.is_driver_worker:
+        logits = self.model.compute_logits(hidden_states_or_intermediate,
+                                           sampling_metadata)
+        if logits is None:
             return None
 
         # Sample the next token.
@@ -826,9 +831,11 @@ class ModelRunner:
             max_num_seqs = min(
                 max_num_seqs,
                 int(max_num_batched_tokens / vlm_config.image_feature_size))
+        batch_size = 0
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
+            batch_size += seq_len
 
             if vlm_config is None:
                 seq_data = SequenceData([0] * seq_len)
@@ -852,7 +859,9 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        self.execute_model(seqs, kv_caches)
+        prev_layer_output = self.model.make_empty_intermediate_output(batch_size, self.model_config.dtype)
+        self.execute_model(seqs, kv_caches,
+                prev_layer_output=prev_layer_output)
         torch.cuda.synchronize()
         return
 

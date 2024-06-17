@@ -31,15 +31,24 @@ try:
             gpu_ids = ray.get_gpu_ids()
             return node_id, gpu_ids
 
-        def execute_model_compiled_dag_remote(self, ignored):
+        def execute_model_compiled_dag_remote(self, execute_model_req):
             """Used only when compiled DAG is enabled."""
             import torch
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-            output = self.worker.execute_model()
-            output = pickle.dumps(output)
+            # print(f"Inside execute_model_compiled_dag_remote, execute_model_req: {execute_model_req}")
+            prev_layer_output = None
+            if isinstance(execute_model_req, tuple):
+                execute_model_req, prev_layer_output = execute_model_req
+            output = self.worker.execute_model(
+                    execute_model_req, prev_layer_output=prev_layer_output)
+
+            # Intermediate output.
+            if isinstance(output, tuple):
+                return execute_model_req, output
+
             return output
 
 except ImportError as e:
