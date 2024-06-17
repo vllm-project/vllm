@@ -4,14 +4,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
-from torch.nn.functional import scaled_dot_product_attention
 
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
-from vllm.utils import is_xpu
 
 _PARTITION_SIZE = 512
 
@@ -119,7 +117,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         self.alibi_slopes = alibi_slopes
         self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
-        self.fuse_batch = is_xpu()
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -210,59 +207,28 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                             attn_metadata.seq_lens, self.sliding_window,
                             query.dtype)  # type: ignore
                     else:
-                        if self.fuse_batch:
-                            att_masks = _make_sliding_window_bias(
-                                attn_metadata.seq_lens,
-                                None,
-                                dtype=query.dtype)
-                        else:
-                            att_masks = [None] * len(attn_metadata.seq_lens)
+                        att_masks = _make_sliding_window_bias(
+                            attn_metadata.seq_lens, None, dtype=query.dtype)
                     attn_metadata.attn_bias = att_masks
 
-                if self.fuse_batch:
-                    out = torch.empty(
-                        (num_tokens, self.num_heads, self.head_size),
-                        dtype=query.dtype,
-                        device=query.device)
-                    ipex_ops.varlen_attention(query,
-                                              key,
-                                              value,
-                                              out,
-                                              attn_metadata.seqlen_q,
-                                              attn_metadata.seqlen_q,
-                                              attn_metadata.max_seqlen,
-                                              attn_metadata.max_seqlen,
-                                              pdropout=0.0,
-                                              softmax_scale=self.scale,
-                                              zero_tensors=False,
-                                              is_causal=True,
-                                              return_softmax=False,
-                                              gen_=None)
-                else:
-                    query = query.movedim(0, query.dim() - 2)
-                    key = key.movedim(0, key.dim() - 2)
-                    value = value.movedim(0, value.dim() - 2)
-
-                    start = 0
-                    out = torch.empty(
-                        (num_tokens, self.num_heads, self.head_size),
-                        dtype=query.dtype,
-                        device=query.device)
-                    for seq_len, mask in zip(attn_metadata.seq_lens,
-                                             attn_metadata.attn_bias):
-                        end = start + seq_len
-                        sub_out = scaled_dot_product_attention(
-                            query[:, start:end, :],
-                            key[:, start:end, :],
-                            value[:, start:end, :],
-                            attn_mask=mask,
-                            dropout_p=0.0,
-                            is_causal=not self.need_mask,
-                            scale=self.scale).movedim(query.dim() - 2, 0)
-                        out[start:end, :, :] = sub_out
-                        start = end
-
-                output = out.to(query.dtype)
+                output = torch.empty(
+                    (num_tokens, self.num_heads, self.head_size),
+                    dtype=query.dtype,
+                    device=query.device)
+                ipex_ops.varlen_attention(query,
+                                          key,
+                                          value,
+                                          output,
+                                          attn_metadata.seqlen_q,
+                                          attn_metadata.seqlen_q,
+                                          attn_metadata.max_seqlen,
+                                          attn_metadata.max_seqlen,
+                                          pdropout=0.0,
+                                          softmax_scale=self.scale,
+                                          zero_tensors=False,
+                                          is_causal=True,
+                                          return_softmax=False,
+                                          gen_=None)
             else:
                 # prefix-enabled attention
                 raise RuntimeError(
