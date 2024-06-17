@@ -313,8 +313,6 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
         image_input = self._parse_and_validate_image_input(**kwargs)
 
         if image_input is not None:
-            input_ids[input_ids ==
-                      self.vision_language_config.image_token_id] = -1
             inputs_embeds = self.vision_embed_tokens(
                 input_ids, image_input["data"], image_input["image_sizes"])
 
