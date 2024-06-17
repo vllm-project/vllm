@@ -72,7 +72,6 @@ class Worker(WorkerBase):
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
-        ##TODO maybe not in remote workers
         speculative_args = {} if speculative_config is None \
             or (speculative_config.draft_model_config.model ==
                 model_config.model) \
