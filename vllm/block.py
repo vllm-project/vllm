@@ -14,6 +14,13 @@ TokensBlock = List[int]
 
 class BlockPool:
     """A pool of physical blocks.
+    When requests come, we create a lot of logical blocks;
+    when requests are done, we destroy a lot of logical blocks.
+    It turns out that creating and destroying logical blocks can be expensive,
+    especially for the `token_ids` field, which is a list of integers.
+    To avoid this overhead, we use a pool to manage the logical blocks.
+    When an old request is done and a new request comes, we can reuse the
+    logical blocks from the old request to feed the new request.
     """
 
     def __init__(self) -> None:
