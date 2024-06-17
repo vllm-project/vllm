@@ -71,6 +71,7 @@ def consumer(batch_tgt: Sequence[int],
         if open_success:
             # modify the memory
             lib.cudaMemset(pointer, 2, 1024)
+            lib.cudaDeviceSynchronize()
             # use two queues to simulate barrier
             producer_queue.get()
             consumer_queue.put(0)
