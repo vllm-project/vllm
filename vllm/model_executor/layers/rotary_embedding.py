@@ -264,12 +264,7 @@ class RotaryEmbedding(CustomOp):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Note: the forward_native() with torch.compile has significant
         # performance regression.
-        return self.forward_cuda(
-            positions,
-            query,
-            key,
-            offsets,
-        )
+        return self.forward_cuda(positions, query, key, offsets)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"

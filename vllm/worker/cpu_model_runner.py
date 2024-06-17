@@ -98,7 +98,7 @@ class CPUModelRunner:
         from vllm.model_executor.custom_op import CustomOp
 
         def replace_model(model: torch.nn.Module):
-            for name, m in model.named_children():
+            for _, m in model.named_children():
                 if isinstance(m, CustomOp):
                     m.forward_native = torch.compile(m.forward_native,
                                                      dynamic=True,
@@ -390,6 +390,10 @@ class CPUModelRunner:
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        # Warming up the model with batchsize = [1, max_num_seqs,
+        # max_num_batched_tokens], to generate corresponding operators 
+        # using torch.compile.
+
         model_config = self.model_config
         vlm_config = self.vision_language_config
 
@@ -409,8 +413,8 @@ class CPUModelRunner:
 
         for seq_len in [1, max_num_seqs, max_num_batched_tokens]:
             if vlm_config:
-                seq_data, dummy_multi_modal_data = MULTIMODAL_REGISTRY \
-                    .dummy_data_for_profiling(seq_len, model_config, vlm_config)
+                seq_data, dummy_multi_modal_data = (MULTIMODAL_REGISTRY
+                .dummy_data_for_profiling(seq_len, model_config, vlm_config))
             else:
                 seq_data = SequenceData([0] * seq_len)
                 dummy_multi_modal_data = None

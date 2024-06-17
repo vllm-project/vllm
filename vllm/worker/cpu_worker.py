@@ -177,7 +177,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
     def load_model(self):
         self.model_runner.load_model()
-        logger.info("Warming up...")
+        logger.info("Warming up the model, it may take a while.")
         self.model_runner.profile_run()
         logger.info("Warming up done.")
 
