@@ -77,13 +77,13 @@ def test_target_model_tp_gt_1(baseline_llm_generator, test_llm_generator,
 
         # Required for spec decode.
         "use_v2_block_manager": True,
+        "tensor_parallel_size": 2,
     }])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "tensor_parallel_size": 2,
         "speculative_tensor_parallel_size": 1,
     },
 ])
