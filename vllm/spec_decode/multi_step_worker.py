@@ -50,7 +50,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         self._tp_group = None
 
         if 'ranks' in kwargs:
-            ranks = kwargs['ranks']
+            ranks = kwargs.pop('ranks')
             self._draft_ranks = ranks
             # whether the worker participates in draft generation or not
             self._is_dummy = kwargs['rank'] not in ranks
