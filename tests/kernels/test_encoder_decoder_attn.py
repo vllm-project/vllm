@@ -221,7 +221,7 @@ def _decoder_attn_setup(
     test_pt: TestPoint,
     test_rsrcs: TestResources,
     block_base_addr: int = 0,
-) -> tuple[QKVInputs, PhaseTestParameters, PhaseTestParameters, int]:
+) -> Tuple[QKVInputs, PhaseTestParameters, PhaseTestParameters, int]:
     '''
     Set up test vectors & data structures for self-attention test.
 
@@ -390,8 +390,8 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
                                             PhaseTestParameters,
                                            test_pt: TestPoint,
                                            test_rsrcs: TestResources,
-                                           block_base_addr: Optional[int]=0) \
-                                            -> tuple[PhaseTestParameters,
+                                           block_base_addr: int=0) \
+                                            -> Tuple[PhaseTestParameters,
                                                      PhaseTestParameters]:
     '''
     Set up test vectors & data structures for cross-attention test.
@@ -456,6 +456,9 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
       for decode phase.
     '''
 
+    assert encoder_test_params.packed_qkvo.packed_qkv is not None
+    assert prefill_decoder_phase_test_params.packed_qkvo.packed_qkv is not None
+
     (num_heads, head_size, _, batch_size, block_size, max_decoder_seq_len,
      max_encoder_seq_len, _) = test_pt
 
@@ -467,6 +470,7 @@ def _enc_dec_cross_attn_setup_reuses_query(decoder_qkv: QKVInputs,
     prefill_q_seq_lens = \
       prefill_decoder_phase_test_params.packed_qkvo.packed_qkv.q_seq_lens
 
+    assert prefill_q_seq_lens is not None
 
     cross_kv, \
     _, \
@@ -591,6 +595,7 @@ def _run_encoder_attention_test(attn: Attention,
     assert attn_metadata.num_decode_tokens == 0
     attn_metadata.attention_type = AttentionType.ENCODER
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
+    assert packed_qkv is not None
     return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value,
                         None, attn_metadata)
 
@@ -624,6 +629,7 @@ def _run_decoder_self_attention_test(test_rsrcs: TestResources,
     kv_cache = test_rsrcs.kv_cache
     attn_metadata.attention_type = AttentionType.DECODER
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
+    assert packed_qkv is not None
     return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value,
                         kv_cache, attn_metadata)
 
@@ -664,6 +670,8 @@ def _run_encoder_decoder_cross_attention_test(
     * Attention.forward() applied to packed_{query,key,value}, kv_cache
       & attn_metadata
     '''
+    assert decoder_test_params.packed_qkvo.packed_qkv is not None
+
     attn_metadata.attention_type = AttentionType.ENCODER_DECODER
     attn = test_rsrcs.attn
     kv_cache = test_rsrcs.kv_cache
@@ -839,7 +847,7 @@ def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
                                               cross_block_base_addr)
 
     # Shared prefill metadata structure
-
+    assert prephase_dec_test_params.packed_qkvo.packed_qkv is not None
     prephase_attn_metadata: AttentionMetadata = make_test_metadata(
         test_rsrcs.attn_backend,
         True,

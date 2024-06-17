@@ -2,7 +2,7 @@
 
 import itertools
 import random
-from typing import List, NamedTuple, Optional, Union
+from typing import Any, List, NamedTuple, Optional, Tuple, Union
 
 import pytest
 import torch
@@ -83,10 +83,10 @@ class PackedQKVInputs(NamedTuple):
     query: torch.Tensor
     key: torch.Tensor
     value: torch.Tensor
-    q_start_loc_list: List[int]
-    kv_start_loc_list: List[int]
-    q_seq_lens: List[int]
-    kv_seq_lens: List[int]
+    q_start_loc_list: Optional[List[int]]
+    kv_start_loc_list: Optional[List[int]]
+    q_seq_lens: Optional[List[int]]
+    kv_seq_lens: Optional[List[int]]
 
 
 class PackedQKVO(NamedTuple):
@@ -102,7 +102,7 @@ class PackedQKVO(NamedTuple):
                         x head_size) known-correct attention output
     '''
 
-    packed_qkv: PackedQKVInputs
+    packed_qkv: Optional[PackedQKVInputs]
     ideal_output: torch.Tensor
 
 
@@ -136,7 +136,7 @@ class PhaseTestParameters(NamedTuple):
     '''
 
     packed_qkvo: PackedQKVO
-    kv_mmap: KVMemoryMap
+    kv_mmap: Optional[KVMemoryMap]
 
 
 def override_backend_env_variable(mpatch: pytest.MonkeyPatch,
@@ -185,6 +185,9 @@ def ref_masked_attention(query: torch.Tensor,
     * Attention result, batch_size x q_padded_seq_len x num_heads x head_size
     '''
 
+    assert q_seq_lens is not None
+    assert kv_seq_lens is not None
+
     batch_size = query.shape[0]
     assert (len(q_seq_lens) == batch_size)
     assert (len(kv_seq_lens) == batch_size)
@@ -219,10 +222,10 @@ def make_qkv(
     num_heads: int,
     head_size: int,
     device: Union[torch.device, str],
-    force_kv_seq_lens: List[int] = None,
+    force_kv_seq_lens: Optional[List[int]] = None,
     attn_type: AttentionType = AttentionType.ENCODER_DECODER,
     force_max_len: bool = False,
-) -> tuple[QKVInputs, QKVInputs, QKVInputs]:
+) -> Tuple[QKVInputs, QKVInputs, QKVInputs]:
     '''
     Construct QKV test tensors for self- and cross-attention.
 
@@ -276,8 +279,9 @@ def make_qkv(
         kv_seq_lens = q_seq_lens
     else:
         # K,V seq lens are distinct from Q seq lens & random
+        assert max_kv_seq_len is not None
         if force_max_len:
-            kv_seq_lens = [max_kv_seq_len for _ in range(batch_size)]
+            kv_seq_lens = [max_kv_seq_len] * batch_size
         else:
             kv_seq_lens = [
                 random.randint(2, max_kv_seq_len) for _ in range(batch_size)
@@ -350,7 +354,7 @@ def make_qkv(
 
 def pack_tensor(
         unpacked_tensor: torch.Tensor, seq_lens: List[int],
-        device: Union[torch.device, str]) -> tuple[torch.Tensor, List[int]]:
+        device: Union[torch.device, str]) -> Tuple[torch.Tensor, List[int]]:
     '''
     Pack a batch_size x padded_seq_len x num_heads x head_size tensor into an
     unpadded number_of_tokens x num_heads x head_size tensor, where
@@ -454,10 +458,10 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
 
 def _make_metadata_tensors(
-    seq_lens: List[int], context_lens: List[int], encoder_seq_lens: List[int],
-    device: Union[torch.device, str]
-) -> tuple[torch.Tensor, torch.Tensor, int, int, Optional[List[int]],
-           torch.Tensor, int]:
+    seq_lens: Optional[List[int]], context_lens: Optional[List[int]],
+    encoder_seq_lens: Optional[List[int]], device: Union[torch.device, str]
+) -> Tuple[torch.Tensor, torch.Tensor, Any, Any, Optional[List[int]],
+           torch.Tensor, Optional[int]]:
     '''
     Build scalar & tensor values required to build attention metadata structure.
 
@@ -603,7 +607,7 @@ def make_block_tables_slot_mapping(
         block_size: int,
         seq_lens: List[int],
         device: Union[torch.device, str],
-        block_base_addr: int = 0) -> tuple[torch.Tensor, List[int], int]:
+        block_base_addr: int = 0) -> Tuple[torch.Tensor, List[int], int]:
     '''
     Construct fake block tables & slot mappings.
 
@@ -685,8 +689,8 @@ def make_block_tables_slot_mapping(
 def make_test_metadata(
     attn_backend: AttentionBackend,
     is_prompt: bool,
-    seq_lens: List[int],
-    decoder_test_params: PhaseTestParameters,
+    seq_lens: Optional[List[int]],
+    decoder_test_params: Optional[PhaseTestParameters],
     default_attn_type: AttentionType,
     device: Union[torch.device, str],
     encoder_test_params: Optional[PhaseTestParameters] = None,
@@ -765,6 +769,7 @@ def make_test_metadata(
     else:
         # Encoder/decoder or encoder-only models only:
         # * Extract encoder input sequence lengths
+        assert encoder_test_params.packed_qkvo.packed_qkv is not None
         encoder_seq_lens = encoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
 
     if cross_test_params is None:
@@ -818,6 +823,10 @@ def make_test_metadata(
 
     else:  # not is_prompt
         # Decode-phase scenario
+
+        assert kv_mmap is not None
+        assert num_prefill_or_decode_tokens is not None
+        assert seq_lens is not None
 
         num_prefills = 0
         num_prefill_tokens = 0
