@@ -746,8 +746,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     " May take a while ...")
 
         qweight_iterator, quant_state_dict = (
-            self._get_quantized_weights_iterator(model_config.model,
-                                                 model_config.weights_revision))
+            self._get_quantized_weights_iterator(
+                model_config.model, model_config.weights_revision))
 
         model.load_weights(qweight_iterator)
 
