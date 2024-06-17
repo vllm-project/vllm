@@ -1,7 +1,6 @@
 steps:
   - block: "Build wheels"
 
-  {% raw %}
   - label: "Build wheel - Python {{matrix.python_version}}, CUDA {{matrix.cuda_version}}" 
     agents:
       queue: cpu_queue
@@ -20,4 +19,3 @@ steps:
           - "3.9"
           - "3.10"
           - "3.11"
-  {% endraw %}
