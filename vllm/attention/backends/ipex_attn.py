@@ -58,13 +58,15 @@ class IpexAttnBackend(AttentionBackend):
 
 @dataclass
 class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
-    """Metadata for TorchSDPABackend.
+    """Metadata for IpexAttnBackend.
     """
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     slot_mapping: torch.Tensor
     seq_lens: Optional[List[int]]
+    seqlen_q: Optional[torch.Tensor]
+    max_seqlen: Optional[int]
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -131,7 +133,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 f"Supported head sizes are: {supported_head_sizes}.")
         if kv_cache_dtype != "auto":
             raise NotImplementedError(
-                "Torch SDPA backend does not support FP8 KV cache. "
+                "IPEX backend does not support FP8 KV cache. "
                 "Please use xFormers backend instead.")
 
     def split_kv_cache(
@@ -159,7 +161,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         attn_metadata: IpexAttnMetadata,  # type: ignore
         kv_scale: float = 1.0,
     ) -> torch.Tensor:
-        """Forward pass with torch SDPA and PagedAttention.
+        """Forward pass with IPEX varlen_attention and PagedAttention.
 
         Args:
             query: shape = [num_tokens, num_heads * head_size]
@@ -222,20 +224,14 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                         (num_tokens, self.num_heads, self.head_size),
                         dtype=query.dtype,
                         device=query.device)
-                    tmp = [0]
-                    tmp.extend(attn_metadata.seq_lens)
-                    seqlen = torch.tensor(tmp)
-                    max_seqlen = max(attn_metadata.seq_lens)
-                    seqlen_q = torch.cumsum(seqlen,
-                                            dim=0).to(device=query.device)
                     ipex_ops.varlen_attention(query,
                                               key,
                                               value,
                                               out,
-                                              seqlen_q,
-                                              seqlen_q,
-                                              max_seqlen,
-                                              max_seqlen,
+                                              attn_metadata.seqlen_q,
+                                              attn_metadata.seqlen_q,
+                                              attn_metadata.max_seqlen,
+                                              attn_metadata.max_seqlen,
                                               pdropout=0.0,
                                               softmax_scale=self.scale,
                                               zero_tensors=False,
@@ -270,7 +266,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             else:
                 # prefix-enabled attention
                 raise RuntimeError(
-                    "Torch SDPA backend doesn't support prefix decoding.")
+                    "IPEX backend doesn't support prefix decoding.")
 
         else:
             # Decoding run.
