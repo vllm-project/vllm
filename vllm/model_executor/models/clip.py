@@ -143,9 +143,9 @@ class CLIPVisionTransformer(nn.Module):
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)
 
-        encoder_outputs = self.encoder(inputs_embeds=hidden_states)
+        hidden_states = self.encoder(inputs_embeds=hidden_states)
 
-        return encoder_outputs.hidden_states
+        return hidden_states
 
 
 class CLIPVisionModel(nn.Module):
