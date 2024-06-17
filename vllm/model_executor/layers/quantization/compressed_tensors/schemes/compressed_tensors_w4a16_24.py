@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N)
 from vllm.model_executor.utils import set_weight_attrs
 
-__all__ = ["CompressedTensors24"]
+__all__ = ["CompressedTensorsW4A16Sparse24"]
 
 
 class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
