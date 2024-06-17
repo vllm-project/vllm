@@ -40,7 +40,8 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 _NUM_WARMUP_ITERS = 2
 
 # Error message if ModelRunner is used with an encoder/decoder model
-STR_MR_ENCODER_DECODER_UNSUPPORTED = "Encoder/decoder model must be executed using EncoderDecoderModelRunner"
+STR_MR_ENCODER_DECODER_UNSUPPORTED = \
+    "Encoder/decoder model must be executed using EncoderDecoderModelRunner"
 
 
 class ModelInput(NamedTuple):
@@ -278,7 +279,7 @@ class ModelRunner:
         lora_requests: Set[LoRARequest] = set(),
         multi_modal_kwargs_list: Dict[str,
                                       List[torch.Tensor]] = defaultdict(list)
-    ) -> tuple[bool, int, int, int]:
+    ) -> Tuple[bool, int, int, int]:
 
         if is_prompt:
             context_len = seq_data.get_num_computed_tokens()
@@ -354,9 +355,13 @@ class ModelRunner:
             if seq_group_metadata.block_tables is not None:
                 # chunked prefill or decode
                 block_table = original_block_table
+                assert block_table is not None
                 if curr_sliding_window_blocks is not None:
                     block_table = block_table[-curr_sliding_window_blocks:]
                 if self.attn_backend.get_name() == "flashinfer":
+                    assert paged_kv_indices is not None
+                    assert paged_kv_indptr is not None
+                    assert paged_kv_last_page_len is not None
                     paged_kv_indices.extend(block_table)
                     paged_kv_indptr.append(paged_kv_indptr[-1] +
                                            len(block_table))
@@ -370,6 +375,8 @@ class ModelRunner:
         else:
             # Prefill without chunked prefill or memory profiling.
             block_table = []
+
+        assert block_table is not None
         block_tables.append(block_table)
 
         seq_lens.append(sliding_seq_len)
@@ -419,10 +426,14 @@ class ModelRunner:
             # slot mapping.
             # In embeddings, the block tables are {seq_id: None}.
             slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
-            return decode_only, num_prefills, num_prefill_tokens, num_decode_tokens
+            return decode_only, \
+                   num_prefills, \
+                   num_prefill_tokens, \
+                   num_decode_tokens
 
         # Compute the slot mapping.
         block_table = original_block_table
+        assert block_table is not None
 
         # Mask the [0, start_idx) tokens of the prompt with
         # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
@@ -536,7 +547,10 @@ class ModelRunner:
 
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 block_table = seq_group_metadata.block_tables[seq_id]
-                decode_only, num_prefills, num_prefill_tokens, num_decode_tokens = self._prepare_seq_model_input(
+                decode_only, \
+                num_prefills, \
+                num_prefill_tokens, \
+                num_decode_tokens = self._prepare_seq_model_input(
                     is_prompt, decode_only, num_prefills, num_prefill_tokens,
                     num_decode_tokens, block_tables, seq_lens, slot_mapping,
                     context_lens, query_lens, input_tokens, input_positions,
@@ -932,7 +946,9 @@ class ModelRunner:
         return False.
         '''
         return False if self.model_config is None else \
-                getattr(self.model_config.hf_config, "is_encoder_decoder", False)
+                getattr(self.model_config.hf_config,
+                        "is_encoder_decoder",
+                        False)
 
     def _am_not_child(self):
         '''
