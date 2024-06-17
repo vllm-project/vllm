@@ -19,11 +19,6 @@ def nullable_str(val: str):
     return val
 
 
-@deprecate_kwargs(
-    "revision",
-    is_deprecated=lambda: EngineArgs.DEPRECATE_LEGACY,
-    additional_message="Please use the '--weights-revision' flag "
-    "instead.")
 @dataclass
 class EngineArgs:
     DEPRECATE_LEGACY: ClassVar[bool] = False
@@ -619,11 +614,26 @@ class EngineArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
-        # Get the list of attributes of this dataclass.
-        attrs = [attr.name for attr in dataclasses.fields(cls)]
-        # Set the attributes from the parsed arguments.
-        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
-        return engine_args
+        # Create a dictionary of attribute names and their values from args
+        def get_kwargs_from_args() -> dict:
+            attrs = {
+                attr.name: getattr(args, attr.name, None)
+                for attr in dataclasses.fields(cls)
+            }
+            return attrs
+
+        @deprecate_kwargs("revision",
+                          is_deprecated=lambda: cls.DEPRECATE_LEGACY,
+                          additional_message=
+                          "Please use the '--weights-revision' flag instead.")
+        def set_attributes(kwargs):
+            # Initialize the instance using the kwargs
+            return cls(**kwargs)
+
+        # Extract arguments from the args namespace
+        kwargs = get_kwargs_from_args()
+        # Create the EngineArgs instance using the decorated function
+        return set_attributes(kwargs)
 
     def create_engine_config(self, ) -> EngineConfig:
 
