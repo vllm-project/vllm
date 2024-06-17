@@ -263,7 +263,7 @@ class DefaultModelLoader(BaseModelLoader):
                                           cache_config)
             model.load_weights(
                 self._get_weights_iterator(model_config.model,
-                                           model_config.weight_revision,
+                                           model_config.weights_revision,
                                            fall_back_to_pt=getattr(
                                                model,
                                                "fall_back_to_pt_during_load",
@@ -497,7 +497,7 @@ class ShardedStateLoader(BaseModelLoader):
         from vllm.distributed import get_tensor_model_parallel_rank
 
         local_model_path = self._prepare_weights(model_config.model,
-                                                 model_config.weight_revision)
+                                                 model_config.weights_revision)
 
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
@@ -747,7 +747,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         qweight_iterator, quant_state_dict = (
             self._get_quantized_weights_iterator(model_config.model,
-                                                 model_config.weight_revision))
+                                                 model_config.weights_revision))
 
         model.load_weights(qweight_iterator)
 
