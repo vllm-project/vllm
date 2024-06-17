@@ -36,28 +36,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v2", torch::kCPU, &paged_attention_v2);
 
-  // Activation ops
-
-  // Activation function used in SwiGLU.
-  ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("silu_and_mul", torch::kCPU, &silu_and_mul);
-
-  // Activation function used in GeGLU with `none` approximation.
-  ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_and_mul", torch::kCPU, &gelu_and_mul);
-
-  // Activation function used in GeGLU with `tanh` approximation.
-  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_tanh_and_mul", torch::kCPU, &gelu_tanh_and_mul);
-
-  // GELU implementation used in GPT-2.
-  ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_new", torch::kCPU, &gelu_new);
-
-  // Approximate GELU implementation.
-  ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_fast", torch::kCPU, &gelu_fast);
-
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(

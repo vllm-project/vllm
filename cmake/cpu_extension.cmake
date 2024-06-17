@@ -83,7 +83,6 @@ message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 # _C extension
 #
 set(VLLM_EXT_SRC
-    "csrc/cpu/activation.cpp"
     "csrc/cpu/attention.cpp"
     "csrc/cpu/cache.cpp"
     "csrc/cpu/layernorm.cpp"
