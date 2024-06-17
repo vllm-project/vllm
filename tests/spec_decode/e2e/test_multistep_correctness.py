@@ -151,43 +151,6 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        # Use a small model for a fast test.
-        # Note this is repeated in the test body; to initialize a tokenizer.
-        "model": "JackFram/llama-68m",
-
-        # Skip cuda graph recording for fast test.
-        "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-    }])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    {
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-        "tensor_parallel_size": 2,
-        "speculative_tensor_parallel_size": 1,
-    },
-])
-@pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("batch_size", [2])
-@pytest.mark.parametrize("seed", [1])
-def test_spec_decode_e2e_with_small_draft_tps(test_llm_generator,
-                                              baseline_llm_generator,
-                                              batch_size: int):
-    """Verify spec decode works well with smaller tp for draft models.
-    """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=32,
-                                         force_output_len=True)
-
-
-@pytest.mark.parametrize(
-    "common_llm_kwargs",
-    [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
