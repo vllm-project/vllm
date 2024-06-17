@@ -3,14 +3,14 @@ import dataclasses
 import json
 import warnings
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union, ClassVar
+from typing import ClassVar, List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          TokenizerPoolConfig, VisionLanguageConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.utils import str_to_int_tuple, deprecate_kwargs
+from vllm.utils import deprecate_kwargs, str_to_int_tuple
 
 
 def nullable_str(val: str):
@@ -18,15 +18,16 @@ def nullable_str(val: str):
         return None
     return val
 
-@deprecate_kwargs("revision",
-                is_deprecated=lambda: EngineArgs.DEPRECATE_LEGACY,
-                additional_message="Please use the '--weights-revision' flag "
-                "instead.")
+
+@deprecate_kwargs(
+    "revision",
+    is_deprecated=lambda: EngineArgs.DEPRECATE_LEGACY,
+    additional_message="Please use the '--weights-revision' flag "
+    "instead.")
 @dataclass
 class EngineArgs:
     DEPRECATE_LEGACY: ClassVar[bool] = False
     """A flag to toggle whether to deprecate the legacy Engine Arguments API."""
-
     """Arguments for vLLM engine."""
     model: str
     served_model_name: Optional[Union[List[str]]] = None
@@ -56,7 +57,7 @@ class EngineArgs:
     max_num_seqs: int = 256
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
-    revision: Optional[str] = None # Deprecated
+    revision: Optional[str] = None  # Deprecated
     weights_revision: Optional[str] = None
     code_revision: Optional[str] = None
     rope_scaling: Optional[dict] = None
@@ -158,7 +159,7 @@ class EngineArgs:
             'for the model on huggingface.')
 
         return parser
-    
+
     @staticmethod
     def add_cli_args(
             parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -187,7 +188,7 @@ class EngineArgs:
             help='The specific revision to use for the model weights. '
             'It can be a branch name, a tag name, or a commit id. '
             'If unspecified, will use the default version.')
-        
+
         parser.add_argument(
             '--revision',
             type=nullable_str,
@@ -195,7 +196,7 @@ class EngineArgs:
             help='The specific model version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
-        
+
         parser.add_argument(
             '--code-revision',
             type=nullable_str,
@@ -650,7 +651,8 @@ class EngineArgs:
             trust_remote_code=self.trust_remote_code,
             dtype=self.dtype,
             seed=self.seed,
-            weights_revision=self.weights_revision if self.weights_revision else self.revision,
+            weights_revision=self.weights_revision
+            if self.weights_revision else self.revision,
             code_revision=self.code_revision,
             rope_scaling=self.rope_scaling,
             rope_theta=self.rope_theta,
