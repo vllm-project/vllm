@@ -29,7 +29,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     requires more thought for MultiStepWorker support.
     """
 
-    def __init__(self, ranks: Optional[List[int]], **kwargs):
+    def __init__(self, **kwargs):
         """Create a MultiStepWorker.
 
         It allows a speculative draft model to run with smaller tensor
@@ -43,12 +43,17 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             ranks (Optional[List[int]]): if this value is given, only some of
              the GPU ranks written in this value participate in draft generation
         """
-        self._draft_ranks = ranks
+
+        self._draft_ranks = None
+        self._is_dummy = False
         self._world_group = None
         self._tp_group = None
 
-        # whether the worker participates in draft generation or not
-        self._is_dummy = False if ranks is None else kwargs['rank'] not in ranks
+        if 'ranks' in kwargs:
+            ranks = kwargs['ranks']
+            self._draft_ranks = ranks
+            # whether the worker participates in draft generation or not
+            self._is_dummy = kwargs['rank'] not in ranks
 
         super().__init__(**kwargs)
 
@@ -62,7 +67,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         if self._is_dummy:
             return
 
-        if self._draft_ranks:
+        if self._draft_ranks is not None:
             # creates tp process group containing only a subset of gpu ranks
             local_rank = get_world_group().local_rank
             world_backend = torch.distributed.get_backend(
