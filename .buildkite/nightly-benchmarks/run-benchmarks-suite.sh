@@ -343,9 +343,9 @@ main() {
   QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
   # benchmarking
-  run_serving_tests $QUICK_BENCHMARK_ROOT/serving-tests.json
-  run_latency_tests $QUICK_BENCHMARK_ROOT/latency-tests.json
-  run_throughput_tests $QUICK_BENCHMARK_ROOT/throughput-tests.json
+  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json
+  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/latency-tests.json
+  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/throughput-tests.json
 
 
   # postprocess benchmarking results

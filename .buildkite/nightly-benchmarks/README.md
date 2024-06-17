@@ -13,9 +13,17 @@ This benchmark will be *triggered* upon:
 
 **Benchmarking Duration**: about 1hr.
 
-## Configuring the workload for the quick benchmark
+**For benchmarking developers**: please try your best to constraint the duration of benchmarking to less than 1.5 hr so that it won't take forever to run.
 
-The workload of the quick benchmark contains two parts: latency tests in `latency-tests.json`, throughput tests in `throughput-tests.json` and serving tests in `serving-tests.json`.
+
+## Configuring the workload
+
+The benchmarking workload contains three parts:
+- Latency tests in `latency-tests.json`.
+- Throughput tests in `throughput-tests.json`.
+- Serving tests in `serving-tests.json`.
+
+See [descriptions.md](tests/descriptions.md) for detailed descriptions. 
 
 ### Latency test
 
@@ -23,7 +31,6 @@ Here is an example of one test inside `latency-tests.json`:
 
 ```json
 [
-    ...
     {
         "test_name": "latency_llama8B_tp1",
         "parameters": {
@@ -34,7 +41,6 @@ Here is an example of one test inside `latency-tests.json`:
             "num_iters": 15
         }
     },
-    ...
 ]
 ```
 
@@ -57,7 +63,6 @@ We test the throughput by using `benchmark_serving.py` with request rate = inf t
 
 ```
 [
-    ...
     {
         "test_name": "serving_llama8B_tp1_sharegpt",
         "qps_list": [1, 4, 16, "inf"],
@@ -77,7 +82,6 @@ We test the throughput by using `benchmark_serving.py` with request rate = inf t
             "num_prompts": 200
         }
     },
-    ...
 ]
 ```
 
@@ -92,7 +96,8 @@ The number of this test is less stable compared to the delay and latency benchma
 WARNING: The benchmarking script will save json results by itself, so please do not configure `--save-results` or other results-saving-related parameters in `serving-tests.json`.
 
 ## Visualizing the results
-The `convert-results-json-to-markdown.py` helps you put the benchmarking results inside a markdown table.
+The `convert-results-json-to-markdown.py` helps you put the benchmarking results inside a markdown table, by formatting [descriptions.md](tests/descriptions.md) with real benchmarking results.
 You can find the result presented as a table inside the `buildkite/performance-benchmark` job page.
 If you do not see the table, please wait till the benchmark finish running.
-The JSON file is also attached within each buildkite job for further analysis.
+The json version of the table (together with the json version of the benchmark) will be also attached to the markdown file.
+The raw benchmarking results (in the format of json files) are in the `Artifacts` tab of the benchmarking.
