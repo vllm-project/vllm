@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Union
 
 import aiohttp
+import huggingface_hub.constants
 from tqdm.asyncio import tqdm
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
