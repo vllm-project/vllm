@@ -60,6 +60,7 @@ class EngineArgs:
     weights_revision: Optional[str] = None
     code_revision: Optional[str] = None
     rope_scaling: Optional[dict] = None
+    rope_theta: Optional[float] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: bool = False
@@ -75,7 +76,7 @@ class EngineArgs:
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
-    lora_dtype = 'auto'
+    lora_dtype: str = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
@@ -245,7 +246,7 @@ class EngineArgs:
             '* "dummy" will initialize the weights with random values, '
             'which is mainly for profiling.\n'
             '* "tensorizer" will load the weights using tensorizer from '
-            'CoreWeave. See the Tensorize vLLM Model script in the Examples'
+            'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
@@ -416,6 +417,12 @@ class EngineArgs:
                             type=json.loads,
                             help='RoPE scaling configuration in JSON format. '
                             'For example, {"type":"dynamic","factor":2.0}')
+        parser.add_argument('--rope-theta',
+                            default=None,
+                            type=float,
+                            help='RoPE theta. Use with `rope_scaling`. In '
+                            'some cases, changing the RoPE theta improves the '
+                            'performance of the scaled model.')
         parser.add_argument('--enforce-eager',
                             action='store_true',
                             help='Always use eager-mode PyTorch. If False, '
@@ -513,7 +520,7 @@ class EngineArgs:
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron", "cpu"],
+                            choices=["auto", "cuda", "neuron", "cpu", "tpu"],
                             help='Device type for vLLM execution.')
 
         # Related to Vision-language models such as llava
@@ -646,6 +653,7 @@ class EngineArgs:
             weights_revision=self.weights_revision if self.weights_revision else self.revision,
             code_revision=self.code_revision,
             rope_scaling=self.rope_scaling,
+            rope_theta=self.rope_theta,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,

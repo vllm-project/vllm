@@ -2,11 +2,10 @@ import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, ClassVar, Iterable, List, Optional
 from typing import Sequence as GenericSequence
-from typing import Type, TypeVar, Union
+from typing import Set, Type, TypeVar, Union
 
 from transformers import GenerationConfig, PreTrainedTokenizer
 
-import vllm
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig,
@@ -38,6 +37,7 @@ from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
+from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -162,14 +162,14 @@ class LLMEngine:
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
             "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "rope_scaling=%r, tokenizer_revision=%s, "
+            "rope_scaling=%r, rope_theta=%r, tokenizer_revision=%s, "
             "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
             "disable_custom_all_reduce=%s, quantization=%s, "
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, seed=%d, served_model_name=%s)",
-            vllm.__version__,
+            VLLM_VERSION,
             model_config.model,
             speculative_config,
             model_config.tokenizer,
@@ -177,6 +177,7 @@ class LLMEngine:
             model_config.tokenizer_mode,
             model_config.weights_revision,
             model_config.rope_scaling,
+            model_config.rope_theta,
             model_config.tokenizer_revision,
             model_config.trust_remote_code,
             model_config.dtype,
@@ -340,6 +341,9 @@ class LLMEngine:
         if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
+        elif engine_config.device_config.device_type == "tpu":
+            from vllm.executor.tpu_executor import TPUExecutor
+            executor_class = TPUExecutor
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor
@@ -969,7 +973,7 @@ class LLMEngine:
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_executor.remove_lora(lora_id)
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         return self.model_executor.list_loras()
 
     def check_health(self) -> None:
