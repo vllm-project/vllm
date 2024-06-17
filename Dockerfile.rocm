@@ -107,8 +107,6 @@ ENV VLLM_NCCL_SO_PATH=/opt/rocm/lib/librccl.so
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
-# TODO: remove cp .so files and refactor for CI purposes
-RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -U -r requirements-rocm.txt \
     && if [ "$BASE_IMAGE" = "$ROCm_6_0_BASE" ]; then \
        patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch; fi \
@@ -117,7 +115,5 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && cp build/lib.linux-x86_64-cpython-${VLLM_PYTHON_VERSION}/vllm/*.so vllm/ \
     && cd ..
 
-# workaround for expecttest package
-RUN pip freeze |grep expecttest || pip install expecttest
 
 CMD ["/bin/bash"]
