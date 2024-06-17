@@ -20,7 +20,7 @@ class BlockPool:
         self.pool: Dict[int, List[TOKEN_BLOCKS]] = defaultdict(list)
 
     def alloc_block(self, block_size: int) -> TOKEN_BLOCKS:
-        if block_size in self.pool:
+        if block_size in self.pool and self.pool[block_size]:
             return self.pool[block_size].pop()
         return [_BLANK_TOKEN_ID] * block_size
 
