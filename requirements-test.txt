@@ -14,7 +14,7 @@ peft
 requests
 ray
 sentence-transformers # required for embedding
-torchvision # required for phi3v
+torchvision # required for the image processor of phi3v
 
 # Benchmarking
 aiohttp
