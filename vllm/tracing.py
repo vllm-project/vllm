@@ -41,6 +41,8 @@ def is_otel_installed() -> bool:
 
 def init_tracer(instrumenting_module_name: str,
                 otlp_traces_endpoint: str) -> Optional[Tracer]:
+    assert is_otel_installed(), ("OpenTelemetry packages must be installed "
+                                 "prior to initializing a tracer")
     trace_provider = TracerProvider()
 
     span_exporter = get_span_exporter(otlp_traces_endpoint)
