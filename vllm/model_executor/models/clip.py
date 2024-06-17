@@ -153,7 +153,6 @@ class CLIPVisionModel(nn.Module):
     main_input_name = "pixel_values"
 
     def __init__(self, config: CLIPVisionConfig):
-        super().__init__(config)
         self.vision_model = CLIPVisionTransformer(config)
 
     def get_input_embeddings(self) -> nn.Module:
