@@ -332,7 +332,8 @@ class SamplingTensors:
         sample_indices: List[int] = []
         prompt_best_of: List[int] = []
         do_penalties = False
-        do_top_p_top_k = False
+        do_top_p, do_top_k = False, False
+        max_k = 0
         do_min_p = False
 
         # We need one base seed per Triton slice.
@@ -361,9 +362,11 @@ class SamplingTensors:
                 # (i.e., greedy sampling or beam search).
                 # Set the temperature to 1 to avoid division by zero.
                 temperature = 1.0
-            if not do_top_p_top_k and (top_p < 1.0 - _SAMPLING_EPS
-                                       or top_k != vocab_size):
-                do_top_p_top_k = True
+            if top_p < 1.0 - _SAMPLING_EPS:
+                do_top_p = True
+            if top_k != vocab_size:
+                max_k = max(max_k, top_k)
+                do_top_k = True
             if not do_min_p and min_p > _SAMPLING_EPS:
                 do_min_p = True
             if not do_penalties and (abs(p) >= _SAMPLING_EPS
@@ -429,7 +432,7 @@ class SamplingTensors:
             frequency_penalties, repetition_penalties, sampling_seeds,
             sample_indices, prompt_tokens, output_tokens, vocab_size,
             extra_seeds_to_generate, device, dtype)
-        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p)
+        return (sampling_tensors, do_penalties, do_top_p, do_top_k, max_k, do_min_p)
 
     @classmethod
     def from_lists(cls, temperatures: List[float], top_ps: List[float],

@@ -63,7 +63,7 @@ class Sampler(nn.Module):
         logits = _apply_min_tokens_penalty(logits, sampling_metadata)
 
         # Prepare sampling tensors with pinned memory to avoid blocking.
-        (sampling_tensors, do_penalties, do_top_p_top_k,
+        (sampling_tensors, do_penalties, do_top_p, do_top_k, max_k,
          do_min_p) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
 
@@ -79,9 +79,9 @@ class Sampler(nn.Module):
         # Use in-place division to avoid creating a new tensor.
         logits.div_(sampling_tensors.temperatures.unsqueeze_(dim=1))
 
-        if do_top_p_top_k:
+        if do_top_p or do_top_k:
             logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
-                                        sampling_tensors.top_ks)
+                                        sampling_tensors.top_ks, do_top_p, max_k)
 
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
@@ -224,7 +224,14 @@ def _apply_top_k_top_p(
     logits: torch.Tensor,
     p: torch.Tensor,
     k: torch.Tensor,
+    do_top_p,
+    max_k,
 ) -> torch.Tensor:
+    if not do_top_p:
+        topk = torch.topk(logits, max_k)
+        indices_to_remove = logits < topk[0].gather(
+            1, (k-1).unsqueeze(1).to(torch.int64))
+        return logits.masked_fill_(indices_to_remove, -float("inf"))
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     # Apply top-k.
@@ -965,7 +972,7 @@ def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
                 distribution.
             - Greedy sampling performs `argmax` to obtain the token with the
                 highest likelihood.
-    
+
     Ignoring greedy sampling for a moment, we find that the computed probability
     distribution has the following property: we can sample from it independently
     and find that the token sampled by the Sampler has a frequency corresponding
