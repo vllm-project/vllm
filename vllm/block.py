@@ -9,7 +9,7 @@ _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
 
-TOKEN_BLOCKS = List[int]
+TokensBlock = List[int]
 
 
 class BlockPool:
@@ -18,14 +18,14 @@ class BlockPool:
 
     def __init__(self) -> None:
         # block size to list of token blocks
-        self.pool: Dict[int, List[TOKEN_BLOCKS]] = defaultdict(list)
+        self.pool: Dict[int, List[TokensBlock]] = defaultdict(list)
 
-    def alloc_block(self, block_size: int) -> TOKEN_BLOCKS:
+    def alloc_block(self, block_size: int) -> TokensBlock:
         if block_size in self.pool and self.pool[block_size]:
             return self.pool[block_size].pop()
         return [_BLANK_TOKEN_ID] * block_size
 
-    def del_block(self, block: TOKEN_BLOCKS) -> None:
+    def del_block(self, block: TokensBlock) -> None:
         self.pool[len(block)].append(block)
 
 
