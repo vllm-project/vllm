@@ -25,7 +25,7 @@ def request_output_to_embedding_response(
     created_time: int,
     model_name: str,
 ) -> EmbeddingResponse:
-    data = []
+    data: List[EmbeddingResponseData] = []
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
         assert final_res is not None

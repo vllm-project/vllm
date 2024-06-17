@@ -108,8 +108,8 @@ def run_vllm(
     )
 
     # Add the requests to the engine.
-    prompts = []
-    sampling_params = []
+    prompts: List[str] = []
+    sampling_params: List[SamplingParams] = []
     for prompt, _, output_len in requests:
         prompts.append(prompt)
         sampling_params.append(
@@ -349,7 +349,7 @@ if __name__ == "__main__":
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda", "cpu", "tpu"],
+        choices=["cuda", "cpu", "tpu", "xpu"],
         help='device type for vLLM execution, supporting CUDA and CPU.')
     parser.add_argument(
         "--enable-prefix-caching",
