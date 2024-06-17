@@ -8,7 +8,7 @@ import ray
 
 from vllm.multimodal.utils import ImageFetchAiohttp, encode_image_base64
 
-from ..utils import ServerRunner
+from ..utils import VLLM_PATH, RemoteOpenAIServer
 
 MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
 LLAVA_CHAT_TEMPLATE = (Path(__file__).parent.parent.parent /
@@ -26,9 +26,15 @@ pytestmark = pytest.mark.openai
 
 
 @pytest.fixture(scope="module")
+def ray_ctx():
+    ray.init(runtime_env={"working_dir": VLLM_PATH})
+    yield
+    ray.shutdown()
+
+
+@pytest.fixture(scope="module")
 def server():
-    ray.init()
-    server_runner = ServerRunner.remote([
+    return RemoteOpenAIServer([
         "--model",
         MODEL_NAME,
         "--dtype",
@@ -47,18 +53,11 @@ def server():
         "--chat-template",
         str(LLAVA_CHAT_TEMPLATE),
     ])
-    ray.get(server_runner.ready.remote())
-    yield server_runner
-    ray.shutdown()
 
 
-@pytest.fixture(scope="session")
-def client():
-    client = openai.AsyncOpenAI(
-        base_url="http://localhost:8000/v1",
-        api_key="token-abc123",
-    )
-    yield client
+@pytest.fixture(scope="module")
+def client(server):
+    return server.get_async_client()
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -73,7 +72,7 @@ async def base64_encoded_image() -> Dict[str, str]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
-async def test_single_chat_session_image(server, client: openai.AsyncOpenAI,
+async def test_single_chat_session_image(client: openai.AsyncOpenAI,
                                          model_name: str, image_url: str):
     messages = [{
         "role":
@@ -126,7 +125,7 @@ async def test_single_chat_session_image(server, client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded(
-        server, client: openai.AsyncOpenAI, model_name: str, image_url: str,
+        client: openai.AsyncOpenAI, model_name: str, image_url: str,
         base64_encoded_image: Dict[str, str]):
 
     messages = [{
@@ -180,7 +179,7 @@ async def test_single_chat_session_image_base64encoded(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
-async def test_chat_streaming_image(server, client: openai.AsyncOpenAI,
+async def test_chat_streaming_image(client: openai.AsyncOpenAI,
                                     model_name: str, image_url: str):
     messages = [{
         "role":
@@ -237,8 +236,8 @@ async def test_chat_streaming_image(server, client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
-async def test_multi_image_input(server, client: openai.AsyncOpenAI,
-                                 model_name: str, image_url: str):
+async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
+                                 image_url: str):
 
     messages = [{
         "role":
