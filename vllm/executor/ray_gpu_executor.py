@@ -137,6 +137,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
             node_workers[node_id].append(i)
+            # `gpu_ids` can be a list of strings or integers.
+            # convert them to integers for consistency.
+            # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
+            # string sorting is not sufficient.
+            # see https://github.com/vllm-project/vllm/issues/5590
+            gpu_ids = [int(x) for x in gpu_ids]
             node_gpus[node_id].extend(gpu_ids)
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
