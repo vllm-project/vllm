@@ -22,6 +22,7 @@ from transformers.utils import logging
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -32,7 +33,7 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import get_dummy_image_data
+from vllm.multimodal.image import DummyImageDataFactories
 from vllm.sequence import SamplerOutput
 
 logger = logging.get_logger(__name__)
@@ -269,8 +270,21 @@ class Phi3VImagePixelInputs(TypedDict):
     """Shape: (batch_size, 2)"""
 
 
-@MULTIMODAL_REGISTRY.register_image_pixel_input()
-@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
+def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
+    seq_data = DummyImageDataFactories.dummy_seq_data_for_clip(
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        seq_len,
+        image_token_id=32044,
+    )
+    multi_modal_data = DummyImageDataFactories.dummy_pixel_data_for_clip(
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+    )
+
+    return seq_data, multi_modal_data
+
+
+@MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
 class Phi3VForCausalLM(VisionLanguageModelBase):
 
     def __init__(self,

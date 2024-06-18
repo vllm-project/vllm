@@ -12,8 +12,7 @@ from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
-from vllm.inputs import INPUT_REGISTRY
-from vllm.inputs.registry import InputContext
+from vllm.inputs import INPUT_REGISTRY, InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (

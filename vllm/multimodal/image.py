@@ -100,7 +100,7 @@ class DummyImageDataFactories:
     """
 
     @classmethod
-    def _dummy_seq_data_for_clip(
+    def dummy_seq_data_for_clip(
         cls,
         hf_config: CLIPVisionConfig,
         seq_len: int,
@@ -118,7 +118,7 @@ class DummyImageDataFactories:
         return SequenceData(token_ids)
 
     @classmethod
-    def _dummy_pixel_data_for_clip(
+    def dummy_pixel_data_for_clip(
         cls,
         hf_config: CLIPVisionConfig,
         *,
@@ -135,7 +135,7 @@ class DummyImageDataFactories:
         return ImagePixelData(image)
 
     @classmethod
-    def _dummy_feature_data_for_clip(
+    def dummy_feature_data_for_clip(
         cls,
         hf_config: CLIPVisionConfig,
         *,
@@ -161,7 +161,7 @@ class DummyImageDataFactories:
         vision_config = hf_config.vision_config
 
         if isinstance(vision_config, CLIPVisionConfig):
-            seq_data = cls._dummy_seq_data_for_clip(
+            seq_data = cls.dummy_seq_data_for_clip(
                 vision_config,
                 seq_len,
                 image_token_id=hf_config.image_token_index,
@@ -171,10 +171,10 @@ class DummyImageDataFactories:
             ImageInputType = VisionLanguageConfig.ImageInputType
             multi_modal_data: MultiModalData
             if image_input_type == ImageInputType.PIXEL_VALUES:
-                multi_modal_data = cls._dummy_pixel_data_for_clip(
+                multi_modal_data = cls.dummy_pixel_data_for_clip(
                     vision_config)
             elif image_input_type == ImageInputType.IMAGE_FEATURES:
-                multi_modal_data = cls._dummy_feature_data_for_clip(
+                multi_modal_data = cls.dummy_feature_data_for_clip(
                     vision_config)
 
             return seq_data, multi_modal_data
@@ -198,7 +198,7 @@ class DummyImageDataFactories:
             hf_config, input_height=dummy_height, input_width=dummy_width)
 
         if isinstance(vision_config, CLIPVisionConfig):
-            seq_data = cls._dummy_seq_data_for_clip(
+            seq_data = cls.dummy_seq_data_for_clip(
                 vision_config,
                 seq_len,
                 image_token_id=hf_config.image_token_index,
@@ -209,13 +209,13 @@ class DummyImageDataFactories:
             ImageInputType = VisionLanguageConfig.ImageInputType
             multi_modal_data: MultiModalData
             if image_input_type == ImageInputType.PIXEL_VALUES:
-                multi_modal_data = cls._dummy_pixel_data_for_clip(
+                multi_modal_data = cls.dummy_pixel_data_for_clip(
                     vision_config,
                     image_width_override=dummy_width,
                     image_height_override=dummy_height,
                 )
             elif image_input_type == ImageInputType.IMAGE_FEATURES:
-                multi_modal_data = cls._dummy_feature_data_for_clip(
+                multi_modal_data = cls.dummy_feature_data_for_clip(
                     vision_config,
                     image_feature_size_override=image_feature_size,
                 )
