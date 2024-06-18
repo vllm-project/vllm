@@ -182,3 +182,9 @@ if __name__ == "__main__":
             serving_tests_markdown_table=serving_md_table,
             benchmarking_results_in_json_string=processed_results_json)
         f.write(results)
+
+    # document benchmarking results in json
+    with open(results_folder / "benchmark_results.json", "w") as f:
+        
+        results = latency_results.to_dict(orient='records') + throughput_results.to_dict(orient='records') + serving_results.to_dict(orient='records')
+        f.write(json.dumps(results))
