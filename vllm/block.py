@@ -13,7 +13,7 @@ TokensBlock = List[int]
 
 
 class BlockPool:
-    """A pool of physical blocks.
+    """A pool of logical blocks.
     When requests come, we create a lot of logical blocks;
     when requests are done, we destroy a lot of logical blocks.
     It turns out that creating and destroying logical blocks can be expensive,
