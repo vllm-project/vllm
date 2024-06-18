@@ -251,8 +251,11 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
 }
 
 template <typename InType, typename OutType,
-          template <typename, typename> typename Epilogue, int32_t M>
-struct sm80_config {
+          template <typename, typename> typename Epilogue>
+struct sm80_config_default {
+  // This config is used in 2 cases,
+  //  - M in (128, inf)
+  //  - M in (64, 128] and N >= 8192
   static_assert(std::is_same<InType, int8_t>());
   using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
@@ -264,7 +267,10 @@ struct sm80_config {
 
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
-struct sm80_config<InType, OutType, Epilogue, 64> {
+struct sm80_config_M64 {
+  // This config is used in 2 cases,
+  // - M in (32, 64]
+  // - M in (64, 128] and N < 8192
   static_assert(std::is_same<InType, int8_t>());
   using TileShape = typename cutlass::gemm::GemmShape<64, 128, 128>;
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
@@ -276,7 +282,8 @@ struct sm80_config<InType, OutType, Epilogue, 64> {
 
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
-struct sm80_config<InType, OutType, Epilogue, 32> {
+struct sm80_config_M32 {
+  // M in (16, 32]
   static_assert(std::is_same<InType, int8_t>());
   using TileShape = typename cutlass::gemm::GemmShape<32, 64, 128>;
   using WarpShape = typename cutlass::gemm::GemmShape<32, 64, 64>;
@@ -288,7 +295,8 @@ struct sm80_config<InType, OutType, Epilogue, 32> {
 
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
-struct sm80_config<InType, OutType, Epilogue, 16> {
+struct sm80_config_M16 {
+  // M in [1, 16]
   static_assert(std::is_same<InType, int8_t>());
   using TileShape = typename cutlass::gemm::GemmShape<16, 64, 128>;
   using WarpShape = typename cutlass::gemm::GemmShape<16, 64, 64>;
@@ -310,36 +318,36 @@ void cutlass_gemm_sm80_dispatch(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(a.dtype() == torch::kInt8);
   TORCH_CHECK(b.dtype() == torch::kInt8);
 
-  static const int32_t MDimDontCare = 0;
-
   using Cutlass2xGemmDefault =
-      typename sm80_config<InType, OutType, Epilogue,
-                           MDimDontCare>::Cutlass2xGemm;
+      typename sm80_config_default<InType, OutType, Epilogue>::Cutlass2xGemm;
   using Cutlass2xGemmM128BigN =
-      typename sm80_config<InType, OutType, Epilogue,
-                           MDimDontCare>::Cutlass2xGemm;
+      typename sm80_config_default<InType, OutType, Epilogue>::Cutlass2xGemm;
   using Cutlass2xGemmM128SmallN =
-      typename sm80_config<InType, OutType, Epilogue, 64>::Cutlass2xGemm;
+      typename sm80_config_M64<InType, OutType, Epilogue>::Cutlass2xGemm;
   using Cutlass2xGemmM64 =
-      typename sm80_config<InType, OutType, Epilogue, 64>::Cutlass2xGemm;
+      typename sm80_config_M64<InType, OutType, Epilogue>::Cutlass2xGemm;
   using Cutlass2xGemmM32 =
-      typename sm80_config<InType, OutType, Epilogue, 32>::Cutlass2xGemm;
+      typename sm80_config_M32<InType, OutType, Epilogue>::Cutlass2xGemm;
   using Cutlass2xGemmM16 =
-      typename sm80_config<InType, OutType, Epilogue, 16>::Cutlass2xGemm;
+      typename sm80_config_M16<InType, OutType, Epilogue>::Cutlass2xGemm;
 
   uint32_t const m = a.size(0);
   uint32_t const mp2 =
       std::max(static_cast<uint32_t>(16), next_pow_2(m));  // next power of 2
   if (mp2 <= 16) {
+    // M in [1, 16]
     return cutlass_gemm_caller<Cutlass2xGemmM16>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 32) {
+    // M in (16, 32]
     return cutlass_gemm_caller<Cutlass2xGemmM32>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 64) {
+    // M in (32, 64]
     return cutlass_gemm_caller<Cutlass2xGemmM64>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 128) {
+    // M in (64, 128]
     uint32_t const n = a.size(1);
     bool const small_n = n < 8192;
     if (small_n) {
@@ -350,6 +358,7 @@ void cutlass_gemm_sm80_dispatch(torch::Tensor& out, torch::Tensor const& a,
           out, a, b, std::forward<EpilogueArgs>(args)...);
     }
   } else {
+    // M in (128, inf)
     return cutlass_gemm_caller<Cutlass2xGemmDefault>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   }
