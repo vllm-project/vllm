@@ -824,3 +824,14 @@ def make_causal_mask(q_max_seq_len: int, kv_max_seq_len: int) \
     mask = mask.masked_fill(mask == 1,
                             float('-inf')).masked_fill(mask == 0, 0.0)
     return mask
+
+#From: https://stackoverflow.com/a/4104188/2749989
+def run_once(f):
+
+    def wrapper(*args, **kwargs) -> Any:
+        if not wrapper.has_run:  # type: ignore[attr-defined]
+            wrapper.has_run = True  # type: ignore[attr-defined]
+            return f(*args, **kwargs)
+
+    wrapper.has_run = False  # type: ignore[attr-defined]
+    return wrapper

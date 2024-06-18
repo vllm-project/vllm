@@ -159,6 +159,15 @@ steps:
   #mirror_hardwares: [amd]
   command: pytest -v -s quantization
 
+- label: Tracing Test
+  commands: 
+    - "pip install \
+        opentelemetry-sdk \
+        opentelemetry-api \
+        opentelemetry-exporter-otlp \
+        opentelemetry-semantic-conventions-ai"
+    - pytest -v -s tracing
+
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"
   mirror_hardwares: [amd]
