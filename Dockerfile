@@ -103,7 +103,7 @@ RUN python3 check-wheel-size.py dist
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM ubuntu22.04 AS vllm-base
+FROM ubuntu:22.04 AS vllm-base
 WORKDIR /vllm-workspace
 
 RUN apt-get update -y \
