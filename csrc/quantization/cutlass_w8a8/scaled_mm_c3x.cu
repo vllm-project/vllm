@@ -233,11 +233,10 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   CUTLASS_CHECK(status);
 }
 
-template <typename InType,
-          typename OutType,
+template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_fp8_config_default {
-  // M in (128, inf) 
+  // M in (128, inf)
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
@@ -249,8 +248,7 @@ struct sm90_fp8_config_default {
                       KernelSchedule, EpilogueSchedule>;
 };
 
-template <typename InType,
-          typename OutType,
+template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_fp8_config_M128 {
   // M in (64, 128]
@@ -265,8 +263,7 @@ struct sm90_fp8_config_M128 {
                       KernelSchedule, EpilogueSchedule>;
 };
 
-template <typename InType,
-          typename OutType,
+template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_fp8_config_M64 {
   // M in [1, 64]
@@ -282,8 +279,7 @@ struct sm90_fp8_config_M64 {
                       KernelSchedule, EpilogueSchedule>;
 };
 
-template <typename InType,
-          typename OutType,
+template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_int8_config_default {
   // For M > 128 and any N
@@ -298,8 +294,7 @@ struct sm90_int8_config_default {
                       KernelSchedule, EpilogueSchedule>;
 };
 
-template <typename InType,
-          typename OutType,
+template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_int8_config_M128 {
   // For M in (64, 128] and any N
@@ -314,8 +309,7 @@ struct sm90_int8_config_M128 {
                       KernelSchedule, EpilogueSchedule>;
 };
 
-template <typename InType,
-          typename OutType,
+template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_int8_config_M64 {
   // For M in (32, 64] and any N
@@ -329,8 +323,7 @@ struct sm90_int8_config_M64 {
                       KernelSchedule, EpilogueSchedule>;
 };
 
-template <typename InType,
-          typename OutType,
+template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_int8_config_M32_NBig {
   // For M in [1, 32] and N >= 8192
@@ -344,8 +337,7 @@ struct sm90_int8_config_M32_NBig {
                       KernelSchedule, EpilogueSchedule>;
 };
 
-template <typename InType,
-          typename OutType,
+template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_int8_config_M32_NSmall {
   // For M in [1, 32] and N < 8192
@@ -361,12 +353,10 @@ struct sm90_int8_config_M32_NSmall {
 
 }  // namespace
 
-template <typename InType,
-          typename OutType,
+template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
-void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out,
-                                    torch::Tensor const& a,
+void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
                                     torch::Tensor const& b,
                                     EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
@@ -374,7 +364,8 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out,
   TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
   using Cutlass3xGemmDefault =
-      typename sm90_fp8_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
+      typename sm90_fp8_config_default<InType, OutType,
+                                       Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM64 =
       typename sm90_fp8_config_M64<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
@@ -399,12 +390,10 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out,
   }
 }
 
-template <typename InType,
-          typename OutType,
+template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
-void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out,
-                                     torch::Tensor const& a,
+void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out, torch::Tensor const& a,
                                      torch::Tensor const& b,
                                      EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, int8_t>());
@@ -412,15 +401,18 @@ void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out,
   TORCH_CHECK(b.dtype() == torch::kInt8);
 
   using Cutlass3xGemmDefault =
-      typename sm90_int8_config_default<InType, OutType, Epilogue>::Cutlass3xGemm;
+      typename sm90_int8_config_default<InType, OutType,
+                                        Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
       typename sm90_int8_config_M128<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM64 =
       typename sm90_int8_config_M64<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM32NBig =
-      typename sm90_int8_config_M32_NBig<InType, OutType, Epilogue>::Cutlass3xGemm;
+      typename sm90_int8_config_M32_NBig<InType, OutType,
+                                         Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM32NSmall =
-      typename sm90_int8_config_M32_NSmall<InType, OutType, Epilogue>::Cutlass3xGemm;
+      typename sm90_int8_config_M32_NSmall<InType, OutType,
+                                           Epilogue>::Cutlass3xGemm;
 
   uint32_t const n = a.size(1);
   bool const is_small_n = n < 8192;
@@ -453,8 +445,7 @@ void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out,
   }
 }
 
-void cutlass_scaled_mm_sm90(torch::Tensor& out,
-                            torch::Tensor const& a,
+void cutlass_scaled_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales) {
