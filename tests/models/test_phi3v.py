@@ -4,31 +4,24 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_FILES
 
 pytestmark = pytest.mark.vlm
 
-_PREFACE = (
-    "A chat between a curious human and an artificial intelligence assistant. "
-    "The assistant gives helpful, detailed, and polite answers to the human's "
-    "questions.")
-
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = [
-    f"{_PREFACE} <image>\nUSER: What's the content of the image? ASSISTANT:",
-    f"{_PREFACE} <image>\nUSER: What is the season? ASSISTANT:",
+    "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
+    "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
 ]
 
 assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
 
 
-def iter_llava_next_configs(model_name: str):
+def iter_phi3v_configs(model_name: str):
     image_hw_to_feature_size = {
-        (336, 336): 1176,
-        (672, 672): 2928,
-        (1344, 336): 1944,
-        (336, 1344): 1890,
+        (1008, 1344): 1921,
     }
 
     for (h, w), f in image_hw_to_feature_size.items():
@@ -38,14 +31,14 @@ def iter_llava_next_configs(model_name: str):
             yield (model_name,
                    VisionLanguageConfig(image_input_type=input_type,
                                         image_feature_size=f,
-                                        image_token_id=32000,
+                                        image_token_id=32044,
                                         image_input_shape=input_shape,
                                         image_processor=model_name,
                                         image_processor_revision=None))
 
 
 model_and_vl_config = [
-    *iter_llava_next_configs("llava-hf/llava-v1.6-vicuna-7b-hf"),
+    *iter_phi3v_configs("microsoft/Phi-3-vision-128k-instruct"),
 ]
 
 
@@ -63,21 +56,28 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     image_token_str = tokenizer.decode(image_token_id)
 
     hf_input_ids = [
-        input_id for idx, input_id in enumerate(input_ids)
-        if input_id != image_token_id or input_ids[idx - 1] != image_token_id
+        input_id if input_id != image_token_id else 0
+        for idx, input_id in enumerate(input_ids)
     ]
     hf_output_str = output_str \
-        .replace(image_token_str * vlm_config.image_feature_size, " ")
+        .replace(image_token_str * vlm_config.image_feature_size, "") \
+        .replace("<s>", " ").replace("<|user|>", "") \
+        .replace("<|end|>\n<|assistant|>", " ")
 
     return hf_input_ids, hf_output_str
 
 
-@pytest.mark.xfail(
-    reason="Inconsistent image processor being used due to lack "
-    "of support for dynamic image token replacement")
+target_dtype = "half"
+if is_cpu():
+    target_dtype = "bfloat16"
+
+
+# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
+# Since we use _attn_implementation="eager" for hf_runner, here is
+# numeric difference for longer context and test can't pass
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("dtype", [target_dtype])
+@pytest.mark.parametrize("max_tokens", [8])
 def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
                 model_and_config, dtype: str, max_tokens: int) -> None:
     """Inference result should be the same between hf and vllm.
@@ -91,24 +91,25 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     """
     model_id, vlm_config = model_and_config
 
-    with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
+    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
+    hf_model_kwargs = {"_attn_implementation": "eager"}
+    with hf_runner(model_id, dtype=dtype,
+                   model_kwargs=hf_model_kwargs) as hf_model:
         hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
                                               max_tokens,
                                               images=hf_images)
 
     vllm_image_prompts = [
-        p.replace("<image>", "<image>" * vlm_config.image_feature_size)
+        p.replace("<|image_1|>",
+                  "<|image|>" * vlm_config.image_feature_size + "<s>")
         for p in HF_IMAGE_PROMPTS
     ]
 
-    with vllm_runner(
-            model_id,
-            dtype=dtype,
-            # should be greater than image_feature_size
-            max_model_len=4096,
-            enforce_eager=True,
-            **vlm_config.as_cli_args_dict(),
-    ) as vllm_model:
+    with vllm_runner(model_id,
+                     max_model_len=2048,
+                     dtype=dtype,
+                     enforce_eager=True,
+                     **vlm_config.as_cli_args_dict()) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
                                                   max_tokens,
                                                   images=vllm_images)
