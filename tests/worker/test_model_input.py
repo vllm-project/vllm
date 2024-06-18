@@ -6,7 +6,7 @@ import torch
 from vllm.attention import AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.model_executor import SamplingMetadata
-from vllm.worker.model_input import GPUModelInputWithSamplingMetadata
+from vllm.worker.model_input import ModelInputForGPUWithSamplingMetadata
 
 
 class MockAttentionBackend(AttentionBackend):
@@ -61,19 +61,20 @@ def test_gpu_model_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
     )
-    model_input = GPUModelInputWithSamplingMetadata.new(
+    model_input = ModelInputForGPUWithSamplingMetadata.new(
         num_seq_groups=10,
         sampling_metadata=sampling_metadata,
         attn_metadata=attn_metadata)
 
-    assert isinstance(model_input, GPUModelInputWithSamplingMetadata)
+    assert isinstance(model_input, ModelInputForGPUWithSamplingMetadata)
 
     # Test round trip serialization.
     tensor_dict = model_input.as_broadcastable_tensor_dict()
     attn_backend = MockAttentionBackend()
-    received_model_input = GPUModelInputWithSamplingMetadata.new(
+    received_model_input = ModelInputForGPUWithSamplingMetadata.new(
         attn_backend=attn_backend, **tensor_dict)
-    assert isinstance(received_model_input, GPUModelInputWithSamplingMetadata)
+    assert isinstance(received_model_input,
+                      ModelInputForGPUWithSamplingMetadata)
 
     # Broadcast should not contain empty values.
     for field in dataclasses.fields(model_input):

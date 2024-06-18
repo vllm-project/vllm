@@ -47,7 +47,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
-        is_driver_worker: bool = False,
+        _is_driver_worker: bool = False,
     ) -> None:
         assert device_config.device_type == "xpu"
         assert is_xpu()
@@ -62,8 +62,8 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
-        self.is_driver_worker = is_driver_worker
-        if self.is_driver_worker:
+        self._is_driver_worker = _is_driver_worker
+        if self._is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
         self.vision_language_config = vision_language_config
@@ -71,7 +71,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
-        self.model_runner = XPUModelRunner(  # type: ignore
+        self._model_runner = XPUModelRunner(  # type: ignore
             model_config,
             parallel_config,
             scheduler_config,
@@ -80,7 +80,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             load_config=self.load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=is_driver_worker,
+            _is_driver_worker=_is_driver_worker,
             vision_language_config=vision_language_config,
         )
         # Uninitialized cache engine. Will be initialized by
@@ -123,7 +123,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        self.model_runner.profile_run()
+        self._model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.

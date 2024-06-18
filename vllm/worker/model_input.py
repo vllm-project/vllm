@@ -90,7 +90,7 @@ class ModelInput:
     Python class like SamplingMetadata. For these fields, override
     as_broadcastable_tensor_dict to return the custom serialized values and
     override _get_init_kwargs to perform the custom deserialization (
-    GPUModelInput for an example).
+    ModelInputForGPU for an example).
     """
 
     @property
@@ -155,10 +155,9 @@ class CPUModelInput(ModelInput):
     """
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
-    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
-
     attn_metadata: Optional["AttentionMetadata"] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
+    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
 
     @property
     def broadcastable_fields(self) -> Tuple[str, ...]:
@@ -185,7 +184,7 @@ class CPUModelInput(ModelInput):
 
 
 @dataclasses.dataclass(frozen=True)
-class GPUModelInput(ModelInput):
+class ModelInputForGPU(ModelInput):
     """
     This base class contains metadata needed for the base model forward pass
     but not metadata for possible additional steps, e.g., sampling. Model
@@ -198,9 +197,8 @@ class GPUModelInput(ModelInput):
     query_lens: Optional[List[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
     lora_requests: Optional[Set[LoRARequest]] = None
-    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
-
     attn_metadata: Optional["AttentionMetadata"] = None
+    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
 
     @property
     def broadcastable_fields(self) -> Tuple[str, ...]:
@@ -226,7 +224,7 @@ class GPUModelInput(ModelInput):
 
 
 @dataclasses.dataclass(frozen=True)
-class GPUModelInputWithPoolingMetadata(GPUModelInput):
+class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
     """
     Used by the EmbeddingModelRunner.
     """
@@ -234,7 +232,7 @@ class GPUModelInputWithPoolingMetadata(GPUModelInput):
 
 
 @dataclasses.dataclass(frozen=True)
-class GPUModelInputWithSamplingMetadata(GPUModelInput):
+class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     """
     Used by the ModelRunner.
     """
@@ -267,3 +265,30 @@ class ModelInputForNeuron(ModelInput):
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
         raise NotImplementedError("ModelInputForNeuron cannot be broadcast.")
+
+
+@dataclasses.dataclass(frozen=True)
+class ModelInputForXPU(ModelInput):
+    """
+    Used by the NeuronModelRunner.
+    """
+    input_tokens: Optional[torch.Tensor] = None
+    input_positions: Optional[torch.Tensor] = None
+    attn_metadata: Optional["AttentionMetadata"] = None
+    sampling_metadata: Optional["SamplingMetadata"] = None
+    multi_modal_input: Optional[Dict[str, torch.Tensor]] = None
+
+    @classmethod
+    def _get_init_kwargs(  # type: ignore
+            cls, **kwargs) -> Dict[str, Any]:
+        kwargs = _init_attn_metadata_from_kwargs(**kwargs)
+        kwargs = _init_sampling_metadata_from_kwargs(**kwargs)
+        return super()._get_init_kwargs(**kwargs)
+
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
+        tensor_dict = super().as_broadcastable_tensor_dict()
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                  self.sampling_metadata)
+        return tensor_dict

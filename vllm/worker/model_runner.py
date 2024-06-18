@@ -25,8 +25,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
-from vllm.worker.model_input import (GPUModelInput,
-                                     GPUModelInputWithSamplingMetadata)
+from vllm.worker.model_input import (ModelInputForGPU,
+                                     ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import ModelRunnerBase
 
 logger = init_logger(__name__)
@@ -41,10 +41,10 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 _NUM_WARMUP_ITERS = 2
 
-TGPUModelInput = TypeVar('TGPUModelInput', bound="GPUModelInput")
+TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
 
-class GPUModelRunnerBase(ModelRunnerBase[TGPUModelInput]):
+class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     """
     Helper class for shared methods between GPU model runners.
     """
@@ -215,7 +215,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TGPUModelInput]):
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> TGPUModelInput:
+    ) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
         metadata for possible additional steps, e.g., sampling.
@@ -831,13 +831,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TGPUModelInput]):
         return self.model_config.get_vocab_size()
 
 
-class ModelRunner(GPUModelRunnerBase[GPUModelInputWithSamplingMetadata]):
+class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     """
     GPU model runner with sampling step.
     """
 
-    def make_model_input(self, **kwargs) -> GPUModelInputWithSamplingMetadata:
-        return GPUModelInputWithSamplingMetadata.new(
+    def make_model_input(self,
+                         **kwargs) -> ModelInputForGPUWithSamplingMetadata:
+        return ModelInputForGPUWithSamplingMetadata.new(
             attn_backend=self.attn_backend,
             **kwargs,
         )
@@ -845,7 +846,7 @@ class ModelRunner(GPUModelRunnerBase[GPUModelInputWithSamplingMetadata]):
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> GPUModelInputWithSamplingMetadata:
+    ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
 
@@ -871,7 +872,7 @@ class ModelRunner(GPUModelRunnerBase[GPUModelInputWithSamplingMetadata]):
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: GPUModelInputWithSamplingMetadata,
+        model_input: ModelInputForGPUWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
     ) -> SamplerOutput:
         if self.lora_config:

@@ -9,14 +9,14 @@ from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
-from vllm.worker.model_input import GPUModelInputWithPoolingMetadata
+from vllm.worker.model_input import ModelInputForGPUWithPoolingMetadata
 from vllm.worker.model_runner import GPUModelRunnerBase
 
 logger = init_logger(__name__)
 
 
-class EmbeddingModelRunner(GPUModelRunnerBase[GPUModelInputWithPoolingMetadata]
-                           ):
+class EmbeddingModelRunner(
+        GPUModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
 
     def __init__(
         self,
@@ -45,7 +45,7 @@ class EmbeddingModelRunner(GPUModelRunnerBase[GPUModelInputWithPoolingMetadata]
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: GPUModelInputWithPoolingMetadata,
+        model_input: ModelInputForGPUWithPoolingMetadata,
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         if self.lora_config:
@@ -86,8 +86,9 @@ class EmbeddingModelRunner(GPUModelRunnerBase[GPUModelInputWithPoolingMetadata]
         return self.model.pooler(hidden_states=hidden_states,
                                  pooling_metadata=model_input.pooling_metadata)
 
-    def make_model_input(self, **kwargs) -> GPUModelInputWithPoolingMetadata:
-        return GPUModelInputWithPoolingMetadata.new(
+    def make_model_input(self,
+                         **kwargs) -> ModelInputForGPUWithPoolingMetadata:
+        return ModelInputForGPUWithPoolingMetadata.new(
             attn_backend=self.attn_backend,
             **kwargs,
         )
@@ -95,7 +96,7 @@ class EmbeddingModelRunner(GPUModelRunnerBase[GPUModelInputWithPoolingMetadata]
     def prepare_model_input(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> GPUModelInputWithPoolingMetadata:
+    ) -> ModelInputForGPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list)

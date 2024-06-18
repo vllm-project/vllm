@@ -14,6 +14,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import CudaMemoryProfiler, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
+from vllm.worker.model_runner_base import ModelRunnerBase
+from vllm.worker.model_input import ModelInputForXPU
 
 logger = init_logger(__name__)
 
@@ -24,7 +26,7 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 
 
-class XPUModelRunner:
+class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
 
     def __init__(
         self,
@@ -134,11 +136,16 @@ class XPUModelRunner:
         torch.xpu.synchronize()
         return
 
-    def prepare_input_tensors(
+    def make_model_input(self, **kwargs) -> ModelInputForXPU:
+        return ModelInputForXPU.new(
+            attn_backend=self.attn_backend,
+            **kwargs,
+        )
+
+    def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Optional[torch.Tensor]]:
+    ) -> ModelInputForXPU:
         multi_modal_input = None
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
@@ -185,8 +192,11 @@ class XPUModelRunner:
                 num_prompts=0,
             )
 
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, multi_modal_input)
+        return self.make_model_input(input_tokens=input_tokens,
+                                     input_positions=input_positions,
+                                     attn_metadata=attn_metadata,
+                                     sampling_metadata=sampling_metadata,
+                                     multi_modal_input=multi_modal_input)
 
     def _prepare_decode(
         self,
@@ -277,27 +287,25 @@ class XPUModelRunner:
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        model_input: ModelInputForXPU,
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
-
         model_executable = self.model
         execute_model_kwargs = {
-            "input_ids": input_tokens,
-            "positions": input_positions,
+            "input_ids": model_input.input_tokens,
+            "positions": model_input.input_positions,
             "kv_caches": kv_caches,
-            "attn_metadata": attn_metadata,
+            "attn_metadata": model_input.attn_metadata,
         }
         if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": multi_modal_input})
+            execute_model_kwargs.update(
+                {"image_input": model_input.multi_modal_input})
 
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        logits = self.model.compute_logits(hidden_states,
+                                           model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
@@ -306,7 +314,7 @@ class XPUModelRunner:
         # Sample the next token.
         output = self.model.sample(
             logits=logits,
-            sampling_metadata=sampling_metadata,
+            sampling_metadata=model_input.sampling_metadata,
         )
         return output
 
