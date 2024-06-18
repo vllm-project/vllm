@@ -2,22 +2,6 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-  - label: ":docker: build image"
-    agents:
-      queue: cpu_queue
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --tag {{ docker_image }} --target test --progress plain ."
-      - "docker push {{ docker_image }}"
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 5
-        - exit_status: -10  # Agent was lost
-          limit: 5
-  - wait
   - label: "A100 Benchmark"
     agents:
       queue: a100-queue
@@ -25,7 +9,7 @@ steps:
     - kubernetes:
         podSpec:
           containers:
-          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:5811d6d87df59f3043772875128023b4c9efc6dd
             command:
             - bash .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
             resources:
