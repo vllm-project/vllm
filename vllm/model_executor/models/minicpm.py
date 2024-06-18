@@ -500,6 +500,8 @@ class MiniCPMForCausalLM(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            if "lm_head" in name:
+                continue
             if ("rotary_emb.cos_cached" in name
                     or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
