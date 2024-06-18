@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -146,8 +146,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Beam search case
         # Select the child sequences to keep in the sequence group.
-        selected_child_seqs = []
-        unselected_child_seqs = []
+        selected_child_seqs: List[Tuple[Sequence, Optional[Sequence]]] = []
+        unselected_child_seqs: List[Tuple[Sequence, Optional[Sequence]]] = []
         beam_width = seq_group.sampling_params.best_of
         length_penalty = seq_group.sampling_params.length_penalty
 

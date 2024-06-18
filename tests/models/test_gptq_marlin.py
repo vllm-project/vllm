@@ -11,9 +11,8 @@ Run `pytest tests/models/test_gptq_marlin.py`.
 import os
 
 import pytest
-import torch
 
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from tests.quantization.utils import is_quant_method_supported
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
 from .utils import check_logprobs_close
@@ -21,14 +20,6 @@ from .utils import check_logprobs_close
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
-
-gptq_marlin_not_supported = True
-
-if torch.cuda.is_available():
-    capability = torch.cuda.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
-    gptq_marlin_not_supported = (
-        capability < QUANTIZATION_METHODS["gptq_marlin"].get_min_capability())
 
 MODELS = [
     # act_order==False, group_size=channelwise
@@ -49,11 +40,14 @@ MODELS = [
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit-128g-actorder_True"),
     # 8-bit, act_order==True, group_size=32
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit-32g-actorder_True"),
+
+    # 4-bit, act_order==True, group_size=128
+    ("TechxGenus/gemma-1.1-2b-it-GPTQ", "main")
 ]
 
 
 @pytest.mark.flaky(reruns=3)
-@pytest.mark.skipif(gptq_marlin_not_supported,
+@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])

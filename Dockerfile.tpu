@@ -1,0 +1,19 @@
+ARG NIGHTLY_DATE="20240601"
+ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.10_tpuvm_$NIGHTLY_DATE"
+
+FROM $BASE_IMAGE
+
+WORKDIR /workspace
+COPY . /workspace/vllm
+
+ENV VLLM_TARGET_DEVICE="tpu"
+# Install aiohttp separately to avoid build errors.
+RUN pip install aiohttp
+# Install the TPU and Pallas dependencies.
+RUN pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
+RUN pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+
+# Build vLLM.
+RUN cd /workspace/vllm && python setup.py develop
+
+CMD ["/bin/bash"]

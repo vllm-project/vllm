@@ -375,11 +375,25 @@ class AsyncLLMEngine:
         if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutorAsync
             executor_class = NeuronExecutorAsync
+        elif engine_config.device_config.device_type == "tpu":
+            from vllm.executor.tpu_executor import TPUExecutorAsync
+            executor_class = TPUExecutorAsync
         elif engine_config.device_config.device_type == "cpu":
             assert distributed_executor_backend is None, (
                 "Distributed execution is not supported with the CPU backend.")
             from vllm.executor.cpu_executor import CPUExecutorAsync
             executor_class = CPUExecutorAsync
+        elif engine_config.device_config.device_type == "xpu":
+            if distributed_executor_backend is None:
+                from vllm.executor.xpu_executor import XPUExecutorAsync
+                executor_class = XPUExecutorAsync
+            elif distributed_executor_backend == "ray":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
+                executor_class = RayXPUExecutorAsync
+            else:
+                raise RuntimeError(
+                    "Not supported distributed execution model on XPU device.")
         elif distributed_executor_backend == "ray":
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
@@ -577,21 +591,9 @@ class AsyncLLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
-        if self.engine_use_ray:
-            processed_inputs = await self.engine.process_model_inputs_async \
-                .remote(  # type: ignore
-                    request_id=request_id,
-                    inputs=inputs,
-                    lora_request=lora_request)
-        else:
-            processed_inputs = await self.engine.process_model_inputs_async(
-                request_id=request_id,
-                inputs=inputs,
-                lora_request=lora_request)
-
         stream = self._request_tracker.add_request(
             request_id,
-            inputs=processed_inputs,
+            inputs=inputs,
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
