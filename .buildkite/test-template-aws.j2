@@ -10,7 +10,7 @@ steps:
     - kubernetes:
         podSpec:
           containers:
-          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:db5ec52ad7dc69dbe8dd9ba25fe8f2c6ce35a4cf
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:32c86e494a49dff8d1d4b10c5922a36daa6e8faf
             command:
             - bash .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
             resources:
