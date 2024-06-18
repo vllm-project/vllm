@@ -2,23 +2,58 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-  - label: "user check"
+  {% for step in steps %}
+  {% if step.gpu == "a100" %}
+  - label: "{{ step.label }}"
     agents:
       queue: a100-queue
-    commands:
-      - whoami
-      - cat /etc/os-release
-      - nvidia-smi
-  - wait
-  {% for step in steps %}
+    soft_fail: {{ step.soft_fail or false }}
+    {% if step.parallelism %}
+    parallelism: {{ step.parallelism }}
+    {% endif %}
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+    - kubernetes:
+        podSpec:
+          containers:
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:13db4369d9ab3158a01192d60c744c6523961824
+            command: ["bash"]
+            args:
+            - '-c'
+            - "'cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}'"
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+            volumeMounts:
+            - name: devshm
+              mountPath: /dev/shm
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+  {% endif %}
+  {% if step.gpu != "a100" %}
   - label: "{{ step.label }}"
     agents:
       {% if step.label == "Documentation Build" %}
       queue: small_cpu_queue
       {% elif step.no_gpu %}
       queue: cpu_queue
-      {% elif step.gpu == "a100" %}
-      queue: a100-queue
       {% elif step.num_gpus == 2 or step.num_gpus == 4 %}
       queue: gpu_4_queue
       {% else %}
@@ -54,4 +89,5 @@ steps:
             {% endif %}
           volumes:
             - /dev/shm:/dev/shm
+  {% endif %}
   {% endfor %}

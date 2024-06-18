@@ -15,6 +15,7 @@ steps:
 
 - label: Basic Correctness Test
   mirror_hardwares: [amd]
+  gpu: a100
   commands:
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
