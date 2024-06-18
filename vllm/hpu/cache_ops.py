@@ -19,6 +19,19 @@ def reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, dtype, i
     value_cache.index_put_((indices, offsets), value)
 
 
+def prepare_to_cache(cache, slot_mapping):
+    block_size = cache.size(1)
+    slot_mapping = slot_mapping.flatten()
+    indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    offsets = torch.fmod(slot_mapping, block_size)
+
+    return indices, offsets
+
+
+def insert_or_update_cache(input, cache, block_indices, block_offsets):
+    cache.index_put_((block_indices, block_offsets), input)
+
+
 def swap_blocks(src, dst, block_mapping):
     index_src = torch.zeros((1,), dtype=torch.int32, device=src.device)
     index_dst = torch.zeros((1,), dtype=torch.int32, device=dst.device)

@@ -7,7 +7,7 @@
 
 import torch
 import habana_frameworks.torch as htorch
-from vllm.attention.ops.habana_paged_attn import HabanaPagedAttention
+from vllm.hpu.cache_ops import insert_or_update_cache
 
 def with_mark_steps(fn):
     def wrapped(*args, **kwargs):
@@ -104,7 +104,9 @@ class VLLMKVCache(torch.nn.Module):
     def __init__(self):
         super(VLLMKVCache, self).__init__()
 
-    def forward(self, key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype, is_prefill_metadata):
-        HabanaPagedAttention.write_to_paged_cache(key, value, key_cache, value_cache,
-                                                  slot_mapping, kv_cache_dtype, is_prefill_metadata)
-        return key_cache, value_cache
+    def forward(self, input, cache, block_indices, block_offset):
+        insert_or_update_cache(input, cache, block_indices, block_offset)
+        return cache
+
+    def fetch_from_cache(self, cache, blocks, permutations):
+        return [cache.index_select(0, blocks[:, i]).permute(permutations) for i in range(blocks.size(1))]
