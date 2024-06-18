@@ -55,6 +55,11 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
               b.stride(1) % 16 == 0);  // 16 Byte Alignment
   TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 
+  if (bias) {
+    TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous() &&
+                bias->dim() == 1);
+  }
+
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
 
   if (version_num >= 90) {
