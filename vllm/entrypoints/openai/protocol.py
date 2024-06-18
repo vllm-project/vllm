@@ -322,9 +322,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
-            elif not 0 <= data["top_logprobs"] <= 20:
+            elif data["top_logprobs"] < 0:
                 raise ValueError(
-                    "`top_logprobs` must be a value in the interval [0, 20].")
+                    "`top_logprobs` must be a value a positive value.")
         return data
 
 
@@ -346,6 +346,7 @@ class CompletionRequest(OpenAIBaseModel):
                                 le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     suffix: Optional[str] = None
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
@@ -477,9 +478,16 @@ class CompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if "logprobs" in data and data[
-                "logprobs"] is not None and not 0 <= data["logprobs"] <= 5:
-            raise ValueError(("if passed, `logprobs` must be a value",
-                              " in the interval [0, 5]."))
+                "logprobs"] is not None and not data["logprobs"] >= 0:
+            raise ValueError("if passed, `logprobs` must be a positive value.")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_stream_options(cls, data):
+        if data.get("stream_options") and not data.get("stream"):
+            raise ValueError(
+                "Stream options can only be defined when stream is True.")
         return data
 
 
@@ -505,7 +513,8 @@ class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
-    top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
+    top_logprobs: List[Optional[Dict[str,
+                                     float]]] = Field(default_factory=list)
 
 
 class CompletionResponseChoice(OpenAIBaseModel):
@@ -604,7 +613,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
-    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
+    finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
 
 
@@ -627,7 +636,7 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     delta: DeltaMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
-    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
+    finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
 
 
@@ -663,6 +672,17 @@ class BatchRequestInput(OpenAIBaseModel):
     body: Union[ChatCompletionRequest, ]
 
 
+class BatchResponseData(OpenAIBaseModel):
+    # HTTP status code of the response.
+    status_code: int = 200
+
+    # An unique identifier for the API request.
+    request_id: str
+
+    # The body of the response.
+    body: Union[ChatCompletionResponse, ]
+
+
 class BatchRequestOutput(OpenAIBaseModel):
     """
     The per-line object of the batch output and error files
@@ -674,7 +694,7 @@ class BatchRequestOutput(OpenAIBaseModel):
     # inputs.
     custom_id: str
 
-    response: Optional[ChatCompletionResponse]
+    response: Optional[BatchResponseData]
 
     # For requests that failed with a non-HTTP error, this will contain more
     # information on the cause of the failure.

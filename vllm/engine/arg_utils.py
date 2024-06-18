@@ -7,8 +7,9 @@ from typing import List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         TokenizerPoolConfig, VisionLanguageConfig)
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                         SpeculativeConfig, TokenizerPoolConfig,
+                         VisionLanguageConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import str_to_int_tuple
 
@@ -48,11 +49,12 @@ class EngineArgs:
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
-    max_logprobs: int = 5  # OpenAI default value
+    max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
     rope_scaling: Optional[dict] = None
+    rope_theta: Optional[float] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: bool = False
@@ -68,7 +70,7 @@ class EngineArgs:
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
-    lora_dtype = 'auto'
+    lora_dtype: str = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
@@ -99,6 +101,8 @@ class EngineArgs:
     ngram_prompt_lookup_min: Optional[int] = None
 
     qlora_adapter_name_or_path: Optional[str] = None
+
+    otlp_traces_endpoint: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -229,7 +233,7 @@ class EngineArgs:
             '* "dummy" will initialize the weights with random values, '
             'which is mainly for profiling.\n'
             '* "tensorizer" will load the weights using tensorizer from '
-            'CoreWeave. See the Tensorize vLLM Model script in the Examples'
+            'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
@@ -400,6 +404,12 @@ class EngineArgs:
                             type=json.loads,
                             help='RoPE scaling configuration in JSON format. '
                             'For example, {"type":"dynamic","factor":2.0}')
+        parser.add_argument('--rope-theta',
+                            default=None,
+                            type=float,
+                            help='RoPE theta. Use with `rope_scaling`. In '
+                            'some cases, changing the RoPE theta improves the '
+                            'performance of the scaled model.')
         parser.add_argument('--enforce-eager',
                             action='store_true',
                             help='Always use eager-mode PyTorch. If False, '
@@ -494,11 +504,12 @@ class EngineArgs:
                   'Enabling this will use the fully sharded layers. '
                   'At high sequence length, max rank or '
                   'tensor parallel size, this is likely faster.'))
-        parser.add_argument("--device",
-                            type=str,
-                            default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron", "cpu"],
-                            help='Device type for vLLM execution.')
+        parser.add_argument(
+            "--device",
+            type=str,
+            default=EngineArgs.device,
+            choices=["auto", "cuda", "neuron", "cpu", "tpu", "xpu"],
+            help='Device type for vLLM execution.')
 
         # Related to Vision-language models such as llava
         parser = EngineArgs.add_cli_args_for_vlm(parser)
@@ -591,6 +602,13 @@ class EngineArgs:
                             type=str,
                             default=None,
                             help='Name or path of the QLoRA adapter.')
+
+        parser.add_argument(
+            '--otlp-traces-endpoint',
+            type=str,
+            default=None,
+            help='Target URL to which OpenTelemetry traces will be sent.')
+
         return parser
 
     @classmethod
@@ -630,6 +648,7 @@ class EngineArgs:
             revision=self.revision,
             code_revision=self.code_revision,
             rope_scaling=self.rope_scaling,
+            rope_theta=self.rope_theta,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
@@ -748,6 +767,9 @@ class EngineArgs:
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
 
+        observability_config = ObservabilityConfig(
+            otlp_traces_endpoint=self.otlp_traces_endpoint)
+
         if (model_config.get_sliding_window() is not None
                 and scheduler_config.chunked_prefill_enabled
                 and not scheduler_config.use_v2_block_manager):
@@ -755,16 +777,19 @@ class EngineArgs:
                 "Chunked prefill is not supported with sliding window. "
                 "Set --disable-sliding-window to disable sliding window.")
 
-        return EngineConfig(model_config=model_config,
-                            cache_config=cache_config,
-                            parallel_config=parallel_config,
-                            scheduler_config=scheduler_config,
-                            device_config=device_config,
-                            lora_config=lora_config,
-                            vision_language_config=vision_language_config,
-                            speculative_config=speculative_config,
-                            load_config=load_config,
-                            decoding_config=decoding_config)
+        return EngineConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            lora_config=lora_config,
+            vision_language_config=vision_language_config,
+            speculative_config=speculative_config,
+            load_config=load_config,
+            decoding_config=decoding_config,
+            observability_config=observability_config,
+        )
 
 
 @dataclass

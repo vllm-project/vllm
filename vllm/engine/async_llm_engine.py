@@ -244,6 +244,9 @@ class _AsyncLLMEngine(LLMEngine):
         # Log stats.
         self.do_log_stats(scheduler_outputs, output)
 
+        # Tracing
+        self.do_tracing(scheduler_outputs)
+
         if not request_outputs:
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
@@ -285,6 +288,7 @@ class _AsyncLLMEngine(LLMEngine):
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -301,6 +305,7 @@ class _AsyncLLMEngine(LLMEngine):
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            trace_headers=trace_headers,
         )
 
     async def check_health_async(self) -> None:
@@ -375,11 +380,25 @@ class AsyncLLMEngine:
         if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutorAsync
             executor_class = NeuronExecutorAsync
+        elif engine_config.device_config.device_type == "tpu":
+            from vllm.executor.tpu_executor import TPUExecutorAsync
+            executor_class = TPUExecutorAsync
         elif engine_config.device_config.device_type == "cpu":
             assert distributed_executor_backend is None, (
                 "Distributed execution is not supported with the CPU backend.")
             from vllm.executor.cpu_executor import CPUExecutorAsync
             executor_class = CPUExecutorAsync
+        elif engine_config.device_config.device_type == "xpu":
+            if distributed_executor_backend is None:
+                from vllm.executor.xpu_executor import XPUExecutorAsync
+                executor_class = XPUExecutorAsync
+            elif distributed_executor_backend == "ray":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
+                executor_class = RayXPUExecutorAsync
+            else:
+                raise RuntimeError(
+                    "Not supported distributed execution model on XPU device.")
         elif distributed_executor_backend == "ray":
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
@@ -542,6 +561,7 @@ class AsyncLLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> AsyncStream:
         if self.log_requests:
             if isinstance(inputs, str):
@@ -577,24 +597,13 @@ class AsyncLLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
-        if self.engine_use_ray:
-            processed_inputs = await self.engine.process_model_inputs_async \
-                .remote(  # type: ignore
-                    request_id=request_id,
-                    inputs=inputs,
-                    lora_request=lora_request)
-        else:
-            processed_inputs = await self.engine.process_model_inputs_async(
-                request_id=request_id,
-                inputs=inputs,
-                lora_request=lora_request)
-
         stream = self._request_tracker.add_request(
             request_id,
-            inputs=processed_inputs,
+            inputs=inputs,
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            trace_headers=trace_headers,
         )
 
         return stream
@@ -605,6 +614,7 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -619,6 +629,7 @@ class AsyncLLMEngine:
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
+            trace_headers: OpenTelemetry trace headers.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine
@@ -672,6 +683,7 @@ class AsyncLLMEngine:
                 inputs,
                 sampling_params,
                 lora_request=lora_request,
+                trace_headers=trace_headers,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
 
@@ -681,6 +693,7 @@ class AsyncLLMEngine:
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> AsyncIterator[EmbeddingRequestOutput]:
         """Generate outputs for a request from an embedding model.
 
@@ -695,6 +708,7 @@ class AsyncLLMEngine:
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
+            trace_headers: OpenTelemetry trace headers.
 
         Yields:
             The output `EmbeddingRequestOutput` objects from the LLMEngine
@@ -746,6 +760,7 @@ class AsyncLLMEngine:
                 inputs,
                 pooling_params,
                 lora_request=lora_request,
+                trace_headers=trace_headers,
         ):
             yield LLMEngine.validate_output(output, EmbeddingRequestOutput)
 
@@ -756,6 +771,7 @@ class AsyncLLMEngine:
         params: Union[SamplingParams, PoolingParams],
         *,
         lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> AsyncIterator[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Common logic to process requests with SamplingParams or
         PoolingParams."""
@@ -767,6 +783,7 @@ class AsyncLLMEngine:
             params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            trace_headers=trace_headers,
         )
 
         try:
@@ -846,3 +863,10 @@ class AsyncLLMEngine:
         else:
             await self.engine.check_health_async()
         logger.debug("Health check took %fs", time.perf_counter() - t)
+
+    async def is_tracing_enabled(self) -> bool:
+        if self.engine_use_ray:
+            return await self.engine.is_tracing_enabled.remote(  # type: ignore
+            )
+        else:
+            return self.engine.is_tracing_enabled()

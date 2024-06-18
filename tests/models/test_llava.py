@@ -7,7 +7,7 @@ from vllm.config import VisionLanguageConfig
 
 from ..conftest import IMAGE_FILES
 
-pytestmark = pytest.mark.llava
+pytestmark = pytest.mark.vlm
 
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = [
@@ -39,8 +39,6 @@ def iter_llava_configs(model_name: str):
 
 model_and_vl_config = [
     *iter_llava_configs("llava-hf/llava-1.5-7b-hf"),
-    # Not enough memory
-    # *iter_llava_configs("llava-hf/llava-1.5-13b-hf"),
 ]
 
 

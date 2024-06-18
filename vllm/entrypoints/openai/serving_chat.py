@@ -31,6 +31,8 @@ from vllm.multimodal.utils import (async_get_and_parse_image,
                                    get_full_image_text_prompt)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
+from vllm.tracing import (contains_trace_headers, extract_trace_headers,
+                          log_tracing_disabled_warning)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -267,11 +269,20 @@ class OpenAIServingChat(OpenAIServing):
         if image_data is not None:
             inputs["multi_modal_data"] = image_data
 
+        is_tracing_enabled = await self.engine.is_tracing_enabled()
+        trace_headers = None
+        if is_tracing_enabled and raw_request:
+            trace_headers = extract_trace_headers(raw_request.headers)
+        if not is_tracing_enabled and raw_request and contains_trace_headers(
+                raw_request.headers):
+            log_tracing_disabled_warning()
+
         result_generator = self.engine.generate(
             inputs,
             sampling_params,
             request_id,
             lora_request,
+            trace_headers=trace_headers,
         )
         # Streaming response
         if request.stream:
@@ -373,13 +384,15 @@ class OpenAIServingChat(OpenAIServing):
                         continue
 
                     delta_token_ids = output.token_ids[previous_num_tokens[i]:]
-                    top_logprobs = output.logprobs[
+                    out_logprobs = output.logprobs[
                         previous_num_tokens[i]:] if output.logprobs else None
 
-                    if request.logprobs:
+                    if request.logprobs and request.top_logprobs is not None:
+                        assert out_logprobs is not None, (
+                            "Did not output logprobs")
                         logprobs = self._create_chat_logprobs(
                             token_ids=delta_token_ids,
-                            top_logprobs=top_logprobs,
+                            top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.top_logprobs,
                         )
                     else:
@@ -441,25 +454,24 @@ class OpenAIServingChat(OpenAIServing):
                         yield f"data: {data}\n\n"
                         finish_reason_sent[i] = True
 
-                    if (request.stream_options
-                            and request.stream_options.include_usage):
-                        final_usage = UsageInfo(
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=previous_num_tokens[i],
-                            total_tokens=prompt_tokens +
-                            previous_num_tokens[i],
-                        )
+            if (request.stream_options
+                    and request.stream_options.include_usage):
+                final_usage = UsageInfo(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=previous_num_tokens[i],
+                    total_tokens=prompt_tokens + previous_num_tokens[i],
+                )
 
-                        final_usage_chunk = ChatCompletionStreamResponse(
-                            id=request_id,
-                            object=chunk_object_type,
-                            created=created_time,
-                            choices=[],
-                            model=model_name,
-                            usage=final_usage)
-                        final_usage_data = (final_usage_chunk.model_dump_json(
-                            exclude_unset=True, exclude_none=True))
-                        yield f"data: {final_usage_data}\n\n"
+                final_usage_chunk = ChatCompletionStreamResponse(
+                    id=request_id,
+                    object=chunk_object_type,
+                    created=created_time,
+                    choices=[],
+                    model=model_name,
+                    usage=final_usage)
+                final_usage_data = (final_usage_chunk.model_dump_json(
+                    exclude_unset=True, exclude_none=True))
+                yield f"data: {final_usage_data}\n\n"
 
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
@@ -486,17 +498,18 @@ class OpenAIServingChat(OpenAIServing):
             final_res = res
         assert final_res is not None
 
-        choices = []
+        choices: List[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
             token_ids = output.token_ids
-            top_logprobs = output.logprobs
+            out_logprobs = output.logprobs
 
-            if request.logprobs:
+            if request.logprobs and request.top_logprobs is not None:
+                assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,
-                    top_logprobs=top_logprobs,
+                    top_logprobs=out_logprobs,
                     num_output_top_logprobs=request.top_logprobs,
                 )
             else:

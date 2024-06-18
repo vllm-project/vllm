@@ -10,8 +10,10 @@ from transformers import PretrainedConfig, PreTrainedTokenizerBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
+from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
+from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
+                        is_hip, is_neuron, is_tpu, is_xpu)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -93,6 +95,7 @@ class ModelConfig:
         revision: Optional[str] = None,
         code_revision: Optional[str] = None,
         rope_scaling: Optional[dict] = None,
+        rope_theta: Optional[float] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
@@ -100,7 +103,7 @@ class ModelConfig:
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: Optional[int] = None,
-        max_logprobs: int = 5,
+        max_logprobs: int = 20,
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
@@ -113,6 +116,7 @@ class ModelConfig:
         self.revision = revision
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
+        self.rope_theta = rope_theta
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
             self.tokenizer_revision = revision
@@ -132,7 +136,7 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling)
+                                    code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(
@@ -164,12 +168,8 @@ class ModelConfig:
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is None:
-            # SparseML uses a "compression_config" with a "quantization_config".
-            compression_cfg = getattr(self.hf_config, "compression_config",
-                                      None)
-            if compression_cfg is not None:
-                quant_cfg = compression_cfg.get("quantization_config", None)
-
+            # compress-tensors uses a "compression_config" key
+            quant_cfg = getattr(self.hf_config, "compression_config", None)
         return quant_cfg
 
     def _verify_quantization(self) -> None:
@@ -214,7 +214,7 @@ class ModelConfig:
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
             if (self.quantization
-                    not in ["marlin", "gptq_marlin_24", "gptq_marlin"]):
+                    not in ("fp8", "marlin", "gptq_marlin_24", "gptq_marlin")):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -303,7 +303,11 @@ class ModelConfig:
             return 1
 
         # For DBRX and MPT
-        if self.hf_config.model_type in ["dbrx", "mpt"]:
+        if self.hf_config.model_type == "mpt":
+            if "kv_n_heads" in self.hf_config.attn_config:
+                return self.hf_config.attn_config["kv_n_heads"]
+            return self.hf_config.num_attention_heads
+        if self.hf_config.model_type == "dbrx":
             return getattr(self.hf_config.attn_config, "kv_n_heads",
                            self.hf_config.num_attention_heads)
 
@@ -605,9 +609,29 @@ class ParallelConfig:
                                  f"'{self.distributed_executor_backend}'.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
+            # We use multiprocessing by default if world_size fits on the
+            # current node and we aren't in a ray placement group.
+
             from vllm.executor import ray_utils
+            backend = "mp"
             ray_found = ray_utils.ray is not None
-            self.distributed_executor_backend = "ray" if ray_found else "mp"
+            if cuda_device_count_stateless() < self.world_size:
+                if not ray_found:
+                    raise ValueError("Unable to load Ray which is "
+                                     "required for multi-node inference")
+                backend = "ray"
+            elif ray_found:
+                if self.placement_group:
+                    backend = "ray"
+                else:
+                    from ray import is_initialized as ray_is_initialized
+                    if ray_is_initialized():
+                        from ray.util import get_current_placement_group
+                        if get_current_placement_group():
+                            backend = "ray"
+            self.distributed_executor_backend = backend
+            logger.info("Defaulting to use %s for distributed inference",
+                        backend)
 
         self._verify_args()
 
@@ -734,8 +758,12 @@ class DeviceConfig:
             # Automated device type detection
             if is_neuron():
                 self.device_type = "neuron"
+            elif is_tpu():
+                self.device_type = "tpu"
             elif is_cpu():
                 self.device_type = "cpu"
+            elif is_xpu():
+                self.device_type = "xpu"
             else:
                 # We don't call torch.cuda.is_available() here to
                 # avoid initializing CUDA before workers are forked
@@ -747,6 +775,8 @@ class DeviceConfig:
         # Some device types require processing inputs on CPU
         if self.device_type in ["neuron"]:
             self.device = torch.device("cpu")
+        elif self.device_type in ["tpu"]:
+            self.device = None
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
@@ -1074,6 +1104,8 @@ class LoRAConfig:
                 "Due to limitations of the custom LoRA CUDA kernel, "
                 "max_num_batched_tokens must be <= 65528 when "
                 "LoRA is enabled.")
+        if scheduler_config.chunked_prefill_enabled:
+            raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
 @dataclass
@@ -1262,7 +1294,10 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None and rope_scaling["type"] != "su":
+    # The correct one should be "longrope", kept "su" here
+    # to be backward compatible
+    if rope_scaling is not None and rope_scaling["type"] != "su" \
+        and rope_scaling["type"] != "longrope":
         if disable_sliding_window:
             # TODO(robertgshaw): Find a model that supports rope_scaling
             # with sliding window to see if this case should be allowed.
@@ -1337,6 +1372,17 @@ class DecodingConfig:
                              f"must be one of {valid_guided_backends}")
 
 
+@dataclass
+class ObservabilityConfig:
+    """Configuration for observability."""
+    otlp_traces_endpoint: Optional[str] = None
+
+    def __post_init__(self):
+        if not is_otel_installed() and self.otlp_traces_endpoint is not None:
+            raise ValueError("OpenTelemetry packages must be installed before "
+                             "configuring 'otlp_traces_endpoint'")
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     """Dataclass which contains all engine-related configuration. This
@@ -1353,6 +1399,7 @@ class EngineConfig:
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
+    observability_config: Optional[ObservabilityConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
