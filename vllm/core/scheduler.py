@@ -861,16 +861,17 @@ class Scheduler:
             fcfs_policy,
             enable_chunking=True)
 
-        # Schedule swapped out requests.
-        # If preemption happens, it means we don't have space for swap-in.
+        # If preemption happens, it means we don't have space for other requests.
         if len(running_scheduled.preempted) + len(
                 running_scheduled.swapped_out) == 0:
+            # Schedule swapped out requests.
             remaining_swapped, swapped_in = self._schedule_swapped(
                 self.swapped, budget, curr_loras, fcfs_policy)
 
-        # Schedule new prefills.
-        remaining_waiting, prefills = self._schedule_prefills(
-            self.waiting, budget, curr_loras, enable_chunking=True)
+            # Schedule new prefills.
+            if len(remaining_swapped) == 0:
+                remaining_waiting, prefills = self._schedule_prefills(
+                    self.waiting, budget, curr_loras, enable_chunking=True)
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
