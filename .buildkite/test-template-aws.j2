@@ -7,9 +7,8 @@ steps:
       queue: a100-queue
     commands:
       - whoami
-      - yum update -y
-      - amazon-linux-extras install docker
-      - service docker start
+      - cat /etc/os-release
+      - nvidia-smi
   - wait
   {% for step in steps %}
   - label: "{{ step.label }}"
