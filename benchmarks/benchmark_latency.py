@@ -48,6 +48,7 @@ def main(args: argparse.Namespace):
         use_beam_search=args.use_beam_search,
         ignore_eos=True,
         max_tokens=args.output_len,
+        seed=args.seed,
     )
     print(sampling_params)
     dummy_prompt_token_ids = np.random.randint(10000,
@@ -254,5 +255,6 @@ if __name__ == '__main__':
         help='Backend to use for distributed serving. When more than 1 GPU '
         'is used, will be automatically set to "ray" if installed '
         'or "mp" (multiprocessing) otherwise.')
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     main(args)
