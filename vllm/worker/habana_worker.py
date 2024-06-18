@@ -101,6 +101,9 @@ class HabanaWorker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
+        if self.model_config.quantization == 'hqt':
+            import habana_frameworks.torch.core as htcore
+            htcore.hpu_set_env()
         self.model_runner.load_model()
 
     @torch.inference_mode()
@@ -184,6 +187,9 @@ class HabanaWorker(WorkerBase):
         if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
 
+    def finish_measurements(self):
+        self.model_runner.finish_measurements()
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -235,6 +241,12 @@ class HabanaWorker(WorkerBase):
 
     def list_loras(self) -> Set[int]:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
+
+    def shutdown_hqt(self):
+        self.model_runner.shutdown_hqt()
+
+    def __del__(self):
+        self.shutdown_hqt()
 
     @property
     def max_model_len(self) -> int:

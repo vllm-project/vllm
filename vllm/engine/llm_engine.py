@@ -537,6 +537,9 @@ class LLMEngine:
             request_outputs.append(request_output)
         return request_outputs
 
+    def finish_measurements(self):
+        self.model_executor.finish_measurements()
+
     def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
 

@@ -84,6 +84,9 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
+        import os
+        os.environ["LOCAL_RANK"] = str(local_rank)
+        os.environ["RANK"] = str(rank)
 
 
 def initialize_model_parallel(

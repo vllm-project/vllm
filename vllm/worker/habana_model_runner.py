@@ -281,6 +281,11 @@ class HabanaModelRunner:
                     parallel_config=self.parallel_config,
                     scheduler_config=self.scheduler_config,
                 )
+                if self.model_config.quantization == 'hqt':
+                    import habana_quantization_toolkit
+                    habana_quantization_toolkit.prep_model(self.model)
+                    import habana_frameworks.torch.core as htcore
+                    htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
             logger.info(f"Pre-loading model weights on {next(self.model.parameters()).device} took {m_getmodel.get_summary_string()}")
 
             # FIXME: Running with disable_tensor_cache=True causes RuntimeErrors. This needs to be debugged
@@ -810,6 +815,10 @@ class HabanaModelRunner:
                         {'prefill_metadata': prefill_metadata,
                          'decode_metadata': decode_metadata})
 
+    def finish_measurements(self):
+        import habana_quantization_toolkit
+        habana_quantization_toolkit.finish_measurements(self.model.model)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -942,10 +951,16 @@ class HabanaModelRunner:
         logger.info(f"[Warmup][{phase}][{i+1}/{max_i}] batch_size:{batch_size} seq_len:{seq_len} free_mem:{free_mem}")
 
     def warmup_all_buckets(self, buckets, is_prompt, kv_caches):
+        counter = 0
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
             mem_usage = 100.0 * HabanaMemoryProfiler.current_device_memory_usage() / HabanaMemoryProfiler.total_device_memory()
             self.log_warmup('Prompt' if is_prompt else 'Decode', i, len(buckets), batch_size, seq_len)
-            self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
+            try:
+                self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
+            except:
+                print(f"Failed on scenario {i+1}: batch_size={batch_size}, seq_len={seq_len}, is_prompt={is_prompt}")
+                counter += 1
+        print(f"Failed warm-up scenarios = {counter}")
 
     def warmup_graphs(self, strategy, buckets, is_prompt, kv_caches, available_mem):
         total_batch_seq = 0.001
@@ -1007,6 +1022,19 @@ class HabanaModelRunner:
         elapsed_time = end_time - start_time
         logger.info(f"Warmup finished in {elapsed_time:.0f} secs, allocated {format_bytes(end_mem - start_mem)} of device memory")
         self.profiler.end()
+
+    def shutdown_hqt(self):
+        print('hqt shutdown')
+        if model_config := getattr(self, "model_config", None):
+            if getattr(model_config, "quantization", None) == 'hqt':
+                print('hqt shutdown start')
+                import habana_quantization_toolkit
+                if habana_quantization_toolkit is not None:
+                    habana_quantization_toolkit.finish_measurements(self.model.model)
+                print('hqt shutdown')
+
+    def __del__(self):
+        self.shutdown_hqt()
 
     @property
     def vocab_size(self) -> int:
