@@ -113,6 +113,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=requirements-common.txt,target=requirements-common.txt \
     --mount=type=bind,source=requirements-cuda.txt,target=requirements-cuda.txt \
     --mount=type=bind,source=requirements-dev.txt,target=requirements-dev.txt \
+    --mount=type=bind,source=requirements-lint.txt,target=requirements-lint.txt \
+    --mount=type=bind,source=requirements-test.txt,target=requirements-test.txt \
     pip3 install \
         -r requirements-cuda.txt \
         -r requirements-dev.txt
