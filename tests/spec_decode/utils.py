@@ -67,7 +67,7 @@ def create_worker(cls: Callable[..., T],
                   num_gpu_blocks: int,
                   seed: int,
                   is_driver_worker: bool = True,
-                  draft_ranks: List[int] = None,
+                  draft_ranks: Optional[List[int]] = None,
                   enforce_eager: bool = True) -> T:
     engine_args = EngineArgs(
         model=model_name,
@@ -94,7 +94,7 @@ def create_worker(cls: Callable[..., T],
     }
 
     if draft_ranks is not None:
-        assert cls is MultiStepWorker, "draft_ranks arg only works with MultiStepWorker"
+        assert cls is MultiStepWorker, "draft_ranks arg is for MultiStepWorker"
         worker_kwargs['draft_ranks'] = draft_ranks
 
     worker = cls(**worker_kwargs)

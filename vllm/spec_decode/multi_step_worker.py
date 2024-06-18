@@ -40,8 +40,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         of the small size temporarily during forward passes of draft models.
 
         Args:
-            draft_ranks (Optional[List[int]]): if this value is given, only some of
-            the GPU ranks written in this value participate in draft generation
+            draft_ranks (Optional[List[int]]): if this value is given, only some
+            of the GPU ranks in this value participate in draft generation
        """
 
         self._draft_ranks = draft_ranks
