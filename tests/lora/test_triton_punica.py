@@ -468,7 +468,7 @@ def test_triton_bgmv_punica_bgmv(
         ref_out_tensor = ref_out_tensor.to(torch.float32)
     assert_close(our_out_tensor, ref_out_tensor)
 
-@pytest.mark.skip("stop")
+
 @pytest.mark.parametrize("batchs", BATCHS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("nslices", NSLICES)

@@ -9,24 +9,34 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce,
-                              tensor_model_parallel_gather)
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    split_tensor_along_last_dim,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_gather,
+)
 from vllm.distributed.utils import divide
-from vllm.lora.ops.sgmv_expand import sgmv_expand
-from vllm.lora.punica import add_lora_triton, add_lora_triton_slice
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+
+# from vllm.lora.ops.sgmv_expand import sgmv_expand
+from vllm.lora.punica import (
+    add_lora_triton,
+    add_expand_triton,
+)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import (
-    LinearScalingRotaryEmbedding, RotaryEmbedding)
+    LinearScalingRotaryEmbedding,
+    RotaryEmbedding,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    VocabParallelEmbedding, )
 
 if TYPE_CHECKING:
     pass
@@ -55,26 +65,49 @@ def _not_fully_sharded_can_replace(can_replace):
     """
 
     def dec(*args, **kwargs):
-        decorate = kwargs.pop('decorate') if 'decorate' in kwargs else True
-        condition = (not kwargs['lora_config'].fully_sharded_loras
+        decorate = kwargs.pop("decorate") if "decorate" in kwargs else True
+        condition = (not kwargs["lora_config"].fully_sharded_loras
                      if decorate else True)
         return can_replace(*args, **kwargs) and condition
 
     return dec
 
 
+def _apply_expand_triton(
+    x: torch.Tensor,
+    lora_b_stacked: torch.Tensor,
+    lora_index_tensor: torch.Tensor,
+    indices_info: List[int],
+    output: torch.Tensor,
+    add_input: bool = True,
+) -> torch.Tensor:
+    org_output = output
+    x = x.view(-1, x.shape[-1])
+    output = output.view(-1, output.shape[-1])
+    token_num = indices_info[0]
+    is_prefilling = bool(indices_info[4])
+    add_expand_triton(
+        output,
+        x,
+        lora_b_stacked,
+        lora_index_tensor[:token_num],
+        0,
+        is_prefilling,
+        add_input,
+    )
+    return output.view_as(org_output)
+
+
 def _apply_lora_triton(
     x: torch.Tensor,
     lora_a_stacked: torch.Tensor,
     lora_b_stacked: torch.Tensor,
-    b_seq_start_tensor: torch.Tensor,
-    seq_length_tensor: torch.Tensor,
     lora_index_tensor: torch.Tensor,
-    batch_mlen_stage_lst: List[int],
+    indices_info: List[int],
     output: torch.Tensor,
 ) -> torch.Tensor:
-    """Applies lora to each input.   This method applies all loras to each 
-    input. It uses the `lora_index_tensor` vector to determine which lora 
+    """Applies lora to each input.   This method applies all loras to each
+    input. It uses the `lora_index_tensor` vector to determine which lora
     yields the correct output. An index of -1 means no lora should be
     applied. This method adds the final lora results to the output.
 
@@ -82,35 +115,33 @@ def _apply_lora_triton(
         x (torch.Tensor): (batch_size, hidden_dim)
         lora_a_stacked (torch.Tensor): (num_loras, lora_rank, hidden_dim)
         lora_b_stacked (torch.Tensor): (num_loras, output_dim, lora_rank)
-        b_seq_start_tensor (torch.Tensor): (batch_size,). The cumulative
-            sequence lengths of the sequences in the batch, used to index
-            into sequence. E.g.,if the sequence length is [4, 6], it is
-            [0, 4].
-        seq_length_tensor (torch.Tensor): batch_size,). record the sequence
-            length of the sequences in the batch
-        lora_index_tensor (torch.Tensor): (batch_size,). The LoRA index
-            corresponding to each batch
-        batch_mlen_stage_lst (List[int]): (3,).Sequentially represent batch
-            size, maximum seq length, and prefilling stage flag.
-        output (torch.Tensor):  (batch_size, output_dim)  
-        
+        lora_index_tensor (torch.Tensor): (batch_size*seq_number,). The LoRA
+        index corresponding to each token
+        indices_info: List[int]: 5 is the number of indicies tensors.
+        # base_indices, sampler_indices, sampler_indices_padded,
+        # embeddings_indices,prefilling or decoding
+        output (torch.Tensor):  (batch_size, output_dim)
+
     Returns:
-        output (torch.Tensor):  (batch_size, output_dim)  
-        
+        output (torch.Tensor):  (batch_size*seq_number, output_dim)
+
     """
     org_output = output
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
-    #
-    batch_size = batch_mlen_stage_lst[0]
-    max_length = batch_mlen_stage_lst[1]
-    is_prefilling = bool(batch_mlen_stage_lst[2])
 
-    add_lora_triton(output, x, lora_a_stacked, lora_b_stacked,
-                    b_seq_start_tensor[:batch_size],
-                    seq_length_tensor[:batch_size],
-                    lora_index_tensor[:batch_size], batch_size, max_length, 0,
-                    1.0, is_prefilling)
+    token_num = indices_info[0]
+    is_prefilling = bool(indices_info[4])
+    add_lora_triton(
+        output,
+        x,
+        lora_a_stacked,
+        lora_b_stacked,
+        lora_index_tensor[:token_num],
+        0,
+        1.0,
+        is_prefilling,
+    )
     return output.view_as(org_output)
 
 
@@ -118,52 +149,46 @@ def _apply_lora_triton_nslice(
     x: torch.Tensor,
     lora_a_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     lora_b_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    b_seq_start_tensor: torch.Tensor,
-    seq_length_tensor: torch.Tensor,
     lora_index_tensor: torch.Tensor,
-    batch_mlen_stage_lst: List[int],
+    indices_info: List[int],
     output: torch.Tensor,
     output_slices: Tuple[int, ...],
 ) -> torch.Tensor:
-    """Applies lora to each input.  This method applies all loras to each 
-    input. It uses the `lora_index_tensor` vector to determine which lora 
-    yields the correct output. An index of -1 means no lora should be
-    applied. This method adds the final lora results to the output.
+    """_summary_
 
     Args:
-        x (torch.Tensor): (batch_size, hidden_dim)
-        lora_a_stacked (torch.Tensor): (num_loras, lora_rank, hidden_dim)
-        lora_b_stacked (torch.Tensor): (num_loras, output_dim, lora_rank)
-        b_seq_start_tensor (torch.Tensor): (batch_size,). The cumulative
-            sequence lengths of the sequences in the batch, used to index
-            into sequence. E.g.,if the sequence length is [4, 6], it is
-            [0, 4].
-        seq_length_tensor (torch.Tensor): batch_size,). record the sequence
-            length of the sequences in the batch
-        lora_index_tensor (torch.Tensor): (batch_size,). The LoRA index
-            corresponding to each batch
-        batch_mlen_stage_lst (List[int]): (3,).Sequentially represent batch
-            size, maximum seq length, and prefilling stage flag.
-        output_slices (Tuple[int, ...]): Size of each output column 
+        x (torch.Tensor): _description_
+        lora_a_stacked (Tuple[torch.Tensor, torch.Tensor, torch.Tensor]): _description_
+        lora_b_stacked (Tuple[torch.Tensor, torch.Tensor, torch.Tensor]): _description_
+        lora_index_tensor (torch.Tensor): _description_
+        indices_info (List[int]): _description_
+        output (torch.Tensor): _description_
+        output_slices (Tuple[int, ...]): _description_
 
     Returns:
-        output (torch.Tensor):  (batch_size, output_dim) 
+        torch.Tensor: _description_
     """
     org_output = output
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
 
-    batch_size = batch_mlen_stage_lst[0]
-    max_length = batch_mlen_stage_lst[1]
-    is_prefilling = bool(batch_mlen_stage_lst[2])
+    token_num = indices_info[0]
+    is_prefilling = bool(indices_info[4])
     offset_left = 0
-    #TODO fuse these kernel
+    # TODO fuse these kernels
     for slice_idx in range(len(output_slices)):
-        add_lora_triton_slice(
-            output, x, lora_a_stacked[slice_idx], lora_b_stacked[slice_idx],
-            b_seq_start_tensor[:batch_size], seq_length_tensor[:batch_size],
-            lora_index_tensor[:batch_size], batch_size, max_length, 0, 1.0,
-            offset_left, output_slices[slice_idx], is_prefilling)
+        add_lora_triton(
+            output,
+            x,
+            lora_a_stacked[slice_idx],
+            lora_b_stacked[slice_idx],
+            lora_index_tensor[:token_num],
+            0,
+            1.0,
+            is_prefilling,
+            offset_left,
+            output_slices[slice_idx],
+        )
         offset_left += output_slices[slice_idx]
 
     return output.view_as(org_output)
@@ -175,10 +200,6 @@ class LoRAMapping:
     index_mapping: Tuple[int, ...]
     # Per sampled token:
     prompt_mapping: Tuple[int, ...]
-    # Per batch lora index
-    batch_mapping: List[int] = field(default_factory=list)
-    # Per batch seq length
-    seq_lens: List[int] = field(default_factory=list)
     # prefilling or  decoding.
     is_prefilling: bool = False
 
@@ -202,10 +223,11 @@ class BaseLayerWithLoRA(nn.Module):
         ...
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         """Initializes lora matrices."""
         ...
 
@@ -224,18 +246,25 @@ class BaseLayerWithLoRA(nn.Module):
         ...
 
     def set_mapping(
-            self, base_indices: torch.Tensor, sampler_indices: torch.Tensor,
-            sampler_indices_padded: torch.Tensor,
-            embeddings_indices: torch.Tensor, long_lora_indices: torch.Tensor,
-            indices_len: List[int], seq_length_tensor: torch.Tensor,
-            b_seq_start_tensor: torch.Tensor, batch_mlen_stage_lst: List[int]):
+        self,
+        base_indices: torch.Tensor,
+        sampler_indices: torch.Tensor,
+        sampler_indices_padded: torch.Tensor,
+        embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
+        indices_len: List[int],
+    ):
         """Sets the mapping indices."""
         ...
 
     @classmethod
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
-                          model_config: Optional[PretrainedConfig]) -> bool:
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         raise NotImplementedError
 
@@ -249,22 +278,23 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.embeddings_weights: Optional[torch.Tensor]
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
-
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         lora_vocab_start_idx = self.base_layer.org_vocab_size
         weights_idx = None
         if self.base_layer.vocab_end_index > lora_vocab_start_idx:
             # We can start adding lora weights
             weights_idx = max(
                 lora_vocab_start_idx - self.base_layer.vocab_start_index, 0)
-            self.embeddings_slice = (self.base_layer.vocab_start_index -
-                                     self.base_layer.org_vocab_size +
-                                     weights_idx,
-                                     self.base_layer.vocab_end_index -
-                                     self.base_layer.org_vocab_size)
+            self.embeddings_slice = (
+                self.base_layer.vocab_start_index -
+                self.base_layer.org_vocab_size + weights_idx,
+                self.base_layer.vocab_end_index -
+                self.base_layer.org_vocab_size,
+            )
             self.embeddings_weights = self.base_layer.weight.data[weights_idx:]
             self.embeddings_weights.fill_(0)
         else:
@@ -309,10 +339,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.indices_len: List[int]
         self.embeddings_indices: torch.Tensor
 
-        self.seq_length_tensor: torch.Tensor
-        self.b_seq_start_tensor: torch.Tensor
-        self.batch_mlen_stage_lst: List[int]
-
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
@@ -334,30 +360,30 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         if embeddings_tensor is not None:
             self.embeddings_tensors[
                 index, :embeddings_tensor.shape[0], :embeddings_tensor.
-                shape[1]].copy_(embeddings_tensor, non_blocking=True)
+                shape[1], ].copy_(embeddings_tensor, non_blocking=True)
             if self.embeddings_slice is not None:
                 # TODO(yard1): Optimize this copy, we don't need to copy
                 # everything, just the modified part
                 embeddings = self.embeddings_tensors.view(
                     self.embeddings_tensors.shape[0] *
                     self.embeddings_tensors.shape[1],
-                    self.embeddings_tensors.shape[2]
+                    self.embeddings_tensors.shape[2],
                 )[self.embeddings_slice[0]:self.embeddings_slice[1]]
                 assert self.embeddings_weights is not None
                 self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
 
     def set_mapping(
-            self, base_indices: torch.Tensor, sampler_indices: torch.Tensor,
-            sampler_indices_padded: torch.Tensor,
-            embeddings_indices: torch.Tensor, long_lora_indices: torch.Tensor,
-            indices_len: List[int], seq_length_tensor: torch.Tensor,
-            b_seq_start_tensor: torch.Tensor, batch_mlen_stage_lst: List[int]):
+        self,
+        base_indices: torch.Tensor,
+        sampler_indices: torch.Tensor,
+        sampler_indices_padded: torch.Tensor,
+        embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
+        indices_len: List[int],
+    ):
         self.indices = base_indices
         self.embeddings_indices = embeddings_indices
         self.indices_len = indices_len
-        self.seq_length_tensor = seq_length_tensor
-        self.b_seq_start_tensor = b_seq_start_tensor
-        self.batch_mlen_stage_lst = batch_mlen_stage_lst
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = x > self.base_layer.org_vocab_size - 1
@@ -378,34 +404,34 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         if full_lora_a_embeddings.ndim == 3:
             full_lora_a_embeddings = full_lora_a_embeddings.view(
                 full_lora_a_embeddings.shape[0] *
-                full_lora_a_embeddings.shape[1], -1)
-        batch_size, max_length = self.batch_mlen_stage_lst[
-            0], self.batch_mlen_stage_lst[1]
-
-        sgmv_expand(
+                full_lora_a_embeddings.shape[1],
+                -1,
+            )
+        _apply_expand_triton(
             full_lora_a_embeddings,
             self.lora_b_stacked,
+            self.indices,
+            self.indices_len,
             full_output,
-            self.b_seq_start_tensor[:batch_size],
-            self.seq_length_tensor[:batch_size],
-            self.indices[:batch_size],
-            batch_size,
-            max_length,
-            True,
+            add_input=True,
         )
         return full_output.view_as(full_output_org)
 
     @classmethod
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
-                          model_config: Optional[PretrainedConfig]) -> bool:
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
         return type(source_layer) is VocabParallelEmbedding
 
 
 class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
     """
     LoRA on top of ColumnParallelLinear layer.
-    
+
     LoRA B is sliced for tensor parallelism.
     """
 
@@ -418,10 +444,11 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.device = _get_lora_device(self.base_layer)
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         self.lora_config = lora_config
         self.tp_size = get_tensor_model_parallel_world_size()
         lora_a_output_size_per_partition = (
@@ -448,9 +475,6 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         # lazily initialized.
         self.indices: torch.Tensor
         self.indices_len: List[int]
-        self.seq_length_tensor: torch.Tensor
-        self.b_seq_start_tensor: torch.Tensor
-        self.batch_mlen_stage_lst: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -488,23 +512,28 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
                                 lora_b.T, non_blocking=True)
 
     def set_mapping(
-            self, base_indices: torch.Tensor, sampler_indices: torch.Tensor,
-            sampler_indices_padded: torch.Tensor,
-            embeddings_indices: torch.Tensor, long_lora_indices: torch.Tensor,
-            indices_len: List[int], seq_length_tensor: torch.Tensor,
-            b_seq_start_tensor: torch.Tensor, batch_mlen_stage_lst: List[int]):
+        self,
+        base_indices: torch.Tensor,
+        sampler_indices: torch.Tensor,
+        sampler_indices_padded: torch.Tensor,
+        embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
+        indices_len: List[int],
+    ):
         self.indices = base_indices
         self.indices_len = indices_len
-        self.seq_length_tensor = seq_length_tensor
-        self.b_seq_start_tensor = b_seq_start_tensor
-        self.batch_mlen_stage_lst = batch_mlen_stage_lst
 
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        _apply_lora_triton(x, self.lora_a_stacked, self.lora_b_stacked,
-                           self.b_seq_start_tensor, self.seq_length_tensor,
-                           self.indices, self.batch_mlen_stage_lst, output)
+        _apply_lora_triton(
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            self.indices,
+            self.indices_len,
+            output,
+        )
         return output
 
     def forward(self, input_):
@@ -533,9 +562,13 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     @classmethod
     @_not_fully_sharded_can_replace
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
-                          model_config: Optional[PretrainedConfig]) -> bool:
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
         return type(source_layer) is ColumnParallelLinear or (
             type(source_layer) is MergedColumnParallelLinear
             and len(packed_modules_list) == 1)
@@ -554,10 +587,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         super().__init__(base_layer)
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         self.lora_config = lora_config
         n_slices = 2
         if not (len(self.base_layer.output_sizes) == n_slices
@@ -597,11 +631,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.indices: torch.Tensor
         self.indices_len: torch.Tensor
 
-        self.seq_length_tensor: torch.Tensor
-        self.b_seq_start_tensor: torch.Tensor
-        self.lora_index_tensor: torch.Tensor
-        self.batch_mlen_stage_lst: List[int]
-
     def reset_lora(self, index: int):
         self.lora_a_stacked[0][index] = 0
         self.lora_a_stacked[1][index] = 0
@@ -622,7 +651,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
         lora_b = [
-            lora_b[0][:, start_idx:end_idx], lora_b[1][:, start_idx:end_idx]
+            lora_b[0][:, start_idx:end_idx],
+            lora_b[1][:, start_idx:end_idx],
         ]
         return lora_b
 
@@ -661,10 +691,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
-            self.b_seq_start_tensor,
-            self.seq_length_tensor,
             self.indices,
-            self.batch_mlen_stage_lst,
+            self.indices_len,
             output,
             (self.output_dim, self.output_dim),
         )
@@ -672,22 +700,26 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
     @classmethod
     @_not_fully_sharded_can_replace
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
-                          model_config: Optional[PretrainedConfig]) -> bool:
-        return type(source_layer) is MergedColumnParallelLinear and len(
-            packed_modules_list) == 2
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        return (type(source_layer) is MergedColumnParallelLinear
+                and len(packed_modules_list) == 2)
 
 
 class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     """
-    ColumnParallelLinear layer that is specifically designed for  
-    qkv_proj. Certain models, such as chtglm3 and baichuan-7b,  
-    only contains a single LoRA within their qkv_proj layer. 
+    ColumnParallelLinear layer that is specifically designed for
+    qkv_proj. Certain models, such as chtglm3 and baichuan-7b,
+    only contains a single LoRA within their qkv_proj layer.
 
-    During inference with Tensor Parallel, the weights of lora_b 
+    During inference with Tensor Parallel, the weights of lora_b
     must be accurately partitioned according to the respective ranks.
-    
+
     Q slice may have different shape than K and V slices (which both have
     the same shape).
     """
@@ -718,15 +750,17 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             self.kv_shard_id = tp_rank // self.base_layer.num_kv_head_replicas
             lora_b_q = lora_b[:, self.q_proj_shard_size *
                               self.q_shard_id:self.q_proj_shard_size *
-                              (self.q_shard_id + 1)]
+                              (self.q_shard_id + 1), ]
             k_offset = self.q_proj_total_size
             lora_b_k = lora_b[:, k_offset + self.kv_proj_shard_size *
                               self.kv_shard_id:k_offset +
-                              self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+                              self.kv_proj_shard_size *
+                              (self.kv_shard_id + 1), ]
             v_offset = k_offset + self.kv_proj_total_size
             lora_b_v = lora_b[:, v_offset + self.kv_proj_shard_size *
                               self.kv_shard_id:v_offset +
-                              self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+                              self.kv_proj_shard_size *
+                              (self.kv_shard_id + 1), ]
             lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=1)
 
         self.lora_a_stacked[index,
@@ -737,11 +771,15 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                                 lora_b.T, non_blocking=True)
 
     @classmethod
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
-                          model_config: Optional[PretrainedConfig]) -> bool:
-        return type(source_layer) is QKVParallelLinear and len(
-            packed_modules_list) == 1
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        return (type(source_layer) is QKVParallelLinear
+                and len(packed_modules_list) == 1)
 
 
 class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
@@ -759,10 +797,11 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         super().__init__(base_layer)
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         self.lora_config = lora_config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -830,17 +869,16 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             ),
         )
 
-        self.output_slices = (self.q_proj_shard_size, self.kv_proj_shard_size,
-                              self.kv_proj_shard_size)
+        self.output_slices = (
+            self.q_proj_shard_size,
+            self.kv_proj_shard_size,
+            self.kv_proj_shard_size,
+        )
         self.packed_indices: Optional[torch.Tensor] = None
         self.standard_indices: Optional[torch.Tensor] = None
         # lazily initialized.
         self.indices: torch.Tensor
         self.indices_len: List[int]
-
-        self.seq_length_tensor: torch.Tensor
-        self.b_seq_start_tensor: torch.Tensor
-        self.batch_mlen_stage_lst: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[0][index] = 0
@@ -862,15 +900,15 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         if lora_b[0] is not None:
             lora_b_q = lora_b[0][:, self.q_proj_shard_size *
                                  self.q_shard_id:self.q_proj_shard_size *
-                                 (self.q_shard_id + 1)]
+                                 (self.q_shard_id + 1), ]
         if lora_b[1] is not None:
             lora_b_k = lora_b[1][:, self.kv_proj_shard_size *
                                  self.kv_shard_id:self.kv_proj_shard_size *
-                                 (self.kv_shard_id + 1)]
+                                 (self.kv_shard_id + 1), ]
         if lora_b[2] is not None:
             lora_b_v = lora_b[2][:, self.kv_proj_shard_size *
                                  self.kv_shard_id:self.kv_proj_shard_size *
-                                 (self.kv_shard_id + 1)]
+                                 (self.kv_shard_id + 1), ]
         lora_b = [lora_b_q, lora_b_k, lora_b_v]
         return lora_b
 
@@ -923,10 +961,8 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
-            self.b_seq_start_tensor,
-            self.seq_length_tensor,
             self.indices,
-            self.batch_mlen_stage_lst,
+            self.indices_len,
             output,
             self.output_slices,
         )
@@ -935,11 +971,15 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
 
     @classmethod
     @_not_fully_sharded_can_replace
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
-                          model_config: Optional[PretrainedConfig]) -> bool:
-        return type(source_layer) is QKVParallelLinear and len(
-            packed_modules_list) == 3
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        return (type(source_layer) is QKVParallelLinear
+                and len(packed_modules_list) == 3)
 
 
 class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
@@ -952,10 +992,11 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.device = _get_lora_device(self.base_layer)
 
     def create_lora_weights(
-            self,
-            max_loras: int,
-            lora_config: LoRAConfig,
-            model_config: Optional[PretrainedConfig] = None) -> None:
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         self.lora_config = lora_config
         self.tp_rank = get_tensor_model_parallel_rank()
         self.lora_a_stacked = torch.zeros(
@@ -986,11 +1027,6 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         # Lazily initialized
         self.indices: torch.Tensor
         self.indices_len: List[int]
-
-        self.seq_length_tensor: torch.Tensor
-        self.b_seq_start_tensor: torch.Tensor
-        self.lora_index_tensor: torch.Tensor
-        self.batch_mlen_stage_lst: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -1028,23 +1064,28 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
                                 lora_b.T, non_blocking=True)
 
     def set_mapping(
-            self, base_indices: torch.Tensor, sampler_indices: torch.Tensor,
-            sampler_indices_padded: torch.Tensor,
-            embeddings_indices: torch.Tensor, long_lora_indices: torch.Tensor,
-            indices_len: List[int], seq_length_tensor: torch.Tensor,
-            b_seq_start_tensor: torch.Tensor, batch_mlen_stage_lst: List[int]):
+        self,
+        base_indices: torch.Tensor,
+        sampler_indices: torch.Tensor,
+        sampler_indices_padded: torch.Tensor,
+        embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
+        indices_len: List[int],
+    ):
         self.indices = base_indices
         self.indices_len = indices_len
-        self.seq_length_tensor = seq_length_tensor
-        self.b_seq_start_tensor = b_seq_start_tensor
-        self.batch_mlen_stage_lst = batch_mlen_stage_lst
 
     def apply(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x)
         # maybe we need not  restrict  range to [:batch_size]
-        _apply_lora_triton(x, self.lora_a_stacked, self.lora_b_stacked,
-                           self.b_seq_start_tensor, self.seq_length_tensor,
-                           self.indices, self.batch_mlen_stage_lst, output)
+        _apply_lora_triton(
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            self.indices,
+            self.indices_len,
+            output,
+        )
         return output
 
     def forward(self, input_):
@@ -1087,14 +1128,18 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     @property
     def weight(self):
-        return self.base_layer.weight if hasattr(
-            self.base_layer, "weight") else self.base_layer.qweight
+        return (self.base_layer.weight if hasattr(self.base_layer, "weight")
+                else self.base_layer.qweight)
 
     @classmethod
     @_not_fully_sharded_can_replace
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
-                          model_config: Optional[PretrainedConfig]) -> bool:
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
         return type(source_layer) is RowParallelLinear
 
 
@@ -1177,11 +1222,6 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.indices_len: List[int]
         self.indices_padded: torch.Tensor
 
-        self.seq_length_tensor: torch.Tensor
-        self.b_seq_start_tensor: torch.Tensor
-        self.lora_index_tensor: torch.Tensor
-        self.batch_mlen_stage_lst: List[int]
-
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
@@ -1207,17 +1247,17 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                 shape[1], ] = embeddings_tensor
 
     def set_mapping(
-            self, base_indices: torch.Tensor, sampler_indices: torch.Tensor,
-            sampler_indices_padded: torch.Tensor,
-            embeddings_indices: torch.Tensor, long_lora_indices: torch.Tensor,
-            indices_len: List[int], seq_length_tensor: torch.Tensor,
-            b_seq_start_tensor: torch.Tensor, batch_mlen_stage_lst: List[int]):
+        self,
+        base_indices: torch.Tensor,
+        sampler_indices: torch.Tensor,
+        sampler_indices_padded: torch.Tensor,
+        embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
+        indices_len: List[int],
+    ):
         self.indices = sampler_indices
         self.indices_padded = sampler_indices_padded
         self.indices_len = indices_len
-        self.seq_length_tensor = seq_length_tensor
-        self.b_seq_start_tensor = b_seq_start_tensor
-        self.batch_mlen_stage_lst = batch_mlen_stage_lst
 
     def _get_logits(
         self,
@@ -1255,16 +1295,22 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                            neginf=float("-inf")))
         logits[:,
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
-               lora_logits.shape[1]] = lora_logits
+               lora_logits.shape[1], ] = lora_logits
 
-        batch_mlen_stage_lst = self.batch_mlen_stage_lst.copy()
         # LogitsProcessorWithLoRA always using bgmv
-        batch_mlen_stage_lst[2] = False
-        _apply_lora_triton(hidden_states, self.lora_a_stacked,
-                           self.lora_b_stacked, self.b_seq_start_tensor,
-                           self.seq_length_tensor,
-                           self.indices[:self.indices_len[1]],
-                           batch_mlen_stage_lst, logits)
+        # sampler_indices
+        sampler_indices = self.indices_len[1]
+        is_prefilling = False
+        add_lora_triton(
+            logits,
+            hidden_states,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            self.indices[:sampler_indices],
+            0,
+            1.0,
+            is_prefilling,
+        )
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.base_layer.vocab_size]
 
@@ -1274,9 +1320,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return type(self.base_layer).forward(self, *args, **kwargs)
 
     @classmethod
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
-                          model_config: Optional[PretrainedConfig]) -> bool:
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
         # Special handling for the LogitsProcessor.
         return False
 
@@ -1310,9 +1360,8 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
-        scaling_factors = list(
-            lora_config.long_lora_scaling_factors
-        ) if lora_config.long_lora_scaling_factors else []
+        scaling_factors = (list(lora_config.long_lora_scaling_factors)
+                           if lora_config.long_lora_scaling_factors else [])
         base_scaling_factor = (self.base_layer.scaling_factor if isinstance(
             self.base_layer, LinearScalingRotaryEmbedding) else 1.0)
         scaling_factors = sorted(
@@ -1340,11 +1389,14 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         ...
 
     def set_mapping(
-            self, base_indices: torch.Tensor, sampler_indices: torch.Tensor,
-            sampler_indices_padded: torch.Tensor,
-            embeddings_indices: torch.Tensor, long_lora_indices: torch.Tensor,
-            indices_len: List[int], seq_length_tensor: torch.Tensor,
-            b_seq_start_tensor: torch.Tensor, batch_mlen_stage_lst: List[int]):
+        self,
+        base_indices: torch.Tensor,
+        sampler_indices: torch.Tensor,
+        sampler_indices_padded: torch.Tensor,
+        embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
+        indices_len: List[int],
+    ):
         self.long_lora_indices = long_lora_indices
         self.indices_len = indices_len
 
@@ -1358,19 +1410,24 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
             positions,
             query,
             key,
-            offsets=self.long_lora_indices[:self.indices_len[4]])
+            offsets=self.long_lora_indices[:self.indices_len[4]],
+        )
 
     @property
     def scaling_factor_to_offset(self) -> Dict[float, int]:
         return self.base_layer.scaling_factor_to_offset
 
     @classmethod
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: List,
-                          model_config: Optional[PretrainedConfig]) -> bool:
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        return type(source_layer) is LinearScalingRotaryEmbedding or type(
-            source_layer) is RotaryEmbedding
+        return (type(source_layer) is LinearScalingRotaryEmbedding
+                or type(source_layer) is RotaryEmbedding)
 
     def extra_repr(self) -> str:
         return self.base_layer.extra_repr()
