@@ -6,6 +6,7 @@ from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
 from typing import Sequence as GenericSequence
 from typing import TypedDict, Union, cast, final
 
+import jinja2
 from fastapi import Request
 from openai.types.chat import (ChatCompletionContentPartImageParam,
                                ChatCompletionContentPartTextParam)
@@ -32,6 +33,12 @@ from vllm.multimodal.utils import (async_get_and_parse_image,
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+env = Environment(
+    loader=FileSystemLoader('./'),
+    autoescape=select_autoescape()
+)
 
 logger = init_logger(__name__)
 
@@ -75,8 +82,10 @@ class OpenAIServingChat(OpenAIServing):
         print("CONSTELLATE tool_prompt_jinja_template_path", tool_prompt_jinja_template_path)
         print("CONSTELLATE tool_prompt_role", tool_prompt_role)
         # set up tool use
-        self.enable_auto_tools = enable_auto_tools
-        self.tool_prompt_role = tool_prompt_role
+        self.enable_auto_tools: bool = enable_auto_tools
+        self.tool_prompt_role: str = tool_prompt_role
+        self.tool_use_prompt_template: Optional[jinja2.Template] = None
+
         if self.enable_auto_tools and tool_prompt_jinja_template_path:
             self.tool_use_prompt_template = self._load_tool_prompt_template(tool_prompt_jinja_template_path)
         elif self.enable_auto_tools and not tool_prompt_jinja_template_path:
@@ -85,13 +94,22 @@ class OpenAIServingChat(OpenAIServing):
                 'the model on which tools are available and how to use them.'
             )
 
+
     # TODO set the system prompt for tools and system prompt role for tools if applicable
-    def _load_tool_prompt_template(self, tool_prompt_jinja_template_path: Optional[str] = None) -> None:
+    def _load_tool_prompt_template(self, tool_prompt_jinja_template_path: str) -> jinja2.Template:
         """
         Load the Jinja template for the tool prompt
         """
         print("Loading tool prompt template!", tool_prompt_jinja_template_path)
-        return None
+
+        template = env.get_template(tool_prompt_jinja_template_path)
+        if not template:
+            raise FileNotFoundError(
+                f'The specified tool use prompt template {tool_prompt_jinja_template_path} was not found'
+            )
+
+        # Load the JINJA template
+        return template
 
 
     def _load_chat_template(self, chat_template: Optional[str]):
