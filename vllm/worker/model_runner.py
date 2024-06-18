@@ -1010,16 +1010,15 @@ class ModelRunner:
                         self.kv_cache_dtype, self.model_config.dtype)
 
                     paged_kv_indptr_tensor_host = torch.arange(
-                        0, batch_size + 1).int()
+                        0, batch_size + 1, dtype=torch.int32)
                     paged_kv_indices_tensor_host = torch.arange(
-                        0, batch_size).int()
+                        0, batch_size, dtype=torch.int32)
                     paged_kv_last_page_len_tensor_host = torch.full(
                         (batch_size, ), self.block_size, dtype=torch.int32)
                     query_start_loc_host = torch.arange(0,
-                                                        batch_size + 1).int()
+                                                        batch_size + 1,
+                                                        dtype=torch.int32)
 
-                # Create dummy attn_metadata.
-                if self.attn_backend.get_name() == "flashinfer":
                     attn_metadata = self.attn_backend.make_metadata(
                         num_prefills=0,
                         slot_mapping=slot_mapping[:batch_size],
