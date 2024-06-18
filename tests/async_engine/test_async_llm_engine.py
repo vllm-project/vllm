@@ -2,9 +2,12 @@ import asyncio
 from dataclasses import dataclass
 
 import pytest
+import torch
 
 from vllm import SamplingParams
 from vllm.engine.async_llm_engine import AsyncEngineArgs, AsyncLLMEngine
+
+from ..utils import wait_for_gpu_memory_to_clear
 
 
 @dataclass
@@ -98,6 +101,12 @@ async def test_new_requests_event():
 
 
 def test_asyncio_run():
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(torch.cuda.device_count())),
+        threshold_bytes=2 * 2**30,
+        timeout_s=60,
+    )
+
     engine = AsyncLLMEngine.from_engine_args(
         AsyncEngineArgs(model="facebook/opt-125m"))
 

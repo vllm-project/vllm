@@ -4,7 +4,7 @@ import sys
 import time
 import warnings
 from contextlib import contextmanager
-from typing import List
+from typing import Dict, List
 
 import openai
 import ray
@@ -13,7 +13,11 @@ import requests
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.utils import get_open_port
+from vllm.utils import get_open_port, is_hip
+
+if (not is_hip()):
+    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
+                        nvmlInit)
 
 # Path to root of repository so that utilities can be imported by ray workers
 VLLM_PATH = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir))
@@ -154,3 +158,38 @@ def error_on_warning():
         warnings.simplefilter("error")
 
         yield
+
+
+def wait_for_gpu_memory_to_clear(devices: List[int],
+                                 threshold_bytes: int,
+                                 timeout_s: float = 120) -> None:
+    # Use nvml instead of pytorch to reduce measurement error from torch cuda
+    # context.
+    nvmlInit()
+    start_time = time.time()
+    while True:
+        output: Dict[int, str] = {}
+        output_raw: Dict[int, float] = {}
+        for device in devices:
+            dev_handle = nvmlDeviceGetHandleByIndex(device)
+            mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
+            gb_used = mem_info.used / 2**30
+            output_raw[device] = gb_used
+            output[device] = f'{gb_used:.02f}'
+
+        print('gpu memory used (GB): ', end='')
+        for k, v in output.items():
+            print(f'{k}={v}; ', end='')
+        print('')
+
+        dur_s = time.time() - start_time
+        if all(v <= (threshold_bytes / 2**30) for v in output_raw.values()):
+            print(f'Done waiting for free GPU memory on devices {devices=} '
+                  f'({threshold_bytes/2**30=}) {dur_s=:.02f}')
+            break
+
+        if dur_s >= timeout_s:
+            raise ValueError(f'Memory of devices {devices=} not free after '
+                             f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
+
+        time.sleep(5)
