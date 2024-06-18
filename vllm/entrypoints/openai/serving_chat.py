@@ -57,7 +57,11 @@ class OpenAIServingChat(OpenAIServing):
                  served_model_names: List[str],
                  response_role: str,
                  lora_modules: Optional[List[LoRAModulePath]] = None,
-                 chat_template: Optional[str] = None):
+                 chat_template: Optional[str] = None,
+                 enable_auto_tools: Optional[bool] = False,
+                 tool_prompt_jinja_template_path: Optional[str] = None,
+                 tool_prompt_role: Optional[str] = 'system'
+                 ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
@@ -65,6 +69,30 @@ class OpenAIServingChat(OpenAIServing):
 
         self.response_role = response_role
         self._load_chat_template(chat_template)
+
+
+        print('CONSTELLATE enable_auto_tools', enable_auto_tools)
+        print("CONSTELLATE tool_prompt_jinja_template_path", tool_prompt_jinja_template_path)
+        print("CONSTELLATE tool_prompt_role", tool_prompt_role)
+        # set up tool use
+        self.enable_auto_tools = enable_auto_tools
+        self.tool_prompt_role = tool_prompt_role
+        if self.enable_auto_tools and tool_prompt_jinja_template_path:
+            self.tool_use_prompt_template = self._load_tool_prompt_template(tool_prompt_jinja_template_path)
+        elif self.enable_auto_tools and not tool_prompt_jinja_template_path:
+            raise ValueError(
+                'Argument --enable-auto-tool-choice requires --tool-use-prompt-path to set the prompt for instructing '
+                'the model on which tools are available and how to use them.'
+            )
+
+    # TODO set the system prompt for tools and system prompt role for tools if applicable
+    def _load_tool_prompt_template(self, tool_prompt_jinja_template_path: Optional[str] = None) -> None:
+        """
+        Load the Jinja template for the tool prompt
+        """
+        print("Loading tool prompt template!", tool_prompt_jinja_template_path)
+        return None
+
 
     def _load_chat_template(self, chat_template: Optional[str]):
         tokenizer = self.tokenizer

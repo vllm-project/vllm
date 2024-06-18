@@ -214,7 +214,11 @@ if __name__ == "__main__":
                                             served_model_names,
                                             args.response_role,
                                             args.lora_modules,
-                                            args.chat_template)
+                                            args.chat_template,
+                                            args.enable_auto_tool_choice,
+                                            args.tool_use_prompt_template,
+                                            args.tool_use_prompt_role
+                                            )
     openai_serving_completion = OpenAIServingCompletion(
         engine, model_config, served_model_names, args.lora_modules)
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,

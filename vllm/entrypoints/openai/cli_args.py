@@ -116,6 +116,12 @@ def make_arg_parser():
                         help="Enable OpenAI-like tools API "
                              "(only function calls are currently supported)")
 
+    parser.add_argument("--enable-auto-tool-choice",
+                        action="store_true",
+                        help='Enable auto tool choice for models that support it. '
+                             'Requires specifying --tool-use-prompt-template.'
+                        )
+
     parser.add_argument(
         '--tool-use-prompt-template',
         type=str,
@@ -125,6 +131,17 @@ def make_arg_parser():
              "that instructs the model how to use tools, and which tools are "
              "available. If not provided, tools will be ignored. An example is "
              "provided at 'examples/tool_template_hermes_2_pro.jinja'."
+    )
+
+    parser.add_argument(
+        '--tool-use-prompt-role',
+        type=str,
+        default='system',
+        help='The chat role to use for the system prompt that instructs the model what tools are '
+        'available and how to use them. The default is "system". If the "system" role is used for the tool '
+        'use system prompt (default) _and_ the client specifies a system prompt, then the client-'
+        'specified system prompt will be appended to the tool use system prompt. If a non-"system" role is '
+        'specified, it will be placed as the first non-system message in the conversation.'
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
