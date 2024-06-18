@@ -188,12 +188,10 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     def _image_pixels_to_features(self, vision_tower: CLIPVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
-        # TODO(xwjiang): Maybe port minimal CLIPVisionModel over.
-        image_outputs = vision_tower(pixel_values.to(vision_tower.device),
-                                     output_hidden_states=True)
 
-        image_features = image_outputs.hidden_states[
-            self.config.vision_feature_layer]
+        hidden_states = vision_tower(pixel_values.to(vision_tower.device))
+
+        image_features = hidden_states[self.config.vision_feature_layer]
 
         return self._select_image_features(
             image_features,
@@ -315,6 +313,8 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            if "vision_model.post_layernorm" in name:
                 continue
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:

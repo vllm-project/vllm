@@ -2,7 +2,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import CLIPConfig, CLIPVisionConfig
+from transformers import CLIPVisionConfig
 from transformers.models.clip.modeling_clip import CLIPAttention
 
 from vllm.model_executor.layers.activation import get_act_fn
@@ -54,33 +54,39 @@ class CLIPVisionEmbeddings(nn.Module):
 
 class CLIPMLP(nn.Module):
 
-    def __init__(self, config: CLIPConfig,
+    def __init__(self, config: CLIPVisionConfig,
                  quant_config: Optional[QuantizationConfig]):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
         self.fc1 = ColumnParallelLinear(config.hidden_size,
-                                        config.intermediate_size, quant_config)
+                                        config.intermediate_size,
+                                        bias=True,
+                                        quant_config=quant_config)
         self.fc2 = RowParallelLinear(config.intermediate_size,
-                                     config.hidden_size, quant_config)
+                                     config.hidden_size,
+                                     bias=True,
+                                     quant_config=quant_config)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.fc1(hidden_states)
+        hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
         return hidden_states
 
 
 class CLIPEncoderLayer(nn.Module):
 
-    def __init__(self, config: CLIPConfig):
+    def __init__(self,
+                 config: CLIPVisionConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
         self.self_attn = CLIPAttention(config)
-        self.layer_norm1 = nn.LayerNorm(config.embed_dim,
+        self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
-        self.mlp = CLIPMLP(config)
-        self.layer_norm2 = nn.LayerNorm(config.embed_dim,
+        self.mlp = CLIPMLP(config, quant_config=quant_config)
+        self.layer_norm2 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
 
     def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.FloatTensor]:
@@ -88,7 +94,7 @@ class CLIPEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states, _ = self.self_attn(hidden_states=hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -108,13 +114,15 @@ class CLIPEncoder(nn.Module):
         config: CLIPConfig
     """
 
-    def __init__(self, config: CLIPConfig):
+    def __init__(self,
+                 config: CLIPVisionConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([
-            CLIPEncoderLayer(config) for _ in range(config.num_hidden_layers)
+            CLIPEncoderLayer(config, quant_config=quant_config)
+            for _ in range(config.num_hidden_layers)
         ])
-        self.gradient_checkpointing = False
 
     def forward(self, inputs_embeds: torch.Tensor):
 
@@ -126,14 +134,16 @@ class CLIPEncoder(nn.Module):
 
 class CLIPVisionTransformer(nn.Module):
 
-    def __init__(self, config: CLIPVisionConfig):
+    def __init__(self,
+                 config: CLIPVisionConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
 
         self.embeddings = CLIPVisionEmbeddings(config)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self.encoder = CLIPEncoder(config)
+        self.encoder = CLIPEncoder(config, quant_config=quant_config)
 
     def forward(
         self,
@@ -152,8 +162,11 @@ class CLIPVisionModel(nn.Module):
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
 
-    def __init__(self, config: CLIPVisionConfig):
-        self.vision_model = CLIPVisionTransformer(config)
+    def __init__(self,
+                 config: CLIPVisionConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
+        super().__init__()
+        self.vision_model = CLIPVisionTransformer(config, quant_config)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
@@ -161,3 +174,7 @@ class CLIPVisionModel(nn.Module):
     def forward(self, pixel_values: Optional[torch.FloatTensor] = None):
 
         return self.vision_model(pixel_values=pixel_values)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
