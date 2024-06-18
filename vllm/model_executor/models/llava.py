@@ -4,11 +4,11 @@ import torch
 import torch.nn as nn
 # TODO(xwjiang): We should port CLIPVisionModel's code over to not depend on
 # transformers' impl.
-from transformers import CLIPVisionModel, LlavaConfig
+from transformers import CLIPVisionConfig, CLIPVisionModel, LlavaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
-from vllm.inputs import INPUT_REGISTRY
+from vllm.inputs import INPUT_REGISTRY, InputContext
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -18,7 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
 from vllm.multimodal.image import DummyImageDataFactories, ImageInputProcessors
 from vllm.sequence import SamplerOutput
 
@@ -85,10 +85,37 @@ class LlavaImageFeatureInputs(TypedDict):
 LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
 
 
+def dummy_data_for_llava(ctx: InputContext, seq_len: int):
+    multimodal_config = ctx.get_multimodal_config()
+    hf_config = ctx.get_hf_config(LlavaConfig)
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, CLIPVisionConfig):
+        seq_data = DummyImageDataFactories.dummy_seq_data_for_clip(
+            vision_config,
+            seq_len,
+            image_token_id=hf_config.image_token_index,
+        )
+
+        image_input_type = multimodal_config.image_input_type
+        ImageInputType = VisionLanguageConfig.ImageInputType
+        mm_data: MultiModalData
+        if image_input_type == ImageInputType.PIXEL_VALUES:
+            mm_data = DummyImageDataFactories.dummy_pixel_data_for_clip(
+                vision_config)
+        elif image_input_type == ImageInputType.IMAGE_FEATURES:
+            mm_data = DummyImageDataFactories.dummy_feature_data_for_clip(
+                vision_config)
+
+        return seq_data, mm_data
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
+
+
 @MULTIMODAL_REGISTRY.register_image_feature_input_mapper()
 @MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
-@INPUT_REGISTRY.register_dummy_data(
-    DummyImageDataFactories.for_model(LlavaConfig))
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
 @INPUT_REGISTRY.register_input_processor(
     ImageInputProcessors.for_model(LlavaConfig))
 class LlavaForConditionalGeneration(VisionLanguageModelBase):

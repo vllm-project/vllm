@@ -45,6 +45,11 @@ steps:
       queue: intel
     command: bash .buildkite/run-cpu-test.sh
 
+  - label: "XPU Test"
+    agents:
+      queue: intel
+    command: bash .buildkite/run-xpu-test.sh
+
   {% for step in steps %}
   - label: "{{ step.label }}"
     agents:

@@ -1,7 +1,7 @@
 from .data import (LLMInputs, ParsedText, ParsedTokens, PromptInputs,
                    PromptStrictInputs, TextPrompt, TextTokensPrompt,
                    TokensPrompt, parse_and_batch_prompt)
-from .registry import InputRegistry
+from .registry import InputContext, InputRegistry
 
 INPUT_REGISTRY = InputRegistry()
 """
@@ -12,5 +12,5 @@ to dispatch data processing according to the target model.
 __all__ = [
     "ParsedText", "ParsedTokens", "parse_and_batch_prompt", "TextPrompt",
     "TokensPrompt", "TextTokensPrompt", "PromptStrictInputs", "PromptInputs",
-    "LLMInputs", "INPUT_REGISTRY", "InputRegistry"
+    "LLMInputs", "INPUT_REGISTRY", "InputContext", "InputRegistry"
 ]

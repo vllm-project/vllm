@@ -3,7 +3,7 @@ from typing import (TYPE_CHECKING, Callable, Dict, Generic, Optional, Type,
                     TypeVar)
 
 from vllm.config import ModelConfig
-from vllm.inputs.registry import InputContext
+from vllm.inputs import InputContext
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
