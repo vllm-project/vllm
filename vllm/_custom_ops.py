@@ -386,8 +386,10 @@ def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
 
 def convert_fp8(output: torch.Tensor,
                 input: torch.Tensor,
-                scale: float = 1.0) -> None:
-    torch.ops._C.convert_fp8(output, input, torch.Tensor([scale]))
+                scale: torch.Tensor = torch.Tensor([1.0])) -> None:
+    if scale.device != input.device:
+        scale = scale.to(input.device)
+    torch.ops._C.convert_fp8(output, input, scale)
 
     
 def fp8_mm(a: torch.Tensor, b: torch.Tensor,

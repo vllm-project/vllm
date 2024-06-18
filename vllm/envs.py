@@ -224,10 +224,14 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_XLA_CACHE_PATH":
     lambda: os.getenv("VLLM_XLA_CACHE_PATH", "~/.vllm/xla_cache/"),
     
-    # Wheher to tune fp8 gemm or not.
+    # Whether to tune fp8 gemm or not.
     # Will record all shapes of fp8 gemm.
     "VLLM_TUNE_FP8":
     lambda: os.getenv("VLLM_TUNE_FP8", "0"),
+    
+    # The file storing the all fp8 gemm shapes.
+    "VLLM_FP8_UNTUNED_FILE":
+    lambda: os.getenv("VLLM_FP8_UNTUNED_FILE", "/tmp/utuned_fp8.csv"),
 
     # The file storing the tuned result for fp8 gemm.
     "VLLM_FP8_TUNED_FILE":

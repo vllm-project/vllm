@@ -209,10 +209,10 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
         asf: torch.Tensor = layer.activation_scaling_factor * 2
         wsf: torch.Tensor = layer.weights_scaling_factor * 2
         osf: Optional[torch.Tensor] = layer.output_scaling_factor / 2 \
-            if self.out_dtype == torch.float8_e4m3fnuz else None
+            if self._config.out_dtype == torch.float8_e4m3fnuz else None
         
         x_quant = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        ops.convert_fp8(x_quant, x, float(asf))
+        ops.convert_fp8(x_quant, x, asf)
         m = weight.shape[0]
         n = x.shape[0]
         k = x.shape[1]
@@ -222,12 +222,12 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
         if is_hip() and bias is None and solidx is not None:
             res = ops.fp8_mm(x_quant,
                        weight.t(),
-                       self.out_dtype,
+                       self._config.out_dtype,
                        asf, wsf, osf,
                        int(solidx))
             if osf is not None:
                 res16 = torch.empty_like(res, dtype=torch.float16)
-                ops.convert_fp8(res16, res, float(1/osf))
+                ops.convert_fp8(res16, res, 1/osf)
                 res = res16
         else:
             _save_shapes(m, n, k)
@@ -256,10 +256,10 @@ def _per_tensor_dequantize(tensor: torch.Tensor,
 def _save_shapes(m: int, n: int, k: int):
     if is_hip() and env.VLLM_TUNE_FP8 == "1":
         try:
-            df = pd.read_csv("/tmp/fp8_shapes.csv")
+            df = pd.read_csv(env.VLLM_FP8_UNTUNED_FILE)
         except:
             df = pd.DataFrame(columns=["M", "N", "K"])
         df = pd.concat(
             [df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]
         ).drop_duplicates()
-        df.to_csv("/tmp/fp8_shapes.csv", index=False)
+        df.to_csv(env.VLLM_FP8_UNTUNED_FILE, index=False)

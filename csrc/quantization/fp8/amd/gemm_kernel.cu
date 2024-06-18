@@ -55,7 +55,7 @@ void fp8_mm(torch::Tensor& a,
     auto out_dtype = result.dtype();
     TORCH_CHECK(out_dtype == torch::kFloat8_e4m3fnuz || out_dtype == torch::kFloat16,
         "Only float16 and float8e4m3fnuz are supported as the output dtype.");
-    hipblasDatatype_t hipbas_out_type;
+    hipblasDatatype_t hipblas_out_type;
     if (out_dtype == torch::kFloat8_e4m3fnuz) {
         hipblas_out_type = HIP_R_8F_E4M3_FNUZ;
     }
@@ -124,12 +124,12 @@ void fp8_mm(torch::Tensor& a,
     inputs.d = d_d;
     inputs.alpha = &alpha;
     inputs.beta = &beta;
-    inputs.scaleA = d_scaleA;
-    inputs.scaleB = d_scaleB;
-    inputs.scaleD = d_scaleD;
+    inputs.scaleA = d_scale_a;
+    inputs.scaleB = d_scale_b;
+    inputs.scaleD = d_scale_d;
     gemm.setProblem(m, n, k, 1, epilogue, inputs);
     std::vector<int> algoIndex(1);
-    algoIndex[0] = algo_idx;
+    algoIndex[0] = solidx;
     std::vector<hipblasLtMatmulHeuristicResult_t> tmpAlgo;
     TORCH_CUDABLAS_CHECK(hipblaslt_ext::getAlgosFromIndex(handle, algoIndex, tmpAlgo));
 
