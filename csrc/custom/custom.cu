@@ -39,6 +39,18 @@ void LLMM1(at::Tensor in_a, at::Tensor in_b, at::Tensor out_c,
           at::cuda::getCurrentCUDAStream(), rows_per_block);
 }
 
+void wvSpltK_(void* in_a, void* in_b, void* out_c, const int M, const int K,
+              const int N, cudaStream_t stream, const int CuCount);
+
+void wvSpltK(at::Tensor in_a, at::Tensor in_b, at::Tensor out_c, const int N_in,
+             const int CuCount) {
+  int M = in_a.size(0);
+  int K = in_a.size(1);
+  int N = N_in;
+  wvSpltK_(in_a.data_ptr(), in_b.data_ptr(), out_c.data_ptr(), M, K, N,
+           at::cuda::getCurrentCUDAStream(), CuCount);
+}
+
 void LLGemmZZ(void* in_a, void* in_b, void* out_c, const int M, const int K,
               cudaStream_t stream, const int solidx);
 
@@ -90,5 +102,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("LLZZ", &LLZZ);
   m.def("paged_attention_custom", &paged_attention_custom,
         "PagedAttention LL4Mi Custom.");
+  m.def("wvSpltK", &wvSpltK);
   // m.def("MMCustomGPU", &MMCustomGPU);
 }

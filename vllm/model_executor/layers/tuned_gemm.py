@@ -23,6 +23,8 @@ class TunedGemm:
         self.bestsols = {}
         self.load_best_sols()
         self.create_ds()
+        self.CuCount = torch.cuda.get_device_properties(
+            device='cuda').multi_processor_count
 
         if (self.save_gemm == 1):
             self.tuned_df = pd.DataFrame(columns=['M', 'N', 'K'])
@@ -75,7 +77,6 @@ class TunedGemm:
             #print(">>> found rocblas")
             out = rocb_mm(inp_view, weights.t(), solidx)
         else:
-
             if (self.save_gemm == 1):
                 #print('>>>Tgemm Default',inp_view.shape,
                 #      inp.shape,weights.shape,soltype,solidx)
@@ -89,7 +90,14 @@ class TunedGemm:
                 ]).drop_duplicates()
                 self.tuned_df.to_csv(self.untune_path, index=False)
 
-            if n == 1 and inp_view.dtype == torch.float16:
+            if ((n == 4 or n == 3 or n == 2 or n == 1) and k % 8 == 0
+                    and inp_view.dtype == torch.float16):
+                out = torch.empty(inp_view.shape[0],
+                                  weights.shape[0],
+                                  dtype=inp_view.dtype,
+                                  device='cuda')
+                _custom_C.wvSpltK(weights, inp_view, out, n, self.CuCount)
+            elif n == 1 and inp_view.dtype == torch.float16:
                 out = torch.empty(inp_view.shape[0],
                                   weights.shape[0],
                                   dtype=inp_view.dtype,
