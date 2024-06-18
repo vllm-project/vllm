@@ -32,7 +32,7 @@ def cutlass_fp8_gemm_helper(m: int,
                             k: int,
                             per_token_act_quant: bool,
                             per_out_channel_weight_quant: bool,
-                            azp: bool,
+                            bias: bool,
                             out_dtype: Type[torch.dtype] = torch.bfloat16,
                             device: str = "cuda"):
     # Test for a cutlass kernel with per-token activation quantization
@@ -47,7 +47,7 @@ def cutlass_fp8_gemm_helper(m: int,
         (m_a_scales, 1), device=device, dtype=torch.float32) / 10)
     scale_b = (torch.randn(
         (1, n_b_scales), device=device, dtype=torch.float32) / 10)
-    if azp:
+    if bias:
         # bias term should be > 1 so that the absolute tolerance can catch it
         bias_azp = torch.rand((n, ), device=device, dtype=torch.float32) + 1.0
         out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype,
@@ -68,7 +68,7 @@ def cutlass_int8_gemm_helper(m: int,
                              k: int,
                              per_token_act_quant: bool,
                              per_out_channel_weight_quant: bool,
-                             azp: bool,
+                             bias: bool,
                              out_dtype: Type[torch.dtype] = torch.bfloat16,
                              device: str = "cuda"):
     # Test for a cutlass kernel with per-token activation quantization
@@ -84,7 +84,7 @@ def cutlass_int8_gemm_helper(m: int,
     scale_b = (torch.randn(
         (1, n_b_scales), device=device, dtype=torch.float32) / 10)
 
-    if azp:
+    if bias:
         # bias term should be > 1 so that the absolute tolerance can catch it
         bias_azp = torch.rand((n, ), device=device, dtype=torch.float32) + 1.0
         out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype,
@@ -104,12 +104,12 @@ def cutlass_int8_gemm_helper(m: int,
 @pytest.mark.parametrize("k", [128, 496, 1024])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("azp", [True, False])
+@pytest.mark.parametrize("bias", [True, False])
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
-                          per_out_ch: bool, azp: bool):
-    cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, azp)
+                          per_out_ch: bool, bias: bool):
+    cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, bias)
 
 
 @pytest.mark.parametrize("m", [512, 222, 33, 1])
@@ -117,70 +117,70 @@ def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
 @pytest.mark.parametrize("k", [128, 496, 1024])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("azp", [True, False])
+@pytest.mark.parametrize("bias", [True, False])
 def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
-                           per_out_ch: bool, azp: bool):
-    cutlass_int8_gemm_helper(m, n, k, per_act_token, per_out_ch, azp)
+                           per_out_ch: bool, bias: bool):
+    cutlass_int8_gemm_helper(m, n, k, per_act_token, per_out_ch, bias)
 
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("azp", [True, False])
+@pytest.mark.parametrize("bias", [True, False])
 def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                         out_dtype: Type[torch.dtype],
-                                        azp: bool):
+                                        bias: bool):
     cutlass_int8_gemm_helper(512,
                              512,
                              512,
                              per_act_token,
                              per_out_ch,
-                             azp,
+                             bias,
                              out_dtype=out_dtype)
 
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("azp", [True, False])
+@pytest.mark.parametrize("bias", [True, False])
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                        out_dtype: Type[torch.dtype],
-                                       azp: bool):
+                                       bias: bool):
     cutlass_fp8_gemm_helper(512,
                             512,
                             512,
                             per_act_token,
                             per_out_ch,
-                            azp,
+                            bias,
                             out_dtype=out_dtype)
 
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("azp", [True, False])
+@pytest.mark.parametrize("bias", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_devices(per_act_token: bool, per_out_ch: bool,
-                                  azp: bool, device: str):
-    cutlass_fp8_gemm_helper(512, 512, 512, per_act_token, per_out_ch, azp,
+                                  bias: bool, device: str):
+    cutlass_fp8_gemm_helper(512, 512, 512, per_act_token, per_out_ch, bias,
                             torch.bfloat16, device)
 
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("azp", [True, False])
+@pytest.mark.parametrize("bias", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_cutlass_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
-                                   azp: bool, device: str):
+                                   bias: bool, device: str):
     cutlass_int8_gemm_helper(512,
                              512,
                              512,
                              per_act_token,
                              per_out_ch,
-                             azp,
+                             bias,
                              out_dtype=torch.bfloat16,
                              device=device)
 
@@ -192,24 +192,25 @@ def test_cutlass_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
 # kernel must handle any M thrown at it.
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("azp", [True, False])
+@pytest.mark.parametrize("bias", [True, False])
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
-                                  azp: bool):
+                                  bias: bool):
     for nk in range(32, 128, 32):
         for m in range(1, 128):
-            cutlass_fp8_gemm_helper(m, nk, nk, per_act_token, per_out_ch, azp)
+            cutlass_fp8_gemm_helper(m, nk, nk, per_act_token, per_out_ch, bias)
 
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("azp", [True, False])
+@pytest.mark.parametrize("bias", [True, False])
 def test_cutlass_int8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
-                                   azp: bool):
+                                   bias: bool):
     for nk in range(32, 128, 32):
         for m in range(1, 128):
-            cutlass_int8_gemm_helper(m, nk, nk, per_act_token, per_out_ch, azp)
+            cutlass_int8_gemm_helper(m, nk, nk, per_act_token, per_out_ch,
+                                     bias)
 
 
 # Test working with a subset of A and B
