@@ -306,7 +306,9 @@ class _AsyncLLMEngine(LLMEngine):
             arrival_time = time.time()
 
         processed_inputs = await self.process_model_inputs_async(
-            request_id=request_id, inputs=inputs, lora_request=lora_request, 
+            request_id=request_id,
+            inputs=inputs,
+            lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request)
 
         self._add_processed_request(
@@ -315,8 +317,8 @@ class _AsyncLLMEngine(LLMEngine):
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request
         )
 
     async def check_health_async(self) -> None:
@@ -616,8 +618,7 @@ class AsyncLLMEngine:
             arrival_time=arrival_time,
             lora_request=lora_request,
             trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request
-        )
+            prompt_adapter_request=prompt_adapter_request)
 
         return stream
 

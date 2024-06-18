@@ -8,8 +8,8 @@ from transformers import GenerationConfig, PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig, PromptAdapterConfig)
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, VisionLanguageConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -216,7 +216,7 @@ class LLMEngine:
         self.decoding_config = decoding_config or DecodingConfig()
         self.prompt_adapter_config = prompt_adapter_config
         self.observability_config = observability_config or ObservabilityConfig(
-
+        )
         self.log_stats = log_stats
 
         if not self.model_config.skip_tokenizer_init:
@@ -459,8 +459,8 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
-        trace_headers: Optional[Dict[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest],
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -479,8 +479,7 @@ class LLMEngine:
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request
-            )
+                prompt_adapter_request=prompt_adapter_request)
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
                 request_id,
@@ -595,8 +594,8 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request
         )
 
     def _create_sequence_group_with_sampling(
@@ -636,8 +635,7 @@ class LLMEngine:
             sampling_params=sampling_params,
             lora_request=lora_request,
             trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request
-        )
+            prompt_adapter_request=prompt_adapter_request)
 
         return seq_group
 
