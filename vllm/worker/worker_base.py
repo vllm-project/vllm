@@ -208,8 +208,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 return None
 
             worker_input = WorkerInput.new(**broadcast_data)
-            model_input_cls = self.model_runner.model_input_cls()
-            model_input = model_input_cls.new(**broadcast_data)
+            model_input = self.model_runner.make_model_input(**broadcast_data)
 
         self.execute_worker(worker_input)
 

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Generic, List, Optional, Type, TypeVar
+from typing import Generic, List, Optional, TypeVar
 
 import torch
 
@@ -19,9 +19,12 @@ class ModelRunnerBase(ABC, Generic[T]):
     subclass.
     """
 
-    @staticmethod
     @abstractmethod
-    def model_input_cls() -> Type[T]:
+    def make_model_input(self, **model_input_fields) -> T:
+        """
+        Make an instance of a ModelInput from the given
+        fields.
+        """
         raise NotImplementedError
 
     @abstractmethod

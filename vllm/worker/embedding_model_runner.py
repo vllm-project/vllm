@@ -86,9 +86,11 @@ class EmbeddingModelRunner(GPUModelRunnerBase[GPUModelInputWithPoolingMetadata]
         return self.model.pooler(hidden_states=hidden_states,
                                  pooling_metadata=model_input.pooling_metadata)
 
-    @staticmethod
-    def model_input_cls() -> Type[GPUModelInputWithPoolingMetadata]:
-        return GPUModelInputWithPoolingMetadata
+    def make_model_input(self, **kwargs) -> GPUModelInputWithPoolingMetadata:
+        return GPUModelInputWithPoolingMetadata.new(
+            attn_backend=self.attn_backend,
+            **kwargs,
+        )
 
     def prepare_model_input(
         self,

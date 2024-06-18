@@ -271,9 +271,11 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             attn_metadata,
         )
 
-    @staticmethod
-    def model_input_cls() -> Type[CPUModelInput]:
-        return CPUModelInput
+    def make_model_input(self, **kwargs) -> CPUModelInput:
+        return CPUModelInput.new(
+            attn_backend=self.attn_backend,
+            **kwargs,
+        )
 
     def prepare_model_input(
         self,

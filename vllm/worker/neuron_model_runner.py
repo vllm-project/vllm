@@ -141,9 +141,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         return input_tokens, input_positions, input_block_ids
 
-    @staticmethod
-    def model_input_cls() -> Type[ModelInputForNeuron]:
-        return ModelInputForNeuron
+    def make_model_input(self, **kwargs) -> ModelInputForNeuron:
+        return ModelInputForNeuron.new(**kwargs)
 
     def prepare_model_input(
         self,

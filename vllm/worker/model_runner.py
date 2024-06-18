@@ -269,8 +269,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TGPUModelInput]):
         paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
-            model_input_cls = self.model_input_cls()
-            return model_input_cls()
+            return self.make_model_input()
 
         if self.sliding_window is not None:
             sliding_window_blocks = (self.sliding_window + self.block_size -
@@ -620,8 +619,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TGPUModelInput]):
             for k, v in multi_modal_kwargs_list.items()
         }
 
-        model_input_cls = self.model_input_cls()
-        return model_input_cls(
+        return self.make_model_input(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
             attn_metadata=attn_metadata,
@@ -838,9 +836,11 @@ class ModelRunner(GPUModelRunnerBase[GPUModelInputWithSamplingMetadata]):
     GPU model runner with sampling step.
     """
 
-    @staticmethod
-    def model_input_cls() -> Type[GPUModelInputWithSamplingMetadata]:
-        return GPUModelInputWithSamplingMetadata
+    def make_model_input(self, **kwargs) -> GPUModelInputWithSamplingMetadata:
+        return GPUModelInputWithSamplingMetadata.new(
+            attn_backend=self.attn_backend,
+            **kwargs,
+        )
 
     def prepare_model_input(
         self,
