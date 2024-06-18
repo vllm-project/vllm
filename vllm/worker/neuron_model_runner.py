@@ -141,7 +141,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         return input_tokens, input_positions, input_block_ids
 
-    def make_model_input(self, **kwargs) -> ModelInputForNeuron:
+    def make_model_input(self,
+                         make_attn_metadata: bool = False,
+                         **kwargs) -> ModelInputForNeuron:
+        if make_attn_metadata:
+            kwargs["attn_backend"] = self.attn_backend
         return ModelInputForNeuron.new(**kwargs)
 
     def prepare_model_input(

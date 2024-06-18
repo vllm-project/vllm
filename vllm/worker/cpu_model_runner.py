@@ -271,11 +271,12 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             attn_metadata,
         )
 
-    def make_model_input(self, **kwargs) -> CPUModelInput:
-        return CPUModelInput.new(
-            attn_backend=self.attn_backend,
-            **kwargs,
-        )
+    def make_model_input(self,
+                         make_attn_metadata: bool = False,
+                         **kwargs) -> CPUModelInput:
+        if make_attn_metadata:
+            kwargs["attn_backend"] = self.attn_backend
+        return CPUModelInput.new(**kwargs, )
 
     def prepare_model_input(
         self,

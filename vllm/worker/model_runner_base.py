@@ -20,10 +20,13 @@ class ModelRunnerBase(ABC, Generic[T]):
     """
 
     @abstractmethod
-    def make_model_input(self, **model_input_fields) -> T:
+    def make_model_input(self,
+                         make_attn_metadata: bool = False,
+                         **model_input_fields) -> T:
         """
-        Make an instance of a ModelInput from the given
-        fields.
+        Make an instance of a ModelInput from the given fields. If
+        make_attn_metadata=True, then AttentionMetadata will be created from
+        fields extracted from model_input_fields.
         """
         raise NotImplementedError
 

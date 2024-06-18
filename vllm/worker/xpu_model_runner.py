@@ -136,7 +136,11 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         torch.xpu.synchronize()
         return
 
-    def make_model_input(self, **kwargs) -> ModelInputForXPU:
+    def make_model_input(self,
+                         make_attn_metadata: bool = False,
+                         **kwargs) -> ModelInputForXPU:
+        if make_attn_metadata:
+            kwargs["attn_backend"] = self.attn_backend
         return ModelInputForXPU.new(
             attn_backend=self.attn_backend,
             **kwargs,

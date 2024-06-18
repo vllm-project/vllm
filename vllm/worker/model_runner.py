@@ -837,11 +837,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     """
 
     def make_model_input(self,
+                         make_attn_metadata: bool = False,
                          **kwargs) -> ModelInputForGPUWithSamplingMetadata:
-        return ModelInputForGPUWithSamplingMetadata.new(
-            attn_backend=self.attn_backend,
-            **kwargs,
-        )
+        if make_attn_metadata:
+            kwargs["attn_backend"] = self.attn_backend
+        return ModelInputForGPUWithSamplingMetadata.new(**kwargs, )
 
     def prepare_model_input(
         self,
