@@ -65,6 +65,28 @@ struct enable_sm90_or_later : Kernel {
 };
 
 /*
+ * This class provides the common ScaleA and ScaleB descriptors for the
+ * ScaledEpilogue and ScaledEpilogueAzp classes.
+ */
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueBase {
+ protected:
+  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
+
+  using ScaleA = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, float,
+      Stride<Int<1>, Int<0>, Int<0>>>;
+
+  using ScaleBDescriptor =
+      cutlass::epilogue::collective::detail::RowBroadcastDescriptor<
+          EpilogueDescriptor, float>;
+
+  using ScaleB = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
+      ScaleBDescriptor::Stages, typename EpilogueDescriptor::TileShape,
+      typename ScaleBDescriptor::Element, Stride<Int<0>, Int<1>, Int<0>>>;
+};
+
+/*
    This epilogue function defines a quantized GEMM operation similar to
    torch.scaled_mm_.
 
@@ -81,21 +103,13 @@ struct enable_sm90_or_later : Kernel {
    per row or column.
 */
 template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
-struct ScaledEpilogue {
- protected:
-  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
-
-  using ScaleA = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, float,
-      Stride<Int<1>, Int<0>, Int<0>>>;
-
-  using ScaleBDescriptor =
-      cutlass::epilogue::collective::detail::RowBroadcastDescriptor<
-          EpilogueDescriptor, float>;
-
-  using ScaleB = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
-      ScaleBDescriptor::Stages, typename EpilogueDescriptor::TileShape,
-      typename ScaleBDescriptor::Element, Stride<Int<0>, Int<1>, Int<0>>>;
+struct ScaledEpilogue
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+ private:
+  using SUPER = ScaledEpilogue<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::ScaleA;
+  using ScaleB = typename SUPER::ScaleB;
 
   using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
       cutlass::multiplies, float, float,
@@ -127,12 +141,19 @@ struct ScaledEpilogue {
 
 template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
 struct ScaledEpilogueAzp
-    : private ScaledEpilogue<ElementAcc, ElementD, EpilogueDescriptor> {
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
  private:
-  using SUPER = ScaledEpilogue<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::ScaleA;
   using ScaleB = typename SUPER::ScaleB;
-  using EVTCompute0 = typename SUPER::EVTCompute0;
+
+  using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTCompute0 =
+      cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
 
   using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
       cutlass::multiply_add, ElementD, float,
