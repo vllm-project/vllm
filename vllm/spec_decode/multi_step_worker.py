@@ -29,7 +29,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     requires more thought for MultiStepWorker support.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, draft_ranks: Optional[List[int]], **kwargs):
         """Create a MultiStepWorker.
 
         It allows a speculative draft model to run with smaller tensor
@@ -40,18 +40,16 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         of the small size temporarily during forward passes of draft models.
        """
 
-        self._draft_ranks = None
+        self._draft_ranks = draft_ranks
         self._is_dummy = False
         self._world_group = None
         self._tp_group = None
 
-        # if 'ranks' arg is given, only some of the GPU ranks written in this
-        # value participate in draft generation
-        if 'ranks' in kwargs:
-            ranks = kwargs.pop('ranks')
-            self._draft_ranks = ranks
+        # if 'draft_ranks' arg is given, only some of the GPU ranks written in
+        # this value participate in draft generation
+        if draft_ranks is not None:
             # whether the worker participates in draft generation or not
-            self._is_dummy = kwargs['rank'] not in ranks
+            self._is_dummy = kwargs['rank'] not in draft_ranks
 
         super().__init__(**kwargs)
 

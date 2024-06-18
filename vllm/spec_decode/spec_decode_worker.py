@@ -110,9 +110,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
-            if target_tp != draft_tp:
-                draft_worker_kwargs['ranks'] = list(range(draft_tp))
-            proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+            ranks = list(range(draft_tp)) if target_tp != draft_tp else None
+            proposer_worker = MultiStepWorker(ranks, **draft_worker_kwargs)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))

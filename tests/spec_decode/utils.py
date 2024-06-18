@@ -15,6 +15,7 @@ from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
+from vllm.spec_decode.multi_step_worker import MultiStepWorker
 
 T = TypeVar("T", bound=Worker)
 
@@ -66,6 +67,7 @@ def create_worker(cls: Callable[..., T],
                   num_gpu_blocks: int,
                   seed: int,
                   is_driver_worker: bool = True,
+                  draft_ranks: List[int] = None,
                   enforce_eager: bool = True) -> T:
     engine_args = EngineArgs(
         model=model_name,
@@ -78,18 +80,24 @@ def create_worker(cls: Callable[..., T],
     distributed_init_method = get_distributed_init_method(
         get_ip(), get_open_port())
 
-    worker = cls(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
-        local_rank=0,
-        rank=0,
-        distributed_init_method=distributed_init_method,
-        is_driver_worker=is_driver_worker,
-    )
+    worker_kwargs={
+        'model_config': engine_config.model_config,
+        'parallel_config': engine_config.parallel_config,
+        'scheduler_config': engine_config.scheduler_config,
+        'device_config': engine_config.device_config,
+        'cache_config': engine_config.cache_config,
+        'load_config': engine_config.load_config,
+        'local_rank': 0,
+        'rank': 0,
+        'distributed_init_method': distributed_init_method,
+        'is_driver_worker': is_driver_worker,
+    }
+
+    if draft_ranks is not None:
+        assert cls is MultiStepWorker, "draft_ranks arg only works with MultiStepWorker"
+        worker_kwargs['draft_ranks'] = draft_ranks
+
+    worker = cls(**worker_kwargs)
 
     worker.init_device()
     worker.load_model()
