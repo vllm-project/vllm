@@ -98,7 +98,7 @@ jobs:
 
             - name: set python
               id: set_python
-              uses: ./.github/actions/nm-set-python/
+              uses: neuralmagic/nm-actions/actions/set-python@main
               with:
                 python: ${{ inputs.python }}
                 venv: ${{ env.VENV_BASE }}

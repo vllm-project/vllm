@@ -94,7 +94,7 @@ jobs:
                 nvcc_threads: 0
 
             - name: install testmo
-              uses: ./.github/actions/nm-install-testmo/
+              uses: neuralmagic/nm-actions/actions/install-testmo@main
 
             - name: create testmo run
               id: create_testmo_run
@@ -131,7 +131,7 @@ jobs:
             - name: run buildkite script
               run: |
                 cd tests && sudo bash ../.buildkite/download-images.sh
-            
+
             - name: setenv test skip
               id: setenv_test_skip
               uses: ./.github/actions/nm-set-env-test-skip
