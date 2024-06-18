@@ -4,11 +4,10 @@ from typing import (TYPE_CHECKING, Dict, List, Optional, Tuple, Type, TypeVar,
 
 import torch
 from PIL import Image
-from transformers import (CLIPVisionConfig, LlavaConfig, LlavaNextConfig,
-                          PretrainedConfig, PreTrainedTokenizerBase)
+from transformers import CLIPVisionConfig, PreTrainedTokenizerBase
 
 from vllm.config import ModelConfig, VisionLanguageConfig
-from vllm.inputs.registry import InputContext, InputProcessor
+from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.sequence import SequenceData
 from vllm.transformers_utils.image_processor import get_image_processor
@@ -112,7 +111,7 @@ class ImageInputProcessors:
     """
 
     @classmethod
-    def _repeat_and_pad_token(
+    def repeat_and_pad_token(
         cls,
         token: _T,
         *,
@@ -129,7 +128,7 @@ class ImageInputProcessors:
         return replacement
 
     @classmethod
-    def _repeat_and_pad_image_tokens(
+    def repeat_and_pad_image_tokens(
         cls,
         tokenizer: PreTrainedTokenizerBase,
         prompt: Optional[str],
@@ -149,7 +148,7 @@ class ImageInputProcessors:
             pad_token_str_right = (None if pad_token_right is None else
                                    tokenizer.decode(pad_token_right))
             replacement_str = "".join(
-                cls._repeat_and_pad_token(
+                cls.repeat_and_pad_token(
                     image_token_str,
                     repeat_count=repeat_count,
                     pad_token_left=pad_token_str_left,
@@ -162,7 +161,7 @@ class ImageInputProcessors:
         new_token_ids: List[int] = []
         for i, token in enumerate(prompt_token_ids):
             if token == image_token_id:
-                replacement_ids = cls._repeat_and_pad_token(
+                replacement_ids = cls.repeat_and_pad_token(
                     image_token_id,
                     repeat_count=repeat_count,
                     pad_token_left=pad_token_left,
@@ -179,7 +178,7 @@ class ImageInputProcessors:
         return new_prompt, new_token_ids
 
     @classmethod
-    def _input_processor_for_clip(
+    def input_processor_for_clip(
         cls,
         model_config: ModelConfig,
         multimodal_config: VisionLanguageConfig,
@@ -201,7 +200,7 @@ class ImageInputProcessors:
         else:
             image_feature_size = image_feature_size_override
 
-        new_prompt, new_token_ids = cls._repeat_and_pad_image_tokens(
+        new_prompt, new_token_ids = cls.repeat_and_pad_image_tokens(
             tokenizer,
             llm_inputs.get("prompt"),
             llm_inputs["prompt_token_ids"],
@@ -213,104 +212,6 @@ class ImageInputProcessors:
         return LLMInputs(prompt_token_ids=new_token_ids,
                          prompt=new_prompt,
                          multi_modal_data=multi_modal_data)
-
-    @classmethod
-    def _input_processor_for_llava(
-        cls,
-        model_config: ModelConfig,
-        multimodal_config: VisionLanguageConfig,
-        hf_config: LlavaConfig,
-        llm_inputs: LLMInputs,
-    ):
-        multi_modal_data = llm_inputs.get("multi_modal_data")
-        if multi_modal_data is None or not isinstance(
-                multi_modal_data, (ImagePixelData, ImageFeatureData)):
-            return llm_inputs
-
-        vision_config = hf_config.vision_config
-
-        if isinstance(vision_config, CLIPVisionConfig):
-            return cls._input_processor_for_clip(
-                model_config,
-                multimodal_config,
-                vision_config,
-                llm_inputs,
-                image_token_id=hf_config.image_token_index,
-            )
-
-        msg = f"Unsupported vision config: {type(vision_config)}"
-        raise NotImplementedError(msg)
-
-    @classmethod
-    def _input_processor_for_llava_next(
-        cls,
-        model_config: ModelConfig,
-        multimodal_config: VisionLanguageConfig,
-        hf_config: LlavaNextConfig,
-        llm_inputs: LLMInputs,
-    ):
-        multi_modal_data = llm_inputs.get("multi_modal_data")
-        if multi_modal_data is None or not isinstance(
-                multi_modal_data, (ImagePixelData, ImageFeatureData)):
-            return llm_inputs
-
-        if isinstance(multi_modal_data, ImagePixelData):
-            image = multi_modal_data.image
-            if isinstance(image, torch.Tensor):
-                _, _, _, height, width = image.shape
-            else:
-                width, height = image.size
-            
-            from vllm.model_executor.models.llava_next import (
-                _get_llava_next_image_feature_size)
-
-            image_feature_size = _get_llava_next_image_feature_size(
-                hf_config, input_height=height, input_width=width)
-        else:
-            image_features = multi_modal_data.image_features
-            image_feature_size = image_features.shape[-2]
-
-        vision_config = hf_config.vision_config
-
-        if isinstance(vision_config, CLIPVisionConfig):
-            return cls._input_processor_for_clip(
-                model_config,
-                multimodal_config,
-                vision_config,
-                llm_inputs,
-                image_token_id=hf_config.image_token_index,
-                image_feature_size_override=image_feature_size,
-            )
-
-        msg = f"Unsupported vision config: {type(vision_config)}"
-        raise NotImplementedError(msg)
-
-    @classmethod
-    def for_model(
-        cls,
-        hf_config_type: Type[PretrainedConfig],
-    ) -> InputProcessor:
-        """
-        Create an input processor for a model as identified
-        by the config type.
-        """
-        if hf_config_type == LlavaConfig:
-            return lambda ctx, llm_inputs: cls._input_processor_for_llava(
-                ctx.model_config,
-                ctx.get_multimodal_config(),
-                ctx.get_hf_config(LlavaConfig),
-                llm_inputs=llm_inputs,
-            )
-        if hf_config_type == LlavaNextConfig:
-            return lambda ctx, llm_inputs: cls._input_processor_for_llava_next(
-                ctx.model_config,
-                ctx.get_multimodal_config(),
-                ctx.get_hf_config(LlavaNextConfig),
-                llm_inputs=llm_inputs,
-            )
-
-        msg = f"Unsupported model config: {type(hf_config_type)}"
-        raise NotImplementedError(msg)
 
 
 class ImagePixelData(MultiModalData):

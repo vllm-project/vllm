@@ -11,7 +11,7 @@ from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -22,8 +22,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
-from vllm.multimodal.image import (DummyImageDataFactories,
-                                   ImageInputProcessors,
+from vllm.multimodal.image import (DummyImageDataFactories, ImageFeatureData,
+                                   ImageInputProcessors, ImagePixelData,
                                    get_clip_num_patches)
 from vllm.sequence import SamplerOutput
 
@@ -156,11 +156,50 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
     raise NotImplementedError(msg)
 
 
+def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or not isinstance(
+            multi_modal_data, (ImagePixelData, ImageFeatureData)):
+        return llm_inputs
+
+    model_config = ctx.model_config
+    multimodal_config = ctx.get_multimodal_config()
+    hf_config = ctx.get_hf_config(LlavaNextConfig)
+    vision_config = hf_config.vision_config
+
+    if isinstance(multi_modal_data, ImagePixelData):
+        image = multi_modal_data.image
+        if isinstance(image, torch.Tensor):
+            _, _, _, height, width = image.shape
+        else:
+            width, height = image.size
+
+        image_feature_size = _get_llava_next_image_feature_size(
+            hf_config, input_height=height, input_width=width)
+    else:
+        image_features = multi_modal_data.image_features
+        image_feature_size = image_features.shape[-2]
+
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, CLIPVisionConfig):
+        return ImageInputProcessors.input_processor_for_clip(
+            model_config,
+            multimodal_config,
+            vision_config,
+            llm_inputs,
+            image_token_id=hf_config.image_token_index,
+            image_feature_size_override=image_feature_size,
+        )
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
+
+
 @MULTIMODAL_REGISTRY.register_image_feature_input_mapper()
 @MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
-@INPUT_REGISTRY.register_input_processor(
-    ImageInputProcessors.for_model(LlavaNextConfig))
+@INPUT_REGISTRY.register_input_processor(input_processor_for_llava_next)
 class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
 
     def __init__(self,

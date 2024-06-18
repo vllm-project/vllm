@@ -8,7 +8,7 @@ from transformers import CLIPVisionConfig, CLIPVisionModel, LlavaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -19,7 +19,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
-from vllm.multimodal.image import DummyImageDataFactories, ImageInputProcessors
+from vllm.multimodal.image import (DummyImageDataFactories, ImageFeatureData,
+                                   ImageInputProcessors, ImagePixelData)
 from vllm.sequence import SamplerOutput
 
 from .vlm_base import VisionLanguageModelBase
@@ -113,11 +114,34 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int):
     raise NotImplementedError(msg)
 
 
+def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or not isinstance(
+            multi_modal_data, (ImagePixelData, ImageFeatureData)):
+        return llm_inputs
+
+    model_config = ctx.model_config
+    multimodal_config = ctx.get_multimodal_config()
+    hf_config = ctx.get_hf_config(LlavaConfig)
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, CLIPVisionConfig):
+        return ImageInputProcessors.input_processor_for_clip(
+            model_config,
+            multimodal_config,
+            vision_config,
+            llm_inputs,
+            image_token_id=hf_config.image_token_index,
+        )
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
+
+
 @MULTIMODAL_REGISTRY.register_image_feature_input_mapper()
 @MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
-@INPUT_REGISTRY.register_input_processor(
-    ImageInputProcessors.for_model(LlavaConfig))
+@INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
 class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     def __init__(self,
