@@ -10,7 +10,7 @@ from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (cuda_device_count_stateless,
-                        get_distributed_init_method, get_ip, get_open_port,
+                        get_distributed_init_method, get_open_port,
                         get_vllm_instance_id, make_async)
 
 logger = init_logger(__name__)
@@ -38,7 +38,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             "please set tensor_parallel_size to less than max local gpu count")
 
         distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
+            "127.0.0.1", get_open_port())
 
         if world_size == 1:
             self.workers = []
