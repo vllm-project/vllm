@@ -1,8 +1,3 @@
-"""
-A shared memory ring buffer implementation for broadcast communication.
-It is optimized for the case where there is one writer and multiple readers.
-This way, we don't need to synchronize the access to the buffer.
-"""
 import pickle
 import time
 from contextlib import contextmanager
@@ -18,11 +13,26 @@ logger = init_logger(__name__)
 
 
 class ShmRingBuffer:
-
     # seconds to wait before warning about a potential blocking call
     WARNING_INTERVAL = 60
 
     def __init__(self, pg: ProcessGroup, max_chunk_bytes, max_chunks):
+        """
+        A shared memory ring buffer implementation for broadcast communication.
+        It is optimized for the case where there is one writer and multiple
+         readers. In this case, we don't need to synchronize the access to
+         the buffer.
+        
+        Buffer memory layout:
+                  data                                 metadata
+                    |                                      |
+                    | (current_idx)                        | (current_idx)
+                    v                                      v
+        +-------------------------------+----------------------------------------+
+        | chunk0 | chunk1 | ... | chunk | metadata0 | metadata1 | ... | metadata |
+        +-------------------------------+----------------------------------------+
+        | max_chunks x max_chunk_bytes  | max_chunks x (1 + n_reader) bytes      |
+        """# noqa
         self.rank = dist.get_rank(pg)
         self.world_size = dist.get_world_size(pg)
         global_ranks = dist.get_process_group_ranks(pg)
