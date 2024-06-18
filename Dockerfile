@@ -23,7 +23,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip \
     && if [ "${PYTHON_VERSION}" != "3" ]; then update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; fi \
-    && update-alternatives --display python3 \
     && python3 --version \
     && python3 -m pip --version
 
@@ -59,6 +58,7 @@ ARG PYTHON_VERSION=3
 
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
+RUN python3 --version && python3 -m pip --version
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt
 
