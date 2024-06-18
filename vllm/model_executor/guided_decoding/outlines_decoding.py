@@ -9,10 +9,10 @@ from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest)
+                                              CompletionRequest,
+                                              ChatCompletionNamedToolChoiceParam)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
-
 
 class GuidedDecodingMode(Enum):
     JSON = "json"
@@ -81,7 +81,19 @@ def _get_guide_and_mode(
     request: Union[CompletionRequest, ChatCompletionRequest]
 ) -> Union[Tuple[str, GuidedDecodingMode], Tuple[None, None]]:
 
-    if request.guided_json:
+    # if the request is a chat completion request, AND the tool choice is a named tool choice, do guided decoding
+    #   using that tool as the JSON schema
+    if isinstance(request, ChatCompletionRequest) and isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam):
+        # Guided generation for tools/functions parameters
+        if request.tool_choice.type == "function":
+            for tool in request.tools:
+                if tool.type == "function" and tool.function.name == request.tool_choice.function.name:
+                    json = json_dumps(tool.function.parameters, sort_keys=True)
+                    return json, GuidedDecodingMode.JSON
+        return None, None
+
+    elif request.guided_json:
         json = request.guided_json
         if isinstance(json, dict):
             # turn dict into hashable string
