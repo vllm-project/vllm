@@ -168,13 +168,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
 
 #ifdef USE_ROCM
-  ops.def("fp8_gemm(Tensor a, Tensor b, Tensor scaleA, Tensor scaleB, "
-          "Tensor scaleD, int64_t algo_idx) -> Tensor");
-  ops.impl("fp8_gemm", torch::kCUDA, &fp8_gemm);
-  
-  ops.def("fp8_gemm_16(Tensor a, Tensor b, Tensor scaleA, Tensor scaleB, "
-          "int64_t algo_idx) -> Tensor");
-  ops.impl("fp8_gemm_16", torch::kCUDA, &fp8_gemm_16);
+  ops.def("fp8_mm(Tensor a, Tensor b, Tensor result,"
+          "       Tensor scale_a, Tensor scale_b,"
+          "       Tensor? scale_result, int solidx) -> ()");
+  ops.impl("fp8_mm", torch::kCUDA, &fp8_mm);
 #endif
 
   // Aligning the number of tokens to be processed by each expert such

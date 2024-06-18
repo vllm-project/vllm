@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.deepspeedfp import (
     DeepSpeedFPConfig)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.fp8_rocm import Fp8RocmConfig
+from vllm.model_executor.layers.quantization.fp8fnuz import Fp8FnuzConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
@@ -25,7 +25,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,
     "awq": AWQConfig,
     "deepspeedfp": DeepSpeedFPConfig,
-    "fp8": Fp8Config if not is_hip() else Fp8RocmConfig,
+    "fp8": Fp8Config if not is_hip() else Fp8FnuzConfig,
     # The order of gptq methods is important for config.py iteration over
     # override_quantization_method(..)
     "marlin": MarlinConfig,

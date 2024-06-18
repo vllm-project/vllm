@@ -4,60 +4,53 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
-from safetensors import safe_open
 
+import vllm.envs as env
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import is_hip
 
 import pandas as pd
-import os
-
-try:
-    from vllm._C import ops as vllm_ops
-except ImportError:
-    pass
+import os.path
 
 logger = init_logger(__name__)
 
 
-class Fp8RocmConfig(QuantizationConfig):
+class Fp8FnuzConfig(QuantizationConfig):
     def __init__(self) -> None:
-        # self.quantized_weights_path = config["quantized_weights"]
-        self._tuned = {}
-        self._stats = {}
-        gemm_type = os.getenv("FP8_GEMM", "fp8_16")
-        #print(f"Integral Cross factor = {self.factor}")
-        if gemm_type == "fp8_8":
-            self.gemm_method = Fp8RocmLinearMethod.apply_fp8_8
-            tuned_filename = "/projects/tuned_fp8_8.csv"
-        elif gemm_type == "fp8_16":
-            self.gemm_method = Fp8RocmLinearMethod.apply_fp8_16
-            tuned_filename = "/projects/tuned_fp8_16.csv"
+        # Get the output type for fp8 gemm
+        if env.VLLM_FP8_GEMM_OUTPUT_TYPE == "float16":
+            self.out_dtype = torch.float16
+        elif env.VLLM_FP8_GEMM_OUTPUT_TYPE == "float8_e4m3fnuz":
+            self.out_dtype = torch.float8_e4m3fnuz
         else:
-            raise Exception(f"Unknown fp8 gemm type: {gemm_type}")
-        try:
-            df = pd.read_csv(tuned_filename)
-        except:
-            return
+            raise(NotImplementedError, 
+                  "Only float16 and float8_e4m3fnuz are supported for fp8 gemm output.")
 
-        for i in range(len(df)):
-            shape = df.iloc[i]
-            m = shape["M"]
-            n = shape["N"]
-            k = shape["K"]
-            algo = shape["algo"]
-            self._tuned[(m, n, k)] = algo
+        # Gemm tuning is only for rocm
+        tuned_filename = env.VLLM_FP8_TUNED_FILE
+        self._tuned = {}
+        if is_hip() and os.path.isfile(tuned_filename):
+            df = pd.read_csv(tuned_filename)
+
+            for i in range(len(df)):
+                shape = df.iloc[i]
+                m = shape["M"]
+                n = shape["N"]
+                k = shape["K"]
+                solidx = shape["solidx"]
+                self._tuned[(m, n, k)] = solidx
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
         return []
 
     @classmethod
-    def from_config(cls, config) -> "Fp8RocmConfig":
+    def from_config(cls, config) -> "Fp8FnuzConfig":
         return cls(config)
 
     @classmethod
@@ -71,20 +64,20 @@ class Fp8RocmConfig(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> str:
-        return "Fp8Rocm"
+        return "Fp8Fnuz"
 
     def get_quant_method(self,
-                         layer: torch.nn.Module) -> Optional["Fp8RocmLinearMethod"]:
+                         layer: torch.nn.Module) -> Optional["Fp8FnuzLinearMethod"]:
         if isinstance(layer, LinearBase):
-            return Fp8RocmLinearMethod(self)
+            return Fp8FnuzLinearMethod(self)
         return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
 
 
-class Fp8RocmLinearMethod(LinearMethodBase):
-    def __init__(self, config: Fp8RocmConfig):
+class Fp8FnuzLinearMethod(LinearMethodBase):
+    def __init__(self, config: Fp8FnuzConfig):
         self._config = config
 
 
@@ -205,73 +198,6 @@ class Fp8RocmLinearMethod(LinearMethodBase):
 
         return param[shard_id], loaded_weight
 
-    def apply_fp8_16(
-        self,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        asf: torch.Tensor,
-        wsf: torch.Tensor,
-        osf: torch.Tensor,
-    ) -> torch.Tensor:
-        x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        vllm_ops.convert_fp8(x8, x, asf)
-        m = weight.shape[0]
-        n = x.shape[0]
-        k = x.shape[1]
-
-        algo = self._config._tuned.get((m, n, k))
-        if algo is None:
-            import os
-
-            if os.getenv("TUNE_FP8") == "1":
-                try:
-                    df = pd.read_csv("/projects/fp8_shapes.csv")
-                except:
-                    df = pd.DataFrame(columns=["M", "N", "K"])
-                df = pd.concat(
-                    [df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]
-                ).drop_duplicates()
-                df.to_csv("/projects/fp8_shapes.csv", index=False)
-            algo = 0
-        res = vllm_ops.fp8_gemm_16(x8, weight.t(), asf, wsf, int(algo))
-        return res
-
-    def apply_fp8_8(
-        self,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        asf: torch.Tensor,
-        wsf: torch.Tensor,
-        osf: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert not bias
-        x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        vllm_ops.convert_fp8(x8, x, asf)
-        m = weight.shape[0]
-        n = x.shape[0]
-        k = x.shape[1]
-
-        algo = self._config._tuned.get((m, n, k))
-        if algo is None:
-            import os
-
-            if os.getenv("TUNE_FP8") == "1":
-                try:
-                    df = pd.read_csv("/projects/fp8_shapes.csv")
-                except:
-                    df = pd.DataFrame(columns=["M", "N", "K"])
-                df = pd.concat(
-                    [df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]
-                ).drop_duplicates()
-                df.to_csv("/projects/fp8_shapese.csv", index=False)
-            algo = 0
-
-        res = vllm_ops.fp8_gemm(x8, weight.t(), asf, wsf, osf, int(algo))
-        res16 = torch.empty_like(res, dtype=torch.float16)
-        vllm_ops.convert_fp8(res16, res, 1/osf)
-        return res16
-
     def apply(
         self,
         layer: torch.nn.Module,
@@ -279,15 +205,40 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         weight: torch.Tensor = layer.weight
-        if weight.dtype == torch.float8_e4m3fnuz:
-            asf: torch.Tensor = layer.activation_scaling_factor * 2
-            wsf: torch.Tensor = layer.weights_scaling_factor * 2
-            osf: torch.Tensor = layer.output_scaling_factor / 2
 
-            return self._config.gemm_method(self, x, weight, asf, wsf, osf)
+        asf: torch.Tensor = layer.activation_scaling_factor * 2
+        wsf: torch.Tensor = layer.weights_scaling_factor * 2
+        osf: Optional[torch.Tensor] = layer.output_scaling_factor / 2 \
+            if self.out_dtype == torch.float8_e4m3fnuz else None
+        
+        x_quant = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
+        ops.convert_fp8(x_quant, x, float(asf))
+        m = weight.shape[0]
+        n = x.shape[0]
+        k = x.shape[1]
+        
+        solidx = self._tuned.get((m, n, k))
+        
+        if is_hip() and bias is None and solidx is not None:
+            res = ops.fp8_mm(x_quant,
+                       weight.t(),
+                       self.out_dtype,
+                       asf, wsf, osf,
+                       int(solidx))
+            if osf is not None:
+                res16 = torch.empty_like(res, dtype=torch.float16)
+                ops.convert_fp8(res16, res, float(1/osf))
+                res = res16
+        else:
+            _save_shapes(m, n, k)
+            res, _ = torch._scaled_mm(x_quant,
+                                      weight.t(),
+                                      out_dtype=x.dtype,
+                                      scale_a=asf,
+                                      scale_b=wsf,
+                                      bias=bias)
+        return res
 
-        return F.linear(x, weight, bias)
-    
 
 def _per_tensor_quantize(tensor: torch.Tensor,
                         inv_scale: float) -> torch.Tensor:
@@ -301,3 +252,14 @@ def _per_tensor_dequantize(tensor: torch.Tensor,
     fake_qweight = tensor.to(torch.float16)
     dq_weight = fake_qweight * inv_scale
     return dq_weight
+
+def _save_shapes(m: int, n: int, k: int):
+    if is_hip() and env.VLLM_TUNE_FP8 == "1":
+        try:
+            df = pd.read_csv("/tmp/fp8_shapes.csv")
+        except:
+            df = pd.DataFrame(columns=["M", "N", "K"])
+        df = pd.concat(
+            [df, pd.DataFrame({"M": [m], "N": [n], "K": [k]})]
+        ).drop_duplicates()
+        df.to_csv("/tmp/fp8_shapes.csv", index=False)

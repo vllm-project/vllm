@@ -223,6 +223,20 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH":
     lambda: os.getenv("VLLM_XLA_CACHE_PATH", "~/.vllm/xla_cache/"),
+    
+    # Wheher to tune fp8 gemm or not.
+    # Will record all shapes of fp8 gemm.
+    "VLLM_TUNE_FP8":
+    lambda: os.getenv("VLLM_TUNE_FP8", "0"),
+
+    # The file storing the tuned result for fp8 gemm.
+    "VLLM_FP8_TUNED_FILE":
+    lambda: os.getenv("VLLM_FP8_TUNED_FILE", "/tmp/tuned_fp8.csv"),
+    
+    # The output dtype used for fp8 gemm.
+    # Only float16 and float8_e4m3fnuz supported.
+    "VLLM_FP8_GEMM_OUTPUT_TYPE":
+    lambda: os.getenv("VLLM_FP8_GEMM_OUTPUT_TYPE", "float16")
 }
 
 # end-env-vars-definition
