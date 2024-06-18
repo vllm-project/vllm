@@ -144,7 +144,7 @@ class Metrics:
 # end-metrics-definitions
 
 
-def build_1_2_5_buckets(max_value: int):
+def build_1_2_5_buckets(max_value: int) -> List[int]:
     """
     Builds a list of buckets with increasing powers of 10 multiplied by 
     mantissa values (1, 2, 5) until the value exceeds the specified maximum.
@@ -155,7 +155,7 @@ def build_1_2_5_buckets(max_value: int):
     """
     mantissa_lst = [1, 2, 5]
     exponent = 0
-    buckets = []
+    buckets: List[int] = []
     while True:
         for m in mantissa_lst:
             value = m * 10**exponent
