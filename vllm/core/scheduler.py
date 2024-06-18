@@ -861,7 +861,8 @@ class Scheduler:
             fcfs_policy,
             enable_chunking=True)
 
-        # If preemption happens, it means we don't have space for other requests.
+        # If preemption happens, it means we don't have space for other
+        # requests.
         if len(running_scheduled.preempted) + len(
                 running_scheduled.swapped_out) == 0:
             # Schedule swapped out requests.
