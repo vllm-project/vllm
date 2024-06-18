@@ -100,13 +100,13 @@ steps:
 - label: Models Test
   #mirror_hardwares: [amd]
   commands:
-    - pytest -v -s models -m \"not llava\"
+    - pytest -v -s models -m \"not vlm\"
 
-- label: Llava Test
+- label: Vision Language Models Test
   mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models -m llava
+    - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test
   mirror_hardwares: [amd]

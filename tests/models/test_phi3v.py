@@ -8,7 +8,7 @@ from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_FILES
 
-pytestmark = pytest.mark.llava
+pytestmark = pytest.mark.vlm
 
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = [
