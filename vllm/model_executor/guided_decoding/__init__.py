@@ -7,13 +7,13 @@ from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (
     get_lm_format_enforcer_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.outlines_decoding import (
     get_outlines_guided_decoding_logits_processor)
-from vllm.sampling_params import LogitsProcessor
+from vllm.sampling_params import LogitsProcessorFactory
 
 
-async def get_guided_decoding_logits_processor(
+async def get_guided_decoding_logits_processor_factory(
         guided_decoding_backend: str, request: Union[CompletionRequest,
                                                      ChatCompletionRequest],
-        tokenizer) -> Optional[LogitsProcessor]:
+        tokenizer) -> Optional[LogitsProcessorFactory]:
     request = _adapt_request_for_tool_use(request)
 
     if guided_decoding_backend == 'outlines':

@@ -25,7 +25,7 @@ from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
+    get_guided_decoding_logits_processor_factory)
 from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import (async_get_and_parse_image,
                                    get_full_image_text_prompt)
@@ -249,7 +249,7 @@ class OpenAIServingChat(OpenAIServing):
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
             guided_decode_logits_processor = (
-                await get_guided_decoding_logits_processor(
+                await get_guided_decoding_logits_processor_factory(
                     guided_decoding_backend, request, await
                     self.engine.get_tokenizer()))
             if guided_decode_logits_processor:

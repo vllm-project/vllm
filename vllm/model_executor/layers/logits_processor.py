@@ -95,13 +95,13 @@ def _apply_logits_processors(
     logits_processed = 0
     for seq_group in sampling_metadata.seq_groups:
         seq_ids = seq_group.seq_ids
-        sampling_params = seq_group.sampling_params
-        logits_processors = sampling_params.logits_processors
-        if logits_processors:
-            found_logits_processors = True
 
-            for seq_id, logits_row_idx in zip(seq_ids,
-                                              seq_group.sample_indices):
+        for seq_id, logits_row_idx in zip(seq_ids, seq_group.sample_indices):
+            logits_processors = seq_group.seq_data[seq_id].logits_processors
+
+            if logits_processors:
+                found_logits_processors = True
+
                 logits_row = logits[logits_row_idx]
                 past_tokens_ids = seq_group.seq_data[seq_id].output_token_ids
                 prompt_tokens_ids = seq_group.seq_data[seq_id].prompt_token_ids
