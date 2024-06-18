@@ -367,10 +367,6 @@ def ref_multi_query_kv_attention(
 
 
 # UPSTREAM SYNC: breaks NM automation.
-@pytest.mark.skip("C compiler not installed in NM automation. "
-                  "This codepath follows a triton pathway, which "
-                  "JITs using clang or gcc. Since neither are installed "
-                  "in our test instances, we need to skip this for now.")
 @pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)

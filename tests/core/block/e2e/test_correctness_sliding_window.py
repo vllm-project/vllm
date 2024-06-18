@@ -79,10 +79,6 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
 
 
 # UPSTREAM SYNC: breaks NM automation.
-@pytest.mark.skip("C compiler not installed in NM automation. "
-                  "This codepath follows a triton pathway, which "
-                  "JITs using clang or gcc. Since neither are installed "
-                  "in our test instances, we need to skip this for now.")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
