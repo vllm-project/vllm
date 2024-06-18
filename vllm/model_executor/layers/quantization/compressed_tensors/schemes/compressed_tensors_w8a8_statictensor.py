@@ -39,22 +39,16 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
 
-        # TODO: remove zero_point parameters once the configs given remove them
-
         is_tensor_partitioned = len(output_partition_sizes) != 1
         weight_scale_dim = sum(
             output_partition_sizes) if is_tensor_partitioned else 1
 
         input_scale = Parameter(torch.empty(1, dtype=torch.float32),
                                 requires_grad=False)
-        input_zero_point = Parameter(torch.empty(1, dtype=torch.int8),
-                                     requires_grad=False)
 
         weight_scale = Parameter(torch.empty(weight_scale_dim,
                                              dtype=torch.float32),
                                  requires_grad=False)
-        weight_zero_point = Parameter(torch.empty(1, dtype=torch.int8),
-                                      requires_grad=False)
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
@@ -72,11 +66,6 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
             "weight_loader": weight_loader,
             "ignore_warning": True,
         })
-        layer.register_parameter("input_zero_point", input_zero_point)
-        set_weight_attrs(input_zero_point, {
-            "weight_loader": weight_loader,
-            "ignore_warning": True,
-        })
         layer.register_parameter("weight_scale", weight_scale)
         set_weight_attrs(
             weight_scale, {
@@ -85,11 +74,6 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
                 "logical_widths": output_partition_sizes,
                 "ignore_warning": True,
             })
-        layer.register_parameter("weight_zero_point", weight_zero_point)
-        set_weight_attrs(weight_zero_point, {
-            "weight_loader": weight_loader,
-            "ignore_warning": True
-        })
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         weight = layer.weight

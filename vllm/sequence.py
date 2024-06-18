@@ -124,7 +124,7 @@ class SequenceData:
             output_token_ids = []
 
         self.prompt_token_ids = prompt_token_ids
-        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
+        self._prompt_token_ids_tuple = tuple(prompt_token_ids)
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -422,6 +422,7 @@ class SequenceGroup:
             for an embedding model.
         encoder_seq: Optional, the single encoder sequence. Should be None
                      unless you are working with an encoder/decoder model.
+        trace_headers: OpenTelemetry trace headers.
     """
 
     def __init__(
@@ -434,6 +435,7 @@ class SequenceGroup:
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         self.request_id = request_id
@@ -451,6 +453,7 @@ class SequenceGroup:
         self.pooling_params = pooling_params
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
+        self.trace_headers = trace_headers
 
     @property
     def prompt(self) -> Optional[str]:

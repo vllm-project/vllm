@@ -1,8 +1,6 @@
 import contextlib
 import gc
 import os
-import subprocess
-import sys
 from typing import Any, Dict, List, Optional, Tuple, TypeVar
 
 import pytest
@@ -22,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu
+from vllm.utils import cuda_device_count_stateless, is_cpu
 
 logger = init_logger(__name__)
 
@@ -146,6 +144,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "half",
         *,
+        model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
     ) -> None:
@@ -168,11 +167,13 @@ class HfRunner:
             else:
                 auto_cls = AutoModelForCausalLM
 
+            model_kwargs = model_kwargs if model_kwargs is not None else {}
             self.model = self.wrap_device(
                 auto_cls.from_pretrained(
                     model_name,
                     torch_dtype=torch_dtype,
                     trust_remote_code=True,
+                    **model_kwargs,
                 ))
 
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -539,15 +540,4 @@ def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
 
-    try:
-        out = subprocess.run([
-            sys.executable, "-c",
-            "import torch; print(torch.cuda.device_count())"
-        ],
-                             capture_output=True,
-                             check=True,
-                             text=True)
-    except subprocess.CalledProcessError as e:
-        logger.warning("Failed to get number of GPUs.", exc_info=e)
-        return 0
-    return int(out.stdout.strip())
+    return cuda_device_count_stateless()

@@ -1,6 +1,6 @@
 # In this file, you can add more tests to run either by adding a new step or
 # adding a new command to an existing step. See different options here for examples.
-# This script will be feed into Jinja template in `test-template.j2` to generate
+# This script will be feed into Jinja template in `test-template-aws.j2` to generate
 # the final pipeline yaml file.
 
 steps:
@@ -32,7 +32,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
 
-- label: Distributed Tests
+- label: Distributed Tests (2 GPUs)
   mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
@@ -48,13 +48,18 @@ steps:
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
   - pytest -v -s spec_decode/e2e/test_integration_dist.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
-- label: Distributed Tests (Multiple Groups)
+- label: Distributed Tests (4 GPUs)
   #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   commands:
   - pytest -v -s distributed/test_pynccl.py
+  # We want to test that models which use 2 GPUs work with 4 GPUs, which is why we duplicate them here.
+  # See https://github.com/vllm-project/vllm/pull/5473#issuecomment-2166601837 for context.
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
 
 - label: Engine Test
   mirror_hardwares: [amd]
@@ -95,13 +100,13 @@ steps:
 - label: Models Test
   #mirror_hardwares: [amd]
   commands:
-    - pytest -v -s models -m \"not llava\"
+    - pytest -v -s models -m \"not vlm\"
 
-- label: Llava Test
+- label: Vision Language Models Test
   mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models -m llava
+    - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test
   mirror_hardwares: [amd]
@@ -153,6 +158,15 @@ steps:
 - label: Quantization Test
   #mirror_hardwares: [amd]
   command: pytest -v -s quantization
+
+- label: Tracing Test
+  commands: 
+    - "pip install \
+        opentelemetry-sdk \
+        opentelemetry-api \
+        opentelemetry-exporter-otlp \
+        opentelemetry-semantic-conventions-ai"
+    - pytest -v -s tracing
 
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"

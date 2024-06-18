@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig,
-                         VisionLanguageConfig)
+                         VisionLanguageConfig, ObservabilityConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import str_to_int_tuple
 
@@ -103,6 +103,8 @@ class EngineArgs:
     ngram_prompt_lookup_min: Optional[int] = None
 
     qlora_adapter_name_or_path: Optional[str] = None
+
+    otlp_traces_endpoint: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -233,7 +235,7 @@ class EngineArgs:
             '* "dummy" will initialize the weights with random values, '
             'which is mainly for profiling.\n'
             '* "tensorizer" will load the weights using tensorizer from '
-            'CoreWeave. See the Tensorize vLLM Model script in the Examples'
+            'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
@@ -504,6 +506,7 @@ class EngineArgs:
                   'Enabling this will use the fully sharded layers. '
                   'At high sequence length, max rank or '
                   'tensor parallel size, this is likely faster.'))
+
         parser.add_argument('--enable-prompt-adapter',
                             action='store_true',
                             help='If True, enable handling of PromptAdapters.')
@@ -511,11 +514,12 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_prompt_adapters,
                             help='Max number of PromptAdapters in a batch.')
-        parser.add_argument("--device",
-                            type=str,
-                            default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron", "cpu", "tpu"],
-                            help='Device type for vLLM execution.')
+        parser.add_argument(
+            "--device",
+            type=str,
+            default=EngineArgs.device,
+            choices=["auto", "cuda", "neuron", "cpu", "tpu", "xpu"],
+            help='Device type for vLLM execution.')
 
         # Related to Vision-language models such as llava
         parser = EngineArgs.add_cli_args_for_vlm(parser)
@@ -608,6 +612,13 @@ class EngineArgs:
                             type=str,
                             default=None,
                             help='Name or path of the QLoRA adapter.')
+
+        parser.add_argument(
+            '--otlp-traces-endpoint',
+            type=str,
+            default=None,
+            help='Target URL to which OpenTelemetry traces will be sent.')
+
         return parser
 
     @classmethod
@@ -770,6 +781,9 @@ class EngineArgs:
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
 
+        observability_config = ObservabilityConfig(
+            otlp_traces_endpoint=self.otlp_traces_endpoint)
+
         if (model_config.get_sliding_window() is not None
                 and scheduler_config.chunked_prefill_enabled
                 and not scheduler_config.use_v2_block_manager):
@@ -777,17 +791,21 @@ class EngineArgs:
                 "Chunked prefill is not supported with sliding window. "
                 "Set --disable-sliding-window to disable sliding window.")
 
-        return EngineConfig(model_config=model_config,
-                            cache_config=cache_config,
-                            parallel_config=parallel_config,
-                            scheduler_config=scheduler_config,
-                            device_config=device_config,
-                            lora_config=lora_config,
-                            vision_language_config=vision_language_config,
-                            speculative_config=speculative_config,
-                            load_config=load_config,
-                            decoding_config=decoding_config,
-                            prompt_adapter_config=prompt_adapter_config)
+        return EngineConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            lora_config=lora_config,
+            vision_language_config=vision_language_config,
+            speculative_config=speculative_config,
+            load_config=load_config,
+            decoding_config=decoding_config,
+            observability_config=observability_config,
+            prompt_adapter_config=prompt_adapter_config
+        )
+
 
 
 @dataclass
