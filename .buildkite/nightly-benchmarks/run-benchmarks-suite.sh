@@ -6,7 +6,7 @@
 
 # Do not set -e, as the mixtral 8x22B model tends to crash occasionally
 # and we still want to see other benchmarking results even when mixtral crashes.
-set -o pipefail
+set -ox pipefail
 
 check_gpus() {
   # check the number of GPUs and GPU type.
