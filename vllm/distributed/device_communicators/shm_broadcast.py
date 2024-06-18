@@ -26,8 +26,8 @@ class ShmRingBuffer:
         self.rank = dist.get_rank(pg)
         self.world_size = dist.get_world_size(pg)
         global_ranks = dist.get_process_group_ranks(pg)
-        self.is_writer = self.rank == 0
-        self.is_reader = not self.is_writer
+        self._is_writer = self.rank == 0
+        self._is_reader = not self._is_writer
         self.current_idx = 0
         self.max_chunk_bytes = max_chunk_bytes
         self.max_chunks = max_chunks
@@ -36,7 +36,7 @@ class ShmRingBuffer:
         self.data_offset = 0
         self.metadata_offset = self.max_chunk_bytes * self.max_chunks
 
-        if self.is_writer:
+        if self._is_writer:
             self.shared_memory = shared_memory.SharedMemory(create=True,
                                                             size=total_bytes)
             # initialize the metadata section to 0
@@ -69,7 +69,7 @@ class ShmRingBuffer:
 
     @contextmanager
     def acquire_write(self):
-        assert self.is_writer, "Only writers can acquire write"
+        assert self._is_writer, "Only writers can acquire write"
         start_index = self.current_idx
         start_time = time.time()
         while True:
@@ -105,7 +105,7 @@ class ShmRingBuffer:
 
     @contextmanager
     def acquire_read(self):
-        assert self.is_reader, "Only readers can acquire read"
+        assert self._is_reader, "Only readers can acquire read"
         start_index = self.current_idx
         start_time = time.time()
         while True:
@@ -138,7 +138,7 @@ class ShmRingBuffer:
                 break
 
     def broadcast_object(self, obj=None):
-        if self.is_writer:
+        if self._is_writer:
             serialized_obj = pickle.dumps(obj,
                                           protocol=pickle.HIGHEST_PROTOCOL)
             if len(serialized_obj) > self.max_chunk_bytes:
@@ -158,7 +158,7 @@ class ShmRingBuffer:
             return obj
 
     def __del__(self):
-        if self.is_writer:
+        if self._is_writer:
             self.shared_memory.close()
             self.shared_memory.unlink()
         else:
