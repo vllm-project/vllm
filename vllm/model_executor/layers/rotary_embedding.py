@@ -534,7 +534,6 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
             self.max_position_embeddings / self.original_max_position_embeddings
         )
 
-
         if scale <= 1.0:
             self.scaling_factor = 1.0
         else:
