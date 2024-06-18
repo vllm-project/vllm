@@ -10,6 +10,7 @@ from transformers import PretrainedConfig, PreTrainedTokenizerBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
+from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
                         is_hip, is_neuron, is_tpu, is_xpu)
@@ -1371,6 +1372,17 @@ class DecodingConfig:
                              f"must be one of {valid_guided_backends}")
 
 
+@dataclass
+class ObservabilityConfig:
+    """Configuration for observability."""
+    otlp_traces_endpoint: Optional[str] = None
+
+    def __post_init__(self):
+        if not is_otel_installed() and self.otlp_traces_endpoint is not None:
+            raise ValueError("OpenTelemetry packages must be installed before "
+                             "configuring 'otlp_traces_endpoint'")
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     """Dataclass which contains all engine-related configuration. This
@@ -1387,6 +1399,7 @@ class EngineConfig:
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
+    observability_config: Optional[ObservabilityConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.

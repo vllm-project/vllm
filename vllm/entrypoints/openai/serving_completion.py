@@ -24,6 +24,8 @@ from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
+from vllm.tracing import (contains_trace_headers, extract_trace_headers,
+                          log_tracing_disabled_warning)
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -125,6 +127,14 @@ class OpenAIServingCompletion(OpenAIServing):
                         truncate_prompt_tokens)
                 prompt_ids, prompt_text = prompt_formats
 
+                is_tracing_enabled = await self.engine.is_tracing_enabled()
+                trace_headers = None
+                if is_tracing_enabled:
+                    trace_headers = extract_trace_headers(raw_request.headers)
+                if not is_tracing_enabled and contains_trace_headers(
+                        raw_request.headers):
+                    log_tracing_disabled_warning()
+
                 generator = self.engine.generate(
                     {
                         "prompt": prompt_text,
@@ -133,6 +143,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params,
                     f"{request_id}-{i}",
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
                 )
 
                 generators.append(generator)

@@ -763,3 +763,15 @@ def cuda_device_count_stateless() -> int:
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
 
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+#From: https://stackoverflow.com/a/4104188/2749989
+def run_once(f):
+
+    def wrapper(*args, **kwargs) -> Any:
+        if not wrapper.has_run:  # type: ignore[attr-defined]
+            wrapper.has_run = True  # type: ignore[attr-defined]
+            return f(*args, **kwargs)
+
+    wrapper.has_run = False  # type: ignore[attr-defined]
+    return wrapper

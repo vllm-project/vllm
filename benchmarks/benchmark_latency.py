@@ -20,26 +20,29 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(model=args.model,
-              speculative_model=args.speculative_model,
-              num_speculative_tokens=args.num_speculative_tokens,
-              tokenizer=args.tokenizer,
-              quantization=args.quantization,
-              tensor_parallel_size=args.tensor_parallel_size,
-              trust_remote_code=args.trust_remote_code,
-              dtype=args.dtype,
-              enforce_eager=args.enforce_eager,
-              kv_cache_dtype=args.kv_cache_dtype,
-              quantization_param_path=args.quantization_param_path,
-              device=args.device,
-              ray_workers_use_nsight=args.ray_workers_use_nsight,
-              use_v2_block_manager=args.use_v2_block_manager,
-              enable_chunked_prefill=args.enable_chunked_prefill,
-              download_dir=args.download_dir,
-              block_size=args.block_size,
-              gpu_memory_utilization=args.gpu_memory_utilization,
-              load_format=args.load_format,
-              distributed_executor_backend=args.distributed_executor_backend)
+    llm = LLM(
+        model=args.model,
+        speculative_model=args.speculative_model,
+        num_speculative_tokens=args.num_speculative_tokens,
+        tokenizer=args.tokenizer,
+        quantization=args.quantization,
+        tensor_parallel_size=args.tensor_parallel_size,
+        trust_remote_code=args.trust_remote_code,
+        dtype=args.dtype,
+        enforce_eager=args.enforce_eager,
+        kv_cache_dtype=args.kv_cache_dtype,
+        quantization_param_path=args.quantization_param_path,
+        device=args.device,
+        ray_workers_use_nsight=args.ray_workers_use_nsight,
+        use_v2_block_manager=args.use_v2_block_manager,
+        enable_chunked_prefill=args.enable_chunked_prefill,
+        download_dir=args.download_dir,
+        block_size=args.block_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        load_format=args.load_format,
+        distributed_executor_backend=args.distributed_executor_backend,
+        otlp_traces_endpoint=args.otlp_traces_endpoint,
+    )
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -254,5 +257,10 @@ if __name__ == '__main__':
         help='Backend to use for distributed serving. When more than 1 GPU '
         'is used, will be automatically set to "ray" if installed '
         'or "mp" (multiprocessing) otherwise.')
+    parser.add_argument(
+        '--otlp-traces-endpoint',
+        type=str,
+        default=None,
+        help='Target URL to which OpenTelemetry traces will be sent.')
     args = parser.parse_args()
     main(args)
