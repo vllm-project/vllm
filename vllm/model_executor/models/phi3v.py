@@ -276,11 +276,10 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
         seq_len,
         image_token_id=32044,
     )
-    multi_modal_data = DummyImageDataFactories.dummy_pixel_data_for_clip(
-        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-    )
+    mm_data = DummyImageDataFactories.dummy_pixel_data_for_clip(
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG, )
 
-    return seq_data, multi_modal_data
+    return seq_data, mm_data
 
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
