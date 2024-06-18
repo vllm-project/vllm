@@ -49,16 +49,15 @@ def cutlass_fp8_gemm_helper(m: int,
         (1, n_b_scales), device=device, dtype=torch.float32) / 10)
     if bias:
         # bias term should be > 1 so that the absolute tolerance can catch it
-        bias_azp = torch.rand((n, ), device=device, dtype=torch.float32) + 1.0
-        out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype,
-                                    bias_azp)
+        bias = torch.rand((n, ), device=device, dtype=torch.float32) + 1.0
+        out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     else:
         out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
-        bias_azp = 0
+        bias = 0
 
     baseline = (torch.mm(scale_a * a.to(dtype=torch.float32),
                          scale_b * b.to(dtype=torch.float32)) +
-                bias_azp).to(out_dtype)
+                bias).to(out_dtype)
 
     assert torch.allclose(out, baseline, rtol=1e-2, atol=1e-1)
 
@@ -86,16 +85,15 @@ def cutlass_int8_gemm_helper(m: int,
 
     if bias:
         # bias term should be > 1 so that the absolute tolerance can catch it
-        bias_azp = torch.rand((n, ), device=device, dtype=torch.float32) + 1.0
-        out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype,
-                                    bias_azp)
+        bias = torch.rand((n, ), device=device, dtype=torch.float32) + 1.0
+        out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     else:
         out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
-        bias_azp = 0
+        bias = 0
 
     baseline = (torch.mm(scale_a * a.to(dtype=torch.float32),
                          scale_b * b.to(dtype=torch.float32)) +
-                bias_azp).to(dtype=out_dtype)
+                bias).to(dtype=out_dtype)
     assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
 
 

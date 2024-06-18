@@ -66,7 +66,7 @@ struct enable_sm90_or_later : Kernel {
 
 /*
  * This class provides the common ScaleA and ScaleB descriptors for the
- * ScaledEpilogue and ScaledEpilogueAzp classes.
+ * ScaledEpilogue and ScaledEpilogueBias classes.
  */
 template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
 struct ScaledEpilogueBase {
@@ -140,7 +140,7 @@ struct ScaledEpilogue
 };
 
 template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
-struct ScaledEpilogueAzp
+struct ScaledEpilogueBias
     : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
  private:
   using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
@@ -170,14 +170,14 @@ struct ScaledEpilogueAzp
 
   static ArgumentType prepare_args(torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales,
-                                   torch::Tensor const& bias_azp) {
+                                   torch::Tensor const& bias) {
     using ScaleA_Args = typename ScaleA::Arguments;
     using ScaleB_Args = typename ScaleB::Arguments;
     using Bias_Args = typename Bias::Arguments;
 
     ScaleA_Args a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
     ScaleB_Args b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
-    Bias_Args bias_args{bias_azp.data_ptr<float>(), bias_azp.numel() != 1, {}};
+    Bias_Args bias_args{bias.data_ptr<float>(), bias.numel() != 1, {}};
 
     return ArgumentType{a_args, {b_args}, bias_args};
   }
@@ -422,13 +422,13 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias_azp) {
+                            c10::optional<torch::Tensor> const& bias) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
-  if (bias_azp) {
-    TORCH_CHECK(bias_azp->dtype() == torch::kFloat32);
-    return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueAzp>(
-        c, a, b, a_scales, b_scales, *bias_azp);
+  if (bias) {
+    TORCH_CHECK(bias->dtype() == torch::kFloat32);
+    return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBias>(
+        c, a, b, a_scales, b_scales, *bias);
   } else {
     return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogue>(c, a, b, a_scales,
                                                            b_scales);

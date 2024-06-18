@@ -7,32 +7,32 @@ void cutlass_scaled_mm_sm75(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias_azp);
+                            c10::optional<torch::Tensor> const& bias);
 
 void cutlass_scaled_mm_sm80(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias_azp);
+                            c10::optional<torch::Tensor> const& bias);
 
 void cutlass_scaled_mm_sm89(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias_azp);
+                            c10::optional<torch::Tensor> const& bias);
 
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
 void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias_azp);
+                            c10::optional<torch::Tensor> const& bias);
 #endif
 
 void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales,
-                       c10::optional<torch::Tensor> const& bias_azp) {
+                       c10::optional<torch::Tensor> const& bias) {
   int32_t major_capability;
   int32_t minor_capability;
   cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
@@ -62,19 +62,19 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
 
     // Guard against compilation issues for sm90 kernels
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
-    cutlass_scaled_mm_sm90(c, a, b, a_scales, b_scales, bias_azp);
+    cutlass_scaled_mm_sm90(c, a, b, a_scales, b_scales, bias);
 #else
-    cutlass_scaled_mm_sm80(c, a, b, a_scales, b_scales, bias_azp);
+    cutlass_scaled_mm_sm80(c, a, b, a_scales, b_scales, bias);
 #endif
   } else if (version_num == 89) {
     // Ada Lovelace
-    cutlass_scaled_mm_sm89(c, a, b, a_scales, b_scales, bias_azp);
+    cutlass_scaled_mm_sm89(c, a, b, a_scales, b_scales, bias);
   } else if (version_num >= 80) {
     // Ampere
-    cutlass_scaled_mm_sm80(c, a, b, a_scales, b_scales, bias_azp);
+    cutlass_scaled_mm_sm80(c, a, b, a_scales, b_scales, bias);
   } else {
     // Turing
     TORCH_CHECK(version_num >= 75);
-    cutlass_scaled_mm_sm75(c, a, b, a_scales, b_scales, bias_azp);
+    cutlass_scaled_mm_sm75(c, a, b, a_scales, b_scales, bias);
   }
 }
