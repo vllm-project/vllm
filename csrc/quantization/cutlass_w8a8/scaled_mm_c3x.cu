@@ -353,9 +353,11 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   }
 }
 
-template <template<typename, typename, typename> typename Epilogue, typename ...EpilogueArgs>
+template <template <typename, typename, typename> typename Epilogue,
+          typename... EpilogueArgs>
 void cutlass_scaled_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor const& a,
-                            torch::Tensor const& b, EpilogueArgs&& ...epilogue_args) {
+                                     torch::Tensor const& b,
+                                     EpilogueArgs&&... epilogue_args) {
   if (a.dtype() == torch::kInt8) {
     TORCH_CHECK(b.dtype() == torch::kInt8);
 
@@ -366,9 +368,10 @@ void cutlass_scaled_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor const& a,
     using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
 
     if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_caller<cutlass_3x_gemm<
-          int8_t, cutlass::bfloat16_t, Epilogue, TileShape, ClusterShape,
-          KernelSchedule, EpilogueSchedule>>(out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+      return cutlass_gemm_caller<
+          cutlass_3x_gemm<int8_t, cutlass::bfloat16_t, Epilogue, TileShape,
+                          ClusterShape, KernelSchedule, EpilogueSchedule>>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
 
@@ -382,8 +385,8 @@ void cutlass_scaled_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor const& a,
     TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
     if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_sm90_fp8_dispatch<
-          cutlass::float_e4m3_t, cutlass::bfloat16_t, Epilogue>(
+      return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
+                                            cutlass::bfloat16_t, Epilogue>(
           out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);

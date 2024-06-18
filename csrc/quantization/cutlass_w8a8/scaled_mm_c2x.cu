@@ -407,18 +407,18 @@ void cutlass_scaled_mm_sm89_epilogue(torch::Tensor& out, torch::Tensor const& a,
     TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
     if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_caller<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89_to_sm90, cutlass::float_e4m3_t,
-          cutlass::bfloat16_t, Epilogue, TileShape, WarpShape,
-          InstructionShape, 5>>(out, a, b,
-                                std::forward<EpilogueArgs>(epilogue_args)...);
+      return cutlass_gemm_caller<
+          cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
+                          cutlass::float_e4m3_t, cutlass::bfloat16_t, Epilogue,
+                          TileShape, WarpShape, InstructionShape, 5>>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
-      return cutlass_gemm_caller<cutlass_2x_gemm<
-          cutlass::arch::Sm89, enable_sm89_to_sm90, cutlass::float_e4m3_t,
-          cutlass::half_t, Epilogue, TileShape, WarpShape,
-          InstructionShape, 5>>(out, a, b,
-                                std::forward<EpilogueArgs>(epilogue_args)...);
+      return cutlass_gemm_caller<
+          cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
+                          cutlass::float_e4m3_t, cutlass::half_t, Epilogue,
+                          TileShape, WarpShape, InstructionShape, 5>>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   }
 }
