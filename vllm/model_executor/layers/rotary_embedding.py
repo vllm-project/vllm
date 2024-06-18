@@ -530,18 +530,15 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self.short_mscale = short_mscale
         self.long_mscale = long_mscale
 
-        scale = (
-            self.max_position_embeddings / self.original_max_position_embeddings
-        )
+        scale = (self.max_position_embeddings /
+                 self.original_max_position_embeddings)
 
         if scale <= 1.0:
             self.scaling_factor = 1.0
         else:
             self.scaling_factor = math.sqrt(
-                1
-                + math.log(scale)
-                / math.log(self.original_max_position_embeddings)
-            )
+                1 + math.log(scale) /
+                math.log(self.original_max_position_embeddings))
 
         short_cache = self._compute_cos_sin_cache(
             original_max_position_embeddings, short_factor, short_mscale)
