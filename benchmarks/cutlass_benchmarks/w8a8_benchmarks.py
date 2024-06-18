@@ -120,7 +120,7 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
 
     # cutlass impl
     timers.append(
-        bench_fn(a, b, scale_a.to(device="cpu"), scale_b.to(device="cpu"),
+        bench_fn(a, b, scale_a, scale_b,
                  torch.bfloat16, label, sub_label, cutlass_impl,
                  "cutlass_i8_i8_bf16_scaled_mm"))
 
