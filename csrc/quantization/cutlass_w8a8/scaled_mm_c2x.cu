@@ -348,7 +348,7 @@ void cutlass_gemm_sm80_dispatch(torch::Tensor& out, torch::Tensor const& a,
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 128) {
     // M in (64, 128]
-    uint32_t const n = a.size(1);
+    uint32_t const n = out.size(1);
     bool const small_n = n < 8192;
     if (small_n) {
       return cutlass_gemm_caller<Cutlass2xGemmM128SmallN>(
