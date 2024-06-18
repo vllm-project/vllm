@@ -3,8 +3,10 @@ Note: sparse kernels do not have bitwise correctness vs the dense models.
 As a result, in this test, we just confirm that the top selected tokens of the 
 sparse models are in the top N selections of same model running dense.
 
-Run `pytest tests/models/test_compressed.py`.
+Run `pytest tests/models_core/test_magic_wand.py`.
 """
+
+import gc
 
 import pytest
 
@@ -47,6 +49,7 @@ def test_magic_wand(
     dense_outputs = dense_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
     del dense_model
+    gc.collect()
 
     sparse_model = vllm_runner(
         model_name=model_name,
