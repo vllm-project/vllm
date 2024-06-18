@@ -31,16 +31,16 @@ class ShmRingBuffer:
         self.current_idx = 0
         self.max_chunk_bytes = max_chunk_bytes
         self.max_chunks = max_chunks
-        total_bytes = (self.max_chunk_bytes +
-                       self.world_size) * self.max_chunks
+        total_bytes_of_buffer = (self.max_chunk_bytes +
+                                 self.world_size) * self.max_chunks
         self.data_offset = 0
         self.metadata_offset = self.max_chunk_bytes * self.max_chunks
 
         if self._is_writer:
-            self.shared_memory = shared_memory.SharedMemory(create=True,
-                                                            size=total_bytes)
+            self.shared_memory = shared_memory.SharedMemory(
+                create=True, size=total_bytes_of_buffer)
             # initialize the metadata section to 0
-            for i in range(self.metadata_offset, total_bytes):
+            for i in range(self.metadata_offset, total_bytes_of_buffer):
                 self.shared_memory.buf[i] = 0
             dist.broadcast_object_list([self.shared_memory.name],
                                        src=global_ranks[0])
