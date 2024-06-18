@@ -68,15 +68,15 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     updated from `CUDAGraphRunner.forward` API.
     """
 
-    # seq_lens stored as a tensor.
-    seq_lens_tensor: Optional[torch.Tensor]
-
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
     # |-------------------- seq_len ----------------------|
     #                                   |-- query_len ---|
+
+    # seq_lens stored as a tensor.
+    seq_lens_tensor: Optional[torch.Tensor]
 
     # FIXME: It is for flash attn.
     # Maximum sequence length among prefill batch. 0 if there are decoding
@@ -125,6 +125,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     # Maximum sequence length among encoder sequences
     max_encoder_seq_len: Optional[int] = None
+
+    # Number of tokens input to encoder
+    num_encoder_tokens: Optional[int] = None
 
     # Cross-attention memory-mapping data structures: slot mapping
     # and block tables
@@ -538,7 +541,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             # Encoder attention - chunked prefill is not applicable;
             # derive token-count from query shape & and treat them
             # as 100% prefill tokens
-            num_prefill_tokens = query.shape[0]
+            num_prefill_tokens = attn_metadata.num_encoder_tokens
             num_decode_tokens = 0
 
         if attn_type == AttentionType.DECODER:
