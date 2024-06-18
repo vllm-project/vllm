@@ -10,7 +10,7 @@ ARG CUDA_VERSION=12.4.1
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
 
-ARG CUDA_VERSION
+ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -58,7 +58,7 @@ ARG PYTHON_VERSION=3
 
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
-RUN python3 --version && python3 -m pip --version
+
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt
 
@@ -127,6 +127,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
 FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04 AS vllm-base
+ARG CUDA_VERSION=12.4.1
 WORKDIR /vllm-workspace
 
 RUN apt-get update -y \
