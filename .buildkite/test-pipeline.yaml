@@ -24,6 +24,7 @@ steps:
 
 - label: Core Test
   mirror_hardwares: [amd]
+  gpu: a100
   command: pytest -v -s core
 
 - label: Distributed Comm Ops Test
