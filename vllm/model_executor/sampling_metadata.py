@@ -343,14 +343,14 @@ class SamplingTensors:
 
         # first pass through to determine do_penalties
         for seq_group in sampling_metadata.seq_groups:
-             sampling_params = seq_group.sampling_params
-             p = sampling_params.presence_penalty
-             f = sampling_params.frequency_penalty
-             r = sampling_params.repetition_penalty
-             if not do_penalties and (abs(p) >= _SAMPLING_EPS
-                                 or abs(f) >= _SAMPLING_EPS
-                                 or abs(r - 1.0) >= _SAMPLING_EPS):
-                 do_penalties = True
+            sampling_params = seq_group.sampling_params
+            p = sampling_params.presence_penalty
+            f = sampling_params.frequency_penalty
+            r = sampling_params.repetition_penalty
+            if not do_penalties and (abs(p) >= _SAMPLING_EPS
+                                     or abs(f) >= _SAMPLING_EPS
+                                     or abs(r - 1.0) >= _SAMPLING_EPS):
+                do_penalties = True
 
         for seq_group in sampling_metadata.seq_groups:
             seq_ids = seq_group.seq_ids
