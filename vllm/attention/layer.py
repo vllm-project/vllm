@@ -78,25 +78,22 @@ class Attention(nn.Module):
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params)
 
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        attn_type: Optional[AttentionType] = None
-    ) -> torch.Tensor:
-        if attn_type is None:
-            # Support backends without an attention type argument
-            return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                                     self._kv_scale)
-        else:
-            # Backends with encoder/decoder support require attention
-            # type argument to distinguish between encoder attention,
-            # decoder self-attention, or encoder/decoder cross-attention
-            return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                                     self._kv_scale, attn_type=attn_type)
+    def forward(self,
+                query: torch.Tensor,
+                key: torch.Tensor,
+                value: torch.Tensor,
+                kv_cache: Optional[torch.Tensor],
+                attn_metadata: AttentionMetadata,
+                attn_type: AttentionType = AttentionType.DECODER) \
+                    -> torch.Tensor:
+
+        return self.impl.forward(query,
+                                 key,
+                                 value,
+                                 kv_cache,
+                                 attn_metadata,
+                                 self._kv_scale,
+                                 attn_type=attn_type)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore

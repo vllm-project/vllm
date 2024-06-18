@@ -7,7 +7,7 @@ import torch
 
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
@@ -150,14 +150,14 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         return key_cache, value_cache
 
     def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: Optional[torch.Tensor],
-        attn_metadata: IpexAttnMetadata,  # type: ignore
-        kv_scale: float = 1.0,
-    ) -> torch.Tensor:
+            self,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            kv_cache: Optional[torch.Tensor],
+            attn_metadata: IpexAttnMetadata,  # type: ignore
+            kv_scale: float = 1.0,
+            attn_type: AttentionType = AttentionType.DECODER) -> torch.Tensor:
         """Forward pass with IPEX varlen_attention and PagedAttention.
 
         Args:
@@ -170,6 +170,11 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             shape = [num_tokens, num_heads * head_size]
         """
         assert kv_scale == 1.0
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and " + \
+                                      "encoder/decoder cross-attention " + \
+                                      "are not implemented for " + \
+                                      "IpexAttnBackendImpl")
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)

@@ -276,8 +276,7 @@ def _get_attn_bias(attn_metadata: XFormersMetadata,
     elif attn_type == AttentionType.ENCODER_DECODER:
         return attn_metadata.cross_attn_bias
     else:
-        raise AttributeError(
-            f"Invalid attention type {str(attn_type)}")
+        raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
 def _set_attn_bias(attn_metadata: XFormersMetadata,
@@ -302,8 +301,7 @@ def _set_attn_bias(attn_metadata: XFormersMetadata,
     elif attn_type == AttentionType.ENCODER_DECODER:
         attn_metadata.cross_attn_bias = attn_bias
     else:
-        raise AttributeError(
-            f"Invalid attention type {str(attn_type)}")
+        raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
 def _get_seq_len_block_table_args(attn_metadata: XFormersMetadata,
@@ -356,8 +354,7 @@ def _get_seq_len_block_table_args(attn_metadata: XFormersMetadata,
                attn_metadata.max_encoder_seq_len, \
                None
     else:
-        raise AttributeError(
-            f"Invalid attention type {str(attn_type)}")
+        raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
 class XFormersImpl(AttentionImpl[XFormersMetadata]):
@@ -419,15 +416,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
     def forward(
-        self,
-        query: torch.Tensor,
-        key: Optional[torch.Tensor],
-        value: Optional[torch.Tensor],
-        kv_cache: Optional[torch.Tensor],
-        attn_metadata: "XFormersMetadata",
-        kv_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER
-    ) -> torch.Tensor:
+            self,
+            query: torch.Tensor,
+            key: Optional[torch.Tensor],
+            value: Optional[torch.Tensor],
+            kv_cache: Optional[torch.Tensor],
+            attn_metadata: "XFormersMetadata",
+            kv_scale: float = 1.0,
+            attn_type: AttentionType = AttentionType.DECODER) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
         For decoder-only models: query, key and value must be non-None.
@@ -477,15 +473,15 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         # Check that appropriate attention metadata attributes are
         # selected for the desired attention type
-        if attn_type == AttentionType.ENCODER:
-            if not attn_metadata.is_all_encoder_attn_metadata_set:
-                raise AttributeError("Encoder attention requires setting " + \
-                                     "encoder metadata attributes.")
-        elif attn_type == AttentionType.ENCODER_DECODER:
-            if not attn_metadata.is_all_cross_attn_metadata_set:
-                raise AttributeError("Encoder/decoder cross-attention " + \
-                                     "requires setting cross-attention " + \
-                                     "metadata attributes.")
+        if attn_type == AttentionType.ENCODER and \
+            (not attn_metadata.is_all_encoder_attn_metadata_set):
+            raise AttributeError("Encoder attention requires setting " + \
+                                 "encoder metadata attributes.")
+        elif attn_type == AttentionType.ENCODER_DECODER and \
+            (not attn_metadata.is_all_cross_attn_metadata_set):
+            raise AttributeError("Encoder/decoder cross-attention " + \
+                                 "requires setting cross-attention " + \
+                                 "metadata attributes.")
 
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
@@ -605,8 +601,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
             seq_lens_arg, \
             max_seq_len_arg,\
-            block_tables_arg = _get_seq_len_block_table_args(decode_meta, 
-                                                             False, 
+            block_tables_arg = _get_seq_len_block_table_args(decode_meta,
+                                                             False,
                                                              attn_type)
 
             output[num_prefill_tokens:] = PagedAttention.forward_decode(
@@ -627,13 +623,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         return output.view(-1, self.num_heads * self.head_size)
 
     def _run_memory_efficient_xformers_forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: XFormersMetadata,
-        attn_type: AttentionType = AttentionType.DECODER
-    ) -> torch.Tensor:
+            self,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            attn_metadata: XFormersMetadata,
+            attn_type: AttentionType = AttentionType.DECODER) -> torch.Tensor:
         """Attention for 1D query of multiple prompts. Multiple prompt
         tokens are flattened in to `query` input.
 
@@ -669,7 +664,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # Set attention bias if not provided. This typically happens at
         # the very attention layer of every iteration.
         # FIXME(woosuk): This is a hack.
-        attn_bias = _get_attn_bias(attn_metadata,attn_type)
+        attn_bias = _get_attn_bias(attn_metadata, attn_type)
         if attn_bias is None:
             if self.alibi_slopes is None:
                 if attn_type == \
