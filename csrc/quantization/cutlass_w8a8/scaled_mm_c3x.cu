@@ -414,7 +414,7 @@ void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out, torch::Tensor const& a,
       typename sm90_int8_config_M32_NSmall<InType, OutType,
                                            Epilogue>::Cutlass3xGemm;
 
-  uint32_t const n = a.size(1);
+  uint32_t const n = out.size(1);
   bool const is_small_n = n < 8192;
 
   uint32_t const m = a.size(0);
