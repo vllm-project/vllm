@@ -13,7 +13,7 @@ steps:
       {% elif step.num_gpus == 2 or step.num_gpus == 4 %}
       queue: gpu_4_queue
       {% else %}
-      queue: A100
+      queue: a100-queue
       {% endif %}
     soft_fail: {{ step.soft_fail or false }}
     {% if step.parallelism %}
