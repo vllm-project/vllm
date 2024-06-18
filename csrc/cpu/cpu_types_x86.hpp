@@ -1,6 +1,6 @@
 
-#ifndef CPU_TYPES_HPP
-#define CPU_TYPES_HPP
+#ifndef CPU_TYPES_X86_HPP
+#define CPU_TYPES_X86_HPP
 
 #include <immintrin.h>
 #include <torch/all.h>
