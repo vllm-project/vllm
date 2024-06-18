@@ -92,8 +92,7 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  {% endif %}
-  {% if step.gpu != "a100" %}
+  {% else %}
   - label: "{{ step.label }}"
     agents:
       {% if step.label == "Documentation Build" %}
