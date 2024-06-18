@@ -977,6 +977,7 @@ class HabanaModelRunner:
             raise NotImplementedError(f'Unsupported graph allocation strategy: {strategy}')
         buckets = list(sorted(buckets, key=ordering))
 
+        counter = 0
         for idx, (batch_size, seq_len) in enumerate(buckets):
             # Graph memory usage is proportional to seq dimension in a batch
             batch_seq = batch_size * seq_len if is_prompt else batch_size
@@ -986,11 +987,16 @@ class HabanaModelRunner:
             self.graphed_buckets.add((batch_size, seq_len, is_prompt))
             self.log_warmup(phase, idx, num_candidates, batch_size, seq_len)
             with HabanaMemoryProfiler() as mem_prof:
-                self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
+                try:
+                    self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
+                except:
+                    print(f"Failed on graph scenario {idx}: batch_size={batch_size}, seq_len={seq_len}, is_prompt={is_prompt}")
+                    counter += 1
             used_mem = align_workers(mem_prof.consumed_device_memory, torch.distributed.ReduceOp.MAX)
             available_mem -= used_mem
             total_mem += used_mem
             total_batch_seq += batch_seq
+        print(f"Failed warm-up graph scenarios = {counter}")
         graphed = list(c[:2] for c in self.graphed_buckets if c[2] == is_prompt)
         logger.info(f'{phase} captured:{len(graphed)} ({100 * len(graphed) / num_candidates:.1f}%) used_mem:{format_bytes(total_mem)} buckets:{sorted(list(graphed))}')
 
