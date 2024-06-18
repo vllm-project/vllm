@@ -1,6 +1,6 @@
 """Attention layer with xFormers and PagedAttention."""
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 from xformers import ops as xops
@@ -212,7 +212,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
+        assert blocksparse_params is None, ValueError(
+            "XFormer does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -428,8 +431,8 @@ def _make_alibi_bias(
     num_kv_heads: int,
     dtype: torch.dtype,
     seq_lens: List[int],
-) -> LowerTriangularMaskWithTensorBias:
-    attn_biases = []
+) -> List[AttentionBias]:
+    attn_biases: List[AttentionBias] = []
     for seq_len in seq_lens:
         bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses

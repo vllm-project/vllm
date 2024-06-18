@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -60,10 +60,10 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         assert len(outputs) == 1, ("Single step should only has 1 output.")
         output = outputs[0]
         prompt_logprobs = output.prompt_logprobs
-        if (prompt_logprobs is not None
-                and seq_group.sampling_params.detokenize and self.detokenizer):
-            self.detokenizer.decode_prompt_logprobs_inplace(
-                seq_group, prompt_logprobs)
+        if prompt_logprobs is not None:
+            if seq_group.sampling_params.detokenize and self.detokenizer:
+                self.detokenizer.decode_prompt_logprobs_inplace(
+                    seq_group, prompt_logprobs)
             if not seq_group.prompt_logprobs:
                 # The first prompt token's logprob is None because it doesn't
                 # have tokens that are precedent.
@@ -146,8 +146,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Beam search case
         # Select the child sequences to keep in the sequence group.
-        selected_child_seqs = []
-        unselected_child_seqs = []
+        selected_child_seqs: List[Tuple[Sequence, Optional[Sequence]]] = []
+        unselected_child_seqs: List[Tuple[Sequence, Optional[Sequence]]] = []
         beam_width = seq_group.sampling_params.best_of
         length_penalty = seq_group.sampling_params.length_penalty
 

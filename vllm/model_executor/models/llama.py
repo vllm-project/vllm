@@ -94,7 +94,6 @@ class LlamaAttention(nn.Module):
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
-        sliding_window: Optional[int] = None,
         cache_config: Optional[CacheConfig] = None,
     ) -> None:
         super().__init__()
@@ -146,7 +145,6 @@ class LlamaAttention(nn.Module):
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
-                              sliding_window=sliding_window,
                               cache_config=cache_config,
                               quant_config=quant_config)
 
@@ -183,7 +181,6 @@ class LlamaDecoderLayer(nn.Module):
                 config.original_max_position_embeddings)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        sliding_window = getattr(config, "sliding_window", None)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
@@ -198,7 +195,6 @@ class LlamaDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,
-            sliding_window=sliding_window,
             cache_config=cache_config,
         )
         self.mlp = LlamaMLP(
@@ -323,6 +319,14 @@ class LlamaForCausalLM(nn.Module):
         "lm_head": "output_embeddings",
     }
     embedding_padding_modules = ["lm_head"]
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
 
     def __init__(
         self,

@@ -27,7 +27,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm import _custom_ops as ops
+from vllm.model_executor.custom_op import CustomOp
+from vllm.utils import is_tpu
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -43,7 +44,20 @@ def _rotate_gptj(x: torch.Tensor) -> torch.Tensor:
     return x.flatten(-2)
 
 
-class RotaryEmbedding(nn.Module):
+def _apply_rotary_emb(
+    x: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> torch.Tensor:
+    x_ = torch.view_as_complex(
+        torch.stack(torch.chunk(x.transpose(1, 2).float(), 2, dim=-1), dim=-1))
+    x_out = torch.view_as_real(x_ * freqs_cis).type_as(x)
+    x_out = torch.cat(torch.chunk(x_out, 2, dim=-1), dim=-2)
+    x_out = x_out.reshape(x_out.shape[0], x_out.shape[1], x_out.shape[2],
+                          -1).transpose(1, 2)
+    return x_out
+
+
+class RotaryEmbedding(CustomOp):
     """Original rotary positional embedding."""
 
     def __init__(
@@ -64,8 +78,14 @@ class RotaryEmbedding(nn.Module):
         self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
-        cache = cache.to(dtype)
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        self.use_native2 = is_tpu() and is_neox_style
+        if not self.use_native2:
+            cache = cache.to(dtype)
+            self.register_buffer("cos_sin_cache", cache, persistent=False)
+        else:
+            cos, sin = cache.chunk(2, dim=-1)
+            freqs_cis = cos + 1j * sin
+            self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -93,14 +113,18 @@ class RotaryEmbedding(nn.Module):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
-    def _forward(
+    def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """PyTorch-native implementation equivalent to forward()."""
+        """A PyTorch-native implementation equivalent to forward().
+
+        This method mimics the implementation of the custom CUDA kernel
+        used in `forward_cuda()`.
+        """
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
 
@@ -138,13 +162,51 @@ class RotaryEmbedding(nn.Module):
         key = key.flatten(-2)
         return query, key
 
-    def forward(
+    def forward_native2(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Another PyTorch-native implementation of forward().
+
+        This method might perform better than `forward_native()` when compiled.
+        """
+        if positions.dim() == 1:
+            batch_size = 1
+            seq_len = positions.shape[0]
+        else:
+            batch_size, seq_len = positions.shape
+        if offsets is not None:
+            positions = positions + offsets
+        freqs_cis = self.freqs_cis.index_select(0, positions.flatten())
+        freqs_cis = freqs_cis.view(batch_size, 1, seq_len, -1)
+
+        query_shape = query.shape
+        query = query.view(batch_size, seq_len, -1, self.head_size)
+        query_rot = query[..., :self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        query_rot = _apply_rotary_emb(query_rot, freqs_cis)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.view(batch_size, seq_len, -1, self.head_size)
+        key_rot = key[..., :self.rotary_dim]
+        key_pass = key[..., self.rotary_dim:]
+        key_rot = _apply_rotary_emb(key_rot, freqs_cis)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from vllm import _custom_ops as ops
+
         self.cos_sin_cache = self.cos_sin_cache.to(positions.device,
                                                    dtype=query.dtype)
         # ops.rotary_embedding()/batched_rotary_embedding()
@@ -158,6 +220,40 @@ class RotaryEmbedding(nn.Module):
             ops.rotary_embedding(positions, query, key, self.head_size,
                                  self.cos_sin_cache, self.is_neox_style)
         return query, key
+
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from vllm._ipex_ops import ipex_ops as ops
+
+        self.cos_sin_cache = self.cos_sin_cache.to(positions.device,
+                                                   dtype=query.dtype)
+        # ops.rotary_embedding()/batched_rotary_embedding()
+        # are in-place operations that update the query and key tensors.
+        if offsets is not None:
+            ops.batched_rotary_embedding(positions, query, key, self.head_size,
+                                         self.cos_sin_cache,
+                                         self.is_neox_style, self.rotary_dim,
+                                         offsets)
+        else:
+            ops.rotary_embedding(positions, query, key, self.head_size,
+                                 self.cos_sin_cache, self.is_neox_style)
+        return query, key
+
+    def forward_tpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        forward_fn = (self.forward_native2
+                      if self.use_native2 else self.forward_native)
+        return forward_fn(positions, query, key, offsets)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
@@ -394,7 +490,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         return cache
 
 
-class Phi3SuScaledRotaryEmbedding(nn.Module):
+class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
     """Phi3 family of models scaled rotary embedding.
 
     Based on the original RotaryEmbedding implementation.
@@ -418,11 +514,12 @@ class Phi3SuScaledRotaryEmbedding(nn.Module):
 
         if rotary_dim != head_size:
             raise ValueError(
-                f"`Phi3SuScaledRotaryEmbedding` does not support rotary_dim != \
-                    head_size ({rotary_dim}!={head_size}).")
+                f"`Phi3LongRoPEScaledRotaryEmbedding` does not support \
+                    rotary_dim != head_size ({rotary_dim}!={head_size}).")
         if is_neox_style is False:
             raise ValueError(
-                "`Phi3SuScaledRotaryEmbedding` only supports neox_style.")
+                "`Phi3LongRoPEScaledRotaryEmbedding` only supports neox_style."
+            )
 
         self.head_size = head_size
         self.max_position_embeddings = max_position_embeddings
@@ -535,7 +632,9 @@ def get_rope(
                                      is_neox_style, dtype)
     else:
         scaling_type = rope_scaling["type"]
-        if scaling_type != "su":
+        # The correct one should be "longrope" but keep "su" here
+        # for backward compatible
+        if scaling_type != "su" and scaling_type != "longrope":
             scaling_factor = rope_scaling["factor"]
         if scaling_type == "linear":
             rotary_emb = LinearScalingRotaryEmbedding(head_size, rotary_dim,
@@ -560,7 +659,9 @@ def get_rope(
                                                     base, is_neox_style,
                                                     scaling_factor, dtype,
                                                     **extra_kwargs)
-        elif scaling_type == "su":
+        # The correct one should be "longrope" but keep "su" here
+        # for backward compatible
+        elif scaling_type == "su" or scaling_type == "longrope":
             short_factor = rope_scaling["short_factor"]
             long_factor = rope_scaling["long_factor"]
             original_max_position = rope_scaling[
@@ -570,7 +671,7 @@ def get_rope(
                 for k, v in rope_scaling.items()
                 if k in ("short_mscale", "long_mscale")
             }
-            rotary_emb = Phi3SuScaledRotaryEmbedding(
+            rotary_emb = Phi3LongRoPEScaledRotaryEmbedding(
                 head_size, rotary_dim, max_position, original_max_position,
                 base, is_neox_style, dtype, short_factor, long_factor,
                 **extra_kwargs)

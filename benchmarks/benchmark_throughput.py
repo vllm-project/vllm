@@ -10,6 +10,7 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
+from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 
@@ -78,8 +79,10 @@ def run_vllm(
     enable_prefix_caching: bool,
     enable_chunked_prefill: bool,
     max_num_batched_tokens: int,
+    distributed_executor_backend: Optional[str],
     gpu_memory_utilization: float = 0.9,
     download_dir: Optional[str] = None,
+    load_format: str = EngineArgs.load_format,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -100,11 +103,13 @@ def run_vllm(
         download_dir=download_dir,
         enable_chunked_prefill=enable_chunked_prefill,
         max_num_batched_tokens=max_num_batched_tokens,
+        distributed_executor_backend=distributed_executor_backend,
+        load_format=load_format,
     )
 
     # Add the requests to the engine.
-    prompts = []
-    sampling_params = []
+    prompts: List[str] = []
+    sampling_params: List[SamplingParams] = []
     for prompt, _, output_len in requests:
         prompts.append(prompt)
         sampling_params.append(
@@ -225,8 +230,8 @@ def main(args: argparse.Namespace):
             args.enforce_eager, args.kv_cache_dtype,
             args.quantization_param_path, args.device,
             args.enable_prefix_caching, args.enable_chunked_prefill,
-            args.max_num_batched_tokens, args.gpu_memory_utilization,
-            args.download_dir)
+            args.max_num_batched_tokens, args.distributed_executor_backend,
+            args.gpu_memory_utilization, args.download_dir, args.load_format)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -344,7 +349,7 @@ if __name__ == "__main__":
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda", "cpu"],
+        choices=["cuda", "cpu", "tpu", "xpu"],
         help='device type for vLLM execution, supporting CUDA and CPU.')
     parser.add_argument(
         "--enable-prefix-caching",
@@ -368,6 +373,36 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help='Path to save the throughput results in JSON format.')
+    parser.add_argument(
+        '--distributed-executor-backend',
+        choices=['ray', 'mp'],
+        default=None,
+        help='Backend to use for distributed serving. When more than 1 GPU '
+        'is used, will be automatically set to "ray" if installed '
+        'or "mp" (multiprocessing) otherwise.')
+    parser.add_argument(
+        '--load-format',
+        type=str,
+        default=EngineArgs.load_format,
+        choices=[
+            'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer',
+            'bitsandbytes'
+        ],
+        help='The format of the model weights to load.\n\n'
+        '* "auto" will try to load the weights in the safetensors format '
+        'and fall back to the pytorch bin format if safetensors format '
+        'is not available.\n'
+        '* "pt" will load the weights in the pytorch bin format.\n'
+        '* "safetensors" will load the weights in the safetensors format.\n'
+        '* "npcache" will load the weights in pytorch format and store '
+        'a numpy cache to speed up the loading.\n'
+        '* "dummy" will initialize the weights with random values, '
+        'which is mainly for profiling.\n'
+        '* "tensorizer" will load the weights using tensorizer from '
+        'CoreWeave. See the Tensorize vLLM Model script in the Examples'
+        'section for more information.\n'
+        '* "bitsandbytes" will load the weights using bitsandbytes '
+        'quantization.\n')
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

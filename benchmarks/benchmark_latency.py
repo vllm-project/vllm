@@ -3,13 +3,15 @@ import argparse
 import json
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
+from vllm.engine.arg_utils import EngineArgs
+from vllm.inputs import PromptStrictInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 
@@ -34,7 +36,10 @@ def main(args: argparse.Namespace):
               use_v2_block_manager=args.use_v2_block_manager,
               enable_chunked_prefill=args.enable_chunked_prefill,
               download_dir=args.download_dir,
-              block_size=args.block_size)
+              block_size=args.block_size,
+              gpu_memory_utilization=args.gpu_memory_utilization,
+              load_format=args.load_format,
+              distributed_executor_backend=args.distributed_executor_backend)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -48,7 +53,9 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_prompt_token_ids = dummy_prompt_token_ids.tolist()
+    dummy_inputs: List[PromptStrictInputs] = [{
+        "prompt_token_ids": batch
+    } for batch in dummy_prompt_token_ids.tolist()]
 
     def run_to_completion(profile_dir: Optional[str] = None):
         if profile_dir:
@@ -59,13 +66,13 @@ def main(args: argparse.Namespace):
                     ],
                     on_trace_ready=torch.profiler.tensorboard_trace_handler(
                         str(profile_dir))) as p:
-                llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+                llm.generate(dummy_inputs,
                              sampling_params=sampling_params,
                              use_tqdm=False)
             print(p.key_averages())
         else:
             start_time = time.perf_counter()
-            llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+            llm.generate(dummy_inputs,
                          sampling_params=sampling_params,
                          use_tqdm=False)
             end_time = time.perf_counter()
@@ -91,7 +98,7 @@ def main(args: argparse.Namespace):
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
         latencies.append(run_to_completion(profile_dir=None))
     latencies = np.array(latencies)
-    percentages = [10, 25, 50, 75, 90]
+    percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
     print(f'Avg latency: {np.mean(latencies)} seconds')
     for percentage, percentile in zip(percentages, percentiles):
@@ -184,7 +191,7 @@ if __name__ == '__main__':
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda", "cpu"],
+        choices=["cuda", "cpu", "tpu", "xpu"],
         help='device type for vLLM execution, supporting CUDA and CPU.')
     parser.add_argument('--block-size',
                         type=int,
@@ -211,5 +218,41 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help='Path to save the latency results in JSON format.')
+    parser.add_argument('--gpu-memory-utilization',
+                        type=float,
+                        default=0.9,
+                        help='the fraction of GPU memory to be used for '
+                        'the model executor, which can range from 0 to 1.'
+                        'If unspecified, will use the default value of 0.9.')
+    parser.add_argument(
+        '--load-format',
+        type=str,
+        default=EngineArgs.load_format,
+        choices=[
+            'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer',
+            'bitsandbytes'
+        ],
+        help='The format of the model weights to load.\n\n'
+        '* "auto" will try to load the weights in the safetensors format '
+        'and fall back to the pytorch bin format if safetensors format '
+        'is not available.\n'
+        '* "pt" will load the weights in the pytorch bin format.\n'
+        '* "safetensors" will load the weights in the safetensors format.\n'
+        '* "npcache" will load the weights in pytorch format and store '
+        'a numpy cache to speed up the loading.\n'
+        '* "dummy" will initialize the weights with random values, '
+        'which is mainly for profiling.\n'
+        '* "tensorizer" will load the weights using tensorizer from '
+        'CoreWeave. See the Tensorize vLLM Model script in the Examples'
+        'section for more information.\n'
+        '* "bitsandbytes" will load the weights using bitsandbytes '
+        'quantization.\n')
+    parser.add_argument(
+        '--distributed-executor-backend',
+        choices=['ray', 'mp'],
+        default=None,
+        help='Backend to use for distributed serving. When more than 1 GPU '
+        'is used, will be automatically set to "ray" if installed '
+        'or "mp" (multiprocessing) otherwise.')
     args = parser.parse_args()
     main(args)

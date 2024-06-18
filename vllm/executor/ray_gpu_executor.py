@@ -137,6 +137,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
             node_workers[node_id].append(i)
+            # `gpu_ids` can be a list of strings or integers.
+            # convert them to integers for consistency.
+            # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
+            # string sorting is not sufficient.
+            # see https://github.com/vllm-project/vllm/issues/5590
+            gpu_ids = [int(x) for x in gpu_ids]
             node_gpus[node_id].extend(gpu_ids)
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
@@ -292,23 +298,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
                     input_data) for worker in self.workers
             ])
         return forward_dag.experimental_compile()
-
-    def check_health(self) -> None:
-        """Raises an error if engine is unhealthy."""
-        self._check_if_any_actor_is_dead()
-
-    def _check_if_any_actor_is_dead(self):
-        if not self.workers:
-            return
-
-        dead_actors = []
-        for actor in self.workers:
-            actor_state = ray.state.actors(actor._ray_actor_id.hex())  # pylint: disable=protected-access
-            if actor_state["State"] == "DEAD":
-                dead_actors.append(actor)
-        if dead_actors:
-            raise RuntimeError("At least one Worker is dead. "
-                               f"Dead Workers: {dead_actors}. ")
 
 
 class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
