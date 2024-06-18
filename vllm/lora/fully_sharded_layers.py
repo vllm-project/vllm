@@ -17,7 +17,6 @@ from vllm.lora.layers import (
     MergedQKVParallelLinearWithLora,
     RowParallelLinearWithLoRA,
 )
-from vllm.lora.punica import bgmv, dispatch_bgmv_low_level
 from vllm.lora.punica import (
     add_shrink_triton,
     add_expand_triton,
