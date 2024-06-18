@@ -80,7 +80,7 @@ def create_worker(cls: Callable[..., T],
     distributed_init_method = get_distributed_init_method(
         get_ip(), get_open_port())
 
-    worker_kwargs={
+    worker_kwargs = {
         'model_config': engine_config.model_config,
         'parallel_config': engine_config.parallel_config,
         'scheduler_config': engine_config.scheduler_config,
