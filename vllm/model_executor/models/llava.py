@@ -1,7 +1,7 @@
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
-from torch import nn
+import torch.nn as nn
 # TODO(xwjiang): We should port CLIPVisionModel's code over to not depend on
 # transformers' impl.
 from transformers import CLIPVisionModel, LlavaConfig
@@ -51,10 +51,10 @@ class LlavaMultiModalProjector(nn.Module):
         return hidden_states
 
 
-def _merge_vision_embeddings(input_ids: torch.Tensor,
-                             inputs_embeds: torch.Tensor,
-                             vision_embeddings: torch.Tensor,
-                             image_token_id: int) -> torch.Tensor:
+def merge_vision_embeddings(input_ids: torch.Tensor,
+                            inputs_embeds: torch.Tensor,
+                            vision_embeddings: torch.Tensor,
+                            image_token_id: int) -> torch.Tensor:
     """In place merges in vision_embeddings with inputs_embeds."""
     mask = (input_ids == image_token_id)
 
@@ -151,7 +151,8 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
                 return None
 
             if not isinstance(pixel_values, torch.Tensor):
-                raise ValueError("Incorrect type of pixel values")
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
             return LlavaImagePixelInputs(
                 type="pixel_values",
@@ -166,7 +167,8 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
                 return None
 
             if not isinstance(image_features, torch.Tensor):
-                raise ValueError("Incorrect type of image features")
+                raise ValueError("Incorrect type of image features. "
+                                 f"Got type: {type(image_features)}")
 
             return LlavaImageFeatureInputs(
                 type="image_features",
@@ -225,7 +227,7 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         attn_metadata: AttentionMetadata,
         **kwargs: object,
     ) -> SamplerOutput:
-        """Run forward pass for Llava 1.5.
+        """Run forward pass for LLaVA-1.5.
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted image embeddings.
@@ -245,22 +247,25 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
 
-        The model takes two types of image inputs:
-        PIXEL_VALUES and IMAGE_FEATURES.
-        The following shows how each maps to huggingface implementation.
-        PIXEL_VALUES:
-        - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L353
-        IMAGE_FEATURES:
-        - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L430
-        before going through the multi modal projector.
+        This model has two modes of image inputs:
+        `PIXEL_VALUES` and `IMAGE_FEATURES`.
 
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
-            pixel_values: For PIXEL_VALUES, expects a batch with shape
-                [1, 3, 336, 336].
-            image_features: For IMAGE_FEATURES, expects a batch with shape
-                [1, 576, 1024].
+            pixel_values: The pixels in each input image.
+                Expects a batch with shape `[1, 3, 336, 336]`.
+                (Only applicable to `PIXEL_VALUES` mode)
+            image_features: The image features for each input image outputted by
+                the vision tower before passing to the multi-modal projector.
+                Expects a batch with shape `[1, 576, 1024]`.
+                (Only applicable to `IMAGE_FEATURES` mode)
+
+        See also:
+            Each input maps to huggingface implementation, as follows:
+
+            - `pixel_values`: https://github.com/huggingface/transformers/blob/v4.41.1/src/transformers/models/llava/modeling_llava.py#L360
+            - `image_features`: https://github.com/huggingface/transformers/blob/v4.41.1/src/transformers/models/llava/modeling_llava.py#L437
         """
         image_input = self._parse_and_validate_image_input(**kwargs)
 
@@ -268,7 +273,7 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = _merge_vision_embeddings(
+            inputs_embeds = merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.vision_language_config.image_token_id)
 

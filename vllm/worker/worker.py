@@ -15,6 +15,7 @@ from vllm.distributed import (broadcast_tensor_dict,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
@@ -132,6 +133,13 @@ class Worker(WorkerBase):
             max_size=max_size,
         )
 
+    def save_tensorized_model(
+        self,
+        tensorizer_config: TensorizerConfig,
+    ) -> None:
+        self.model_runner.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
+
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
@@ -197,7 +205,8 @@ class Worker(WorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
+                                        self.parallel_config,
+                                        self.device_config)
         self.gpu_cache = self.cache_engine.gpu_cache
 
     def _warm_up_model(self) -> None:

@@ -1,15 +1,16 @@
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Type, Union
 
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
+from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MPTConfig, RWConfig)
 
 logger = init_logger(__name__)
 
-_CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
+_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "dbrx": DbrxConfig,
     "mpt": MPTConfig,
@@ -25,9 +26,14 @@ def get_config(model: Union[str, Path],
                trust_remote_code: bool,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None,
-               rope_scaling: Optional[dict] = None) -> PretrainedConfig:
-    is_gguf = Path(model).is_file() and Path(model).suffix == ".gguf"
+               rope_scaling: Optional[dict] = None,
+               rope_theta: Optional[float] = None) -> PretrainedConfig:
     try:
+        if VLLM_USE_MODELSCOPE:
+            from modelscope import AutoConfig
+        else:
+            from transformers import AutoConfig
+        is_gguf = Path(model).is_file() and Path(model).suffix == ".gguf"
         gguf_file = None
         if is_gguf:
             gguf_file = Path(model).name
@@ -54,13 +60,17 @@ def get_config(model: Union[str, Path],
         config = config_class.from_pretrained(model,
                                               revision=revision,
                                               code_revision=code_revision)
+
     if config.model_type in _GGUF_ARCHITECTURE_REGISTRY and is_gguf:
         model_type = _GGUF_ARCHITECTURE_REGISTRY[config.model_type]
         config.update({"architectures": [model_type]})
-    if rope_scaling is not None:
-        logger.info("Updating rope_scaling from %r to %r",
-                    getattr(config, "rope_scaling", None), rope_scaling)
-        config.update({"rope_scaling": rope_scaling})
+    for key, value in [("rope_scaling", rope_scaling),
+                       ("rope_theta", rope_theta)]:
+        if value is not None:
+            logger.info("Updating %s from %r to %r", key,
+                        getattr(config, key, None), value)
+            config.update({key: value})
+
     return config
 
 
