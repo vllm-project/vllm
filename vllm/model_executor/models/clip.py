@@ -49,6 +49,7 @@ class CLIPVisionEmbeddings(nn.Module):
         class_embeds = self.class_embedding.expand(batch_size, 1, -1)
         embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
         embeddings = embeddings + self.position_embedding(self.position_ids)
+
         return embeddings
 
 
@@ -72,6 +73,7 @@ class CLIPMLP(nn.Module):
         hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
         hidden_states, _ = self.fc2(hidden_states)
+
         return hidden_states
 
 
@@ -129,6 +131,7 @@ class CLIPEncoder(nn.Module):
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states, )
+
         return hidden_states
 
 
@@ -150,11 +153,13 @@ class CLIPVisionTransformer(nn.Module):
         pixel_values: torch.FloatTensor,
     ) -> torch.Tensor:
 
+        print(f"input: {pixel_values.shape}")
         hidden_states = self.embeddings(pixel_values)
+        print(f"embeds: {hidden_states.shape}")
         hidden_states = self.pre_layrnorm(hidden_states)
-
+        print(f"pre_layernorm: {hidden_states.shape}")
         hidden_states = self.encoder(inputs_embeds=hidden_states)
-
+        print(f"final: {hidden_states.shape}")
         return hidden_states
 
 

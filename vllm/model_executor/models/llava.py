@@ -178,20 +178,18 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
+
         # Copied from https://github.com/huggingface/transformers/blob/39c3c0a72af6fbda5614dde02ff236069bb79827/src/transformers/models/llava/modeling_llava.py#L421  # noqa
         if strategy == "default":
             return image_features[:, 1:]
         elif strategy == "full":
             return image_features
-
         raise ValueError(f"Unexpected select feature strategy: {strategy}")
 
     def _image_pixels_to_features(self, vision_tower: CLIPVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
 
-        hidden_states = vision_tower(pixel_values.to(vision_tower.device))
-
-        image_features = hidden_states[self.config.vision_feature_layer]
+        image_features = vision_tower(pixel_values.to(vision_tower.device))
 
         return self._select_image_features(
             image_features,
