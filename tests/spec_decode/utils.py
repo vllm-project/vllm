@@ -12,10 +12,10 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SamplerOutput, SequenceData, SequenceGroupMetadata,
                            SequenceOutput)
+from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
-from vllm.spec_decode.multi_step_worker import MultiStepWorker
 
 T = TypeVar("T", bound=Worker)
 
