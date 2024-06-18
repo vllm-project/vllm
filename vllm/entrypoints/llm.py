@@ -117,6 +117,7 @@ class LLM:
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
+        enable_lora: bool = False,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
