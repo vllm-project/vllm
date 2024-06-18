@@ -148,8 +148,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     tools: Optional[List[ChatCompletionToolsParam]] = None
-    tool_choice: Optional[Union[Literal["none"],
-                                ChatCompletionNamedToolChoiceParam]] = "none"
+    tool_choice: Optional[
+        Union[
+            Union[
+                Literal["none"],
+                Literal["auto"]
+            ],
+            ChatCompletionNamedToolChoiceParam
+        ]
+    ] = "none"
     user: Optional[str] = None
 
     # doc: begin-chat-completion-sampling-params
