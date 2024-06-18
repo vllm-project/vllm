@@ -593,11 +593,11 @@ def _run_encoder_attention_test(attn: Attention,
       & attn_metadata
     '''
     assert attn_metadata.num_decode_tokens == 0
-    attn_metadata.attention_type = AttentionType.ENCODER
+    attn_type=AttentionType.ENCODER
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value,
-                        None, attn_metadata)
+                        None, attn_metadata, attn_type=attn_type)
 
 
 def _run_decoder_self_attention_test(test_rsrcs: TestResources,
@@ -625,13 +625,13 @@ def _run_decoder_self_attention_test(test_rsrcs: TestResources,
     * Attention.forward() applied to packed_{query,key,value}, kv_cache
       & attn_metadata
     '''
+    attn_type = AttentionType.DECODER
     attn = test_rsrcs.attn
     kv_cache = test_rsrcs.kv_cache
-    attn_metadata.attention_type = AttentionType.DECODER
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     return attn.forward(packed_qkv.query, packed_qkv.key, packed_qkv.value,
-                        kv_cache, attn_metadata)
+                        kv_cache, attn_metadata, attn_type=attn_type)
 
 
 def _run_encoder_decoder_cross_attention_test(
@@ -672,7 +672,7 @@ def _run_encoder_decoder_cross_attention_test(
     '''
     assert decoder_test_params.packed_qkvo.packed_qkv is not None
 
-    attn_metadata.attention_type = AttentionType.ENCODER_DECODER
+    attn_type = AttentionType.ENCODER_DECODER
     attn = test_rsrcs.attn
     kv_cache = test_rsrcs.kv_cache
     if cross_test_params is None:
@@ -685,7 +685,7 @@ def _run_encoder_decoder_cross_attention_test(
         value = None if cross_pckd_qkv is None else \
                 cross_pckd_qkv.value
     return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query, key,
-                        value, kv_cache, attn_metadata)
+                        value, kv_cache, attn_metadata, attn_type=attn_type)
 
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
@@ -727,7 +727,6 @@ def test_encoder_only(num_heads: int, head_size: int, backend_name: str,
         decoder_test_params=None,
         encoder_test_params=enc_test_params,
         cross_test_params=None,
-        default_attn_type=AttentionType.ENCODER,
         device=CUDA_DEVICE)
 
     # PREFILL: encoder attention
@@ -855,7 +854,6 @@ def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
         decoder_test_params=prephase_dec_test_params,
         encoder_test_params=enc_test_params,
         cross_test_params=prephase_cross_test_params,
-        default_attn_type=AttentionType.ENCODER,
         device=CUDA_DEVICE)
 
     # PREFILL: encoder attention
@@ -903,7 +901,6 @@ def test_e2e_enc_dec_attn(num_heads: int, head_size: int, backend_name: str,
         decoder_test_params=decphase_dec_test_params,
         encoder_test_params=enc_test_params,
         cross_test_params=decphase_cross_test_params,
-        default_attn_type=AttentionType.DECODER,
         device=CUDA_DEVICE)
 
     # DECODE: decoder self-attention test

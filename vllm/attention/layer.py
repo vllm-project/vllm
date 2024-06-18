@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 
-from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata, AttentionType
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.quantization.base_config import (
@@ -85,9 +85,18 @@ class Attention(nn.Module):
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        attn_type: Optional[AttentionType] = None
     ) -> torch.Tensor:
-        return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                                 self._kv_scale)
+        if attn_type is None:
+            # Support backends without an attention type argument
+            return self.impl.forward(query, key, value, kv_cache, attn_metadata,
+                                     self._kv_scale)
+        else:
+            # Backends with encoder/decoder support require attention
+            # type argument to distinguish between encoder attention,
+            # decoder self-attention, or encoder/decoder cross-attention
+            return self.impl.forward(query, key, value, kv_cache, attn_metadata,
+                                     self._kv_scale, attn_type=attn_type)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore

@@ -691,7 +691,6 @@ def make_test_metadata(
     is_prompt: bool,
     seq_lens: Optional[List[int]],
     decoder_test_params: Optional[PhaseTestParameters],
-    default_attn_type: AttentionType,
     device: Union[torch.device, str],
     encoder_test_params: Optional[PhaseTestParameters] = None,
     cross_test_params: Optional[PhaseTestParameters] = None
@@ -719,8 +718,6 @@ def make_test_metadata(
     * decoder_test_params: decoder self-attention test params; 
                            this function requires
                            kv_mmap (memory mapping) field
-    * default_attn_type: value of attn_metadata.attention_type at
-                         construction time
     * device: CPU or CUDA device
     * encoder_test_params: encoder attention test params;
                            this function requires encoder query
@@ -812,7 +809,6 @@ def make_test_metadata(
             block_tables=None if kv_mmap is None else \
                             kv_mmap.block_tables,
             use_cuda_graph=False,
-            _attn_type=default_attn_type,
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
             max_encoder_seq_len=max_encoder_seq_len,
@@ -855,7 +851,6 @@ def make_test_metadata(
             context_lens_tensor=context_lens_tensor,
             block_tables=kv_mmap.block_tables,
             use_cuda_graph=False,
-            _attn_type=default_attn_type,
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
             max_encoder_seq_len=max_encoder_seq_len,
