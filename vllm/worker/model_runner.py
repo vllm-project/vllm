@@ -2,7 +2,7 @@ import gc
 import time
 import warnings
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple, Type, TypeVar, Union
+from typing import Dict, List, Optional, Set, Tuple, TypeVar, Union
 
 import numpy as np
 import torch
