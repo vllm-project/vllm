@@ -2,6 +2,12 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
+  - label: "user check"
+    agents:
+      queue: a100-queue
+    commands:
+      - whoami
+  - wait
   {% for step in steps %}
   - label: "{{ step.label }}"
     agents:
