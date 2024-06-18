@@ -85,7 +85,7 @@ class ExecutorBase(ABC):
     @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
-    
+
     @abstractmethod
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError

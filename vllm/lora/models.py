@@ -524,7 +524,7 @@ class LoRAModelManager:
         if self.long_lora_context:
             self.long_lora_context.offsets_by_lora_id.pop(lora_id, None)
         return bool(self._registered_loras.pop(lora_id, None))
-    
+
     def pin_lora(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
         self._pin_lora_in_cpu_cache(lora_id)
@@ -537,15 +537,13 @@ class LoRAModelManager:
         except ValueError as err:
             raise ValueError(f"Pinning failed. \
                               LoRA {lora_id} is not registered.") from err
-    
+
     def _pin_lora_in_gpu_cache(self, lora_id: int):
         if lora_id not in self._active_loras:
             # move lora to gpu if not already active
             self.activate_lora(lora_id)
 
         self._active_loras.pin(lora_id)
-
-        
 
     # TODO see if this can be vectorized
     def _set_lora_mapping(self, mapping: LoRAMapping) -> None:

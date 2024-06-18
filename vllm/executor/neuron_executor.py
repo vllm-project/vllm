@@ -64,7 +64,7 @@ class NeuronExecutor(ExecutorBase):
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.driver_worker.remove_lora(lora_id)
-    
+
     def pin_lora(self, lora_id: int) -> bool:
         return self.driver_worker.pin_lora(lora_id)
 

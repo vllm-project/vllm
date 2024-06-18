@@ -69,7 +69,7 @@ class WorkerBase(ABC):
     @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
-    
+
     @abstractmethod
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
@@ -89,7 +89,7 @@ class LoraNotSupportedWorkerBase(WorkerBase):
 
     def remove_lora(self, lora_id: int) -> bool:
         raise ValueError(f"{type(self)} does not support LoRA")
-    
+
     def pin_lora(self, lora_id: int) -> bool:
         return ValueError(f"{type(self)} does not support LoRA")
 

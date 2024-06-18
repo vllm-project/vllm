@@ -238,6 +238,7 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model):
     with pytest.raises(ValueError):
         assert manager.pin_lora(3)
 
+
 def test_lru_lora_model_manager(dist_init, dummy_model):
     # This tests just the LRU cache functionality, everything else is
     # tested in test_lora_model_manager
@@ -322,7 +323,7 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     assert manager.activate_lora(4)
     assert set(manager.list_loras()) == {3, 4}
     with pytest.raises(ValueError):
-       assert manager.pin_lora(1)
+        assert manager.pin_lora(1)
     assert manager.pin_lora(3)
     # Remove manually
     assert manager.remove_lora(3)

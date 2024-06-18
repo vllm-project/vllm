@@ -116,16 +116,16 @@ class LRUCache(Generic[T]):
     def remove_oldest(self, remove_pinned=False):
         if not self.cache:
             return
-        
+
         if not remove_pinned:
             if all(key in self.pinned_items for key in self.cache):
                 raise RuntimeError("All items are pinned, \
                                    cannot remove oldest from the cache.")
             # pop the oldest item in the cache that is not pinned
             lru_key = next(key for key in self.cache
-                            if key not in self.pinned_items)
+                           if key not in self.pinned_items)
         else:
-            lru_key = next(iter(self.cache))    
+            lru_key = next(iter(self.cache))
         self.pop(lru_key)
 
     def _remove_old_if_needed(self) -> None:
