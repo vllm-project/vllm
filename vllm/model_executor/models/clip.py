@@ -153,13 +153,10 @@ class CLIPVisionTransformer(nn.Module):
         pixel_values: torch.FloatTensor,
     ) -> torch.Tensor:
 
-        print(f"input: {pixel_values.shape}")
         hidden_states = self.embeddings(pixel_values)
-        print(f"embeds: {hidden_states.shape}")
         hidden_states = self.pre_layrnorm(hidden_states)
-        print(f"pre_layernorm: {hidden_states.shape}")
         hidden_states = self.encoder(inputs_embeds=hidden_states)
-        print(f"final: {hidden_states.shape}")
+
         return hidden_states
 
 
