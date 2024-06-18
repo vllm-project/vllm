@@ -3,6 +3,7 @@ import time
 from contextlib import contextmanager
 from multiprocessing import shared_memory
 from unittest.mock import patch
+from typing import Optional
 
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -16,7 +17,12 @@ class ShmRingBuffer:
     # seconds to wait before warning about a potential blocking call
     WARNING_INTERVAL = 60
 
-    def __init__(self, pg: ProcessGroup, max_chunk_bytes, max_chunks):
+    def __init__(self,
+                n_reader: Optional[int],
+                max_chunk_bytes: Optional[int],
+                max_chunks: Optional[int],
+                handle: Optional[bytes] = None,
+                reader_rank: Optional[int] = None):
         """
         A shared memory ring buffer implementation for broadcast communication.
         It is optimized for the case where there is one writer and multiple
@@ -33,6 +39,12 @@ class ShmRingBuffer:
         +-------------------------------+----------------------------------------+
         | max_chunks x max_chunk_bytes  | max_chunks x (1 + n_reader) bytes      |
         """# noqa
+        if handle is None:
+            # we are creating a writer
+            assert reader_rank is None and n_reader is not None and max_chunk_bytes is not None and max_chunks is not None
+        else:
+            # we are creating a reader
+            assert reader_rank is not None and n_reader is None and max_chunk_bytes is None and max_chunks is None
         self.rank = dist.get_rank(pg)
         self.world_size = dist.get_world_size(pg)
         global_ranks = dist.get_process_group_ranks(pg)
@@ -64,6 +76,12 @@ class ShmRingBuffer:
             with patch("multiprocessing.resource_tracker.register",
                        lambda *args, **kwargs: None):
                 self.shared_memory = shared_memory.SharedMemory(name=name)
+
+    @staticmethod
+    def create(pg: ProcessGroup, max_chunk_bytes, max_chunks, writer_rank=0):
+        group_rank = dist.get_rank(pg)
+        group_world_size = dist.get_world_size(pg)
+        return ShmRingBuffer(pg, max_chunk_bytes, max_chunks)
 
     @property
     def data(self):
