@@ -1,8 +1,12 @@
 import asyncio
+import enum
+import sys
 import time
+import warnings
 from functools import partial
-from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
-                    Set, Tuple, Type, Union)
+from types import TracebackType
+from typing import (Any, AsyncIterator, Callable, Dict, Iterable, List,
+                    Optional, Set, Tuple, Type, Union)
 
 from transformers import PreTrainedTokenizer
 
@@ -32,13 +36,6 @@ class AsyncEngineDeadError(RuntimeError):
 # From https://github.com/aio-libs/async-timeout/blob/master/async_timeout/__init__.py
 # Licensed under the Apache License (Apache-2.0)
 
-import asyncio
-import enum
-import sys
-import warnings
-from types import TracebackType
-from typing import Optional, Type
-
 if sys.version_info[:2] >= (3, 11):
     from asyncio import timeout as asyncio_timeout  # noqa: F401
 else:
@@ -57,10 +54,7 @@ else:
         delay - value in seconds or None to disable timeout logic
         """
         loop = asyncio.get_running_loop()
-        if delay is not None:
-            deadline = loop.time() + delay  # type: Optional[float]
-        else:
-            deadline = None
+        deadline = loop.time() + delay if delay is not None else None
         return Timeout(deadline, loop)
 
     class _State(enum.Enum):
@@ -102,7 +96,7 @@ else:
 
         def __enter__(self) -> "Timeout":
             warnings.warn(
-                "with timeout() is deprecated, use async with timeout() instead",
+                "with timeout() is deprecated, use async with timeout()",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -213,7 +207,8 @@ else:
             self._reschedule()
 
         def _do_exit(self, exc_type: Optional[Type[BaseException]]) -> None:
-            if exc_type is asyncio.CancelledError and self._state == _State.TIMEOUT:
+            if exc_type is asyncio.CancelledError and \
+                    self._state == _State.TIMEOUT:
                 self._timeout_handler = None
                 raise asyncio.TimeoutError
             # timeout has not expired
@@ -221,8 +216,9 @@ else:
             self._reject()
             return None
 
-        def _on_timeout(self, task: "asyncio.Task[None]") -> None:
-            task.cancel()
+        def _on_timeout(self, task: "Optional[asyncio.Task[Any]]") -> None:
+            if task:
+                task.cancel()
             self._state = _State.TIMEOUT
             # drop the reference early
             self._timeout_handler = None
