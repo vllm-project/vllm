@@ -257,7 +257,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             if self.forward_dag is None:
                 self.forward_dag = self._compiled_ray_dag()
 
-            output_channels = self.forward_dag.execute(driver_kwargs.pop("execute_model_req"))
+            ray_worker_outputs = self.forward_dag.execute(driver_kwargs.pop("execute_model_req"))
         else:
             # Start the ray workers first.
             ray_worker_outputs = [
@@ -280,14 +280,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         # Get the results of the ray workers.
         if self.workers:
-            if use_ray_compiled_dag:
-                try:
-                    ray_worker_outputs = output_channels.begin_read()
-                finally:
-                    # Has to call end_read in order to reuse the DAG.
-                    output_channels.end_read()
-            else:
-                ray_worker_outputs = ray.get(ray_worker_outputs)
+            ray_worker_outputs = ray.get(ray_worker_outputs)
 
         return driver_worker_output + ray_worker_outputs
 

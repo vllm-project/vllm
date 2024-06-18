@@ -28,6 +28,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
+import vllm.envs as envs
 
 logger = init_logger(__name__)
 
@@ -41,6 +42,8 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 _NUM_WARMUP_ITERS = 2
 
+
+USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
 
 class ModelInput(NamedTuple):
     input_tokens: torch.Tensor
@@ -665,10 +668,9 @@ class ModelRunner:
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        do_metadata_broadcast: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
-        if self.is_driver_worker:
+        if self.is_driver_worker or USE_RAY_COMPILED_DAG:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
             (
@@ -689,7 +691,7 @@ class ModelRunner:
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
 
-            if do_metadata_broadcast:
+            if not USE_RAY_COMPILED_DAG:
                 metadata_dict = {
                     "input_tokens": input_tokens,
                     "input_positions": input_positions,
@@ -707,7 +709,7 @@ class ModelRunner:
                     metadata_dict.update(attn_metadata.asdict_zerocopy())
                 broadcast_tensor_dict(metadata_dict, src=0)
         else:
-            assert do_metadata_broadcast
+            assert not USE_RAY_COMPILED_DAG
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
@@ -738,12 +740,10 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
         virtual_engine: int = 0,
-        do_metadata_broadcast: bool = True,
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_kwargs
-         ) = self.prepare_input_tensors(seq_group_metadata_list,
-                 do_metadata_broadcast)
+         ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -855,8 +855,7 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        self.execute_model(seqs, kv_caches,
-                do_metadata_broadcast=False)
+        self.execute_model(seqs, kv_caches)
         torch.cuda.synchronize()
         return
 

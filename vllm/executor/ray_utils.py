@@ -39,8 +39,7 @@ try:
                 self.compiled_dag_cuda_device_set = True
 
             output = self.worker.execute_model(
-                    execute_model_req,
-                    do_metadata_broadcast=False)
+                    execute_model_req)
             #output = pickle.dumps(output)
             return output
 
