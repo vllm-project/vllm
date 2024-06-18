@@ -541,6 +541,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             # Encoder attention - chunked prefill is not applicable;
             # derive token-count from query shape & and treat them
             # as 100% prefill tokens
+            assert attn_metadata.num_encoder_tokens is not None
             num_prefill_tokens = attn_metadata.num_encoder_tokens
             num_decode_tokens = 0
 

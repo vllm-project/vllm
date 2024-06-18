@@ -825,6 +825,7 @@ def make_causal_mask(q_max_seq_len: int, kv_max_seq_len: int) \
                             float('-inf')).masked_fill(mask == 0, 0.0)
     return mask
 
+
 #From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f):
 
