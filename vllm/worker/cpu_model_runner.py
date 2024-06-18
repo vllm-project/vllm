@@ -397,7 +397,6 @@ class CPUModelRunner:
         model_config = self.model_config
         vlm_config = self.vision_language_config
 
-        # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = min(
             self.scheduler_config.max_num_batched_tokens,
