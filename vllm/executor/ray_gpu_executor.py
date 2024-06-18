@@ -81,7 +81,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         # Create the workers.
         driver_ip = get_ip()
-        is_inside_single_node = True
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
@@ -110,8 +109,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
             )
 
             worker_ip = ray.get(worker.get_node_ip.remote())
-            if worker_ip != driver_ip:
-                is_inside_single_node = False
             if worker_ip == driver_ip and self.driver_dummy_worker is None:
                 # If the worker is on the same node as the driver, we use it
                 # as the resource holder for the driver process.
@@ -164,7 +161,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._run_workers("update_environment_variables",
                           all_args=all_args_to_update_environment_variables)
 
-        driver_ip = "127.0.0.1" if is_inside_single_node else driver_ip
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 
