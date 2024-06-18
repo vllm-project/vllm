@@ -9,7 +9,7 @@
   //ppc implementation
   #include "cpu_types_vsx.hpp"
 #else
-  #warning "unsupport vLLM cpu implementation"
+  #warning "unsupported vLLM cpu implementation"
 #endif
 
 #endif
