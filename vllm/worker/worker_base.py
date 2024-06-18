@@ -243,17 +243,20 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
+    ) -> Tuple[BroadcastableModelInput, Dict[str, int], WorkerInput, Dict[str, torch.Tensor]]:
         """ Get the driver input and broadcast it to other workers.  """
         assert self.is_driver_worker
 
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
-        model_input: ModelRunnerInputBase = (
+        model_input: ModelRunnerInputBase
+        cache_hints: Dict[str, int]
+        model_input, cache_hints = (
             self.model_runner.prepare_model_input(
                 execute_model_req.seq_group_metadata_list,
                 execute_model_req.virtual_engine,
-                execute_model_req.finished_requests_ids))
+                execute_model_req.finished_requests_ids,
+                self.kv_cache[worker_input.virtual_engine]))
 
         kwargs = extract_previous_hidden_states(execute_model_req)
 
@@ -268,16 +271,17 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 model_input,
                 async_callback=execute_model_req.async_callback)
 
-        return model_input, worker_input, kwargs
+        return model_input, cache_hints, worker_input, kwargs
 
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+    ) -> Optional[Tuple[BroadcastableModelInput, Dict[str, int], WorkerInput, Dict[
             str, torch.Tensor]]]:
         """
         Prepare the inputs to ModelRunner and workers.
         """
+        cache_hints = None
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
@@ -304,7 +308,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if inputs is None:
             return None
 
-        model_input, worker_input, kwargs = inputs
+        model_input, cache_hints, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
 
         self.execute_worker(worker_input)
@@ -334,6 +338,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         )
 
         model_execute_time = time.perf_counter() - start_time
+        if self.model_runner.vineyard_llm_cache and self.kv_cache[worker_input.virtual_engine][0] is not None:
+            self.model_runner.vineyard_llm_cache.update_kv_caches(
+                cache_hints, 
+                execute_model_req.seq_group_metadata_list, 
+                self.kv_cache[worker_input.virtual_engine], 
+                getattr(self.model_runner, 'block_size', None))
+
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
             if (self.observability_config is not None
@@ -368,7 +379,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             "ExecuteModelRequest")
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
-        model_input: ModelRunnerInputBase = (
+        model_input: ModelRunnerInputBase
+        cache_hints: Dict[str, int]
+        model_input, cache_hints = (
             self.model_runner.prepare_model_input(
                 execute_model_req.seq_group_metadata_list))
 
@@ -380,13 +393,22 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         kwargs = extract_previous_hidden_states(execute_model_req)
 
-        return self.model_runner.execute_model(
+        ret = self.model_runner.execute_model(
             model_input=model_input,
             kv_caches=self.kv_cache[worker_input.virtual_engine]
             if self.kv_cache is not None else None,
             intermediate_tensors=intermediate_tensors,
             **kwargs,
         )
+        
+        if self.model_runner.vineyard_llm_cache and self.kv_cache[worker_input.virtual_engine][0] is not None:
+            self.model_runner.vineyard_llm_cache.update_kv_caches(
+                cache_hints, 
+                execute_model_req.seq_group_metadata_list, 
+                self.kv_cache[worker_input.virtual_engine], 
+                getattr(self.model_runner, 'block_size', None))
+        
+        return ret
 
 
 class WorkerWrapperBase:

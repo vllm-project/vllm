@@ -25,6 +25,7 @@ from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -47,7 +48,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
                         flatten_2d_lists, is_hip, is_pin_memory_available,
-                        supports_dynamo)
+                        get_kv_cache_torch_dtype, supports_dynamo)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -985,8 +986,40 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
         self.prompt_adapter_manager: LRUCacheWorkerPromptAdapterManager = None
 
+        # Delay the initialization of vineyard cache after model loading
+        # to ensure the tensor model parallel group is initialized.
+        self.vineyard_llm_cache = None
+
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
+
+        set_cpu_offload_max_bytes(
+            int(self.cache_config.cpu_offload_gb * 1024**3))
+        # Delay the initialization of vineyard cache after model loading
+        # to ensure the tensor model parallel group is initialized.
+        self.vineyard_llm_cache = None
+
+    def _init_vineyard_cache(self):
+        if envs.VLLM_USE_VINEYARD_CACHE:
+            if not self.scheduler_config.chunked_prefill_enabled:
+                logger.warn("Vineyard LLM cache is not enabled, requires chunked prefill")
+            elif not envs.VLLM_USE_FLASH_ATTN_DECODING:
+                logger.warn("Vineyard LLM cache is not enabled, requires flash attention decoding")
+            else:
+                from vllm.worker.vineyard_llm_cache import VineyardLLMCache
+                self.vineyard_llm_cache: VineyardLLMCache = VineyardLLMCache.from_envs(
+                    model_config=self.model_config,
+                    parallel_config=self.parallel_config,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    torch_dtype=get_kv_cache_torch_dtype(self.kv_cache_dtype,
+                                                         self.model_config.dtype),
+                )
+                if self.vineyard_llm_cache:
+                    logger.info("Using Vineyard LLM cache")
+                else:
+                    logger.warn("Vineyard LLM cache is failed to be initialized")
+        else:
+            logger.info("Vineyard LLM cache is not enabled")
 
         # Used to cache python objects
         self.inter_data_cache: Dict[int, PyObjectCache] = {}
@@ -1068,6 +1101,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend="eager")
+        self._init_vineyard_cache()
 
     def save_sharded_state(
         self,
@@ -1082,6 +1116,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             pattern=pattern,
             max_size=max_size,
         )
+
+    def set_block_size(self, block_size: int) -> None:
+        self.block_size = block_size
 
     def save_tensorized_model(
         self,
@@ -1205,8 +1242,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
         finished_requests_ids = [seq.request_id for seq in seqs]
-        model_input = self.prepare_model_input(
-            seqs, finished_requests_ids=finished_requests_ids)
+        model_input, cache_hints = self.prepare_model_input(
+            seqs, finished_requests_ids=finished_requests_ids, kv_caches = kv_caches)
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = self.model.make_empty_intermediate_tensors(
@@ -1214,6 +1251,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
         self.execute_model(model_input, kv_caches, intermediate_tensors)
+        if self.vineyard_llm_cache and kv_caches[0] is not None:
+            self.vineyard_llm_cache.update_kv_caches(
+                cache_hints, seqs, kv_caches, getattr(self, 'block_size', None))
         torch.cuda.synchronize()
         return
 
@@ -1456,6 +1496,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None,
+        kv_caches: List[torch.Tensor] = [],
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1470,6 +1511,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
+        cache_hints = None
+        if self.vineyard_llm_cache and len(kv_caches) > 0 and kv_caches[0] is not None:
+            cache_hints = self.vineyard_llm_cache.prefetch_kv_caches(
+                seq_group_metadata_list, kv_caches, getattr(self, 'block_size', None))
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
         if get_pp_group().is_last_rank:
@@ -1486,7 +1531,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
                                    is_prompt=is_prompt,
-                                   virtual_engine=virtual_engine)
+                                   virtual_engine=virtual_engine), cache_hints
+                
 
     @torch.inference_mode()
     def execute_model(

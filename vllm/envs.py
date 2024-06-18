@@ -48,6 +48,8 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_AUDIO_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
+    VLLM_USE_VINEYARD_CACHE: Optional[str] = None
+    VLLM_USE_FLASH_ATTN_DECODING: Optional[str] = None
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -91,6 +93,14 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # rocm, neuron, cpu, openvino]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
+
+    # Enable vineyard kv cache for vLLM.
+    "VLLM_USE_VINEYARD_CACHE":
+    lambda: os.getenv("VLLM_USE_VINEYARD_CACHE", None),
+    
+    # Enable vineyard kv cache for vLLM.
+    "VLLM_USE_FLASH_ATTN_DECODING":
+    lambda: os.getenv("VLLM_USE_FLASH_ATTN_DECODING", None),
 
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
