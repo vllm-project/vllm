@@ -61,7 +61,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     ]
     hf_output_str = output_str \
         .replace(image_token_str * vlm_config.image_feature_size, "") \
-        .replace("<s>", " ").replace("<|user|>", "") \
+        .replace("<|user|>", "") \
         .replace("<|end|>\n<|assistant|>", " ")
 
     return hf_input_ids, hf_output_str
@@ -99,18 +99,12 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
                                               max_tokens,
                                               images=hf_images)
 
-    vllm_image_prompts = [
-        p.replace("<|image_1|>",
-                  "<|image|>" * vlm_config.image_feature_size + "<s>")
-        for p in HF_IMAGE_PROMPTS
-    ]
-
     with vllm_runner(model_id,
                      max_model_len=2048,
                      dtype=dtype,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+        vllm_outputs = vllm_model.generate_greedy(HF_IMAGE_PROMPTS,
                                                   max_tokens,
                                                   images=vllm_images)
 

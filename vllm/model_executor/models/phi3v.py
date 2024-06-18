@@ -22,7 +22,7 @@ from transformers.utils import logging
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -33,7 +33,8 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import DummyImageDataFactories
+from vllm.multimodal.image import (DummyImageDataFactories, ImageFeatureData,
+                                   ImageInputProcessors, ImagePixelData)
 from vllm.sequence import SamplerOutput
 
 logger = logging.get_logger(__name__)
@@ -280,6 +281,24 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
         CLIP_VIT_LARGE_PATCH14_336_CONFIG, )
 
     return seq_data, mm_data
+
+
+def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or not isinstance(
+            multi_modal_data, (ImagePixelData, ImageFeatureData)):
+        return llm_inputs
+
+    model_config = ctx.model_config
+    multimodal_config = ctx.get_multimodal_config()
+
+    return ImageInputProcessors.input_processor_for_clip(
+        model_config,
+        multimodal_config,
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        llm_inputs,
+        image_token_id=32044,
+    )
 
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
