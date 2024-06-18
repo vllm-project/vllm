@@ -21,7 +21,7 @@ latency_column_mapping = {
     "P99": "P99",
 }
 
-# thoughput tests and the keys that will be printed into markdown
+# throughput tests and the keys that will be printed into markdown
 throughput_results = []
 throughput_results_column_mapping = {
     "test_name": "Test name",
