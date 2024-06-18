@@ -5,9 +5,11 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
+import os
 import torch
 import math
 import vllm.hpu.xops as xops
+import vllm.hpu.utils
 from vllm.hpu.attn_bias import (AttentionBias,
                                 LowerTriangularMaskWithTensorBias)
 
@@ -17,6 +19,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,
                                                   HabanaPagedAttentionMetadata)
 from vllm.logger import init_logger
+from vllm.utils import Matmul, Softmax
 
 logger = init_logger(__name__)
 
@@ -111,7 +114,11 @@ class HabanaAttentionMetadata(AttentionMetadataPerStage, HabanaPagedAttentionMet
         self.attn_bias: Optional[List[AttentionBias]] = None
 
 
-class HabanaAttentionImpl(AttentionImpl):
+import habana_frameworks.torch.utils.experimental as htexp
+PA_SPLIT_VALUE_DEFAULT = '0' if (htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi3) else '1'
+PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', PA_SPLIT_VALUE_DEFAULT) == '1')
+
+class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
     |<--------------- num_prefill_tokens ----------------->|
@@ -137,8 +144,12 @@ class HabanaAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
+        super(AttentionImpl, self).__init__()
         self.num_heads = num_heads
         self.head_size = head_size
+        self.qk_matmul = Matmul()
+        self.softmax = Softmax()
+        self.kv_matmul = Matmul()
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
@@ -154,6 +165,75 @@ class HabanaAttentionImpl(AttentionImpl):
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
+
+    @vllm.hpu.utils.with_mark_steps
+    def prompt_attention(self,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            attn_bias: Optional[torch.Tensor] = None,
+            p: float = 0.0,
+            scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+        query_heads = query.size(1)
+        kv_heads = key.size(1)
+        if query_heads != kv_heads:
+            query = query.unflatten(1, (kv_heads, -1))
+            key = key.unflatten(1, (kv_heads, 1))
+            value = value.unflatten(1, (kv_heads, 1))
+            attn_bias = attn_bias.unsqueeze(2)
+        attn_weights = self.qk_matmul(query * scale, key.transpose(-1, -2))
+        if attn_bias is not None:
+            attn_weights.add_(attn_bias)
+        attn_weights = self.softmax(attn_weights, dim=-1)
+        attn_weights = self.kv_matmul(attn_weights, value)
+        if query_heads != kv_heads:
+            attn_weights = attn_weights.flatten(1, 2)
+        attn_weights = attn_weights.transpose(1, 2)
+        return attn_weights
+
+    def _fetch_from_cache(self, cache, blocks, permutations):
+        return [cache.index_select(0, blocks[:, i]).permute(permutations) for i in range(blocks.size(1))]
+
+    @vllm.hpu.utils.with_mark_steps
+    def paged_attention_v1(self, query, key_cache, value_cache, head_mapping, scale, block_tables, context_lens, block_size, alibi_slopes, kv_cache_dtype=None)  -> None:
+        seq_len = block_tables.size(1)
+        batch_size, query_heads, _ = query.shape
+        _, _, kv_heads, _ = key_cache.shape
+        min_inf = torch.finfo(query.dtype).min
+        mask = (torch.arange(0, seq_len * block_size, dtype=torch.int32, device=key_cache.device)
+                .view(1, -1)
+                .expand(batch_size, -1)
+                .ge(context_lens.view(-1, 1))
+                .view(batch_size, 1, 1, -1))
+        query.mul_(scale)
+        query = query.unsqueeze(-2)
+        keys = self._fetch_from_cache(key_cache, block_tables, (0, 2, 3, 1))
+        if query_heads != kv_heads:
+            query = query.unflatten(1, (kv_heads, -1))
+            keys = [k.unflatten(1, (kv_heads, 1)) for k in keys]
+            mask = mask.unsqueeze(2)
+
+        attn_weights = [self.qk_matmul(query, k) for k in keys]
+        attn_weights = self.softmax(torch.cat(attn_weights, dim=-1).masked_fill(mask, min_inf),
+                                    dim=-1)
+
+        values = self._fetch_from_cache(value_cache, block_tables, (0, 2, 1, 3))
+        if PA_SPLIT_VALUE:
+            attn_weights = attn_weights.split(block_size, dim=-1)
+        else:
+            values = [torch.cat(values, dim=-2)]
+            attn_weights = [attn_weights]
+        if query_heads != kv_heads:
+            values = [v.unflatten(1, (kv_heads, 1)) for v in values]
+        attn_weights = [self.kv_matmul(a, v) for a, v in zip(attn_weights, values)]
+        if query_heads != kv_heads:
+            attn_weights = [a.flatten(1, 2) for a in attn_weights]
+        attn_weights = sum(attn_weights)
+        return attn_weights.squeeze(-2)
 
     def forward(
         self,
@@ -201,7 +281,7 @@ class HabanaAttentionImpl(AttentionImpl):
                 assert prefill_meta.attn_bias is not None, 'attn_bias must be set before calling model.forward!'
                 query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
                 kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
-                out = xops.prompt_attention(
+                out = self.prompt_attention(
                     query.view(query_shape),
                     key.view(kv_shape),
                     value.view(kv_shape),
@@ -227,17 +307,18 @@ class HabanaAttentionImpl(AttentionImpl):
                 )
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            output = HabanaPagedAttention.forward_decode(
+            block_size = value_cache.shape[1]
+            output = self.paged_attention_v1(
                 query,
                 key_cache,
                 value_cache,
-                decode_meta.block_tables,
-                decode_meta.seq_lens_tensor,
-                attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
+                decode_meta.block_tables,
+                decode_meta.seq_lens_tensor,
+                block_size,
                 self.alibi_slopes,
-                kv_scale
+                attn_metadata.kv_cache_dtype,
             )
 
         # Reshape the output tensor.

@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from vllm.distributed import tensor_model_parallel_gather, tensor_model_parallel_all_gather
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.utils import is_hpu
+from vllm.utils import is_hpu, Matmul
 
 class LogitsProcessor(nn.Module):
     """Process logits and apply logits processors from sampling metadata.
@@ -33,6 +33,7 @@ class LogitsProcessor(nn.Module):
         self.logits_as_input = logits_as_input
         # original vocabulary size (without LoRA).
         self.org_vocab_size = org_vocab_size or vocab_size
+        self.matmul = Matmul()
 
     def forward(
         self,
@@ -63,7 +64,7 @@ class LogitsProcessor(nn.Module):
     def _get_logits(self, hidden_states: torch.Tensor, embedding: torch.Tensor,
                     embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
+        logits = self.matmul(hidden_states, embedding.t())
         if embedding_bias is not None:
             logits += embedding_bias
         # NOTE(kzawora): HPU PT bridge is missing support for single-rank gather. We'll use all-gather on Gaudi for now.

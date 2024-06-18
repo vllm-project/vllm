@@ -229,7 +229,7 @@ def _is_neuron() -> bool:
     torch_neuronx_installed = True
     try:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
-    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
+    except (FileNotFoundError, NotADirectoryError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
     return torch_neuronx_installed or envs.VLLM_BUILD_WITH_NEURON
 
