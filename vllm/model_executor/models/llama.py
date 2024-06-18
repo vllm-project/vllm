@@ -286,6 +286,8 @@ class LlamaModel(nn.Module):
         else:
             hidden_states = self.get_input_embeddings(input_ids)
         residual = None
+        import habana_frameworks.torch as htorch
+        htorch.core.mark_step()
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -295,6 +297,7 @@ class LlamaModel(nn.Module):
                 attn_metadata,
                 residual,
             )
+            htorch.core.mark_step()
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 

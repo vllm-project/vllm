@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
+import torch
 import habana_frameworks.torch as htorch
+from vllm.attention.ops.habana_paged_attn import HabanaPagedAttention
 
 def with_mark_steps(fn):
     def wrapped(*args, **kwargs):
@@ -97,3 +99,12 @@ def profile_reicpes(recipe_names):
     plt.title(f'Recipe similarity ({backend_name})')
     return plt
 #    plt.savefig('similarity.png')
+
+class VLLMKVCache(torch.nn.Module):
+    def __init__(self):
+        super(VLLMKVCache, self).__init__()
+
+    def forward(self, key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype, is_prefill_metadata):
+        HabanaPagedAttention.write_to_paged_cache(key, value, key_cache, value_cache,
+                                                  slot_mapping, kv_cache_dtype, is_prefill_metadata)
+        return key_cache, value_cache
