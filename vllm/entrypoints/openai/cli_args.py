@@ -111,5 +111,21 @@ def make_arg_parser():
         "If a class is provided, vLLM will add it to the server "
         "using app.add_middleware(). ")
 
+    parser.add_argument("--enable-api-tools",
+                        action="store_true",
+                        help="Enable OpenAI-like tools API "
+                             "(only function calls are currently supported)")
+
+    parser.add_argument(
+        '--tool-use-prompt-template',
+        type=str,
+        default=None,
+        help="The path to the jinja template that should be used to format "
+             "any provided OpenAI API-style function definitions into a system prompt "
+             "that instructs the model how to use tools, and which tools are "
+             "available. If not provided, tools will be ignored. An example is "
+             "provided at 'examples/tool_template_hermes_2_pro.jinja'."
+    )
+
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser

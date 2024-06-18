@@ -341,7 +341,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         break
                 if not valid_tool:
                     return ValueError("The tool specified in `tool_choice` does not match any of the specified `tools`")
-                
+
         # per OpenAI spec, make sure that tool_choice defaults to "auto" when tools are specified
         elif "tools" in data and "tool_choice" not in data:
             data["tool_choice"] = "auto"
