@@ -109,6 +109,7 @@ class CPUModelRunner:
                                                          "dce": True
                                                      })
                 replace_model(m)
+            return
 
         replace_model(self.model)
 
