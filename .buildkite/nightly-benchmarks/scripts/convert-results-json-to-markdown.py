@@ -185,6 +185,8 @@ if __name__ == "__main__":
 
     # document benchmarking results in json
     with open(results_folder / "benchmark_results.json", "w") as f:
-        
-        results = latency_results.to_dict(orient='records') + throughput_results.to_dict(orient='records') + serving_results.to_dict(orient='records')
+
+        results = latency_results.to_dict(
+            orient='records') + throughput_results.to_dict(
+                orient='records') + serving_results.to_dict(orient='records')
         f.write(json.dumps(results))
