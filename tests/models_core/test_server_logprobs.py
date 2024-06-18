@@ -69,7 +69,7 @@ async def my_chat(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [3])
+@pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 def test_models_on_server(
     hf_runner_nm: HfRunnerNM,
