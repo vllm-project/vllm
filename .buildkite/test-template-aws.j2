@@ -4,6 +4,7 @@
 steps:
   {% for step in steps %}
   - label: "{{ step.label }}"
+    priority: 1000
     agents:
       {% if step.label == "Documentation Build" %}
       queue: small_cpu_queue
