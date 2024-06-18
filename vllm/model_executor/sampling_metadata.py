@@ -340,6 +340,18 @@ class SamplingTensors:
                              get_num_triton_sampler_splits(vocab_size))
 
         assert sampling_metadata.seq_groups is not None
+
+        # first pass through to determine do_penalties
+        for seq_group in sampling_metadata.seq_groups:
+             sampling_params = seq_group.sampling_params
+             p = sampling_params.presence_penalty
+             f = sampling_params.frequency_penalty
+             r = sampling_params.repetition_penalty
+             if not do_penalties and (abs(p) >= _SAMPLING_EPS
+                                 or abs(f) >= _SAMPLING_EPS
+                                 or abs(r - 1.0) >= _SAMPLING_EPS):
+                 do_penalties = True
+
         for seq_group in sampling_metadata.seq_groups:
             seq_ids = seq_group.seq_ids
             sampling_params = seq_group.sampling_params
@@ -366,10 +378,6 @@ class SamplingTensors:
                 do_top_p_top_k = True
             if not do_min_p and min_p > _SAMPLING_EPS:
                 do_min_p = True
-            if not do_penalties and (abs(p) >= _SAMPLING_EPS
-                                     or abs(f) >= _SAMPLING_EPS
-                                     or abs(r - 1.0) >= _SAMPLING_EPS):
-                do_penalties = True
 
             is_prompt = seq_group.is_prompt
             if (seq_group.is_prompt
