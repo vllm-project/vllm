@@ -340,18 +340,6 @@ class SamplingTensors:
                              get_num_triton_sampler_splits(vocab_size))
 
         assert sampling_metadata.seq_groups is not None
-
-        # first pass through to determine do_penalties
-        for seq_group in sampling_metadata.seq_groups:
-            sampling_params = seq_group.sampling_params
-            p = sampling_params.presence_penalty
-            f = sampling_params.frequency_penalty
-            r = sampling_params.repetition_penalty
-            if not do_penalties and (abs(p) >= _SAMPLING_EPS
-                                     or abs(f) >= _SAMPLING_EPS
-                                     or abs(r - 1.0) >= _SAMPLING_EPS):
-                do_penalties = True
-
         for seq_group in sampling_metadata.seq_groups:
             seq_ids = seq_group.seq_ids
             sampling_params = seq_group.sampling_params
@@ -378,6 +366,10 @@ class SamplingTensors:
                 do_top_p_top_k = True
             if not do_min_p and min_p > _SAMPLING_EPS:
                 do_min_p = True
+            if not do_penalties and (abs(p) >= _SAMPLING_EPS
+                                     or abs(f) >= _SAMPLING_EPS
+                                     or abs(r - 1.0) >= _SAMPLING_EPS):
+                do_penalties = True
 
             is_prompt = seq_group.is_prompt
             if (seq_group.is_prompt
@@ -394,18 +386,10 @@ class SamplingTensors:
                 presence_penalties += [0] * prefill_len
                 frequency_penalties += [0] * prefill_len
                 repetition_penalties += [1] * prefill_len
-                if do_penalties:
-                    prompt_tokens.extend([] for _ in range(prefill_len))
-                    output_tokens.extend([] for _ in range(prefill_len))
 
             if seq_group.do_sample:
                 sample_lens = len(seq_group.sample_indices)
                 assert sample_lens == len(seq_ids)
-                for seq_id in seq_ids:
-                    seq_data = seq_group.seq_data[seq_id]
-                    if do_penalties:
-                        prompt_tokens.append(seq_data.prompt_token_ids)
-                        output_tokens.append(seq_data.output_token_ids)
                 temperatures += [temperature] * len(seq_ids)
                 top_ps += [top_p] * len(seq_ids)
                 top_ks += [top_k] * len(seq_ids)
@@ -431,6 +415,22 @@ class SamplingTensors:
                     is_greedy=is_greedy)
                 sampling_seeds.append(seq_seeds)
             sample_indices.extend(seq_group.sample_indices)
+
+        if do_penalties:
+            for seq_group in sampling_metadata.seq_groups:
+                seq_ids = seq_group.seq_ids
+
+                if (seq_group.is_prompt
+                        and sampling_params.prompt_logprobs is not None):
+                    prefill_len = len(seq_group.prompt_logprob_indices)
+                    prompt_tokens.extend([] for _ in range(prefill_len))
+                    output_tokens.extend([] for _ in range(prefill_len))
+
+                if seq_group.do_sample:
+                    for seq_id in seq_ids:
+                        seq_data = seq_group.seq_data[seq_id]
+                        prompt_tokens.append(seq_data.prompt_token_ids)
+                        output_tokens.append(seq_data.output_token_ids)
 
         sampling_tensors = SamplingTensors.from_lists(
             temperatures, top_ps, top_ks, min_ps, presence_penalties,
