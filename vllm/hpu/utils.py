@@ -100,6 +100,23 @@ def profile_reicpes(recipe_names):
     return plt
 #    plt.savefig('similarity.png')
 
+
+class Matmul(torch.nn.Module):
+    def __init__(self):
+        super(Matmul, self).__init__()
+
+    def forward(self, x, y):
+        return torch.matmul(x, y)
+
+
+class Softmax(torch.nn.Module):
+      def __init__(self):
+        super().__init__()
+
+      def forward(self, x, dim = None, inv_head = None):
+        return torch.softmax(x, dim)
+
+
 class VLLMKVCache(torch.nn.Module):
     def __init__(self):
         super(VLLMKVCache, self).__init__()

@@ -281,18 +281,21 @@ class HabanaModelRunner:
                     parallel_config=self.parallel_config,
                     scheduler_config=self.scheduler_config,
                 )
-                if self.model_config.quantization == 'hqt':
+            logger.info(f"Pre-loading model weights on {next(self.model.parameters()).device} took {m_getmodel.get_summary_string()}")
+
+            if self.model_config.quantization == 'hqt':
+                with HabanaMemoryProfiler() as m_useHQT:
                     import habana_quantization_toolkit
                     habana_quantization_toolkit.prep_model(self.model)
                     import habana_frameworks.torch.core as htcore
                     htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
-            logger.info(f"Pre-loading model weights on {next(self.model.parameters()).device} took {m_getmodel.get_summary_string()}")
+                logger.info(f"HQT prep model took {m_useHQT.get_summary_string()}")
 
             # FIXME: Running with disable_tensor_cache=True causes RuntimeErrors. This needs to be debugged
             with HabanaMemoryProfiler() as m_wrap:
                 self.model = _maybe_wrap_in_hpu_graph(self.model)
             logger.info(f"Wrapping in HPU Graph took {m_wrap.get_summary_string()}")
-            
+
         self.model_memory_usage = m.consumed_device_memory
         logger.info(f"Loading model weights took in total {m.get_summary_string()}")
 

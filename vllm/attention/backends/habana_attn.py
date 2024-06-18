@@ -9,7 +9,7 @@ import os
 import torch
 import math
 from vllm.hpu import cache_ops, xops
-from vllm.hpu.utils import VLLMKVCache
+from vllm.hpu.utils import Matmul, Softmax, VLLMKVCache
 from vllm.hpu.attn_bias import (AttentionBias,
                                 LowerTriangularMaskWithTensorBias)
 
@@ -19,7 +19,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,
                                                   HabanaPagedAttentionMetadata)
 from vllm.logger import init_logger
-from vllm.utils import Matmul, Softmax
 
 logger = init_logger(__name__)
 

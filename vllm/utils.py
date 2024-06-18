@@ -54,22 +54,6 @@ class Counter:
         self.counter = 0
 
 
-class Matmul(torch.nn.Module):
-    def __init__(self):
-        super(Matmul, self).__init__()
-
-    def forward(self, x, y):
-        return torch.matmul(x, y)
-
-
-class Softmax(torch.nn.Module):
-      def __init__(self):
-        super().__init__()
-
-      def forward(self, x, dim = None, inv_head = None):
-        return torch.softmax(x, dim)
-
-
 class LRUCache(Generic[T]):
 
     def __init__(self, capacity: int):
