@@ -38,6 +38,10 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         This is implemented by changing vLLM's tensor parallel group to a group
         of the small size temporarily during forward passes of draft models.
+
+        Args:
+            draft_ranks (Optional[List[int]]): if this value is given, only some of
+            the GPU ranks written in this value participate in draft generation
        """
 
         self._draft_ranks = draft_ranks
@@ -45,8 +49,6 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         self._world_group = None
         self._tp_group = None
 
-        # if 'draft_ranks' arg is given, only some of the GPU ranks written in
-        # this value participate in draft generation
         if draft_ranks is not None:
             # whether the worker participates in draft generation or not
             self._is_dummy = kwargs['rank'] not in draft_ranks
