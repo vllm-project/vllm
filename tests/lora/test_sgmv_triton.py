@@ -28,7 +28,7 @@ def setup_(S, R, H, dtype, repeats_per_lora=1):
     else:
         ranks = torch.full((S, ), R, device='cuda', dtype=torch.int32)
     weights = torch.randn((num_unique, 1, H, R), device='cuda', dtype=dtype)
-    indices = torch.arange(num_unique, device='cuda')
+    indices = torch.randint(0, num_unique, (num_unique,), device='cuda')
     repeats = torch.full((num_unique, ),
                          repeats_per_lora,
                          device='cuda',
@@ -49,12 +49,13 @@ def setup_(S, R, H, dtype, repeats_per_lora=1):
 @pytest.mark.parametrize("seed", [SEED])
 @torch.inference_mode()
 def test_correct(S, R, H, dtype, repeats_per_lora, seed):
+    torch.set_printoptions(precision=2, linewidth=1000, sci_mode=False)
     torch.manual_seed(seed)
     weights, ranks, indices, repeats, num_unique, R, dtype = (setup_(
         S, R, H, dtype, repeats_per_lora))
 
     buffer = torch.randn((S, R), device='cuda', dtype=torch.float32)
-    out_col_offset = 128
+    out_col_offset = 77
     out = torch.randn((S, H + out_col_offset), device='cuda', dtype=dtype)
     ref_outs = []
     for ui in range(num_unique):

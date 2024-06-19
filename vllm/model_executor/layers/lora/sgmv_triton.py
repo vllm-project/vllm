@@ -7,21 +7,21 @@ import triton.language as tl
 MAX_REPEATS_PER_BLOCK = 32
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=8),
-        triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=8),
-        triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=8),
-    ],
-    key=['R', 'H', 'BLOCK_SIZE_INPUT_PER_LORA'],
-    restore_value=['o_ptr']
-)
+# @triton.autotune(
+#     configs=[
+#         triton.Config({'BLOCK_SIZE_H_IN': 32}, num_warps=1),
+#         triton.Config({'BLOCK_SIZE_H_IN': 32}, num_warps=4),
+#         triton.Config({'BLOCK_SIZE_H_IN': 32}, num_warps=8),
+#         triton.Config({'BLOCK_SIZE_H_IN': 64}, num_warps=1),
+#         triton.Config({'BLOCK_SIZE_H_IN': 64}, num_warps=4),
+#         triton.Config({'BLOCK_SIZE_H_IN': 64}, num_warps=8),
+#         triton.Config({'BLOCK_SIZE_H_IN': 128}, num_warps=1),
+#         triton.Config({'BLOCK_SIZE_H_IN': 128}, num_warps=4),
+#         triton.Config({'BLOCK_SIZE_H_IN': 128}, num_warps=8),
+#     ],
+#     key=['R', 'H', 'BLOCK_SIZE_INPUT_PER_LORA'],
+#     restore_value=['o_ptr']
+# )
 @triton.jit
 def sgmv_shrink_multi_lora_rank(
         # Same arguments as below, some renamed
@@ -43,7 +43,7 @@ def sgmv_shrink_multi_lora_rank(
         stride_or,
         # Meta-parameters
         BLOCK_SIZE_INPUT_PER_LORA: tl.constexpr,
-        BLOCK_SIZE_H_OUT: tl.constexpr):
+        BLOCK_SIZE_H_IN: tl.constexpr):
     """
     The shrink side of the lora, very similar implementation to expand, but 
     uses the split-k strategy as in punica.
@@ -61,10 +61,10 @@ def sgmv_shrink_multi_lora_rank(
     input_range = tl.arange(0, BLOCK_SIZE_INPUT_PER_LORA)
     offs_xs = repeats_0 + input_range
     rank_range = tl.arange(0, R)
-    offs_h = h_id * BLOCK_SIZE_H_OUT + tl.arange(0, BLOCK_SIZE_H_OUT)
+    offs_h = h_id * BLOCK_SIZE_H_IN + tl.arange(0, BLOCK_SIZE_H_IN)
     offs_os = offs_xs
 
-    w_ptrs = (w_ptr + lora_id * stride_wl + offs_h[:, None] * stride_wh +
+    w_ptrs = (w_ptr + idx * stride_wl + offs_h[:, None] * stride_wh +
               rank_range[None, :] * stride_wr)
     w = tl.load(w_ptrs,
                 mask=(offs_h[:, None] < H) & (rank_range[None, :] < rank),
@@ -116,8 +116,8 @@ def sgmv_shrink(x, weights, out, ranks, indices, repeats, max_repeats):
     S, H = x.shape
     R = out.shape[-1]
 
-    BLOCK_SIZE_INPUT_PER_LORA = max_repeats
-    grid = lambda META: (triton.cdiv(H, META['BLOCK_SIZE_H_OUT']), len(repeats)
+    BLOCK_SIZE_INPUT_PER_LORA = triton.next_power_of_2(max_repeats)
+    grid = lambda META: (triton.cdiv(H, META['BLOCK_SIZE_H_IN']), len(repeats)
                          - 1)
     sgmv_shrink_multi_lora_rank[grid](
         x,
@@ -136,25 +136,26 @@ def sgmv_shrink(x, weights, out, ranks, indices, repeats, max_repeats):
         weights.stride(3),
         out.stride(0),
         out.stride(1),
-        BLOCK_SIZE_INPUT_PER_LORA=BLOCK_SIZE_INPUT_PER_LORA)
+        BLOCK_SIZE_INPUT_PER_LORA=BLOCK_SIZE_INPUT_PER_LORA,
+        BLOCK_SIZE_H_IN=64)
     return out
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=8),
-        triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=8),
-        triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=1),
-        triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=8),
-    ],
-    key=['R', 'H', 'BLOCK_SIZE_INPUT_PER_LORA'],
-    restore_value=['o_ptr']
-)
+# @triton.autotune(
+#     configs=[
+#         triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=1),
+#         triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=4),
+#         triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=8),
+#         triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=1),
+#         triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=4),
+#         triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=8),
+#         triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=1),
+#         triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=4),
+#         triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=8),
+#     ],
+#     key=['R', 'H', 'BLOCK_SIZE_INPUT_PER_LORA'],
+#     restore_value=['o_ptr']
+# )
 @triton.jit
 def sgmv_expand_multi_lora_rank(
         # NOTE: Inputs MUST be grouped by lora
@@ -210,7 +211,7 @@ def sgmv_expand_multi_lora_rank(
     offs_wh = h_id * BLOCK_SIZE_H_OUT + tl.arange(0, BLOCK_SIZE_H_OUT)
 
     # compare transpose after vs transpose ptrs
-    w_ptrs = (w_ptr + lora_id * stride_wl + rank_range[:, None] * stride_wr +
+    w_ptrs = (w_ptr + idx * stride_wl + rank_range[:, None] * stride_wr +
               offs_wh[None, :] * stride_wh)
 
     offs_os = offs_bs
@@ -287,7 +288,7 @@ def sgmv_expand(buffer,
     S, R = buffer.shape
     H = weights.shape[-2]
 
-    BLOCK_SIZE_INPUT_PER_LORA = max_repeats
+    BLOCK_SIZE_INPUT_PER_LORA = triton.next_power_of_2(max_repeats)
     grid = lambda META: (triton.cdiv(H, META['BLOCK_SIZE_H_OUT']), len(repeats)
                          - 1)
     sgmv_expand_multi_lora_rank[grid](
@@ -309,5 +310,6 @@ def sgmv_expand(buffer,
         weights.stride(3),
         out.stride(0),
         out.stride(1),
-        BLOCK_SIZE_INPUT_PER_LORA=BLOCK_SIZE_INPUT_PER_LORA)
+        BLOCK_SIZE_INPUT_PER_LORA=BLOCK_SIZE_INPUT_PER_LORA,
+        BLOCK_SIZE_H_OUT=64)
     return out
