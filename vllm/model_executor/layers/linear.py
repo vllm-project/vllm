@@ -14,7 +14,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
-
+import intel_extension_for_pytorch as ipex
+from intel_extension_for_pytorch.cpu._auto_kernel_selection import (
+    _enable_tpp,
+    _disable_tpp,
+)
 logger = init_logger(__name__)
 
 
@@ -103,7 +107,22 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        weight = layer.weight
+        if not hasattr(layer, "ipex_linear"):
+            linear = torch.nn.Linear(layer.weight.shape[1], layer.weight.shape[0], bias=True if bias is not None else False)
+            linear.weight = layer.weight
+            if bias is not None:
+                linear.bias = bias
+            _disable_tpp()
+            if x.dtype is torch.bfloat16:
+                _enable_tpp()
+            layer.ipex_linear = ipex.optimize(linear.eval(), dtype=x.dtype, inplace=True, conv_bn_folding=False, linear_bn_folding=False)
+            breakpoint()
+        if hasattr(layer, "ipex_linear"):
+            x_reshape = x.unsqueeze(0) if x.dim() == 2 else x
+            res = layer.ipex_linear(x_reshape)
+            res_reshape = res.squeeze(0) if x.dim() == 2 else res
+            return res_reshape
+        weight = layer.weightc
         if self.separate_bias_add:
             if bias is not None:
                 return F.linear(x, weight) + bias
