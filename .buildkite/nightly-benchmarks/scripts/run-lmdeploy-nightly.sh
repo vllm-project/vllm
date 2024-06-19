@@ -83,7 +83,7 @@ run_serving_tests() {
     echo "Running over qps list $qps_list"
 
     # check if there is enough GPU to run the test
-    tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
+    tp=$(echo "$server_params" | jq -r '.tp')
     if [[ $gpu_count -lt $tp ]]; then
       echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $testname."
       continue
