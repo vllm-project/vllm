@@ -72,6 +72,7 @@ jobs:
               --label code-sync \
               --title "$title" \
               --body "$body" \
+              --draft \
               --no-maintainer-edit
             exit 0
           fi
