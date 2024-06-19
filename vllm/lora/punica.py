@@ -15,6 +15,12 @@ if is_cpu():
     logger.warning(
         "punica LoRA kernels on CPU will be fallback to Torch native kernels, "
         "which will cause non-optimized performance.")
+elif torch.cuda.get_device_capability() < (8, 0):
+    logger.warning(
+        "punica LoRA kernels require compute capability >= 8.0, "
+        "but you are running on device with compute capability < 8.0, this "
+        "will fallback to Torch native kernels with non-optimized performance."
+    )
 
 
 def _check_punica_support():
@@ -25,8 +31,7 @@ def _check_punica_support():
         return ops
 
     if torch.cuda.get_device_capability() < (8, 0):
-        raise ImportError(
-            "punica LoRA kernels require compute capability >= 8.0")
+        return native_kernels
     else:
         logger.warning(
             "punica LoRA kernels could not be imported. If you built vLLM "
