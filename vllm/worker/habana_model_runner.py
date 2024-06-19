@@ -290,6 +290,8 @@ class HabanaModelRunner:
                     import habana_frameworks.torch.core as htcore
                     htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
                 logger.info(f"HQT prep model took {m_useHQT.get_summary_string()}")
+            else:
+                self.model = self.model.to("hpu")
 
             # FIXME: Running with disable_tensor_cache=True causes RuntimeErrors. This needs to be debugged
             with HabanaMemoryProfiler() as m_wrap:
