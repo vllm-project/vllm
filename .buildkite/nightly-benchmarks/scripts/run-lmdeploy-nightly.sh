@@ -3,7 +3,6 @@
 set -ex
 set -o pipefail
 
-
 check_gpus() {
   # check the number of GPUs and GPU type.
   declare -g gpu_count=$(nvidia-smi --list-gpus | wc -l)
@@ -17,20 +16,18 @@ check_gpus() {
   echo "GPU type is $gpu_type"
 }
 
-
-
 kill_gpu_processes() {
   # kill all processes on GPU.
   pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
   if [ -z "$pids" ]; then
-      echo "No GPU processes found."
+    echo "No GPU processes found."
   else
-      for pid in $pids; do
-          kill -9 "$pid"
-          echo "Killed process with PID: $pid"
-      done
+    for pid in $pids; do
+      kill -9 "$pid"
+      echo "Killed process with PID: $pid"
+    done
 
-      echo "All GPU processes have been killed."
+    echo "All GPU processes have been killed."
   fi
 
   # waiting for GPU processes to be fully killed
@@ -45,8 +42,6 @@ kill_gpu_processes() {
   # The memory usage should be 0 MB.
   echo "GPU 0 Memory Usage: $gpu_memory_usage MB"
 }
-
-
 
 json2args() {
   # transforms the JSON string to command line args, and '_' is replaced to '-'
@@ -73,8 +68,6 @@ wait_for_server() {
     done' && return 0 || return 1
 }
 
-
-
 run_serving_tests() {
   # run serving tests using `benchmark_serving.py`
   # $1: a json file specifying serving test cases
@@ -94,7 +87,6 @@ run_serving_tests() {
       echo "Skip test case $test_name."
       continue
     fi
-
 
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.lmdeploy_server_parameters')
@@ -174,7 +166,7 @@ run_serving_tests() {
           gpu_type: $gpu,
           engine: $engine
         }')
-      echo "$jq_output" > "$RESULTS_FOLDER/${new_test_name}.commands"
+      echo "$jq_output" >"$RESULTS_FOLDER/${new_test_name}.commands"
 
     done
 
@@ -183,16 +175,18 @@ run_serving_tests() {
   done
 }
 
-main () {
+main() {
 
-    # enter vllm directory
-    cd /vllm/benchmarks
+  check_gpus
+  # enter vllm directory
+  cd /vllm/benchmarks
 
-    declare -g RESULTS_FOLDER=results/
-    mkdir -p $RESULTS_FOLDER
-    BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
+  declare -g RESULTS_FOLDER=results/
+  mkdir -p $RESULTS_FOLDER
+  BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
-    run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
+  run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
+  CURRENT_LLM_SERVING_ENGINE=lmdeploy python $BENCHMARK_ROOT/scripts/summary-nightly-results.py
 
 }
 
