@@ -177,7 +177,7 @@ struct ScaledEpilogueBias
 
     ScaleA_Args a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
     ScaleB_Args b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
-    Bias_Args bias_args{bias.data_ptr<float>(), bias.numel() != 1, {}};
+    Bias_Args bias_args{bias.data_ptr<float>()};
 
     return ArgumentType{a_args, {b_args}, bias_args};
   }
