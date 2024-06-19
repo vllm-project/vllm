@@ -283,15 +283,18 @@ class HabanaModelRunner:
                 )
             logger.info(f"Pre-loading model weights on {next(self.model.parameters()).device} took {m_getmodel.get_summary_string()}")
 
+            import habana_frameworks.torch.core as htcore
             if self.model_config.quantization == 'hqt':
-                with HabanaMemoryProfiler() as m_useHQT:
+                logger.info("Preparing model with HQT..")
+                with HabanaMemoryProfiler() as m_hqt:
                     import habana_quantization_toolkit
                     habana_quantization_toolkit.prep_model(self.model)
-                    import habana_frameworks.torch.core as htcore
                     htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
-                logger.info(f"HQT prep model took {m_useHQT.get_summary_string()}")
+                logger.info(f"Preparing model with HQT took {m_hqt.get_summary_string()}")
             else:
                 self.model = self.model.to("hpu")
+                htcore.mark_step()
+            torch.hpu.synchronize()
 
             # FIXME: Running with disable_tensor_cache=True causes RuntimeErrors. This needs to be debugged
             with HabanaMemoryProfiler() as m_wrap:
@@ -956,16 +959,9 @@ class HabanaModelRunner:
         logger.info(f"[Warmup][{phase}][{i+1}/{max_i}] batch_size:{batch_size} seq_len:{seq_len} free_mem:{free_mem}")
 
     def warmup_all_buckets(self, buckets, is_prompt, kv_caches):
-        counter = 0
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
-            mem_usage = 100.0 * HabanaMemoryProfiler.current_device_memory_usage() / HabanaMemoryProfiler.total_device_memory()
             self.log_warmup('Prompt' if is_prompt else 'Decode', i, len(buckets), batch_size, seq_len)
-            try:
-                self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
-            except:
-                print(f"Failed on scenario {i+1}: batch_size={batch_size}, seq_len={seq_len}, is_prompt={is_prompt}")
-                counter += 1
-        print(f"Failed warm-up scenarios = {counter}")
+            self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
 
     def warmup_graphs(self, strategy, buckets, is_prompt, kv_caches, available_mem):
         total_batch_seq = 0.001
@@ -982,7 +978,6 @@ class HabanaModelRunner:
             raise NotImplementedError(f'Unsupported graph allocation strategy: {strategy}')
         buckets = list(sorted(buckets, key=ordering))
 
-        counter = 0
         for idx, (batch_size, seq_len) in enumerate(buckets):
             # Graph memory usage is proportional to seq dimension in a batch
             batch_seq = batch_size * seq_len if is_prompt else batch_size
@@ -992,16 +987,11 @@ class HabanaModelRunner:
             self.graphed_buckets.add((batch_size, seq_len, is_prompt))
             self.log_warmup(phase, idx, num_candidates, batch_size, seq_len)
             with HabanaMemoryProfiler() as mem_prof:
-                try:
-                    self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
-                except:
-                    print(f"Failed on graph scenario {idx}: batch_size={batch_size}, seq_len={seq_len}, is_prompt={is_prompt}")
-                    counter += 1
+                self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
             used_mem = align_workers(mem_prof.consumed_device_memory, torch.distributed.ReduceOp.MAX)
             available_mem -= used_mem
             total_mem += used_mem
             total_batch_seq += batch_seq
-        print(f"Failed warm-up graph scenarios = {counter}")
         graphed = list(c[:2] for c in self.graphed_buckets if c[2] == is_prompt)
         logger.info(f'{phase} captured:{len(graphed)} ({100 * len(graphed) / num_candidates:.1f}%) used_mem:{format_bytes(total_mem)} buckets:{sorted(list(graphed))}')
 

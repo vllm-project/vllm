@@ -86,6 +86,16 @@ class HabanaWorker(WorkerBase):
         self.cache_engine: CacheEngine
         self.hpu_cache: List[torch.Tensor]
 
+    def _set_env_vars(self):
+        local_rank = self.local_rank
+        if self.parallel_config.world_size == 1:
+            local_rank = -1
+        import os
+        os.environ["LOCAL_RANK"] = str(local_rank)
+        os.environ["ID"] = str(local_rank)
+        os.environ["WORLD_SIZE"] = str(self.parallel_config.world_size)
+        os.environ["RANK"] = str(self.rank)
+
     def init_device(self) -> None:
         if self.device_config.device.type == "hpu":
             self.device = torch.device("hpu")
@@ -94,6 +104,8 @@ class HabanaWorker(WorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
+        if self.model_config.quantization == 'hqt':
+            self._set_env_vars()
         init_worker_distributed_environment(self.parallel_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
