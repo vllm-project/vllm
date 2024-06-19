@@ -3,9 +3,8 @@
 Deploying with Docker
 ============================
 
-vLLM offers official docker image for deployment.
-The image can be used to run OpenAI compatible server.
-The image is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.com/r/vllm/vllm-openai/tags>`_.
+vLLM offers an official Docker image for deployment.
+The image can be used to run OpenAI compatible server and is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.com/r/vllm/vllm-openai/tags>`_.
 
 .. code-block:: console
 
@@ -25,7 +24,7 @@ The image is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.co
         memory to share data between processes under the hood, particularly for tensor parallel inference.
 
 
-You can build and run vLLM from source via the provided dockerfile. To build vLLM:
+You can build and run vLLM from source via the provided `Dockerfile <https://github.com/vllm-project/vllm/blob/main/Dockerfile>`_. To build vLLM:
 
 .. code-block:: console
 
