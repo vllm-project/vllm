@@ -174,11 +174,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         #     scorer_worker=self.scorer_worker,
         #     device=self.device,
         #     vocab_size=self._vocab_size)
-        self.scorer = MQAScorer(
-            scorer_worker=self.scorer_worker,
-            device=self.device,
-            vocab_size=self._vocab_size
-        )
+        self.scorer = MQAScorer(scorer_worker=self.scorer_worker,
+                                device=self.device,
+                                vocab_size=self._vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
 
@@ -472,6 +470,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # metadata.
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
+        print("-------------accept token ids------------", accepted_token_ids)
         return accepted_token_ids, logprobs
 
     def _create_output_sampler_list(

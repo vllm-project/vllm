@@ -317,15 +317,15 @@ class ModelRunner:
                 seq_data = seq_group_metadata.seq_data[seq_id]
 
                 context_len = seq_data.get_num_computed_tokens()
-    
+
                 if is_prompt:
                     seq_len = min(
-                    seq_data.get_len(),
-                    context_len + seq_group_metadata.token_chunk_size)
+                        seq_data.get_len(),
+                        context_len + seq_group_metadata.token_chunk_size)
                 else:
                     seq_len = seq_data.get_len()
                 tokens = seq_data.get_token_ids()[context_len:seq_len]
-                    # tokens = [seq_data.get_last_token_id()]
+                # tokens = [seq_data.get_last_token_id()]
                 print("tokens", tokens)
 
                 # Prefix cache was hit.
