@@ -175,4 +175,5 @@ steps:
 
 - label: A100 status
   gpu: a100
-  commands: nvidia-smi
+  commands: 
+  - nvidia-smi
