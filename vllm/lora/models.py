@@ -81,7 +81,7 @@ def convert_mapping(
                 embeddings_indices, long_lora_indices). If long_lora doesn't
                 exist, it only contains first 4 entries.
     """
-    device = "cpu" if is_cpu else "cuda"
+    device = "cpu" if is_cpu() else "cuda"
     index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
@@ -390,7 +390,7 @@ class LoRAModelManager:
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
 
-        device = "cpu" if is_cpu else "cuda"
+        device = "cpu" if is_cpu() else "cuda"
         self.long_lora_context: Optional[LongContextLoRAContext] = None
         self.base_indices = torch.empty(self.max_num_batched_tokens,
                                         dtype=torch.long,
