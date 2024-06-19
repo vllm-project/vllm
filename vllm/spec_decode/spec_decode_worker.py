@@ -10,6 +10,7 @@ from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
                            SamplerOutput, SequenceGroupMetadata)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
+from vllm.spec_decode.mqa_scorer import MQAScorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
@@ -169,10 +170,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
-        self.scorer = BatchExpansionTop1Scorer(
+        # self.scorer = BatchExpansionTop1Scorer(
+        #     scorer_worker=self.scorer_worker,
+        #     device=self.device,
+        #     vocab_size=self._vocab_size)
+        self.scorer = MQAScorer(
             scorer_worker=self.scorer_worker,
             device=self.device,
-            vocab_size=self._vocab_size)
+            vocab_size=self._vocab_size
+        )
 
         self._configure_model_sampler_for_spec_decode()
 
