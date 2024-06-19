@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
+USE_RAY_COMPILED_DAG_NCCL = True
 
 
 class RayGPUExecutor(DistributedGPUExecutor):
@@ -71,6 +72,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
         # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerWrapper] = []
+        # All workers, including the driver dummy worker.
         self.all_workers: List[RayWorkerWrapper] = []
 
         # Indexed first by PP rank, and then TP rank.
@@ -324,6 +326,61 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.driver_exec_method = make_async(self.driver_worker.execute_method)
+
+    def _compiled_ray_dag(self):
+        import pkg_resources
+        required_version = "2.9"
+        current_version = pkg_resources.get_distribution("ray").version
+        if current_version < required_version:
+            raise ValueError(f"Ray version {required_version} or greater is "
+                             f"required, but found {current_version}")
+
+        from ray.dag import InputNode, MultiOutputNode
+        from ray.experimental.channel.torch_tensor_type import TorchTensorType
+        assert self.parallel_config.distributed_executor_backend == "ray"
+
+        with InputNode() as input_data:
+            # Example DAG: PP=2, TP=4
+            # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput
+            #                         -> 1 -> (ExecuteModelReq, IntermediateOutput) -> 5 -> SamplerOutput
+            #                         -> 2 -> (ExecuteModelReq, IntermediateOutput) -> 6 -> SamplerOutput
+            #                         -> 3 -> (ExecuteModelReq, IntermediateOutput) -> 7 -> SamplerOutput
+            # All workers in the first TP group will take in the
+
+            # ExecuteModelRequest as input.
+            outputs = [input_data for _ in self.pp_tp_workers[0]]
+            for pp_rank, tp_group in enumerate(self.pp_tp_workers):
+                # Each PP worker takes in the output of the previous PP worker.
+                outputs = [worker.execute_model_compiled_dag_remote.bind(outputs[i])
+                           for i, worker in enumerate(tp_group)]
+
+                # Specify how intermediate tensors should be passed between
+                # workers.
+                if pp_rank < len(self.pp_tp_workers) - 1:
+                    if USE_RAY_COMPILED_DAG_NCCL:
+                        # Transfer the tensors through NCCL.
+                        outputs = [output.with_type_hint(TorchTensorType(transport="nccl"))
+                                   for output in outputs]
+                    else:
+                        # Just transfer the tensors through Ray's shared memory
+                        # store.
+                        outputs = [output.with_type_hint(TorchTensorType())
+                                   for output in outputs]
+
+            forward_dag = MultiOutputNode(outputs)
+
+        return forward_dag.experimental_compile(enable_asyncio=True)
+
+    async def execute_model_async(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        assert USE_RAY_COMPILED_DAG
+        if self.forward_dag is None:
+            self.forward_dag = self._compiled_ray_dag()
+        val = await self.forward_dag.execute_async((execute_model_req, None))
+        outputs = await val.get()
+        # Only the first driver returns sampler output.
+        return outputs[0]
 
     async def _driver_execute_model_async(
         self,

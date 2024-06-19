@@ -245,6 +245,7 @@ class Worker(WorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
+        prev_layer_output=None,
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
         if not self.is_driver_worker and not USE_RAY_COMPILED_DAG:
             self._execute_model_non_driver()
@@ -299,7 +300,14 @@ class Worker(WorkerBase):
 
         output = self.model_runner.execute_model(
             seq_group_metadata_list, self.gpu_cache[virtual_engine],
-            virtual_engine)
+            virtual_engine,
+            prev_layer_output=prev_layer_output)
+
+        # Intermediate output.
+        # TODO(swang): Improve this by wrapping the intermediate tensors in a
+        # class.
+        if isinstance(output, tuple):
+            return output
 
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.
