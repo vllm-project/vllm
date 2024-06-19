@@ -184,6 +184,7 @@ steps:
 
 - label: Distributed Tests (A100)
   gpu: a100
+  num_gpus: 4
   commands: 
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
