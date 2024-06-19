@@ -1,5 +1,6 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
+{% set huggingface_cache_dir = "~/.cache/huggingface" %}
 
 steps:
   - label: ":docker: build image"
@@ -90,4 +91,5 @@ steps:
             {% endif %}
           volumes:
             - /dev/shm:/dev/shm
+            - "{{ huggingface_cache_dir }}:{{ huggingface_cache_dir }}"
   {% endfor %}
