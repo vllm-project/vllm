@@ -115,7 +115,7 @@ class LLM:
         swap_space: int = 4,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
-        max_seq_len_to_capture: int = 8192,
+        max_seq_len_to_capture: int = 32768,
         disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
