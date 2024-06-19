@@ -6,12 +6,17 @@ from torch.nn import Parameter
 from vllm import _custom_ops as custom_ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    QuantizationStrategy)
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsW8A8DynamicToken"]
 
 
 class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
+
+    def __init__(self, strategy: str):
+        self.strategy = strategy
 
     def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
         if isinstance(shard_id, int):
@@ -45,11 +50,17 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         # CompressedTensorsW8A8StaticTensor::create_weights for further
         # information.
         is_tensor_partitioned = len(output_partition_sizes) != 1
-        weight_scale_dim = sum(
-            output_partition_sizes) if is_tensor_partitioned else 1
+        # when doing channel-wise quantization, number of scales
+        # is equal to output_dim
+        weight_scale_dim = sum(output_partition_sizes) if (
+            is_tensor_partitioned
+            or self.strategy == QuantizationStrategy.CHANNEL) else 1
 
-        weight_scale = Parameter(torch.empty(weight_scale_dim,
-                                             dtype=torch.float32),
+        shape: Union[Tuple[int], Tuple[int, int]] = (weight_scale_dim, )
+        if self.strategy == QuantizationStrategy.CHANNEL:
+            shape = (weight_scale_dim, 1)
+
+        weight_scale = Parameter(torch.empty(*shape, dtype=torch.float32),
                                  requires_grad=False)
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),
@@ -67,12 +78,20 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
             })
 
         layer.register_parameter("weight_scale", weight_scale)
-        set_weight_attrs(
-            weight_scale, {
-                "weight_loader": weight_loader,
-                "shard_splitter": self.scales_shard_splitter,
-                "logical_widths": output_partition_sizes
+        set_weight_attrs(weight_scale, {"weight_loader": weight_loader})
+
+        # Don't need a shard_splitter for channel-wise quantization
+        # Use the default loading method
+        if self.strategy == QuantizationStrategy.CHANNEL:
+            set_weight_attrs(weight_scale, {
+                "output_dim": 0,
             })
+        else:
+            set_weight_attrs(
+                weight_scale, {
+                    "logical_widths": output_partition_sizes,
+                    "shard_splitter": self.scales_shard_splitter,
+                })
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         weight = layer.weight
