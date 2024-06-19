@@ -1,39 +1,25 @@
-import gc
-import time
-import warnings
 from collections import defaultdict
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
-import numpy as np
 import torch
-import torch.nn as nn
 
-from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.attention import AttentionMetadata
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
-from vllm.distributed.communication_op import graph_capture
+# from vllm.distributed.communication_op import graph_capture
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available, make_tensor_with_pad)
-from vllm.worker.model_runner import (_PAD_SLOT_ID, LORA_WARMUP_RANK,
-                                      _BATCH_SIZE_ALIGNMENT,
-                                      _BATCH_SIZES_TO_CAPTURE,
-                                      _NUM_WARMUP_ITERS, ModelInput,
-                                      ModelRunner, _is_block_tables_empty,
-                                      _get_graph_batch_size, CUDAGraphRunner)
-from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
-                                   STR_NOT_IMPL_ENC_DEC_SWA)
-from vllm.attention.backends.utils import STR
+from vllm.utils import make_tensor_with_pad
+from vllm.worker.model_runner import (LORA_WARMUP_RANK,
+                                      ModelInput,
+                                      ModelRunner)
 
 logger = init_logger(__name__)
 
@@ -49,35 +35,15 @@ STR_ENCDECMR_CUDAGRAPH_UNSUPPORTED = \
     "Currently CUDAGraph is not supported for encoder/decoder models"
 
 
-class EncoderDecoderModelInput(ModelInput):
+class EncoderInput(NamedTuple):
     input_tokens: torch.Tensor
     input_positions: torch.Tensor
-    attn_metadata: Optional[AttentionMetadata]
-    seq_lens: List[int]
-    query_lens: List[int]
-    lora_mapping: Optional[LoRAMapping]
-    lora_requests: Set[LoRARequest]
-    multi_modal_kwargs: Dict[str, torch.Tensor]
-    slot_mapping: torch.Tensor
-    num_prefill_tokens: int
-    num_decode_tokens: int
-    num_prefills: int
 
     @classmethod
     def empty(cls, device):
         return ModelInput(
             input_tokens=torch.empty(0, device=device),
             input_positions=torch.empty(0, device=device),
-            attn_metadata=None,
-            seq_lens=[],
-            query_lens=[],
-            lora_mapping=None,
-            lora_requests=set(),
-            multi_modal_kwargs={},
-            slot_mapping=torch.empty(0, device=device),
-            num_prefill_tokens=0,
-            num_decode_tokens=0,
-            num_prefills=0,
         )
 
 
@@ -111,7 +77,7 @@ class EncoderDecoderModelRunner(ModelRunner):
 
     def _prepare_encoder_model_input(
             self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            attn_metadata: AttentionMetadata) -> ModelInput:
+            attn_metadata: AttentionMetadata) -> None:
         """Prepare the encoder input based on a given sequence group.
 
         Encoder attention is an entirely prefill-phase operation.
@@ -223,12 +189,6 @@ class EncoderDecoderModelRunner(ModelRunner):
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
-        input_tokens_tensor = torch.tensor(input_tokens,
-                                           dtype=torch.long,
-                                           device=self.device)
-        input_positions_tensor = torch.tensor(input_positions,
-                                              dtype=torch.long,
-                                              device=self.device)
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,
                                            device=self.device)
@@ -244,38 +204,40 @@ class EncoderDecoderModelRunner(ModelRunner):
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
+        # Set encoder-oriented attention metadata fields
+        attn_metadata.num_encoder_tokens = num_prefill_tokens
         attn_metadata.encoder_seq_lens = seq_lens
         attn_metadata.encoder_seq_lens_tensor = seq_lens_tensor
         attn_metadata.max_encoder_seq_len = max_seq_len
         attn_metadata.cross_slot_mapping = slot_mapping_tensor
         attn_metadata.cross_block_tables = block_tables
 
-        if self.lora_config:
-            lora_mapping = LoRAMapping(
-                lora_index_mapping,
-                lora_prompt_mapping,
+        if seq_group_metadata.is_prompt:
+
+            input_tokens_tensor = torch.tensor(input_tokens,
+                                            dtype=torch.long,
+                                            device=self.device)
+            input_positions_tensor = torch.tensor(input_positions,
+                                                dtype=torch.long,
+                                                device=self.device)
+
+            return EncoderInput(
+                input_tokens=input_tokens_tensor,
+                input_positions=input_positions_tensor
             )
+
         else:
-            lora_mapping = None
 
-        multi_modal_kwargs = {
-            k: torch.cat(v, dim=0).to(self.device)
-            for k, v in multi_modal_kwargs_list.items()
-        }
+            input_tokens_tensor = torch.tensor([],
+                                            dtype=torch.long,
+                                            device=self.device)
+            input_positions_tensor = torch.tensor([],
+                                                dtype=torch.long,
+                                                device=self.device)
 
-        return ModelInput(
+        return EncoderInput(
             input_tokens=input_tokens_tensor,
-            input_positions=input_positions_tensor,
-            attn_metadata=attn_metadata,
-            seq_lens=seq_lens,
-            query_lens=query_lens,
-            lora_mapping=lora_mapping,
-            lora_requests=lora_requests,
-            multi_modal_kwargs=multi_modal_kwargs,
-            slot_mapping=slot_mapping_tensor,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            num_prefills=num_prefills,
+            input_positions=input_positions_tensor
         )
 
     def prepare_input_tensors(
@@ -300,6 +262,10 @@ class EncoderDecoderModelRunner(ModelRunner):
                 num_decode_tokens,
                 num_prefills,
             ) = self._prepare_model_input(seq_group_metadata_list)
+            (
+                encoder_input_tokens,
+                encoder_input_positions
+            ) = self._prepare_encoder_model_input(seq_group_metadata_list,attn_metadata)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
@@ -316,6 +282,8 @@ class EncoderDecoderModelRunner(ModelRunner):
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
+                "encoder_input_tokens":encoder_input_tokens,
+                "encoder_input_positions":encoder_input_positions
             }
             if attn_metadata:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
@@ -324,6 +292,8 @@ class EncoderDecoderModelRunner(ModelRunner):
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
+            encoder_input_tokens = metadata_dict.pop("encoder_input_tokens")
+            encoder_input_positions = metadata_dict.pop("encoder_input_positions")
             selected_token_indices = metadata_dict.pop(
                 "selected_token_indices")
             lora_mapping = metadata_dict.pop("lora_mapping")
@@ -341,7 +311,8 @@ class EncoderDecoderModelRunner(ModelRunner):
                 num_prompts=0,
             )
 
-        return (input_tokens, input_positions, attn_metadata,
+        return (input_tokens, input_positions, encoder_input_tokens,
+                encoder_input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
                 multi_modal_kwargs)
 
@@ -351,7 +322,8 @@ class EncoderDecoderModelRunner(ModelRunner):
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
+        (input_tokens, input_positions, encoder_input_tokens,
+         encoder_input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_kwargs
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
@@ -370,6 +342,8 @@ class EncoderDecoderModelRunner(ModelRunner):
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
+            encoder_input_ids=encoder_input_tokens,
+            encoder_positions=encoder_input_positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             **multi_modal_kwargs,
