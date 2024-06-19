@@ -78,11 +78,11 @@ def main():
     model = "meta-llama/Llama-2-13b-chat-hf"
     model = "mistralai/Mixtral-8x7B-Instruct-v0.1" # TODO
     model = "tiiuae/falcon-7b-instruct"
-    model = "lmsys/vicuna-7b-v1.5"
-    model = "mosaicml/mpt-7b-chat"
     model = "bigscience/bloom-7b1"
     model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
     model = "meta-llama/Meta-Llama-3-8B-Instruct"
+    model = "mosaicml/mpt-7b-chat"
+    model = "lmsys/vicuna-7b-v1.5"
     args = EngineArgs(
         model=model,
         enforce_eager=True,
@@ -93,9 +93,18 @@ def main():
 
     engine = LLMEngine.from_engine_args(args)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    prompts = get_prompt(model, magic_word=True)
+    # prompts = get_prompt(model, magic_word=True)
     # prompts = get_long_prompt()
-    process_requests(engine, prompts, tokenizer)
+    # process_requests(engine, prompts, tokenizer)
+
+    model = engine.model_executor.driver_worker.model_runner.model
+    for module_name, module in model.named_modules(remove_duplicate=False):
+        print(module_name)
+        # parts = module_name.split(".")
+        # if len(parts) != 5: continue
+        # if parts[-1] == "attn":
+        #     print(module_name)
+        #     print(dir(module))
 
 
 if __name__ == "__main__":
