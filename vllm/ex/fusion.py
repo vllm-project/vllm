@@ -38,7 +38,6 @@ def fuse_graph_nodes(
 
     # Collect all kwargs for fused ops and all the nodes that
     # will need to be fused (and erased) later.
-    first = sub.first_in_graph()
     nodes_to_fuse = []
     kwargs = dict()
     for n in sub.nodes:
@@ -83,7 +82,8 @@ def fuse_graph_nodes(
     # 3. delete old call_function and output nodes.
     #
 
-    sub.module.graph.inserting_after(first)
+    insert_point = sub.last_input()
+    sub.module.graph.inserting_after(insert_point)   # TODO: use with 'with'?
 
     # Note: we do not update the meta info for cf here.  It should
     # not be required after transformation anyway.
@@ -142,6 +142,9 @@ def is_compute(node: torch.fx.Node) -> bool:
 
 def is_getitem(a: torch.fx.Node) -> bool:
     return is_call(a) and node_function_target(a) == '_operator.getitem'
+
+def is_get_attr(a: torch.fx.Node) -> bool:
+    return a.op == 'get_attr'
 
 
 """
@@ -244,11 +247,11 @@ def pointwise_fusion(cc: CodeCache,
         pred = is_fusable_pair if not fuse_with_compute else is_compute_fusable_pair
 
         fusable = [
-            pred(s, n) for s in fg.predecessors(n) if s.op != 'placeholder'
+            pred(s, n) for s in fg.predecessors(n) if s.op != 'placeholder' and not is_get_attr(s)
         ]
         if not all(fusable):
             logger.debug(
-                f"  REJECT {n}: no fusable preds and not in map: {fusable}, {fg.predecessors(n)}"
+                f"  REJECT {n}: not all preds fusable: {fusable}, {fg.predecessors(n)}"
             )
             if not n in node_map:
                 node_map[n] = 0
@@ -284,6 +287,16 @@ def pointwise_fusion(cc: CodeCache,
 
     if fuse_with_compute:
         num_compute : Dict[int, int] = dict()  # use set
+
+        for i in range(len(node_map)):
+            num_compute[i] = 0
+
+        for n in mod.graph.nodes:
+            part = node_map[n]
+            if is_compute(n):
+                assert part == 0 or num_compute[part] == 0, f"part = {part}: {[n for n, p in node_map.items() if p == part]}"
+                num_compute[part] = num_compute[part] + 1
+
         for n in mod.graph.nodes:
             if not is_call(n):
                 continue
@@ -311,13 +324,13 @@ def pointwise_fusion(cc: CodeCache,
 
             fuse_part_id = node_map[fuse_part]
 
-            if fuse_part_id != 0 and fuse_part_id in num_compute and num_compute[fuse_part_id] == 1:
+            if fuse_part_id != 0 and fuse_part_id in num_compute and num_compute[fuse_part_id] >= 1:
                 logger.debug(f"COMPUTE REJECT {n}: already a compute node in {str(node_map[fuse_part])}")
                 continue
 
             logger.debug(f"COMPUTE ACCEPT {n}: partition {fuse_part_id}, nodes={str(nodes)}")
 
-            num_compute[fuse_part_id] = 1
+            num_compute[fuse_part_id] = num_compute[fuse_part_id] + 1
             node_map[n] = fuse_part_id
 
     logger.debug(f"final paritions = {dump_partitions(node_map)}")
@@ -343,13 +356,13 @@ def pointwise_fusion(cc: CodeCache,
         if len([n for n in sub.nodes if non_trivial_op(n)]) <= 1:
             logger.debug(f"Reject empty/singleton subgraph:\n{sub.tabular()}")
             continue
-        logger.debug(f"Fusing sub-module:\n{sub.tabular()}")
+        logger.debug(f"Fusing sub-module (last_input={sub.last_input()}):\n{sub.tabular()}")
         #print(f"Fusing sub-module:\n{sub.tabular()}")
         fuse_graph_nodes(cc, fgen, sub)
         logger.debug(f"Post fusion sub-module:\n{sub.tabular()}")
         #print(f"Post fusion sub-module:\n{sub.tabular()}")
 
-    fg.topo_sort()
+    # fg.topo_sort()
 
     # Don't do this with inplace ops!!!!!!!!!!!!!!!!!!!!
     # toposort the module

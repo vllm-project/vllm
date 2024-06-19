@@ -475,4 +475,5 @@ class FusedOpGenerator:
             return callables
 
         except Exception as ex:
+            self.reset_fused_op()
             raise FusionFail(ex)

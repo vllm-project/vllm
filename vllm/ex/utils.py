@@ -263,9 +263,9 @@ def dump_inputs_users(
 
     entries = [
         [
-            n.name,
-            f"{all_input_nodes[n]}{'***' if n.all_input_nodes != all_input_nodes[n] else ''}",
-            f"{all_node_users[n]}{'***' if n.users != all_node_users[n] else ''}",
+            trunc(n.name),
+            f"{trunc(all_input_nodes[n])}{'***' if n.all_input_nodes != all_input_nodes[n] else ''}",
+            f"{trunc(all_node_users[n])}{'***' if n.users != all_node_users[n] else ''}",
         ] for n in nodes
     ]
 
@@ -417,8 +417,40 @@ class FlowGraph:
         return self.preds[n] if n in self.preds else set()
 
     def topo_sort(self):
-        # TODO: topo sort wrt. renamed inputs
+        # TBD
         return
+
+        order = []
+        in_degree = dict()
+        worklist: collections.deque = collections.deque()
+
+        self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(self.module.graph.nodes, True)
+        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
+
+        new_g = torch.fx.Graph(self.module, self.module.graph._tracer_cls, self.module.graph._tracer_extras)
+        new_g._codegen = self.module.graph._codegen
+        env: Dict[torch.fx.Node, torch.fx.Node] = {}
+
+        for n in self.module.graph.nodes:
+            count = len(self.all_renamed_input_nodes[n])
+            in_degree[n] = count
+            if count == 0:
+                worklist.append(n)
+        while len(worklist) > 0:
+            n = worklist.popleft()
+            env[n] = new_g.node_copy(n) #, lambda x: env[x])
+
+            for u in self.all_renamed_node_users[n]:
+                in_degree[u] = in_degree[u] - 1
+                if in_degree[u] == 0:
+                    worklist.append(u)
+
+        assert len(new_g.nodes) == len(self.module.graph.nodes), f"cycle found: ({new_g.nodes}) != ({self.module.graph.nodes})"
+
+        self.module.graph = new_g
+
+        print(f"topo'd graph\n {graph_print_tabular(new_g)}")
+
 
     def visit(self, fn: Callable):
         q = self.inputs
@@ -514,13 +546,36 @@ class SubGraph:
         self.topo_sort()
         self.inputs, self.outputs = self.collect_inputs_outputs()
 
-    def first_in_graph(self):
+    def first_in_subgraph(self):
         first = None
         for n in self.module.graph.nodes:
-            if not first and n.next in self.nodes:
+            if not first and n in self.nodes:
                 first = n
                 break
         return first
+
+    def last_input(self):
+        first = self.first_in_subgraph()
+        count = dict()
+
+        #for n in self.nodes:
+        #    count[n] = 0
+
+        for n in self.inputs:
+            while n != first.prev:
+                if not n in count:
+                    count[n] = 0
+                count[n] = count[n] + 1
+                n = n.prev
+
+        last = None
+        max_count = 0
+        for n in count.keys():
+            if count[n] > max_count:
+                max_count = count[n]
+                last = n
+
+        return last
 
     def erase(self):
         for n in reversed(self.nodes):

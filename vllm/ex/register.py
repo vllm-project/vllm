@@ -105,7 +105,7 @@ def register_defaults():
     register_fusable('torch.ops._C.silu_and_mul')
     register_fusable('torch.ops._C.static_scaled_int8_quant')
     register_fusable('torch.ops._C.static_scaled_fp8_quant')
-    #register_fusable('torch.ops._C.fused_add_rms_norm', True)
+    register_fusable('torch.ops._C.fused_add_rms_norm', True)
     register_fusable('torch._C._nn.linear', True)
     register_fusable('torch.ops._C.cutlass_scaled_mm_dq', True)
     if False:  # functionalization
