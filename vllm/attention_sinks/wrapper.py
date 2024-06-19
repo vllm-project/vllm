@@ -1,0 +1,3 @@
+
+class AttentionSinkWrapper:
+    pass

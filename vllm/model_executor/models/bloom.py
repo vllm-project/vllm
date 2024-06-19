@@ -28,7 +28,7 @@ from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention_sinks import get_attention_sink
+from vllm.attention_sinks import get_attention_sink
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
