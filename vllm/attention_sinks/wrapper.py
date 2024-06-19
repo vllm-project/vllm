@@ -17,20 +17,25 @@ def apply_attn_sinks_to_model(
         parts = module_name.split(".")
         
         if len(parts) == 4 and "Attention" in module.__class__.__name__: # sus
+            # e.g. 'LlamaAttention'
             model_attn = module
         
         if len(parts) != 5:
             continue
         if parts[-1] == "attn":
-            # e.g. 'model.layers.21.self_attn.attn' (llama)
+            # e.g. 'model.layers.21.self_attn.attn'
             attn_sink_layer = get_attention_sink(model_attn, cache_config, max_model_len)
             replace_submodule(model, module_name, attn_sink_layer)
         elif parts[-1] == "rotary_emb":
+            # e.g. 'model.layers.21.self_attn.rotary_emb'
             replace_submodule(model, module_name, _get_identity_module())
 
 
-class Identity(nn.Module):
-    """Used to patch rotary_emb."""
+class _Identity(nn.Module):
+    """Used to patch rotary_emb.
+    StreamingAttentionSink will call rotary_emb, so the rotary_emb
+    inside the model's attention module should do nothing.
+    """
     def __init__(self):
         super().__init__()
     
@@ -40,4 +45,5 @@ class Identity(nn.Module):
 
 @lru_cache(maxsize=1)
 def _get_identity_module():
-    return Identity()
+    # should this be cached?
+    return _Identity()

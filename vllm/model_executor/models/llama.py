@@ -149,17 +149,17 @@ class LlamaAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
 
-        if cache_config:
-            self.use_attention_sinks = cache_config.use_attention_sinks
-        else:
-            self.use_attention_sinks = False
+        # if cache_config:
+        #     self.use_attention_sinks = cache_config.use_attention_sinks
+        # else:
+        #     self.use_attention_sinks = False
 
-        if self.use_attention_sinks:
-            self.attention_sink = get_attention_sink(
-                self,
-                cache_config,
-                model_context_len=max_position_embeddings
-            )
+        # if self.use_attention_sinks:
+        #     self.attention_sink = get_attention_sink(
+        #         self,
+        #         cache_config,
+        #         model_context_len=max_position_embeddings
+        #     )
 
     def forward(
         self,
@@ -171,11 +171,13 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        if self.use_attention_sinks:
-            attn_output = self.attention_sink(q, k, v, positions, kv_cache, attn_metadata)
-        else:
-            q, k = self.rotary_emb(positions, q, k)
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        # if self.use_attention_sinks:
+        #     attn_output = self.attention_sink(q, k, v, positions, kv_cache, attn_metadata)
+        # else:
+        #     q, k = self.rotary_emb(positions, q, k)
+        #     attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         
         output, _ = self.o_proj(attn_output)
         return output

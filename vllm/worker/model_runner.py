@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.attention_sinks import apply_attn_sinks_to_model
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
@@ -205,6 +206,9 @@ class ModelRunner:
                     "Using FP8 KV cache but no scaling factors "
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
+                
+        if self.model_config.use_attention_sinks:
+            apply_attn_sinks_to_model(self.model)
 
     def save_sharded_state(
         self,
