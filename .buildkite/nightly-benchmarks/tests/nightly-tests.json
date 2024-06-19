@@ -2,7 +2,7 @@
     {
         "test_name": "llama8B_tp1_sharegpt",
         "qps_list": [1, 16],
-        "model": "meta-llama/Llama-2-7b-hf",
+        "lmdeploy_server_model": "meta-llama/Llama-2-7b-hf",
         "lmdeploy_server_parameters": {
             "tp": 1,
             "server_port": 8000

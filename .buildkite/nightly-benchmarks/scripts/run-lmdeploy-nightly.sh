@@ -90,7 +90,7 @@ run_serving_tests() {
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.lmdeploy_server_parameters')
     client_params=$(echo "$params" | jq -r '.lmdeploy_client_parameters')
-    model=$(echo "$params" | jq -r '.model')
+    model=$(echo "$params" | jq -r '.lmdeploy_server_model')
     server_args=$(json2args "$server_params")
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
@@ -105,11 +105,10 @@ run_serving_tests() {
     fi
 
     # prepare tokenizer
-    server_model=$(echo "$server_params" | jq -r '.model')
     rm -rf /tokenizer_cache
     mkdir /tokenizer_cache
     python ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
-      --model "$server_model" \
+      --model "$model" \
       --cachedir /tokenizer_cache
 
     server_command="lmdeploy server api_server $model $server_args"
