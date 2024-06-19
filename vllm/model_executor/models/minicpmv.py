@@ -37,7 +37,6 @@ from timm.data import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
 from torch import nn
 from torch.nn.init import trunc_normal_
 from torchvision import transforms
-from torchvision.transforms import InterpolationMode
 from PIL import Image
 
 from vllm.attention import AttentionMetadata
@@ -410,8 +409,10 @@ class MiniCPMV(VisionLanguageModelBase):
                                               patch_size,
                                               allow_upscale=True)
             # The resizing of torchvision is also avaliable in this funciton.
-            # But there are slight deviations between the results of torchvision resizing and pillow image resizing.
-            # For the consistency with MiniCPM-V-2 in HF, we choose PIL resizing and this may take a little more time.
+            # But there are slight deviations between the results of 
+            # torchvision resizing and pillow image resizing.
+            # For the consistency with MiniCPM-V-2 in HF, 
+            # we choose PIL resizing and this may take a little more time.
             #
             # resize_transform = transforms.Compose([
             #     transforms.Resize((best_size[::-1]),

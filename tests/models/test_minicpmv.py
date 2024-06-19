@@ -1,5 +1,3 @@
-from typing import List, Tuple
-
 import math
 import torch
 import pytest
@@ -8,7 +6,6 @@ from torchvision import transforms
 from transformers import AutoTokenizer, AutoConfig, AutoModel
 
 from vllm import LLM, SamplingParams
-from vllm.config import VisionLanguageConfig
 from vllm.multimodal.image import ImagePixelData
 
 from ..conftest import IMAGE_FILES
