@@ -12,7 +12,6 @@ def run_phi3v():
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=4096,
         image_input_type="pixel_values",
         image_token_id=32044,
         image_input_shape="1,3,1008,1344",
