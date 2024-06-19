@@ -147,7 +147,7 @@ class ModelRunner:
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
-        if self._am_not_child() and self._is_encoder_decoder_model():
+        if (not self._am_child()) and self._is_encoder_decoder_model():
             # Fail if ModelRunner is constructed for an
             # encoder/decoder model
             #
@@ -950,7 +950,7 @@ class ModelRunner:
                         "is_encoder_decoder",
                         False)
 
-    def _am_not_child(self):
+    def _am_child(self):
         '''
         True if self is an instance of the ModelRunner
         base class, False otherwise (i.e. child class)

@@ -142,7 +142,7 @@ def test_prepare_prompt(batch_size):
 def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output."""
     model_runner = _create_model_runner(
-        "facebook/opt-125m",
+        "facebook/bart-base",
         seed=0,
         dtype="float16",
         enforce_eager=False,
