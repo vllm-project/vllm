@@ -392,9 +392,11 @@ def gguf_quant_weights_iterator(
         if weight_type.name != "F32" and "blk" in name:
             weight_name = name.replace("weight", "qweight")
             weight_type_name = name.replace("weight", "qweight_type")
-            for i, (new_name, param) in enumerate(zip([weight_type_name, weight_name],
-                                        [weight_type, weight])):
-                param = torch.tensor(param).view(shape[-1], -1) if i==1 else torch.tensor(param)
+            for i, (new_name, param) in enumerate(
+                    zip([weight_type_name, weight_name],
+                        [weight_type, weight])):
+                param = torch.tensor(param).view(
+                    shape[-1], -1) if i == 1 else torch.tensor(param)
                 yield new_name, param
         else:
             weight = load_dequant_gguf_tensor(shape, weight_type, weight)

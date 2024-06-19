@@ -365,7 +365,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             ori_shape = param.tensor_shape
             weight_type = self.qweight_type.data.item()
             block_size, type_size = GGML_QUANT_SIZES[weight_type]
-            q_shape = (ori_shape[0], ori_shape[1]//block_size*type_size)
+            q_shape = (ori_shape[0], ori_shape[1] // block_size * type_size)
             param.materialize(q_shape, dtype=loaded_weight.dtype)
             set_weight_attrs(param, {"shard_id": []})
             set_weight_attrs(param, {"shard_size": {}})
@@ -448,13 +448,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size = loaded_weight.shape[output_dim]
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
-            
+
             if use_gguf:
                 shard_size = loaded_weight.shape[output_dim]
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
                 param.shard_id.append(loaded_shard_id)
-                param.shard_size[loaded_shard_id] = loaded_weight.shape[output_dim]
+                param.shard_size[loaded_shard_id] = loaded_weight.shape[
+                    output_dim]
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
@@ -576,7 +577,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             ori_shape = param.tensor_shape
             weight_type = self.qweight_type.data.item()
             block_size, type_size = GGML_QUANT_SIZES[weight_type]
-            q_shape = (ori_shape[0], ori_shape[1]//block_size*type_size)
+            q_shape = (ori_shape[0], ori_shape[1] // block_size * type_size)
             param.materialize(q_shape, dtype=loaded_weight.dtype)
             # Use for gguf runtime dequantize
             set_weight_attrs(param, {"shard_id": []})
@@ -684,10 +685,11 @@ class QKVParallelLinear(ColumnParallelLinear):
                 }
                 shard_size, shard_offset = adjust_bitsandbytes_shard(
                     param, orig_qkv_offsets, loaded_shard_id)
-            
+
             if use_gguf:
                 param.shard_id.append(loaded_shard_id)
-                param.shard_size[loaded_shard_id] = loaded_weight.shape[output_dim]
+                param.shard_size[loaded_shard_id] = loaded_weight.shape[
+                    output_dim]
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
@@ -810,8 +812,7 @@ class RowParallelLinear(LinearBase):
 
         # materialize GGUF UninitializedParameter
         if isinstance(param, UninitializedParameter):
-            param.materialize(loaded_weight.shape,
-                                  dtype=loaded_weight.dtype)
+            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
 
         param_data = param.data
         if input_dim is not None:

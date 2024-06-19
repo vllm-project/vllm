@@ -31,8 +31,7 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_quant_config,
-    gguf_quant_weights_iterator, initialize_dummy_weights,
+    get_quant_config, gguf_quant_weights_iterator, initialize_dummy_weights,
     np_cache_weights_iterator, pt_weights_iterator,
     safetensors_weights_iterator)
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
@@ -837,7 +836,7 @@ class GGUFModelLoader(BaseModelLoader):
             raise ValueError(f"{model_name_or_path} is not a file.")
 
     def _get_weights_iterator(
-            self, model_name_or_path: str
+        self, model_name_or_path: str
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         local_model_path = self._prepare_weights(model_name_or_path)
         return gguf_quant_weights_iterator(local_model_path)
@@ -854,8 +853,7 @@ class GGUFModelLoader(BaseModelLoader):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config,
                                           cache_config)
-            model.load_weights(
-                self._get_weights_iterator(model_config.model))
+            model.load_weights(self._get_weights_iterator(model_config.model))
         return model
 
 

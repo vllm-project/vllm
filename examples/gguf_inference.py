@@ -15,7 +15,7 @@ def run_gguf_inference(model_path):
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Create an LLM.
-    llm = LLM(model=model_path)
+    llm = LLM(model=model_path, enforce_eager=True)
 
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.

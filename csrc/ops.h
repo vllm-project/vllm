@@ -90,6 +90,17 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits);
 
+torch::Tensor ggml_dequantize(torch::Tensor W, int8_t type, int64_t m, int64_t n);
+
+torch::Tensor ggml_mul_mat_vec(torch::Tensor W, torch::Tensor X,
+                               int8_t type, int64_t row);
+
+torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
+                                  int8_t type, int64_t row);
+
+torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X,
+                              int8_t type, int64_t row);
+
 void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales);

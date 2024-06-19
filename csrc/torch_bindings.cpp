@@ -133,6 +133,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_marlin_repack", &gptq_marlin_repack);
   ops.impl("gptq_marlin_repack", torch::kCUDA, &gptq_marlin_repack);
 
+  // Dequantization for GGML.
+  ops.def("ggml_dequantize", &ggml_dequantize);
+  ops.impl("ggml_dequantize", torch::kCUDA, &ggml_dequantize);
+
+  // dmmv kernel for GGML.
+  ops.def("ggml_mul_mat_vec", &ggml_mul_mat_vec);
+  ops.impl("ggml_mul_mat_vec", torch::kCUDA, &ggml_mul_mat_vec);
+
+  // mmvq kernel for GGML.
+  ops.def("ggml_mul_mat_vec_a8", &ggml_mul_mat_vec_a8);
+  ops.impl("ggml_mul_mat_vec_a8", torch::kCUDA, &ggml_mul_mat_vec_a8);
+
+  // mmq kernel for GGML.
+  ops.def("ggml_mul_mat_a8", &ggml_mul_mat_a8);
+  ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
+
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization.
   ops.def(
