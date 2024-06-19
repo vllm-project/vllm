@@ -27,21 +27,25 @@ class MQAScorer(SpeculativeScorer):
         target_seq_ids_iter = self._create_target_seq_id_iterator(
                 seq_ids=get_all_seq_ids(execute_model_req.seq_group_metadata_list))
         for i, seq_group_metadata in enumerate(execute_model_req.seq_group_metadata_list):
-            seq_data: SequenceData = seq_group_metadata.seq_data()
+            seq_data = seq_group_metadata.seq_data
             seq_id = next(iter(seq_data.keys()))
 
+            seq_data: SequenceData = seq_data[seq_id]
             prompt_token_ids = seq_data.get_prompt_token_ids()
             output_token_ids = seq_data.get_output_token_ids()
-            proposal_token_ids = proposals.proposal_token_ids[i]
+            proposal_token_ids = proposals.proposal_token_ids.tolist()[i]
+            print("propoese token ids", proposal_token_ids)
             new_output_token_ids = [*output_token_ids, *proposal_token_ids]
 
             target_seq_id = next(target_seq_ids_iter)
-            new_seq_data_dict = {
-                target_seq_id:
-                SequenceData(
+            new_seq_data = SequenceData(
                     prompt_token_ids=prompt_token_ids,
                     output_token_ids=new_output_token_ids,
-                ),
+                )
+            assert len(output_token_ids) - 1 >= 0
+            new_seq_data.update_num_computed_tokens(len(prompt_token_ids) + len(output_token_ids) - 1)
+            new_seq_data_dict = {
+                target_seq_id: new_seq_data
             }
 
             new_seq_group_metadata = SequenceGroupMetadata(
@@ -61,9 +65,9 @@ class MQAScorer(SpeculativeScorer):
 
         target_sampler_output = target_sampler_output[0]
 
-        all_probs = TODO
-        all_tokens = TODO
-        spec_logprobs = TODO
+        all_probs = None
+        all_tokens = None
+        spec_logprobs = None
 
         return SpeculativeScores(
             probs=all_probs,
