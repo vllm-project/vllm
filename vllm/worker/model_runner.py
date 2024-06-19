@@ -64,23 +64,23 @@ class ModelInput(NamedTuple):
     num_prefill_tokens: int
     num_decode_tokens: int
     num_prefills: int
+    is_profile_run: bool
 
     @classmethod
     def empty(cls, device):
-        return ModelInput(
-            input_tokens=torch.empty(0, device=device),
-            input_positions=torch.empty(0, device=device),
-            attn_metadata=None,
-            seq_lens=[],
-            query_lens=[],
-            lora_mapping=None,
-            lora_requests=set(),
-            multi_modal_kwargs={},
-            slot_mapping=torch.empty(0, device=device),
-            num_prefill_tokens=0,
-            num_decode_tokens=0,
-            num_prefills=0,
-        )
+        return ModelInput(input_tokens=torch.empty(0, device=device),
+                          input_positions=torch.empty(0, device=device),
+                          attn_metadata=None,
+                          seq_lens=[],
+                          query_lens=[],
+                          lora_mapping=None,
+                          lora_requests=set(),
+                          multi_modal_kwargs={},
+                          slot_mapping=torch.empty(0, device=device),
+                          num_prefill_tokens=0,
+                          num_decode_tokens=0,
+                          num_prefills=0,
+                          is_profile_run=False)
 
 
 class ModelRunner:
@@ -625,28 +625,6 @@ class ModelRunner:
                 paged_kv_indptr_tensor = None
                 paged_kv_last_page_len_tensor = None
 
-            if num_decode_tokens:
-                if use_captured_graph and not is_profile_run:
-                    self.flashinfer_decode_wrapper = self.graph_runners[
-                        batch_size].flashinfer_decode_wrapper
-                elif self.flashinfer_decode_wrapper is None:
-                    self.flashinfer_decode_workspace_buffer = torch.empty(
-                        FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                        dtype=torch.uint8,
-                        device=self.device)
-                    self.flashinfer_decode_wrapper = \
-                        BatchDecodeWithPagedKVCacheWrapper(
-                        self.flashinfer_decode_workspace_buffer, "NHD")
-
-            if num_prefill_tokens and self.flashinfer_prefill_wrapper is None:
-                self.flashinfer_prefill_workspace_buffer = torch.empty(
-                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                    dtype=torch.uint8,
-                    device=self.device)
-                self.flashinfer_prefill_wrapper = \
-                    BatchPrefillWithPagedKVCacheWrapper(
-                    self.flashinfer_prefill_workspace_buffer, "NHD")
-
             kv_cache_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype,
                                                       self.model_config.dtype)
 
@@ -670,10 +648,7 @@ class ModelRunner:
                 query_start_loc=query_start_loc,
                 device=self.device,
                 data_type=kv_cache_dtype,
-                use_cuda_graph=use_captured_graph,
-                decode_wrapper=self.flashinfer_decode_wrapper,
-                prefill_wrapper=self.flashinfer_prefill_wrapper,
-            )
+                use_cuda_graph=use_captured_graph)
 
         else:
             attn_metadata = self.attn_backend.make_metadata(
@@ -706,20 +681,19 @@ class ModelRunner:
             for k, v in multi_modal_kwargs_list.items()
         }
 
-        return ModelInput(
-            input_tokens=input_tokens_tensor,
-            input_positions=input_positions_tensor,
-            attn_metadata=attn_metadata,
-            seq_lens=seq_lens,
-            query_lens=query_lens,
-            lora_mapping=lora_mapping,
-            lora_requests=lora_requests,
-            multi_modal_kwargs=multi_modal_kwargs,
-            slot_mapping=slot_mapping_tensor,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            num_prefills=num_prefills,
-        )
+        return ModelInput(input_tokens=input_tokens_tensor,
+                          input_positions=input_positions_tensor,
+                          attn_metadata=attn_metadata,
+                          seq_lens=seq_lens,
+                          query_lens=query_lens,
+                          lora_mapping=lora_mapping,
+                          lora_requests=lora_requests,
+                          multi_modal_kwargs=multi_modal_kwargs,
+                          slot_mapping=slot_mapping_tensor,
+                          num_prefill_tokens=num_prefill_tokens,
+                          num_decode_tokens=num_decode_tokens,
+                          num_prefills=num_prefills,
+                          is_profile_run=is_profile_run)
 
     def prepare_input_tensors(
         self,
@@ -729,24 +703,17 @@ class ModelRunner:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
-            (
-                input_tokens,
-                input_positions,
-                attn_metadata,
-                seq_lens,
-                query_lens,
-                lora_mapping,
-                lora_requests,
-                multi_modal_kwargs,
-                slot_mapping,
-                num_prefill_tokens,
-                num_decode_tokens,
-                num_prefills,
-            ) = self._prepare_model_input(seq_group_metadata_list)
+            (input_tokens, input_positions, attn_metadata, seq_lens,
+             query_lens, lora_mapping, lora_requests, multi_modal_kwargs,
+             slot_mapping, num_prefill_tokens, num_decode_tokens, num_prefills,
+             is_profile_run
+             ) = self._prepare_model_input(seq_group_metadata_list)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
 
+            use_cuda_graph = attn_metadata.use_cuda_graph \
+                if attn_metadata else False
             metadata_dict = {
                 "input_tokens": input_tokens,
                 "input_positions": input_positions,
@@ -759,10 +726,23 @@ class ModelRunner:
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
+                "use_cuda_graph": use_cuda_graph,
+                "is_profile_run": is_profile_run
             }
             if attn_metadata:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
+
+            if self.attn_backend.get_name() == "flashinfer":
+                self._create_flashinfer_wrapper(metadata_dict,
+                                                attn_metadata.use_cuda_graph,
+                                                is_profile_run,
+                                                input_tokens.shape[0])
+                attn_metadata.prefill_wrapper = metadata_dict.pop(
+                    'prefill_wrapper', None)
+                attn_metadata.decode_wrapper = metadata_dict.pop(
+                    'decode_wrapper', None)
+                attn_metadata.begin_forward()
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
@@ -772,9 +752,19 @@ class ModelRunner:
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
             multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
+
+            use_cuda_graph = metadata_dict.pop('use_cuda_graph')
+            is_profile_run = metadata_dict.pop('is_profile_run')
+            if self.attn_backend.get_name() == "flashinfer":
+                self._create_flashinfer_wrapper(metadata_dict, use_cuda_graph,
+                                                is_profile_run,
+                                                input_tokens.shape[0])
+
             if metadata_dict:
                 attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
+                if self.attn_backend.get_name() == "flashinfer":
+                    attn_metadata.begin_forward()
             else:
                 attn_metadata = None
             sampling_metadata = SamplingMetadata(
@@ -787,6 +777,37 @@ class ModelRunner:
         return (input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
                 multi_modal_kwargs)
+
+    def _create_flashinfer_wrapper(self, metadata_dict: Optional[Dict],
+                                   use_cuda_graph: bool, is_profile_run: bool,
+                                   batch_size: int):
+        if metadata_dict is None:
+            return
+
+        if metadata_dict['num_decode_tokens']:
+            if use_cuda_graph and not is_profile_run:
+                self.flashinfer_decode_wrapper = self.graph_runners[
+                    batch_size].flashinfer_decode_wrapper
+            elif self.flashinfer_decode_wrapper is None:
+                self.flashinfer_decode_workspace_buffer = torch.empty(
+                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                    dtype=torch.uint8,
+                    device=self.device)
+                self.flashinfer_decode_wrapper = \
+                    BatchDecodeWithPagedKVCacheWrapper(
+                    self.flashinfer_decode_workspace_buffer, "NHD")
+            metadata_dict['decode_wrapper'] = self.flashinfer_decode_wrapper
+
+        if metadata_dict['num_prefill_tokens']:
+            if self.flashinfer_prefill_wrapper is None:
+                self.flashinfer_prefill_workspace_buffer = torch.empty(
+                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                    dtype=torch.uint8,
+                    device=self.device)
+                self.flashinfer_prefill_wrapper = \
+                    BatchPrefillWithPagedKVCacheWrapper(
+                    self.flashinfer_prefill_workspace_buffer, "NHD")
+            metadata_dict['prefill_wrapper'] = self.flashinfer_prefill_wrapper
 
     @torch.inference_mode()
     def execute_model(
@@ -1043,6 +1064,7 @@ class ModelRunner:
                         use_cuda_graph=True,
                         decode_wrapper=decode_wrapper,
                         prefill_wrapper=None)
+                    attn_metadata.begin_forward()
                 else:
                     attn_metadata = self.attn_backend.make_metadata(
                         num_prefills=0,

@@ -94,20 +94,10 @@ class EmbeddingModelRunner(ModelRunner):
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
-            (
-                input_tokens,
-                input_positions,
-                attn_metadata,
-                seq_lens,
-                _,
-                lora_mapping,
-                lora_requests,
-                multi_modal_kwargs,
-                slot_mapping,
-                num_prefill_tokens,
-                num_decode_tokens,
-                num_prefills,
-            ) = self._prepare_model_input(seq_group_metadata_list)
+            (input_tokens, input_positions, attn_metadata, seq_lens, _,
+             lora_mapping, lora_requests, multi_modal_kwargs, slot_mapping,
+             num_prefill_tokens, num_decode_tokens, num_prefills,
+             _) = self._prepare_model_input(seq_group_metadata_list)
             # Prepare PoolingMetadata
             pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
                                                      seq_lens)

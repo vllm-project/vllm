@@ -114,6 +114,7 @@ class FlashInferMetadata(AttentionMetadata):
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
 
+    def begin_forward(self):
         if self.num_prefill_tokens > 0:
             if self.paged_kv_indices is None:
                 return
