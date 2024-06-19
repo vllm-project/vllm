@@ -691,7 +691,6 @@ def make_test_metadata(
     is_prompt: bool,
     seq_lens: Optional[List[int]],
     decoder_test_params: Optional[PhaseTestParameters],
-    default_attn_type: AttentionType,
     device: Union[torch.device, str],
     encoder_test_params: Optional[PhaseTestParameters] = None,
     cross_test_params: Optional[PhaseTestParameters] = None
@@ -719,8 +718,6 @@ def make_test_metadata(
     * decoder_test_params: decoder self-attention test params; 
                            this function requires
                            kv_mmap (memory mapping) field
-    * default_attn_type: value of attn_metadata.attention_type at
-                         construction time
     * device: CPU or CUDA device
     * encoder_test_params: encoder attention test params;
                            this function requires encoder query
@@ -766,11 +763,14 @@ def make_test_metadata(
 
     if encoder_test_params is None:
         encoder_seq_lens = None
+        num_encoder_tokens = None
     else:
         # Encoder/decoder or encoder-only models only:
         # * Extract encoder input sequence lengths
         assert encoder_test_params.packed_qkvo.packed_qkv is not None
         encoder_seq_lens = encoder_test_params.packed_qkvo.packed_qkv.q_seq_lens
+        num_encoder_tokens = None if encoder_seq_lens is None else \
+            (sum(encoder_seq_lens))
 
     if cross_test_params is None:
         cross_kv_mmap = None
@@ -812,7 +812,7 @@ def make_test_metadata(
             block_tables=None if kv_mmap is None else \
                             kv_mmap.block_tables,
             use_cuda_graph=False,
-            _attn_type=default_attn_type,
+            num_encoder_tokens=num_encoder_tokens,
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
             max_encoder_seq_len=max_encoder_seq_len,
@@ -855,7 +855,7 @@ def make_test_metadata(
             context_lens_tensor=context_lens_tensor,
             block_tables=kv_mmap.block_tables,
             use_cuda_graph=False,
-            _attn_type=default_attn_type,
+            num_encoder_tokens=num_encoder_tokens,
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
             max_encoder_seq_len=max_encoder_seq_len,
