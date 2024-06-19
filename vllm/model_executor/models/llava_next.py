@@ -120,9 +120,7 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_tower = CLIPVisionModel(
-                config=config.vision_config,
-                vision_feature_layer=config.vision_feature_layer)
+            self.vision_tower = CLIPVisionModel(config=config.vision_config)
         else:
             raise TypeError("Image features are not supported by LLaVA-NeXT")
 

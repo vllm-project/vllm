@@ -99,9 +99,7 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_tower = CLIPVisionModel(
-                config.vision_config,
-                vision_feature_layer=config.vision_feature_layer)
+            self.vision_tower = CLIPVisionModel(config.vision_config)
         else:
             self.vision_tower = None
 
