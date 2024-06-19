@@ -296,12 +296,14 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     model_config = ctx.model_config
     multimodal_config = ctx.get_multimodal_config()
 
+    # TODO: Dynamic feature size
     return ImageInputProcessors.input_processor_for_clip(
         model_config,
         multimodal_config,
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         llm_inputs,
         image_token_id=32044,
+        image_feature_size_override=1921,
     )
 
 
