@@ -77,10 +77,6 @@ class OpenAIServingChat(OpenAIServing):
         self.response_role = response_role
         self._load_chat_template(chat_template)
 
-
-        print('CONSTELLATE enable_auto_tools', enable_auto_tools)
-        print("CONSTELLATE tool_prompt_jinja_template_path", tool_prompt_jinja_template_path)
-        print("CONSTELLATE tool_prompt_role", tool_prompt_role)
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
         self.tool_prompt_role: str = tool_prompt_role
@@ -263,28 +259,23 @@ class OpenAIServingChat(OpenAIServing):
                 image_futures.extend(chat_parsed_result.image_futures)
 
             # if specified, add the system prompt template
-            print('CONSTELLATE request tools', request.tools)
             if self.enable_auto_tools and self.tool_use_prompt_template:
-                print('CONSTELLATE configuring tools')
                 # create the system prompt from the template
                 templated_prompt_with_tools: str = self.tool_use_prompt_template.render(tools=request.tools)
 
                 # if there is already a system prompt
                 if conversation[0]['role'] == 'system':
-                    print('CONSTELLATE modifying existing system prompt with tool template')
                     conversation[0]['content'] = f'{templated_prompt_with_tools}\n\n{conversation[0]["content"]}'
 
                 # if there isn't a system prompt already
                 else:
                     conversation.insert(0, ConversationMessage(role='system', content=templated_prompt_with_tools))
-            print('CONSTELLATE conversation:', conversation)
 
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
             )
-            print('CONSTELLATE prompt', prompt)
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
@@ -575,7 +566,7 @@ class OpenAIServingChat(OpenAIServing):
             # if the reqeust uses tools and specified a tool choice
             if request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
-                print("CONSTELLATE handling named tool choice")
+
                 message = ChatMessage(
                     role=role,
                     content="",
@@ -587,13 +578,12 @@ class OpenAIServingChat(OpenAIServing):
 
             # if the request doesn't use tool choice OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
-                print("CONSTELLATE handling no tool choice or tool_choice = none")
+
                 message = ChatMessage(role=role, content=output.text)
 
             # handle when there are tools and tool choice is auto
             elif request.tools and (request.tool_choice == "auto" or request.tool_choice is None):
-                print("CONSTELLATE handling tool choice = auto")
-                print(output)
+
                 # FOR NOW make it a chat message; we will have to detect the type to make it later.
                 message = ChatMessage(role=role, content=output.text)
 
