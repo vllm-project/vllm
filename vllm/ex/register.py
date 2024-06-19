@@ -18,7 +18,8 @@ class OpSupport:
     def __init__(self,
                  op_name: Union[str, Callable],
                  is_fusable: bool = False,
-                 is_compute: bool = False):
+                 is_compute: bool = False,
+                 is_trivial: bool = False):
         self.op_name = operator_name(op_name)
 
 
@@ -87,7 +88,11 @@ Register default supported operations.
 """
 def register_defaults():
     logger.debug("REGISTER DEFAULTS")
-    register_supported('torch.empty')  # maybe TBD
+    #register_supported('torch.empty')  # maybe TBD
+    #register_supported('torch.empty_like')  # maybe TBD
+    register_fusable('torch.empty')
+    register_fusable('torch.empty_like')
+    # methods need to be supported via function object and not name.
     register_fusable(torch.Tensor.to)
     register_fusable(torch.Tensor.transpose)
     register_fusable(torch.Tensor.numel)
@@ -100,7 +105,7 @@ def register_defaults():
     register_fusable('torch.ops._C.silu_and_mul')
     register_fusable('torch.ops._C.static_scaled_int8_quant')
     register_fusable('torch.ops._C.static_scaled_fp8_quant')
-    register_fusable('torch.ops._C.fused_add_rms_norm', True)
+    #register_fusable('torch.ops._C.fused_add_rms_norm', True)
     register_fusable('torch._C._nn.linear', True)
     register_fusable('torch.ops._C.cutlass_scaled_mm_dq', True)
     if False:  # functionalization

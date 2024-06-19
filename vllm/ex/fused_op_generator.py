@@ -101,10 +101,18 @@ class FusedOpGenerator:
             return 'torch::nn::functional::linear'
         elif s.startswith('torch.ops._C.'):
             return s.replace('torch.ops._C.', '')
+        elif s == 'torch::int8':
+            return 'torch::kInt8'
+        elif s == 'torch::uint8':
+            return 'torch::kUInt8'
         elif s == 'torch::float16':
             return 'torch::kFloat16'
         elif s == 'torch::float32':
             return 'torch::kFloat32'
+        elif s in ['cpu', 'cuda', 'hip', 'fpga', 'ort', 'xla', 'mps', 'xpu', 'hpu', 've', 'ipu', 'mtia']:
+            return f'torch::k{s.upper()}'
+        elif s in ['meta', 'vulkan', 'metal', 'lazy']:
+            return f'torch::k{s[0].upper()}{s[1:]}'
         else:
             return s.replace("_operator.", "_operator_")
 
@@ -153,7 +161,7 @@ class FusedOpGenerator:
         tensor = n.args[0]
         idx = n.args[1]
 
-        assert isinstance(idx, tuple)
+        assert isinstance(idx, tuple) or self.is_simple_slice(idx)
 
         if self.is_simple_slice(idx):
             call_str = f"  auto {self.mangle(n.name, '_')} = {self.mangle(str(tensor), '_')}.slice({self.convert_slice_args(idx)});"
@@ -235,8 +243,8 @@ class FusedOpGenerator:
         fns = [n.target for n in nodes]
         logger.debug(f"make_fused_op: {fns}")
 
-        # assume unary output for now
-        #assert len(outputs) == 1
+        # assume no input kwargs for now.
+        assert len(kwargs) == 0
 
         fn_names = [self.rename(node_function_target(n)) for n in nodes]
 
@@ -297,10 +305,34 @@ class FusedOpGenerator:
                         call_str = call_str + sep + self.rename(
                             self.mangle(str(inp), '::'))
                     sep = ', '
-                n_kwargs = kwargs.get(n.name)
-                # TODO
-                if n_kwargs:
-                    raise FusionFailed("kwargs nyi")
+
+                # Only handle 'empty' kwargs for now
+                if n.kwargs:
+                    if fn != 'torch.empty' and fn != 'torch.empty_like':
+                        raise FusionFail(f"kwargs nyi on {n}, {n.kwargs}")
+
+                    #supported_empty_kwargs = ['dtype', 'device', 'layout', 'memory_format']
+                    supported_empty_kwargs = ['dtype', 'device']
+
+                    if not all([(k in supported_empty_kwargs) for k in n.kwargs.keys()]):
+                        raise FusionFail(f"unsupported kwarg type in {n.kwargs.keys()}")
+
+                    dtype = n.kwargs.get('dtype')
+                    device = n.kwargs.get('device')
+                    #layout = n.kwargs.get('layout')
+                    #mem_format = n.kwargs.get('memory_format')
+
+                    call_str = call_str + sep + 'torch::TensorOptions()'
+
+                    if dtype:
+                        call_str = call_str + f'.dtype({self.rename(self.mangle(str(dtype), "::"))})'
+
+                    if device:
+                        if device.index:
+                            call_str = call_str + f'.device(torch::Device({self.rename(device.type)}, {device.index}))'
+                        else:
+                            call_str = call_str + f'.device({self.rename(device.type)})'
+
                 call_str = call_str + ');'
 
             self.fused_op.append(comment_str)
@@ -334,11 +366,13 @@ class FusedOpGenerator:
         return op
 
     # The schema is (mostly) derivable from types annotations on input/output nodes.
-    def generate_op_schema(self, inputs: List[torch.fx.Node],
-                           outputs: List[torch.fx.Node],
-                           nodes: List[torch.fx.Node],
-                           kwargs: Dict[str, Dict[str,
-                                                  torch.fx.node.Argument]]):
+    def generate_op_schema(
+        self,
+        inputs: List[torch.fx.Node],
+        outputs: List[torch.fx.Node],
+        nodes: List[torch.fx.Node],
+        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
+    ):
         sep = f"("
         arg_sig = ""
         for i, n in enumerate(inputs):
@@ -348,6 +382,10 @@ class FusedOpGenerator:
             arg_name = self.mangle(n.name, '_')
             arg_sig = arg_sig + sep + f"{arg_type} {arg_name}"
             sep = ", "
+
+        # TODO kwargs
+        assert len(kwargs) == 0
+
         arg_sig = arg_sig + ") -> "
 
         sep = "(" if len(outputs) != 1 else ""
@@ -370,9 +408,12 @@ class FusedOpGenerator:
     # op takes all the inputs and chains the rest to subsequent ops.
     # See functools.partial and inspect.signature().parameters
     def generate_meta_function(
-            self, inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
-            nodes: List[torch.fx.Node],
-            kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]) -> Callable:
+        self,
+        inputs: List[torch.fx.Node],
+        outputs: List[torch.fx.Node],
+        nodes: List[torch.fx.Node],
+        kwargs: Dict[str, Dict[str, torch.fx.node.Argument]]
+    ) -> Callable:
         fns = [n.target for n in nodes]
         return compose(*fns)
 

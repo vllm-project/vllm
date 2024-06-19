@@ -45,7 +45,7 @@ def fuse_graph_nodes(
         if not is_call(n):
             continue
 
-        if n.kwargs is not None and len(n.kwargs) > 0:
+        if False and n.kwargs is not None and len(n.kwargs) > 0:
             kwargs[n.name] = n.kwargs
 
         nodes_to_fuse.append(n)
@@ -164,10 +164,11 @@ def is_compute_fusable_pair(a: torch.fx.Node, b: torch.fx.Node) -> bool:
 Determine if any kwargs associated with 'node' are supported.
 """
 def supported_kwargs(node: torch.fx.Node,
-                     allow_const_kwargs: bool = False) -> bool:
-    if allow_const_kwargs:
+                     only_const_kwargs: bool = True) -> bool:
+    if only_const_kwargs:
         for arg in node.kwargs.values():
             if not isinstance(arg, torch.fx.node.BaseArgumentTypes):
+                #print(f"non-const kwarg = {arg}")
                 return False
         return True
     else:
@@ -187,6 +188,13 @@ def dump_partitions(node_map: Dict[torch.fx.Node, int]) -> str:
         part_str = part_str + f"  {p}: {str(ns)}\n"
     part_str = part_str + "\n}"
     return part_str
+
+
+def non_trivial_op(n: torch.fx.Node) -> bool:
+    if not is_call(n):
+        return False
+    trg = node_function_target(n)
+    return trg not in ['_operator.getitem', 'torch.empty', 'torch.empty_like']
 
 
 """
@@ -217,7 +225,7 @@ def pointwise_fusion(cc: CodeCache,
     # assumption, graph.nodes are in topo order
     mod.graph.lint()
 
-    logger.debug("start fusion")
+    logger.debug("Start fusion")
 
     # create partition groups
     # run in reverse order so predecessors of non-unary ops will appear
@@ -329,9 +337,10 @@ def pointwise_fusion(cc: CodeCache,
 
     logger.debug(f"Found {len(subgraphs)} fusable subgraphs.")
 
-    for p, nodes in subgraphs.items():
-        sub = SubGraph(mod, subgraphs[p])
-        if len([n for n in sub.nodes if is_call(n)]) <= 1:
+    for p in subgraphs.keys():
+        #print(f"Candidate Fusing sub-module:\n{subgraphs[p]}")
+        sub = SubGraph(fg, subgraphs[p])
+        if len([n for n in sub.nodes if non_trivial_op(n)]) <= 1:
             logger.debug(f"Reject empty/singleton subgraph:\n{sub.tabular()}")
             continue
         logger.debug(f"Fusing sub-module:\n{sub.tabular()}")
@@ -339,6 +348,8 @@ def pointwise_fusion(cc: CodeCache,
         fuse_graph_nodes(cc, fgen, sub)
         logger.debug(f"Post fusion sub-module:\n{sub.tabular()}")
         #print(f"Post fusion sub-module:\n{sub.tabular()}")
+
+    fg.topo_sort()
 
     # Don't do this with inplace ops!!!!!!!!!!!!!!!!!!!!
     # toposort the module

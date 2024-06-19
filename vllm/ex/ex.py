@@ -167,6 +167,41 @@ class backend_class:
     def __init__(self, backend: Optional[str] = 'inductor'):
         self.backend = backend
 
+    def __call__(self, gm: torch.fx.GraphModule,
+                 example_inputs: List[torch.Tensor]) -> Callable:
+        gm = copy.copy(gm)
+
+        logger.debug(f"Original module {gm}:\n{graph_print_tabular(gm.graph,'users',lambda n: list(n.users.keys()))}")
+        logger.debug(f"input_types: {[type(inp) for inp in example_inputs]}")
+
+        tag_side_effects(gm.graph)
+
+        gm.graph.eliminate_dead_code()
+
+        # TODO: store these in the root module state dictionary so that code for
+        # all sub-modules is shared?  Or should these be globals?
+        fgen = FusedOpGenerator()
+
+        ShapeProp(gm).propagate(*example_inputs)
+
+        # Get the current FakeTensorMode (there should be one since we are in
+        # a backend).
+        fake_mode = torch._guards.detect_fake_mode()
+
+        # There should be an existing fake_mode but double check.
+        assert fake_mode is not None
+
+        gm = optimize(backend_class.cc, fgen, gm, example_inputs)
+
+        # TODO: no need to recompile if nothing got optimized.
+        gm.recompile()
+
+        logger.debug(f"Final module: {gm.print_readable(False)}")
+
+        # Forward optimized graph onto "final" backend (if any).
+        return backend_compile(gm, example_inputs, backend=self.backend)
+
+
     #
     # Remember that torch._dynamo.mark_dynamic(x, 0) can be used on example_inputs to mark dynamic
     # dimensions to prevent recompiles, these would go on the M dim (also kv_caches?)
@@ -174,8 +209,8 @@ class backend_class:
     #
     # TODO: if nothing is optimized, return original gm/gm.forward function
     #
-    def __call__(self, gm: torch.fx.GraphModule,
-                 example_inputs: List[torch.Tensor]) -> Callable:
+    def old___call__(self, gm: torch.fx.GraphModule,
+                     example_inputs: List[torch.Tensor]) -> Callable:
 
         # Nop for baseline testing
         #print(f"Original module {gm} ({maybe_name(gm)}):\n{graph_print_tabular(gm.graph)}")
@@ -294,8 +329,8 @@ class backend_class:
         logger.debug(f"Final module: {part_gm.print_readable(False)}")
         #print(f"Final module: {part_gm.print_readable(False)}")
 
-        # TODO: Add option for backend for the final graph?
-        return part_gm.forward
+        # Forward optimized graph onto "final" backend (if any).
+        return backend_compile(part_gm, example_inputs, backend=self.backend)
 
 
 """
