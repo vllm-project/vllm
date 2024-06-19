@@ -87,8 +87,7 @@ def convert_mapping(
             indices_len: List of lengths of the above tensors.
                 Used to index into each tensor. It contains length for
                 (base_indices, sampler_indices, sampler_indices_padded,
-                embeddings_indices, long_lora_indices). If long_lora doesn't
-                exist, it only contains first 4 entries.
+                embeddings_indices, long_lora_indices,prefilling stage flag). 
     """
     index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
@@ -153,6 +152,10 @@ def convert_mapping(
     ]
     if long_lora_indices_len is not None:
         indices_len.append(long_lora_indices_len)
+    else:
+        #If long_lora doesn'texist,append None
+        indices_len.append(None)
+    indices_len.append(int(mapping.is_prefilling))
     return (
         base_indices,
         sampler_indices,
@@ -428,10 +431,10 @@ class LoRAModelManager:
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
-        # 5 is the number of indicies tensors.
+        # 6 is the number of indicies tensors.
         # base_indices, sampler_indices, sampler_indices_padded,
-        # embeddings_indices,prefilling or decoding
-        self.indices_len: List[Optional[int]] = [None] * 5
+        # embeddings_indices,long_lora_indices,prefilling or decoding
+        self.indices_len: List[Optional[int]] = [None] * 6
 
         self.model: nn.Module = model
         if hasattr(self.model, "supported_lora_modules"):
@@ -588,7 +591,7 @@ class LoRAModelManager:
         else:
             self.long_lora_indices.zero_()
         # Maintain the reference
-        self.indices_len[:] = indices_len + [int(mapping.is_prefilling)]
+        self.indices_len[:] = indices_len
         #
         if mapping.is_prefilling:
             punica.reset_params_cache()

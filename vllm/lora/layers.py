@@ -85,7 +85,7 @@ def _apply_expand_triton(
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     token_num = indices_info[0]
-    is_prefilling = bool(indices_info[4])
+    is_prefilling = bool(indices_info[5])
     add_expand_triton(
         output,
         x,
@@ -131,7 +131,7 @@ def _apply_lora_triton(
     output = output.view(-1, output.shape[-1])
 
     token_num = indices_info[0]
-    is_prefilling = bool(indices_info[4])
+    is_prefilling = bool(indices_info[5])
     add_lora_triton(
         output,
         x,
@@ -173,7 +173,7 @@ def _apply_lora_triton_nslice(
     output = output.view(-1, output.shape[-1])
 
     token_num = indices_info[0]
-    is_prefilling = bool(indices_info[4])
+    is_prefilling = bool(indices_info[5])
     offset_left = 0
     # TODO fuse these kernels
     for slice_idx in range(len(output_slices)):

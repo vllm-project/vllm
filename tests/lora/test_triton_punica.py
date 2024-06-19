@@ -2,7 +2,6 @@ import pytest
 import torch
 
 import vllm._punica_C as punica_kernels
-import vllm.lora.punica as punica
 from vllm.lora.ops.bgmv_expand import bgmv_expand
 from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
 from vllm.lora.ops.bgmv_shrink import bgmv_shrink
@@ -90,7 +89,8 @@ def assert_close(a, b):
 @torch.inference_mode()
 def _punica_bgmv(out_tensor, inputs, lora_weights, indices, scaling):
     layer_idx = 0
-    punica.bgmv(out_tensor, inputs, lora_weights, indices, layer_idx, scaling)
+    punica_kernels.dispatch_bgmv(out_tensor, inputs, lora_weights, indices,
+                                 layer_idx, scaling)
     return
 
 
