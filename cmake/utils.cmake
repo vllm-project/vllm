@@ -155,8 +155,11 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
     # Find the intersection of the supported + detected architectures to
     # set the module architecture flags.
     #
+
+    set(VLLM_ROCM_SUPPORTED_ARCHS "gfx908;gfx90a;gfx942;gfx1100")
+
     set(${GPU_ARCHES})
-    foreach (_ARCH ${CMAKE_HIP_ARCHITECTURES})
+    foreach (_ARCH ${VLLM_ROCM_SUPPORTED_ARCHS})
       if (_ARCH IN_LIST _GPU_SUPPORTED_ARCHES_LIST)
         list(APPEND ${GPU_ARCHES} ${_ARCH})
       endif()
