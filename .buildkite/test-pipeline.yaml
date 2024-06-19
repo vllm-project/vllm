@@ -181,3 +181,8 @@ steps:
   commands:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
+
+- label: A100 status
+  gpu: a100
+  commands: 
+  - nvidia-smi
