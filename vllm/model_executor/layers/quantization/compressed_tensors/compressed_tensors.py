@@ -85,8 +85,11 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
-        is_tensor = (weight_quant.strategy == input_quant.strategy ==
-                     QuantizationStrategy.TENSOR.value)
+        weight_strategy = (
+            weight_quant.strategy == QuantizationStrategy.TENSOR.value
+            or weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
+        is_tensor = (weight_strategy and input_quant.strategy
+                     == QuantizationStrategy.TENSOR.value)
         is_symmetric = weight_quant.symmetric and input_quant.symmetric
         is_static = not weight_quant.dynamic and not input_quant.dynamic
 
@@ -131,7 +134,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if self.quant_format == CompressionFormat.int_quantized.value:
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8StaticTensor()
+                return CompressedTensorsW8A8StaticTensor(
+                    strategy=weight_quant.strategy)
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8DynamicToken(

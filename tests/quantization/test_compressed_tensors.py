@@ -13,8 +13,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW8A8StaticTensor)
 
 
-def test_compressed_tensors_w8a8_static_setup(vllm_runner):
-    model_path = "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change"
+@pytest.mark.parametrize("model_args", [
+    ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", "tensor"),
+    ("nm-testing/tinyllama-oneshot-w8-channel-a8-tensor", "channel"),
+])
+def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
+    model_path, strategy = model_args
     with vllm_runner(model_path, enforce_eager=True) as llm:
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         layer = model.model.layers[0]
@@ -33,12 +37,14 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner):
 
         assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8StaticTensor)
 
+        assert qkv_proj.scheme.strategy == strategy
         assert qkv_proj.weight.dtype is torch.int8
         assert o_proj.weight.dtype is torch.int8
         assert gate_up_proj.weight.dtype is torch.int8
 
-        assert qkv_proj.weight_scale.shard_splitter is not None
-        assert qkv_proj.weight_scale.logical_widths is not None
+        if qkv_proj.scheme.strategy == "tensor":
+            assert qkv_proj.weight_scale.shard_splitter is not None
+            assert qkv_proj.weight_scale.logical_widths is not None
         assert qkv_proj.input_scale.dtype is torch.float32
 
 
