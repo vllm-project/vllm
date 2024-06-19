@@ -3,7 +3,10 @@
 #include "ops.h"
 #include "registration.h"
 
+#include <git.h>
 #include <torch/library.h>
+
+std::string githash() { return std::string{git::CommitSHA1()}; }
 
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
@@ -17,6 +20,10 @@
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
+
+  // Show vllm git hash
+  ops.def("githash", &githash);
+  ops.impl("githash", torch::kCUDA, &githash);
 
   // Attention ops
   // Compute the attention between an input query and the cached
