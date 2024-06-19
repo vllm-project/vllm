@@ -71,6 +71,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
         # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerWrapper] = []
+        self.all_workers: List[RayWorkerWrapper] = []
+
+        # Indexed first by PP rank, and then TP rank.
+        self.pp_tp_workers: List[List[RayWorkerWrapper]] = []
 
         if self.parallel_config.ray_workers_use_nsight:
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
@@ -118,6 +122,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             else:
                 # Else, added to the list of workers.
                 self.workers.append(worker)
+            self.all_workers.append(worker)
 
         if self.driver_dummy_worker is None:
             raise ValueError(
@@ -174,6 +179,17 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
+
+        for pp_rank in range(self.parallel_config.pipeline_parallel_size):
+            self.pp_tp_workers.append([])
+            for tp_rank in range(self.parallel_config.tensor_parallel_size):
+                # PP=2, TP=4
+                # pp_tp_workers = [[0, 1, 2, 3], [4, 5, 6, 7]]
+                rank = (pp_rank *
+                        self.parallel_config.tensor_parallel_size) + tp_rank
+                assert len(self.pp_tp_workers[pp_rank]) == tp_rank
+                assert pp_rank < len(self.pp_tp_workers)
+                self.pp_tp_workers[pp_rank].append(self.all_workers[rank])
 
     def execute_model(
             self,
@@ -319,16 +335,17 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         async with self.pp_locks[0]:
             output = await self.driver_exec_method("execute_model",
                                                    execute_model_req)
-        for pp_rank, driver_worker in enumerate(self.tp_driver_workers,
-                                                start=1):
-            async with self.pp_locks[pp_rank]:
-                output = await driver_worker.execute_method.remote(
+        for pp_rank, tp_group in enumerate(self.pp_tp_workers[1:]):
+            async with self.pp_locks[pp_rank + 1]:
+                output = await tp_group[0].execute_method.remote(
                     "execute_model", execute_model_req)
         return output
 
     async def _start_worker_execution_loop(self):
-        coros = [
-            worker.execute_method.remote("start_worker_execution_loop")
-            for worker in self.tp_parallel_workers
-        ]
+        coros = []
+        for pp_rank, tp_group in enumerate(self.pp_tp_workers):
+            coros += [
+                worker.execute_method.remote("start_worker_execution_loop")
+                for worker in tp_group[1:]
+                ]
         return await asyncio.gather(*coros)
