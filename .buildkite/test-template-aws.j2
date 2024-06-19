@@ -75,7 +75,7 @@ steps:
             - "'cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}'"
             resources:
               limits:
-                nvidia.com/gpu: 8
+                nvidia.com/gpu: {{ step.num_gpus or 1 }}
             volumeMounts:
             - name: devshm
               mountPath: /dev/shm
