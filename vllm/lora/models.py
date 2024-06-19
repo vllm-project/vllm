@@ -18,7 +18,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
-from vllm.utils import LRUCache, is_pin_memory_available
+from vllm.utils import LRUCache, is_pin_memory_available, is_cpu
 
 logger = init_logger(__name__)
 
@@ -81,7 +81,7 @@ def convert_mapping(
                 embeddings_indices, long_lora_indices). If long_lora doesn't
                 exist, it only contains first 4 entries.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu" if is_cpu else "cuda"
     index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
@@ -390,7 +390,7 @@ class LoRAModelManager:
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cpu" if is_cpu else "cuda"
         self.long_lora_context: Optional[LongContextLoRAContext] = None
         self.base_indices = torch.empty(self.max_num_batched_tokens,
                                         dtype=torch.long,

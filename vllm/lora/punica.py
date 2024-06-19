@@ -12,8 +12,9 @@ from vllm.utils import is_cpu
 logger = init_logger(__name__)
 
 if is_cpu():
-    logger.warning("punica LoRA kernels require a GPU to run. "
-                   "But you are using the CPU version vLLM")
+    logger.warning(
+        "punica LoRA kernels on CPU will be fallback to Torch native kernels with non-optimized performance."
+    )
 
 
 def _check_punica_support():

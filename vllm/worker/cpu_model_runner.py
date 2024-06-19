@@ -145,15 +145,16 @@ class CPUModelRunner:
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
 
-            lora_id = seq_group_metadata.lora_int_id
+            if self.lora_config:
+                lora_id = seq_group_metadata.lora_int_id
 
-            if lora_id > 0:
-                lora_requests.add(seq_group_metadata.lora_request)
+                if lora_id > 0:
+                    lora_requests.add(seq_group_metadata.lora_request)
 
-            lora_index_mapping += [lora_id] * (seq_len - computed_len)
-            lora_prompt_mapping.extend([lora_id] * (
-                seq_len - computed_len if seq_group_metadata.sampling_params
-                and seq_group_metadata.sampling_params.prompt_logprobs else 1))
+                lora_index_mapping += [lora_id] * (seq_len - computed_len)
+                lora_prompt_mapping.extend([lora_id] * (
+                    seq_len - computed_len if seq_group_metadata.sampling_params
+                    and seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data is not None:

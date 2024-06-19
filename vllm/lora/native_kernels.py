@@ -54,8 +54,9 @@ def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
       indicies: Shape: `[B]`. Indices of the LoRA weights.
       layer_idx: Layer index of LoRA weights.
       scale: Scaling factor.
+      h_in: Size of the x column slice.
+      h_out: Size of the y column slice.
       y_offset: Offset to apply to the starting column of y.
-      y_slice_size: Size of the y column slice.
     """
     y[:, y_offset:y_offset + h_out] += (
         x[:, :h_in].unsqueeze(1)
