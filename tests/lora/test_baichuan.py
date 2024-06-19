@@ -81,14 +81,16 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files):
     del llm_tp1
     cleanup()
 
-    llm_tp2 = vllm.LLM(MODEL_PATH,
-                       enable_lora=True,
-                       max_num_seqs=16,
-                       max_loras=4,
-                       max_lora_rank=64,
-                       tensor_parallel_size=2,
-                       trust_remote_code=True,
-                       fully_sharded_loras=True,) ## Verify fully sharded lora
+    llm_tp2 = vllm.LLM(
+        MODEL_PATH,
+        enable_lora=True,
+        max_num_seqs=16,
+        max_loras=4,
+        max_lora_rank=64,
+        tensor_parallel_size=2,
+        trust_remote_code=True,
+        fully_sharded_loras=True,
+    )  ## Verify fully sharded lora
     output_tp2 = do_sample(llm_tp2, baichuan_lora_files, lora_id=2)
 
     del llm_tp2
