@@ -41,7 +41,9 @@ def main(args: argparse.Namespace):
         block_size=args.block_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         load_format=args.load_format,
-        distributed_executor_backend=args.distributed_executor_backend)
+        distributed_executor_backend=args.distributed_executor_backend,
+        otlp_traces_endpoint=args.otlp_traces_endpoint,
+    )
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -100,7 +102,7 @@ def main(args: argparse.Namespace):
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
         latencies.append(run_to_completion(profile_dir=None))
     latencies = np.array(latencies)
-    percentages = [10, 25, 50, 75, 90]
+    percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
     print(f'Avg latency: {np.mean(latencies)} seconds')
     for percentage, percentile in zip(percentages, percentiles):
@@ -197,7 +199,7 @@ if __name__ == '__main__':
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda", "cpu", "tpu"],
+        choices=["cuda", "cpu", "tpu", "xpu"],
         help='device type for vLLM execution, supporting CUDA and CPU.')
     parser.add_argument('--block-size',
                         type=int,
@@ -260,5 +262,10 @@ if __name__ == '__main__':
         help='Backend to use for distributed serving. When more than 1 GPU '
         'is used, will be automatically set to "ray" if installed '
         'or "mp" (multiprocessing) otherwise.')
+    parser.add_argument(
+        '--otlp-traces-endpoint',
+        type=str,
+        default=None,
+        help='Target URL to which OpenTelemetry traces will be sent.')
     args = parser.parse_args()
     main(args)
