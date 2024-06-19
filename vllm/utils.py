@@ -43,6 +43,13 @@ K = TypeVar("K")
 T = TypeVar("T")
 
 
+class _Sentinel:
+    ...
+
+
+ALL_PINNED_SENTINEL = _Sentinel()
+
+
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
@@ -103,6 +110,9 @@ class LRUCache(Generic[T]):
         self._remove_old_if_needed()
 
     def pin(self, key: Hashable) -> None:
+        """
+        Pins a key in the cache preventing it from being evicted in the LRU order.
+        """
         if key not in self.cache:
             raise ValueError(f"Cannot pin key: {key} not in cache.")
         self.pinned_items.add(key)
@@ -118,12 +128,13 @@ class LRUCache(Generic[T]):
             return
 
         if not remove_pinned:
-            if all(key in self.pinned_items for key in self.cache):
-                raise RuntimeError("All items are pinned, \
-                                   cannot remove oldest from the cache.")
             # pop the oldest item in the cache that is not pinned
-            lru_key = next(key for key in self.cache
-                           if key not in self.pinned_items)
+            lru_key = next(
+                (key for key in self.cache if key not in self.pinned_items),
+                ALL_PINNED_SENTINEL)
+            if lru_key is ALL_PINNED_SENTINEL:
+                raise RuntimeError("All items are pinned, "
+                                   "cannot remove oldest from the cache.")
         else:
             lru_key = next(iter(self.cache))
         self.pop(lru_key)
