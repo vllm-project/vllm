@@ -37,6 +37,9 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         assert world_size <= cuda_device_count_stateless(), (
             "please set tensor_parallel_size to less than max local gpu count")
 
+        # Multiprocessing-based executor does not support multi-node setting.
+        # Since it only works for single node, we can use the loopback address
+        # 127.0.0.1 for communication.
         distributed_init_method = get_distributed_init_method(
             "127.0.0.1", get_open_port())
 
