@@ -48,6 +48,12 @@ main() {
         bash ../.buildkite/nightly-benchmarks/scripts/run-lmdeploy-nightly.sh
     fi
 
+    # run tgi
+    if [ -e /tgi-entrypoint.sh ]; then
+        echo "tgi is available, redirect to run-tgi-nightly.sh"
+        bash ../.buildkite/nightly-benchmarks/scripts/run-tgi-nightly.sh
+    fi
+
 }
 
 main "$@"

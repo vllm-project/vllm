@@ -7,19 +7,25 @@
             "tp": 1,
             "server_port": 8000
         },
-        "client_parameters": {
-            "model": "meta-llama/Llama-2-7b-hf",
-            "dataset_name": "sharegpt",
-            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 200,
-            "port": 8000
-        },
         "lmdeploy_client_parameters": {
             "model": "llama2",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
             "num_prompts": 200,
             "port": 8000
+        },
+        "tgi_server_parameters": {
+            "model_id": "meta-llama/Llama-2-7b-hf",
+            "num_shard": 2,
+            "port": 8000
+        },
+        "tgi_client_parameters": {
+            "model": "meta-llama/Llama-2-7b-hf",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200,
+            "port": 8000,
+            "endpoint": "/generate_stream"
         }
     }
 ]
