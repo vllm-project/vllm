@@ -139,10 +139,9 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         For multi step worker, this indicator shall be True.
         """
-        # NOTE: we do not call _patch_tensor_parallel_group() in this function,
-        # as it's always called after tp_group has already been overridden
-        if self._is_dummy:
-            return [], True
+        # NOTE: here, neither _patch_tensor_parallel_group() call nor _is_dummy
+        # check, as it's always called after tp_group has already been
+        # overridden by get_spec_proposals()
 
         self._raise_if_unsupported(execute_model_req)
 
