@@ -385,8 +385,8 @@ class FlowGraph:
 
         #print(f"Graph:\n{graph_print_tabular(self.module.graph,'users',lambda n: list(n.users.keys()))}")
 
-        self.all_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(self.module.graph.nodes, True)
-        _, self.all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
+        self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(self.module.graph.nodes, True)
+        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
 
         while len(q) > 0:
             n = q.pop()
@@ -394,7 +394,7 @@ class FlowGraph:
                 continue
 
             visited.add(n)
-            for input in self.all_input_nodes[n]:
+            for input in self.all_renamed_input_nodes[n]:
                 self.add_edge(input, n)
                 q.append(input)
 
@@ -443,7 +443,6 @@ class FlowGraph:
 class SubGraph:
 
     def __init__(self,
-                 #gm: torch.fx.GraphModule,
                  fg: FlowGraph,
                  nodes: Optional[List[torch.fx.Node]] = None):
         self.module = fg.module
@@ -462,8 +461,8 @@ class SubGraph:
         outputs = []
 
         # Note: this will include Node kwargs
-        all_input_nodes, all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
-        #all_input_nodes, all_node_users = self.all_input_nodes, self.all_node_users
+        #all_input_nodes, all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
+        all_input_nodes, all_node_users = self.all_input_nodes, self.all_node_users
 
         for n in self.nodes:
             new_inputs = [
@@ -484,8 +483,8 @@ class SubGraph:
         in_degree = dict()
         worklist: collections.deque = collections.deque()
 
-        all_input_nodes, all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
-        #all_input_nodes, all_node_users = self.all_input_nodes, self.all_node_users
+        #all_input_nodes, all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
+        all_input_nodes, all_node_users = self.all_input_nodes, self.all_node_users
 
         for n in self.nodes:
             count = len(
@@ -526,6 +525,11 @@ class SubGraph:
     def erase(self):
         for n in reversed(self.nodes):
             self.module.graph.erase_node(n)
+
+        # TODO: make a function to get/recompute these on demand
+        # TODO: be smarter with updating just for deleted/new nodes
+        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
+
         #try:
         #    for n in reversed(self.nodes):
         #        self.module.graph.erase_node(n)
