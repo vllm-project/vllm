@@ -111,7 +111,7 @@ run_serving_tests() {
       --model "$model" \
       --cachedir /tokenizer_cache
 
-    server_command="lmdeploy server api_server $model $server_args"
+    server_command="lmdeploy serve api_server $model $server_args"
 
     # run the server
     echo "Running test case $test_name"
