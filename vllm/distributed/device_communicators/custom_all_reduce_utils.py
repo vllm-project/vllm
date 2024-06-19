@@ -1,6 +1,9 @@
 import ctypes
 import json
 import os
+import pickle
+import subprocess
+import sys
 from itertools import product
 from typing import Dict, List, Optional, Sequence
 
@@ -198,7 +201,13 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         ids = list(range(num_dev))
         # batch of all pairs of GPUs
         batch_src, batch_tgt = zip(*list(product(ids, ids)))
-        result = can_actually_p2p(batch_src, batch_tgt)
+        input_bytes = pickle.dumps((batch_src, batch_tgt))
+        returned = subprocess.run([sys.executable, __file__],
+                                  input=input_bytes,
+                                  capture_output=True)
+        # check if the subprocess is successful
+        returned.check_returncode()
+        result = pickle.loads(returned.stdout)
         for _i, _j, r in zip(batch_src, batch_tgt, result):
             cache[f"{_i}->{_j}"] = r
         with open(path, "w") as f:
@@ -213,3 +222,8 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
 
 
 __all__ = ["gpu_p2p_access_check"]
+
+if __name__ == "__main__":
+    batch_src, batch_tgt = pickle.loads(sys.stdin.buffer.read())
+    result = can_actually_p2p(batch_src, batch_tgt)
+    sys.stdout.buffer.write(pickle.dumps(result))
