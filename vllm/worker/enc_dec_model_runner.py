@@ -110,10 +110,8 @@ class EncoderDecoderModelRunner(ModelRunner):
             raise NotImplementedError()
 
     def _prepare_encoder_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        attn_metadata: AttentionMetadata
-    ) -> ModelInput:
+            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            attn_metadata: AttentionMetadata) -> ModelInput:
         """Prepare the encoder input based on a given sequence group.
 
         Encoder attention is an entirely prefill-phase operation.
@@ -175,7 +173,7 @@ class EncoderDecoderModelRunner(ModelRunner):
             if (self.scheduler_config is not None
                     and self.scheduler_config.chunked_prefill_enabled
                     and not (computed_block_nums is None
-                                or computed_block_nums == [])):
+                             or computed_block_nums == [])):
                 raise RuntimeError(
                     "chunked prefill cannot be used with prefix caching "
                     "now.")
@@ -235,16 +233,16 @@ class EncoderDecoderModelRunner(ModelRunner):
                                            dtype=torch.long,
                                            device=self.device)
         query_lens_tensor = torch.tensor(query_lens,
-                                            dtype=torch.long,
-                                            device=self.device)
+                                         dtype=torch.long,
+                                         device=self.device)
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                        dtype=torch.int32,
-                                        device=self.device)
+                                      dtype=torch.int32,
+                                      device=self.device)
 
         torch.cumsum(query_lens_tensor,
-                        dim=0,
-                        dtype=query_start_loc.dtype,
-                        out=query_start_loc[1:])
+                     dim=0,
+                     dtype=query_start_loc.dtype,
+                     out=query_start_loc[1:])
 
         attn_metadata.encoder_seq_lens = seq_lens
         attn_metadata.encoder_seq_lens_tensor = seq_lens_tensor
