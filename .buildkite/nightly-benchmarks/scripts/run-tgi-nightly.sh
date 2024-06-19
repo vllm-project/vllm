@@ -87,7 +87,7 @@ run_serving_tests() {
     fi
 
 
-    server_command="./tgi-entrypoint.sh $server_args"
+    server_command="/tgi-entrypoint.sh $server_args"
 
     # run the server
     echo "Running test case $test_name"
