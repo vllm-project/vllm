@@ -14,7 +14,12 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
 
-# Copied from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa
+def get_clip_num_patches(image_size: int, patch_size: int) -> int:
+    assert image_size % patch_size == 0
+    return (image_size // patch_size)**2
+
+
+# Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa
 class CLIPVisionEmbeddings(nn.Module):
 
     def __init__(self, config: CLIPVisionConfig):
@@ -34,7 +39,8 @@ class CLIPVisionEmbeddings(nn.Module):
             bias=False,
         )
 
-        self.num_patches = (self.image_size // self.patch_size)**2
+        self.num_patches = get_clip_num_patches(self.image_size,
+                                                self.patch_size)
         self.num_positions = self.num_patches + 1
         self.position_embedding = nn.Embedding(self.num_positions,
                                                self.embed_dim)
