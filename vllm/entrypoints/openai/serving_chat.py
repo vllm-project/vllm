@@ -262,14 +262,33 @@ class OpenAIServingChat(OpenAIServing):
                 conversation.extend(chat_parsed_result.messages)
                 image_futures.extend(chat_parsed_result.image_futures)
 
+            # if specified, add the system prompt template
+            print('CONSTELLATE request tools', request.tools)
+            if self.enable_auto_tools and self.tool_use_prompt_template:
+                print('CONSTELLATE configuring tools')
+                # create the system prompt from the template
+                templated_prompt_with_tools: str = self.tool_use_prompt_template.render(tools=request.tools)
+
+                # if there is already a system prompt
+                if conversation[0]['role'] == 'system':
+                    print('CONSTELLATE modifying existing system prompt with tool template')
+                    conversation[0]['content'] = f'{templated_prompt_with_tools}\n\n{conversation[0]["content"]}'
+
+                # if there isn't a system prompt already
+                else:
+                    conversation.insert(0, ConversationMessage(role='system', content=templated_prompt_with_tools))
+            print('CONSTELLATE conversation:', conversation)
+
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
             )
+            print('CONSTELLATE prompt', prompt)
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
+
 
         # Fetch image data
         image_data: Optional[ImagePixelData] = None
@@ -516,8 +535,11 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-        self, request: ChatCompletionRequest, raw_request: Optional[Request],
-        result_generator: AsyncIterator[RequestOutput], request_id: str,
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Optional[Request],
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
         conversation: List[ConversationMessage]
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
