@@ -7,7 +7,7 @@ On the server side, run one of the following commands:
         --disable-log-requests
 
     (TGI backend)
-    ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
+    ./launch.sh --server tgi --model facebook/opt-125m --tokens 10000 -p 8000
 
 On the client side, run:
     python benchmarks/benchmark_serving.py \
