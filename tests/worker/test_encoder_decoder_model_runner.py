@@ -9,7 +9,8 @@ from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 
 
-def _create_model_runner(model: str, *args, **kwargs) -> EncoderDecoderModelRunner:
+def _create_model_runner(model: str, *args,
+                         **kwargs) -> EncoderDecoderModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
     model_runner = EncoderDecoderModelRunner(
@@ -136,6 +137,7 @@ def test_prepare_prompt(batch_size):
                             device=actual.device,
                             dtype=actual.dtype)
     torch.testing.assert_close(actual, expected)
+
 
 def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output."""

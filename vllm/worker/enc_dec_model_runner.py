@@ -17,8 +17,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
-from vllm.worker.model_runner import (LORA_WARMUP_RANK,
-                                      ModelInput,
+from vllm.worker.model_runner import (LORA_WARMUP_RANK, ModelInput,
                                       ModelRunner)
 
 logger = init_logger(__name__)
@@ -41,7 +40,7 @@ class EncoderInput(NamedTuple):
 
     @classmethod
     def empty(cls, device):
-        return ModelInput(
+        return EncoderInput(
             input_tokens=torch.empty(0, device=device),
             input_positions=torch.empty(0, device=device),
         )
@@ -77,7 +76,7 @@ class EncoderDecoderModelRunner(ModelRunner):
 
     def _prepare_encoder_model_input(
             self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            attn_metadata: AttentionMetadata) -> None:
+            attn_metadata: AttentionMetadata) -> EncoderInput:
         """Prepare the encoder input based on a given sequence group.
 
         Encoder attention is an entirely prefill-phase operation.
@@ -215,36 +214,33 @@ class EncoderDecoderModelRunner(ModelRunner):
         if seq_group_metadata.is_prompt:
 
             input_tokens_tensor = torch.tensor(input_tokens,
-                                            dtype=torch.long,
-                                            device=self.device)
+                                               dtype=torch.long,
+                                               device=self.device)
             input_positions_tensor = torch.tensor(input_positions,
-                                                dtype=torch.long,
-                                                device=self.device)
+                                                  dtype=torch.long,
+                                                  device=self.device)
 
-            return EncoderInput(
-                input_tokens=input_tokens_tensor,
-                input_positions=input_positions_tensor
-            )
+            return EncoderInput(input_tokens=input_tokens_tensor,
+                                input_positions=input_positions_tensor)
 
         else:
 
             input_tokens_tensor = torch.tensor([],
-                                            dtype=torch.long,
-                                            device=self.device)
+                                               dtype=torch.long,
+                                               device=self.device)
             input_positions_tensor = torch.tensor([],
-                                                dtype=torch.long,
-                                                device=self.device)
+                                                  dtype=torch.long,
+                                                  device=self.device)
 
-        return EncoderInput(
-            input_tokens=input_tokens_tensor,
-            input_positions=input_positions_tensor
-        )
+        return EncoderInput(input_tokens=input_tokens_tensor,
+                            input_positions=input_positions_tensor)
 
-    def prepare_input_tensors(
+    def prepare_input_tensors_encoder_decoder(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+               AttentionMetadata, SamplingMetadata, Set[LoRARequest],
+               LoRAMapping, Dict[str, torch.Tensor]]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
@@ -262,10 +258,9 @@ class EncoderDecoderModelRunner(ModelRunner):
                 num_decode_tokens,
                 num_prefills,
             ) = self._prepare_model_input(seq_group_metadata_list)
-            (
-                encoder_input_tokens,
-                encoder_input_positions
-            ) = self._prepare_encoder_model_input(seq_group_metadata_list,attn_metadata)
+            (encoder_input_tokens,
+             encoder_input_positions) = self._prepare_encoder_model_input(
+                 seq_group_metadata_list, attn_metadata)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
@@ -282,8 +277,8 @@ class EncoderDecoderModelRunner(ModelRunner):
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
-                "encoder_input_tokens":encoder_input_tokens,
-                "encoder_input_positions":encoder_input_positions
+                "encoder_input_tokens": encoder_input_tokens,
+                "encoder_input_positions": encoder_input_positions
             }
             if attn_metadata:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
@@ -293,7 +288,8 @@ class EncoderDecoderModelRunner(ModelRunner):
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
             encoder_input_tokens = metadata_dict.pop("encoder_input_tokens")
-            encoder_input_positions = metadata_dict.pop("encoder_input_positions")
+            encoder_input_positions = metadata_dict.pop(
+                "encoder_input_positions")
             selected_token_indices = metadata_dict.pop(
                 "selected_token_indices")
             lora_mapping = metadata_dict.pop("lora_mapping")
@@ -312,9 +308,8 @@ class EncoderDecoderModelRunner(ModelRunner):
             )
 
         return (input_tokens, input_positions, encoder_input_tokens,
-                encoder_input_positions, attn_metadata,
-                sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_kwargs)
+                encoder_input_positions, attn_metadata, sampling_metadata,
+                lora_requests, lora_mapping, multi_modal_kwargs)
 
     @torch.inference_mode()
     def execute_model(
@@ -325,7 +320,8 @@ class EncoderDecoderModelRunner(ModelRunner):
         (input_tokens, input_positions, encoder_input_tokens,
          encoder_input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_kwargs
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+         ) = \
+            self.prepare_input_tensors_encoder_decoder(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
