@@ -11,7 +11,9 @@ import torch.nn as nn
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         VisionLanguageConfig, ControlVectorConfig)
+from vllm.control_vectors.request import ControlVectorRequest
+from vllm.control_vectors.models import ControlVectorModel, create_cv_model
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import graph_capture
 from vllm.logger import init_logger
@@ -53,6 +55,7 @@ class ModelInput(NamedTuple):
     num_prefill_tokens: int
     num_decode_tokens: int
     num_prefills: int
+    control_vector_request: Optional[ControlVectorRequest]
 
     @classmethod
     def empty(cls, device):
@@ -69,6 +72,7 @@ class ModelInput(NamedTuple):
             num_prefill_tokens=0,
             num_decode_tokens=0,
             num_prefills=0,
+            control_vector_request=None,
         )
 
 
@@ -86,6 +90,7 @@ class ModelRunner:
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        control_vector_config: Optional[ControlVectorConfig] = None,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -96,6 +101,7 @@ class ModelRunner:
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.vision_language_config = vision_language_config
+        self.control_vector_config = control_vector_config
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -154,6 +160,7 @@ class ModelRunner:
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
                 cache_config=self.cache_config,
+                control_vector_config = self.control_vector_config
             )
 
         self.model_memory_usage = m.consumed_memory
@@ -181,6 +188,9 @@ class ModelRunner:
                 max_position_embeddings,
             )
             self.model = self.lora_manager.create_lora_manager(self.model)
+
+        if self.control_vector_config:
+            self.model = create_cv_model(self.model, self.control_vector_config)
 
         if self.kv_cache_dtype == "fp8" and is_hip():
             # Currently only ROCm accepts kv-cache scaling factors
@@ -259,7 +269,8 @@ class ModelRunner:
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
-
+        control_vector_request = None
+        
         seq_lens: List[int] = []
         prefill_seq_lens: List[int] = []
         decode_seq_lens: List[int] = []
@@ -655,13 +666,14 @@ class ModelRunner:
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
+            control_vector_request=control_vector_request
         )
 
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
+               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor], ControlVectorRequest]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
@@ -678,6 +690,7 @@ class ModelRunner:
                 num_prefill_tokens,
                 num_decode_tokens,
                 num_prefills,
+                control_vector_request
             ) = self._prepare_model_input(seq_group_metadata_list)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
@@ -695,6 +708,7 @@ class ModelRunner:
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
+                "control_vector_request": control_vector_request
             }
             if attn_metadata:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
@@ -708,6 +722,7 @@ class ModelRunner:
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
             multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
+            control_vector_request = metadata_dict.pop("control_vector_request")
             if metadata_dict:
                 attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
@@ -722,7 +737,7 @@ class ModelRunner:
 
         return (input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_kwargs)
+                multi_modal_kwargs, control_vector_request)
 
     @torch.inference_mode()
     def execute_model(
@@ -731,12 +746,16 @@ class ModelRunner:
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_kwargs
+         lora_requests, lora_mapping, multi_modal_kwargs, control_vector_request
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
 
+        if self.control_vector_config:
+            if control_vector_request:
+                self.model.add_control_vector_request(control_vector_request)
+                self.model.set_active_control_vector_request(control_vector_request)
         # Currently cuda graph is only supported by the decode phase.
         prefill_meta = attn_metadata.prefill_metadata
         decode_meta = attn_metadata.decode_metadata
@@ -871,6 +890,13 @@ class ModelRunner:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_loras()
 
+    def add_control_vector(self, control_vector_request: ControlVectorRequest) -> None:
+        if not self.control_vector_config:
+            raise RuntimeError("Control vector is not enabled.")
+        if not isinstance(self.model, ControlVectorModel):
+            raise RuntimeError("Model is not a control vector model.")
+        return self.model.add_control_vector(control_vector_request)
+    
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[torch.Tensor]) -> None:
         """Cuda graph capture a model.

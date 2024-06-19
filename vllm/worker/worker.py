@@ -8,11 +8,12 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, VisionLanguageConfig)
+                         SpeculativeConfig, VisionLanguageConfig, ControlVectorConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -45,6 +46,7 @@ class Worker(WorkerBase):
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
+        control_vector_config: Optional[ControlVectorConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -58,6 +60,7 @@ class Worker(WorkerBase):
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
+        self.control_vector_config = control_vector_config
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
@@ -83,6 +86,7 @@ class Worker(WorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
+            control_vector_config=control_vector_config
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.

@@ -4,6 +4,7 @@ from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.inputs import (PromptInputs, PromptStrictInputs, TextPrompt,
@@ -250,6 +251,7 @@ class LLM:
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -299,6 +301,7 @@ class LLM:
             inputs=inputs,
             params=sampling_params,
             lora_request=lora_request,
+            control_vector_request=control_vector_request,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -499,6 +502,7 @@ class LLM:
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
+        control_vector_request: Optional[ControlVectorRequest],
     ) -> None:
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
@@ -521,6 +525,7 @@ class LLM:
                 params[i] if isinstance(params, Sequence) else params,
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,
+                control_vector_request=control_vector_request,
             )
 
     def _add_request(
@@ -528,12 +533,14 @@ class LLM:
         inputs: PromptInputs,
         params: Union[SamplingParams, PoolingParams],
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
                                     inputs,
                                     params,
-                                    lora_request=lora_request)
+                                    lora_request=lora_request,
+                                    control_vector_request=control_vector_request,)
 
     def _run_engine(
             self, *, use_tqdm: bool

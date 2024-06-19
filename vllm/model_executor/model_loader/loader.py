@@ -17,7 +17,7 @@ from torch import nn
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VisionLanguageConfig)
+                         SchedulerConfig, VisionLanguageConfig, ControlVectorConfig)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -90,6 +90,7 @@ def _get_model_initialization_kwargs(
 def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
                       lora_config: Optional[LoRAConfig],
                       vision_language_config: Optional[VisionLanguageConfig],
+                      control_vector_config: Optional[ControlVectorConfig],
                       cache_config: CacheConfig) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_class = get_model_architecture(model_config)[0]
@@ -115,7 +116,8 @@ class BaseModelLoader(ABC):
                    vision_language_config: Optional[VisionLanguageConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+                   cache_config: CacheConfig,
+                   control_vector_config: Optional[ControlVectorConfig]) -> nn.Module:
         """Load a model with the given configurations."""
         ...
 
@@ -253,13 +255,14 @@ class DefaultModelLoader(BaseModelLoader):
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
                    vision_language_config: Optional[VisionLanguageConfig],
+                   control_vector_config: Optional[ControlVectorConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, vision_language_config,
+                                          lora_config, vision_language_config, control_vector_config,
                                           cache_config)
             model.load_weights(
                 self._get_weights_iterator(model_config.model,

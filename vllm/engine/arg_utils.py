@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple, Union
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         TokenizerPoolConfig, VisionLanguageConfig)
+                         TokenizerPoolConfig, VisionLanguageConfig, ControlVectorConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import str_to_int_tuple
 
@@ -77,6 +77,9 @@ class EngineArgs:
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
     preemption_mode: Optional[str] = None
+
+    ## Control Vectors
+    enable_cv: bool = False
 
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
@@ -708,6 +711,8 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
+        
+        control_vector_config = ControlVectorConfig()
 
         if self.qlora_adapter_name_or_path is not None and \
             self.qlora_adapter_name_or_path != "":
@@ -772,7 +777,8 @@ class EngineArgs:
                             vision_language_config=vision_language_config,
                             speculative_config=speculative_config,
                             load_config=load_config,
-                            decoding_config=decoding_config)
+                            decoding_config=decoding_config,
+                            control_vector_config=control_vector_config)
 
 
 @dataclass

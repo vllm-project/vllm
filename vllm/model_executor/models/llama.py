@@ -75,7 +75,7 @@ class LlamaMLP(nn.Module):
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
-    def forward(self, x):
+    def forward(self, x, positions):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
@@ -234,7 +234,7 @@ class LlamaDecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, positions)
         return hidden_states, residual
 
 

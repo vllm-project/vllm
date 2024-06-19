@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
@@ -46,6 +47,7 @@ class GPUExecutor(ExecutorBase):
             vision_language_config=self.vision_language_config,
             speculative_config=self.speculative_config,
             is_driver_worker=rank == 0,
+            control_vector_config = self.control_vector_config
         )
 
     def _create_worker(self,
@@ -102,6 +104,9 @@ class GPUExecutor(ExecutorBase):
     def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
 
+    def add_control_vector(self, control_vector_request: ControlVectorRequest) -> None:
+        return self.driver_worker.add_control_vector(control_vector_request)
+    
     def check_health(self) -> None:
         # GPUExecutor will always be healthy as long as
         # it's running.

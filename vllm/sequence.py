@@ -12,6 +12,7 @@ from vllm.inputs import LLMInputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.control_vectors.request import ControlVectorRequest
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalData
@@ -225,12 +226,14 @@ class Sequence:
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
     ) -> None:
         self.seq_id = seq_id
         self.inputs = inputs
         self.block_size = block_size
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
+        self.control_vector_request = control_vector_request
 
         self.data = SequenceData(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
@@ -426,6 +429,7 @@ class SequenceGroup:
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -441,6 +445,7 @@ class SequenceGroup:
         self.embeddings = embeddings
         self.pooling_params = pooling_params
         self.encoder_seq = encoder_seq
+        self.control_vector_request = control_vector_request
 
     @property
     def prompt(self) -> Optional[str]:
@@ -640,6 +645,7 @@ class SequenceGroupMetadata:
         multi_modal_data: Optional["MultiModalData"] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -655,6 +661,7 @@ class SequenceGroupMetadata:
         self.cross_block_table = cross_block_table
         self._token_chunk_size = token_chunk_size
         self.do_sample = do_sample
+        self.control_vector_request = control_vector_request
 
         # The number of speculative tokens adopted in this request.
         # None means specuative decoding is not used.

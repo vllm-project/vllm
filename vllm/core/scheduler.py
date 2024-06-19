@@ -1000,6 +1000,7 @@ class Scheduler:
                 lora_request=seq_group.lora_request,
                 computed_block_nums=common_computed_block_nums,
                 state=seq_group.state,
+                control_vector_request=seq_group.control_vector_request,
                 # `multi_modal_data` will only be present for the 1st comm
                 # between engine and worker.
                 # the subsequent comms can still use delta, but

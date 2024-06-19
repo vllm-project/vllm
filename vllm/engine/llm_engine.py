@@ -9,7 +9,8 @@ from transformers import GenerationConfig, PreTrainedTokenizer
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+                         VisionLanguageConfig, ControlVectorConfig)
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -154,6 +155,7 @@ class LLMEngine:
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
+        control_vector_config: Optional[ControlVectorConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -208,6 +210,7 @@ class LLMEngine:
         self.load_config = load_config
         self.decoding_config = decoding_config or DecodingConfig()
         self.log_stats = log_stats
+        self.control_vector_config = control_vector_config
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
@@ -230,6 +233,7 @@ class LLMEngine:
             vision_language_config=vision_language_config,
             speculative_config=speculative_config,
             load_config=load_config,
+            control_vector_config=control_vector_config
         )
 
         if not self.model_config.embedding_mode:
@@ -499,6 +503,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
