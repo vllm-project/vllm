@@ -1,0 +1,25 @@
+[
+    {
+        "test_name": "llama8B_tp1_sharegpt",
+        "qps_list": [1, 16],
+        "model": "meta-llama/Llama-8B-hf",
+        "lmdeploy_server_parameters": {
+            "tp": 1,
+            "server_port": 8000
+        },
+        "client_parameters": {
+            "model": "meta-llama/Llama-2-7b-hf",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200,
+            "port": 8000
+        },
+        "lmdeploy_client_parameters": {
+            "model": "llama2",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200,
+            "port": 8000
+        }
+    }
+]
