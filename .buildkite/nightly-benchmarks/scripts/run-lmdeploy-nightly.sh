@@ -106,7 +106,8 @@ run_serving_tests() {
 
     # prepare tokenizer
     server_model=$(echo "$server_params" | jq -r '.model')
-    rm /tokenizer_cache/*
+    rm -rf /tokenizer_cache
+    mkdir /tokenizer_cache
     python ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
       --model "$server_model" \
       --cachedir /tokenizer_cache
@@ -176,8 +177,6 @@ run_serving_tests() {
 
 main () {
 
-    # create tokenizer directory
-    mkdir /tokenizer_cache
     # enter vllm directory
     cd /vllm/benchmarks
 
