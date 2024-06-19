@@ -18,7 +18,6 @@ from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 import torch
 import torch.nn as nn
 from transformers import CLIPVisionConfig, CLIPVisionModel, PretrainedConfig
-from transformers.utils import logging
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
@@ -34,8 +33,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import get_dummy_image_data
 from vllm.sequence import SamplerOutput
-
-logger = logging.get_logger(__name__)
 
 _KEYS_TO_MODIFY_MAPPING = {
     "model.vision_embed_tokens": "vision_embed_tokens",
