@@ -550,8 +550,10 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
+            # if the reqeust uses tools and specified a tool choice
             if request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
+                print("CONSTELLATE handling named tool choice")
                 message = ChatMessage(
                     role=role,
                     content="",
@@ -560,7 +562,17 @@ class OpenAIServingChat(OpenAIServing):
                             name=request.tool_choice.function.name,
                             arguments=output.text))
                     ])
+
+            # if the request doesn't use tool choice OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
+                print("CONSTELLATE handling no tool choice or tool_choice = none")
+                message = ChatMessage(role=role, content=output.text)
+
+            # handle when there are tools and tool choice is auto
+            elif request.tools and (request.tool_choice == "auto" or request.tool_choice is None):
+                print("CONSTELLATE handling tool choice = auto")
+                print(output)
+                # FOR NOW make it a chat message; we will have to detect the type to make it later.
                 message = ChatMessage(role=role, content=output.text)
 
             choice_data = ChatCompletionResponseChoice(
