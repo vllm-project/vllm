@@ -13,8 +13,8 @@ logger = init_logger(__name__)
 
 if is_cpu():
     logger.warning(
-        "punica LoRA kernels on CPU will be fallback to Torch native kernels with non-optimized performance."
-    )
+        "punica LoRA kernels on CPU will be fallback to Torch native kernels, "
+        "which will cause non-optimized performance.")
 
 
 def _check_punica_support():

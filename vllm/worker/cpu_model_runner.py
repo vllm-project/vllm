@@ -152,9 +152,12 @@ class CPUModelRunner:
                     lora_requests.add(seq_group_metadata.lora_request)
 
                 lora_index_mapping += [lora_id] * (seq_len - computed_len)
-                lora_prompt_mapping.extend([lora_id] * (
-                    seq_len - computed_len if seq_group_metadata.sampling_params
-                    and seq_group_metadata.sampling_params.prompt_logprobs else 1))
+                lora_prompt_mapping.extend(
+                    [lora_id] *
+                    (seq_len -
+                     computed_len if seq_group_metadata.sampling_params
+                     and seq_group_metadata.sampling_params.prompt_logprobs
+                     else 1))
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data is not None:
