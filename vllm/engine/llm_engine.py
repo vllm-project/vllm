@@ -406,6 +406,10 @@ class LLMEngine:
                 initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_xpu_executor import RayXPUExecutor
                 executor_class = RayXPUExecutor
+            elif distributed_executor_backend == "mp":
+                from vllm.executor.multiproc_xpu_executor import (
+                    MultiprocessingXPUExecutor)
+                executor_class = MultiprocessingXPUExecutor
             else:
                 from vllm.executor.xpu_executor import XPUExecutor
                 executor_class = XPUExecutor
