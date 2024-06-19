@@ -1,5 +1,5 @@
 # Common dependencies
--r requirements-common.txt
+-r common.txt
 
 setuptools < 70.0.0 # IPEX's torch have some dependency. to be removed.
 
