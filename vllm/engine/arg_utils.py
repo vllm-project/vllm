@@ -56,7 +56,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: Optional[int] = None
-    max_seq_len_to_capture: int = 8192
+    max_seq_len_to_capture: int = 32768
     disable_custom_all_reduce: bool = False
     tokenizer_pool_size: int = 0
     tokenizer_pool_type: str = "ray"
