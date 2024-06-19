@@ -16,7 +16,7 @@
         },
         "tgi_server_parameters": {
             "model_id": "meta-llama/Llama-2-7b-hf",
-            "num_shard": 2,
+            "num_shard": 1,
             "port": 8000
         },
         "tgi_client_parameters": {
