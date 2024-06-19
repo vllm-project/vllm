@@ -243,7 +243,8 @@ class MiniCPMV(VisionLanguageModelBase):
         self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
         self.resampler.to(device="cuda", dtype=param_dtype)
         self.sampler = Sampler()
-        self.img2tensor_transform, self.tensor2img_transform = self.init_transform()
+        self.img2tensor_transform, self.tensor2img_transform = \
+            self.init_transform()
 
     def init_transform(self):
         return transforms.Compose(
@@ -404,9 +405,11 @@ class MiniCPMV(VisionLanguageModelBase):
         patches = []
 
         if multiple <= 1 or never_split:
-            best_size = self.find_best_resize(original_size, scale_resolution,
-                                              patch_size, allow_upscale=True)
-            # The resizing of torchvision is also avaliable in this funciton. 
+            best_size = self.find_best_resize(original_size,
+                                              scale_resolution,
+                                              patch_size,
+                                              allow_upscale=True)
+            # The resizing of torchvision is also avaliable in this funciton.
             # But there are slight deviations between the results of torchvision resizing and pillow image resizing.
             # For the consistency with MiniCPM-V-2 in HF, we choose PIL resizing and this may take a little more time.
             #
@@ -418,7 +421,9 @@ class MiniCPMV(VisionLanguageModelBase):
             #                          std=IMAGENET_INCEPTION_STD)
             # ])
             # source_image = resize_transform(image)
-            source_image = self.img2tensor_transform(image.resize(best_size, Image.Resampling.BICUBIC)).to(image_tensor.device)
+            source_image = self.img2tensor_transform(
+                image.resize(best_size,
+                             Image.Resampling.BICUBIC)).to(image_tensor.device)
         else:
             candidate_split_grids_nums = []
             for i in [multiple - 1, multiple, multiple + 1]:
@@ -436,7 +441,8 @@ class MiniCPMV(VisionLanguageModelBase):
             #                          std=IMAGENET_INCEPTION_STD)
             # ])
             # source_image = resize_transform(image_tensor.clone())
-            source_image = self.img2tensor_transform(image.copy().resize(best_resize, Image.Resampling.BICUBIC)).to(image_tensor.device)
+            source_image = self.img2tensor_transform(image.copy().resize(
+                best_resize, Image.Resampling.BICUBIC)).to(image_tensor.device)
 
             candidate_grids = []
 
@@ -470,7 +476,8 @@ class MiniCPMV(VisionLanguageModelBase):
             #                          std=IMAGENET_INCEPTION_STD)
             # ])
             # refine_image = resize_transform(image.clone())
-            refine_image = self.img2tensor_transform(image.copy().resize(refine_size, Image.Resampling.BICUBIC)).to(image_tensor.device)
+            refine_image = self.img2tensor_transform(image.copy().resize(
+                refine_size, Image.Resampling.BICUBIC)).to(image_tensor.device)
             patches = self.split_to_patches(refine_image, best_grid)
 
         return source_image, patches, best_grid
@@ -607,7 +614,7 @@ class MiniCPMV(VisionLanguageModelBase):
                 "input_ids": input_ids
             }, self.config.im_start_token_id, self.config.im_end_token_id,
             self.config.unk_token_id)
-        
+
         output = self.llm(input_ids=None,
                           positions=positions,
                           kv_caches=kv_caches,

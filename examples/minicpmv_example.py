@@ -113,12 +113,12 @@ class MiniCPMV_VLLM:
             question + \
             "<AI>" + '<unk>' * addtion_tokens
 
-        outputs = self.llm.generate({
+        outputs = self.llm.generate(
+            {
                 "prompt": prompt,
                 "multi_modal_data": ImagePixelData(images),
             },
-            sampling_params=sampling_params
-        )
+            sampling_params=sampling_params)
         return outputs[0].outputs[0].text
 
 
