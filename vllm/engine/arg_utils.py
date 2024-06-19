@@ -577,7 +577,7 @@ class EngineArgs:
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
         parser.add_argument(
-            '--preemption_mode',
+            '--preemption-mode',
             type=str,
             default=None,
             help='If \'recompute\', the engine performs preemption by block '
