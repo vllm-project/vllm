@@ -90,7 +90,7 @@ run_serving_tests() {
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.lmdeploy_server_parameters')
     client_params=$(echo "$params" | jq -r '.lmdeploy_client_parameters')
-    model=$(echo "$server_params" | jq -r '.model')
+    model=$(echo "$params" | jq -r '.model')
     server_args=$(json2args "$server_params")
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
