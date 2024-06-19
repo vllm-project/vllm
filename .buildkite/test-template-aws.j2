@@ -66,6 +66,7 @@ steps:
     plugins:
     - kubernetes:
         podSpec:
+          priorityClassName: ci
           containers:
           - image: {{ docker_image }}
             command: ["bash"]
