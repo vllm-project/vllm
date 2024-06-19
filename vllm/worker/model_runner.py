@@ -327,6 +327,7 @@ class ModelRunner:
                 tokens = seq_data.get_token_ids()[context_len:seq_len]
                 # tokens = [seq_data.get_last_token_id()]
                 print("tokens", tokens)
+                print("context_len, seq_len", context_len, seq_len)
 
                 # Prefix cache was hit.
                 # Prefix is not supported with sliding_window

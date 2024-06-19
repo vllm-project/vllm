@@ -1,11 +1,12 @@
 from itertools import count
 from typing import Iterator, List
 
+from vllm.sequence import (ExecuteModelRequest, SequenceData,
+                           SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
+from vllm.spec_decode.util import get_all_seq_ids, nvtx_range
 from vllm.worker.worker_base import WorkerBase
-from vllm.sequence import ExecuteModelRequest, SequenceData, SequenceGroupMetadata
-from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range)
 
 SeqId = int
 TargetSeqId = int
@@ -30,10 +31,10 @@ class MQAScorer(SpeculativeScorer):
             seq_ids=get_all_seq_ids(execute_model_req.seq_group_metadata_list))
         for i, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
-            seq_data = seq_group_metadata.seq_data
-            seq_id = next(iter(seq_data.keys()))
+            seq_data_dict = seq_group_metadata.seq_data
+            seq_id = next(iter(seq_data_dict.keys()))
 
-            seq_data: SequenceData = seq_data[seq_id]
+            seq_data: SequenceData = seq_data_dict[seq_id]
             prompt_token_ids = seq_data.get_prompt_token_ids()
             output_token_ids = seq_data.get_output_token_ids()
             proposal_token_ids = proposals.proposal_token_ids.tolist()[i]

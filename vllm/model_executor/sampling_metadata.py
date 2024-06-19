@@ -223,6 +223,7 @@ def _prepare_seq_groups(
                                   if do_sample else query_len)
             sample_len = num_prefill_sample if do_sample else 0
         else:
+            assert query_lens is not None
             # Decode
             prompt_logprob_len = 0
             sample_len = query_lens[i] if do_sample else 0

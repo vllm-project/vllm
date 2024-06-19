@@ -685,6 +685,8 @@ class LLMEngine:
                 scheduled_seq_groups, output_by_sequence_group,
                 seq_group_metadata_list):
             seq_group = scheduled_seq_group.seq_group
+            # I don't think we should update the number of computed tokens here
+            # We should update this field when processing the output
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
             if self.model_config.embedding_mode:

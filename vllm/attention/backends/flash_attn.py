@@ -351,7 +351,8 @@ class FlashAttentionImpl(AttentionImpl):
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
-            if decode_meta.max_query_len > 1:
+            if decode_meta.max_query_len and decode_meta.max_query_len > 1:
+                assert decode_meta.seq_lens is not None
                 max_seq_len = max(decode_meta.seq_lens)
                 output[num_prefill_tokens:] = flash_attn_varlen_func(
                     q=decode_query,
