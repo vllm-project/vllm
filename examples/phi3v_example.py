@@ -27,11 +27,12 @@ def run_phi3v():
 
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
 
-    outputs = llm.generate({
-        "prompt": prompt,
-        "sampling_params": sampling_params,
-        "multi_modal_data": ImagePixelData(image),
-    })
+    outputs = llm.generate(
+        {
+            "prompt": prompt,
+            "multi_modal_data": ImagePixelData(image),
+        },
+        sampling_params=sampling_params)
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
