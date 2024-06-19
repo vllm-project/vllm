@@ -1,3 +1,5 @@
+"""Minimal implementation of CLIPVisionModel intended to be only used 
+within a vision language model."""
 from typing import Optional, Tuple
 
 import torch
@@ -12,6 +14,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
 
+# Copied from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa
 class CLIPVisionEmbeddings(nn.Module):
 
     def __init__(self, config: CLIPVisionConfig):
@@ -118,19 +121,22 @@ class CLIPEncoder(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
+                 vision_feature_layer: int = -1,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([
-            CLIPEncoderLayer(config, quant_config=quant_config)
+            CLIPEncoderLayer(config=config, quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
+        self.vision_feature_layer = vision_feature_layer
 
     def forward(self, inputs_embeds: torch.Tensor):
 
+        # Encoder forward pass only up to the required layer
         hidden_states = inputs_embeds
-        for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states, )
+        for encoder_layer in self.layers[:(self.vision_feature_layer + 1)]:
+            hidden_states = encoder_layer(hidden_states)
 
         return hidden_states
 
@@ -139,6 +145,7 @@ class CLIPVisionTransformer(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
+                 vision_feature_layer: int = -1,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
@@ -146,7 +153,9 @@ class CLIPVisionTransformer(nn.Module):
 
         self.embeddings = CLIPVisionEmbeddings(config)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self.encoder = CLIPEncoder(config, quant_config=quant_config)
+        self.encoder = CLIPEncoder(config=config,
+                                   vision_feature_layer=vision_feature_layer,
+                                   quant_config=quant_config)
 
     def forward(
         self,
@@ -161,17 +170,19 @@ class CLIPVisionTransformer(nn.Module):
 
 
 class CLIPVisionModel(nn.Module):
+
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
 
     def __init__(self,
                  config: CLIPVisionConfig,
+                 vision_feature_layer: int = -1,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.vision_model = CLIPVisionTransformer(config, quant_config)
-
-    def get_input_embeddings(self) -> nn.Module:
-        return self.vision_model.embeddings.patch_embedding
+        self.vision_model = CLIPVisionTransformer(
+            config=config,
+            vision_feature_layer=vision_feature_layer,
+            quant_config=quant_config)
 
     def forward(self, pixel_values: Optional[torch.FloatTensor] = None):
 

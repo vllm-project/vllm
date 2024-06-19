@@ -99,7 +99,9 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_tower = CLIPVisionModel(config.vision_config)
+            self.vision_tower = CLIPVisionModel(
+                config.vision_config,
+                vision_feature_layer=config.vision_feature_layer)
         else:
             self.vision_tower = None
 
@@ -178,17 +180,19 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
-
         # Copied from https://github.com/huggingface/transformers/blob/39c3c0a72af6fbda5614dde02ff236069bb79827/src/transformers/models/llava/modeling_llava.py#L421  # noqa
         if strategy == "default":
             return image_features[:, 1:]
         elif strategy == "full":
             return image_features
+
         raise ValueError(f"Unexpected select feature strategy: {strategy}")
 
     def _image_pixels_to_features(self, vision_tower: CLIPVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
 
+        # NOTE: we skip the step to select the vision feature layer since
+        # this is already done inside the vision tower
         image_features = vision_tower(pixel_values.to(vision_tower.device))
 
         return self._select_image_features(
@@ -312,6 +316,7 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            # post_layernorm is not needed in CLIPVisionModel
             if "vision_model.post_layernorm" in name:
                 continue
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():

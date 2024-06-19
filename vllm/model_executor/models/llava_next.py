@@ -120,7 +120,9 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_tower = CLIPVisionModel(config.vision_config)
+            self.vision_tower = CLIPVisionModel(
+                config=config.vision_config,
+                vision_feature_layer=config.vision_feature_layer)
         else:
             raise TypeError("Image features are not supported by LLaVA-NeXT")
 
@@ -218,12 +220,10 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
 
     def _image_pixels_to_features(self, vision_tower: CLIPVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
-        # TODO(xwjiang): Maybe port minimal CLIPVisionModel over.
-        image_outputs = vision_tower(pixel_values.to(vision_tower.device),
-                                     output_hidden_states=True)
 
-        image_features = image_outputs.hidden_states[
-            self.config.vision_feature_layer]
+        # NOTE: we skip the step to select the vision feature layer since
+        # this is already done inside the vision tower
+        image_features = vision_tower(pixel_values.to(vision_tower.device))
 
         return self._select_image_features(
             image_features,
@@ -428,6 +428,9 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            # post_layernorm is not needed in CLIPVisionModel
+            if "vision_model.post_layernorm" in name:
                 continue
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:
