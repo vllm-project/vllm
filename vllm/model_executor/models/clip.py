@@ -42,7 +42,7 @@ class CLIPVisionEmbeddings(nn.Module):
                              torch.arange(self.num_positions).expand((1, -1)),
                              persistent=False)
 
-    def forward(self, pixel_values: torch.FloatTensor) -> torch.Tensor:
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         batch_size = pixel_values.shape[0]
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(pixel_values.to(
@@ -58,8 +58,9 @@ class CLIPVisionEmbeddings(nn.Module):
 
 class CLIPMLP(nn.Module):
 
-    def __init__(self, config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig]):
+    def __init__(self,
+                 config: CLIPVisionConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
@@ -94,7 +95,7 @@ class CLIPEncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
 
-    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.FloatTensor]:
+    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor]:
 
         residual = hidden_states
 
@@ -159,7 +160,7 @@ class CLIPVisionTransformer(nn.Module):
 
     def forward(
         self,
-        pixel_values: torch.FloatTensor,
+        pixel_values: torch.Tensor,
     ) -> torch.Tensor:
 
         hidden_states = self.embeddings(pixel_values)
@@ -184,7 +185,7 @@ class CLIPVisionModel(nn.Module):
             vision_feature_layer=vision_feature_layer,
             quant_config=quant_config)
 
-    def forward(self, pixel_values: Optional[torch.FloatTensor] = None):
+    def forward(self, pixel_values: Optional[torch.Tensor] = None):
 
         return self.vision_model(pixel_values=pixel_values)
 
