@@ -122,7 +122,6 @@ class CLIPEncoder(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
-                 vision_feature_layer: int = -1,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
@@ -130,13 +129,15 @@ class CLIPEncoder(nn.Module):
             CLIPEncoderLayer(config=config, quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
-        self.vision_feature_layer = vision_feature_layer
 
-    def forward(self, inputs_embeds: torch.Tensor):
+    def forward(self,
+                inputs_embeds: torch.Tensor,
+                vision_feature_layer: int = -1):
 
         # Encoder forward pass only up to the required layer
+        num_layer = len(self.layers) + vision_feature_layer + 1
         hidden_states = inputs_embeds
-        for encoder_layer in self.layers[:(self.vision_feature_layer + 1)]:
+        for encoder_layer in self.layers[:num_layer]:
             hidden_states = encoder_layer(hidden_states)
 
         return hidden_states
@@ -146,7 +147,6 @@ class CLIPVisionTransformer(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
-                 vision_feature_layer: int = -1,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
@@ -154,18 +154,18 @@ class CLIPVisionTransformer(nn.Module):
 
         self.embeddings = CLIPVisionEmbeddings(config)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self.encoder = CLIPEncoder(config=config,
-                                   vision_feature_layer=vision_feature_layer,
-                                   quant_config=quant_config)
+        self.encoder = CLIPEncoder(config=config, quant_config=quant_config)
 
     def forward(
         self,
         pixel_values: torch.Tensor,
+        vision_feature_layer: int = -1,
     ) -> torch.Tensor:
 
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)
-        hidden_states = self.encoder(inputs_embeds=hidden_states)
+        hidden_states = self.encoder(inputs_embeds=hidden_states,
+                                     vision_feature_layer=vision_feature_layer)
 
         return hidden_states
 
@@ -177,17 +177,17 @@ class CLIPVisionModel(nn.Module):
 
     def __init__(self,
                  config: CLIPVisionConfig,
-                 vision_feature_layer: int = -1,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.vision_model = CLIPVisionTransformer(
-            config=config,
-            vision_feature_layer=vision_feature_layer,
-            quant_config=quant_config)
+        self.vision_model = CLIPVisionTransformer(config=config,
+                                                  quant_config=quant_config)
 
-    def forward(self, pixel_values: Optional[torch.Tensor] = None):
+    def forward(self,
+                pixel_values: Optional[torch.Tensor] = None,
+                vision_feature_layer: int = -1):
 
-        return self.vision_model(pixel_values=pixel_values)
+        return self.vision_model(pixel_values=pixel_values,
+                                 vision_feature_layer=vision_feature_layer)
 
     @property
     def device(self):
