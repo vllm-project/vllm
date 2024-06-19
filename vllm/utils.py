@@ -111,7 +111,8 @@ class LRUCache(Generic[T]):
 
     def pin(self, key: Hashable) -> None:
         """
-        Pins a key in the cache preventing it from being evicted in the LRU order.
+        Pins a key in the cache preventing it from being
+        evicted in the LRU order.
         """
         if key not in self.cache:
             raise ValueError(f"Cannot pin key: {key} not in cache.")

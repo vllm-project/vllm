@@ -535,8 +535,8 @@ class LoRAModelManager:
         try:
             self._registered_loras.pin(lora_id)
         except ValueError as err:
-            raise ValueError(f"Pinning failed. "
-                             "LoRA {lora_id} is not registered.") from err
+            raise ValueError("Pinning failed. "
+                            f"LoRA {lora_id} is not registered.") from err
 
     def _pin_lora_in_gpu_cache(self, lora_id: int):
         if lora_id not in self._active_loras:
