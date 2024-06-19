@@ -1,9 +1,10 @@
 import math
-import torch
+
 import pytest
+import torch
 from PIL import Image
 from torchvision import transforms
-from transformers import AutoTokenizer, AutoConfig, AutoModel
+from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.multimodal.image import ImagePixelData

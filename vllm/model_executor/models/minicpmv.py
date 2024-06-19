@@ -33,20 +33,20 @@ except ImportError:
     raise ImportError('Please install timm==0.9.10') from ImportError
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from timm.data import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
 from torch import nn
 from torch.nn.init import trunc_normal_
 from torchvision import transforms
-from PIL import Image
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig, VisionLanguageConfig
-from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
+from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import get_dummy_image_data
@@ -408,10 +408,10 @@ class MiniCPMV(VisionLanguageModelBase):
                                               scale_resolution,
                                               patch_size,
                                               allow_upscale=True)
-            # The resizing of torchvision is also avaliable in this funciton.
-            # But there are slight deviations between the results of 
+            # The resizing of torchvision is also available in this function.
+            # But there are slight deviations between the results of
             # torchvision resizing and pillow image resizing.
-            # For the consistency with MiniCPM-V-2 in HF, 
+            # For the consistency with MiniCPM-V-2 in HF,
             # we choose PIL resizing and this may take a little more time.
             #
             # resize_transform = transforms.Compose([

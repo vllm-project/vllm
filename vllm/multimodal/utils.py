@@ -80,7 +80,7 @@ def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
     if config.hf_config.model_type in ("llava", "llava_next"):
         full_prompt = f"{image_prompt}\n{text_prompt}"
     elif config.hf_config.model_type in ("minicpmv"):
-        # TODO: Needs the length of prompt to be changable in model.
+        # TODO: Needs the length of prompt to be changeable in model.
         full_prompt = f"<用户>{image_prompt}<AI>{text_prompt}"
     elif config.hf_config.model_type == 'phi3_v':
         full_prompt = f"{image_prompt}<s>\n{text_prompt}"
