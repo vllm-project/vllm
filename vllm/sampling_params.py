@@ -139,7 +139,7 @@ class SamplingParams:
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
-        guided_options: Optional[Union[Dict, "GuidedDecodingFields"]] = None
+        # guided_options: Optional[Union[Dict, "GuidedDecodingFields"]] = None
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -188,7 +188,7 @@ class SamplingParams:
         else:
             self.output_text_buffer_length = 0
 
-        self.guided_options = guided_options
+        # self.guided_options = guided_options
 
         self._verify_args()
         if self.use_beam_search:

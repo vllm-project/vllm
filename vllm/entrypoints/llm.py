@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
+from typing import ClassVar, List, Optional, Sequence, Union, cast, overload, Dict
 
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -252,6 +252,7 @@ class LLM:
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        guided_options: Optional[Union[Dict, "GuidedDecodingFields"]] = None
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -293,6 +294,10 @@ class LLM:
                 Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
                 prompts)
 
+        if isinstance(guided_options, Dict) and len(guided_options) > 1:
+            raise ValueError(
+                "You can only use one kind of guided decoding but multiple is "
+                f"specified: {self.__dict__}")
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
@@ -301,6 +306,7 @@ class LLM:
             inputs=inputs,
             params=sampling_params,
             lora_request=lora_request,
+            guided_options=guided_options
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -501,6 +507,7 @@ class LLM:
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
+        guided_options: Optional[Union[Dict, "GuidedDecodingFields"]] = None
     ) -> None:
 
         if isinstance(inputs, (str, dict)):
@@ -519,13 +526,13 @@ class LLM:
             if len(params) != num_requests:
                 raise ValueError("The lengths of prompts and params "
                                  "must be the same.")
-            if all(isinstance(param, SamplingParams) for param in params):
-                params = [
-                    self._add_guided_processor(param) for param in params
-                    if isinstance(param, SamplingParams)
-                ]
+            
+            params = [
+                self._add_guided_processor(param, guided_options) for param in params
+                if isinstance(param, SamplingParams)
+            ]
         elif isinstance(params, SamplingParams):
-            params = self._add_guided_processor(params)
+            params = self._add_guided_processor(params, guided_options)
 
         for i, request_inputs in enumerate(inputs):
             self._add_request(
@@ -535,37 +542,37 @@ class LLM:
                     lora_request, Sequence) else lora_request,
             )
 
-    def _add_guided_processor(self, params: SamplingParams):
-        if options := params.guided_options:
-            if isinstance(options, dict):
-                options = GuidedDecodingFields(**options)
-            if options.guided_decoding_backend is None:
+    def _add_guided_processor(self, params: SamplingParams, guided_options: Optional[Union[Dict, "GuidedDecodingFields"]] = None):
+        if guided_options:
+            if isinstance(guided_options, dict):
+                guided_options = GuidedDecodingFields(**guided_options)
+            if guided_options.guided_decoding_backend is None:
                 decoding_config = self.llm_engine.get_decoding_config()
-                options.guided_decoding_backend = (
+                guided_options.guided_decoding_backend = (
                     decoding_config.guided_decoding_backend)
             guided_logits_processor = get_guided_decoding_logits_processor(
-                options, self.get_tokenizer())
+                guided_options, self.get_tokenizer())
             if guided_logits_processor:
                 if params.logits_processors is None:
                     params.logits_processors = []
                 params.logits_processors.append(guided_logits_processor)
         return params
 
-    def _add_guided_processor(self, params: SamplingParams):
-        if options := params.guided_options:
-            if isinstance(options, dict):
-                options = GuidedDecodingFields(**options)
-            if options.guided_decoding_backend is None:
-                decoding_config = self.llm_engine.get_decoding_config()
-                options.guided_decoding_backend = (
-                    decoding_config.guided_decoding_backend)
-            guided_logits_processor = get_guided_decoding_logits_processor(
-                options, self.get_tokenizer())
-            if guided_logits_processor:
-                if params.logits_processors is None:
-                    params.logits_processors = []
-                params.logits_processors.append(guided_logits_processor)
-        return params
+    # def _add_guided_processor(self, params: SamplingParams):
+    #     if options := params.guided_options:
+    #         if isinstance(options, dict):
+    #             options = GuidedDecodingFields(**options)
+    #         if options.guided_decoding_backend is None:
+    #             decoding_config = self.llm_engine.get_decoding_config()
+    #             options.guided_decoding_backend = (
+    #                 decoding_config.guided_decoding_backend)
+    #         guided_logits_processor = get_guided_decoding_logits_processor(
+    #             options, self.get_tokenizer())
+    #         if guided_logits_processor:
+    #             if params.logits_processors is None:
+    #                 params.logits_processors = []
+    #             params.logits_processors.append(guided_logits_processor)
+    #     return params
 
     def _add_request(
         self,

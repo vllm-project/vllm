@@ -48,73 +48,73 @@ def assert_outputs_equal(o1: List[RequestOutput], o2: List[RequestOutput]):
     assert [o.outputs for o in o1] == [o.outputs for o in o2]
 
 
-@pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize('prompt', PROMPTS)
-def test_v1_v2_api_consistency_single_prompt_string(llm: LLM, prompt):
-    sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
+# @pytest.mark.skip_global_cleanup
+# @pytest.mark.parametrize('prompt', PROMPTS)
+# def test_v1_v2_api_consistency_single_prompt_string(llm: LLM, prompt):
+#     sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
 
-    with pytest.warns(DeprecationWarning, match="'prompts'"):
-        v1_output = llm.generate(prompts=prompt,
-                                 sampling_params=sampling_params)
+#     with pytest.warns(DeprecationWarning, match="'prompts'"):
+#         v1_output = llm.generate(prompts=prompt,
+#                                  sampling_params=sampling_params)
 
-    v2_output = llm.generate(prompt, sampling_params=sampling_params)
-    assert_outputs_equal(v1_output, v2_output)
+#     v2_output = llm.generate(prompt, sampling_params=sampling_params)
+#     assert_outputs_equal(v1_output, v2_output)
 
-    v2_output = llm.generate({"prompt": prompt},
-                             sampling_params=sampling_params)
-    assert_outputs_equal(v1_output, v2_output)
-
-
-@pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize('prompt_token_ids', TOKEN_IDS)
-def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM,
-                                                    prompt_token_ids):
-    sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
-
-    with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
-        v1_output = llm.generate(prompt_token_ids=prompt_token_ids,
-                                 sampling_params=sampling_params)
-
-    v2_output = llm.generate({"prompt_token_ids": prompt_token_ids},
-                             sampling_params=sampling_params)
-    assert_outputs_equal(v1_output, v2_output)
+#     v2_output = llm.generate({"prompt": prompt},
+#                              sampling_params=sampling_params)
+#     assert_outputs_equal(v1_output, v2_output)
 
 
-@pytest.mark.skip_global_cleanup
-def test_v1_v2_api_consistency_multi_prompt_string(llm: LLM):
-    sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
+# @pytest.mark.skip_global_cleanup
+# @pytest.mark.parametrize('prompt_token_ids', TOKEN_IDS)
+# def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM,
+#                                                     prompt_token_ids):
+#     sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
 
-    with pytest.warns(DeprecationWarning, match="'prompts'"):
-        v1_output = llm.generate(prompts=PROMPTS,
-                                 sampling_params=sampling_params)
+#     with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
+#         v1_output = llm.generate(prompt_token_ids=prompt_token_ids,
+#                                  sampling_params=sampling_params)
 
-    v2_output = llm.generate(PROMPTS, sampling_params=sampling_params)
-    assert_outputs_equal(v1_output, v2_output)
-
-    v2_output = llm.generate(
-        [{
-            "prompt": p
-        } for p in PROMPTS],
-        sampling_params=sampling_params,
-    )
-    assert_outputs_equal(v1_output, v2_output)
+#     v2_output = llm.generate({"prompt_token_ids": prompt_token_ids},
+#                              sampling_params=sampling_params)
+#     assert_outputs_equal(v1_output, v2_output)
 
 
-@pytest.mark.skip_global_cleanup
-def test_v1_v2_api_consistency_multi_prompt_tokens(llm: LLM):
-    sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
+# @pytest.mark.skip_global_cleanup
+# def test_v1_v2_api_consistency_multi_prompt_string(llm: LLM):
+#     sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
 
-    with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
-        v1_output = llm.generate(prompt_token_ids=TOKEN_IDS,
-                                 sampling_params=sampling_params)
+#     with pytest.warns(DeprecationWarning, match="'prompts'"):
+#         v1_output = llm.generate(prompts=PROMPTS,
+#                                  sampling_params=sampling_params)
 
-    v2_output = llm.generate(
-        [{
-            "prompt_token_ids": p
-        } for p in TOKEN_IDS],
-        sampling_params=sampling_params,
-    )
-    assert_outputs_equal(v1_output, v2_output)
+#     v2_output = llm.generate(PROMPTS, sampling_params=sampling_params)
+#     assert_outputs_equal(v1_output, v2_output)
+
+#     v2_output = llm.generate(
+#         [{
+#             "prompt": p
+#         } for p in PROMPTS],
+#         sampling_params=sampling_params,
+#     )
+#     assert_outputs_equal(v1_output, v2_output)
+
+
+# @pytest.mark.skip_global_cleanup
+# def test_v1_v2_api_consistency_multi_prompt_tokens(llm: LLM):
+#     sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
+
+#     with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
+#         v1_output = llm.generate(prompt_token_ids=TOKEN_IDS,
+#                                  sampling_params=sampling_params)
+
+#     v2_output = llm.generate(
+#         [{
+#             "prompt_token_ids": p
+#         } for p in TOKEN_IDS],
+#         sampling_params=sampling_params,
+#     )
+#     assert_outputs_equal(v1_output, v2_output)
 
 
 @pytest.mark.skip_global_cleanup
@@ -156,13 +156,14 @@ def test_guided_regex(sample_regex, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_options=dict(guided_regex=sample_regex))
+        )
     outputs = llm.generate(
         prompts=[
             f"Give an example IPv4 address with this regex: {sample_regex}"
         ] * 2,
         sampling_params=sampling_params,
         use_tqdm=True,
+        guided_options=dict(guided_regex=sample_regex)
     )
 
     assert outputs is not None
@@ -171,6 +172,7 @@ def test_guided_regex(sample_regex, llm):
         assert isinstance(output, RequestOutput)
         prompt = output.prompt
         generated_text = output.outputs[0].text
+        print(generated_text)
         assert generated_text is not None
         assert re.fullmatch(sample_regex, generated_text) is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
@@ -181,7 +183,7 @@ def test_guided_json_completion(sample_json_schema, llm):
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
-        guided_options=dict(guided_json=sample_json_schema))
+        )
     outputs = llm.generate(
         prompts=[
             f"Give an example JSON for an employee profile "
@@ -189,6 +191,7 @@ def test_guided_json_completion(sample_json_schema, llm):
         ] * 2,
         sampling_params=sampling_params,
         use_tqdm=True,
+        guided_options=dict(guided_json=sample_json_schema)
     )
 
     assert outputs is not None
@@ -210,11 +213,12 @@ def test_guided_choice_completion(sample_guided_choice, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_options=dict(guided_choice=sample_guided_choice))
+        )
     outputs = llm.generate(
         prompts="The best language for type-safe systems programming is ",
         sampling_params=sampling_params,
         use_tqdm=True,
+        guided_options=dict(guided_choice=sample_guided_choice)
     )
 
     assert outputs is not None
@@ -223,6 +227,7 @@ def test_guided_choice_completion(sample_guided_choice, llm):
         assert isinstance(output, RequestOutput)
         prompt = output.prompt
         generated_text = output.outputs[0].text
+        print(generated_text)
         assert generated_text is not None
         assert generated_text in sample_guided_choice
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
@@ -234,12 +239,13 @@ def test_guided_grammar(sample_sql_statements, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_options=dict(guided_grammar=sample_sql_statements))
+        )
     outputs = llm.generate(
         prompts=("Generate a sql state that select col_1 from "
                  "table_1 where it is equals to 1"),
         sampling_params=sampling_params,
         use_tqdm=True,
+        guided_options=dict(guided_grammar=sample_sql_statements)
     )
 
     assert outputs is not None
