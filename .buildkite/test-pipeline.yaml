@@ -182,7 +182,11 @@ steps:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
 
-- label: A100 status
+- label: Distributed Tests (A100)
   gpu: a100
   commands: 
-  - nvidia-smi
+  # NOTE: don't test llama model here, it seems hf implementation is buggy
+  # see https://github.com/vllm-project/vllm/pull/5689 for details
+  - pytest -v -s distributed/test_custom_all_reduce.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
