@@ -276,9 +276,13 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
         image_token_id=32044,
+        image_feature_size_override=1921,
     )
     mm_data = DummyImageDataFactories.dummy_pixel_data_for_clip(
-        CLIP_VIT_LARGE_PATCH14_336_CONFIG, )
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        image_width_override=1344,
+        image_height_override=1008,
+    )
 
     return seq_data, mm_data
 
