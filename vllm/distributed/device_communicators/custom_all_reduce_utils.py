@@ -201,6 +201,12 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         ids = list(range(num_dev))
         # batch of all pairs of GPUs
         batch_src, batch_tgt = zip(*list(product(ids, ids)))
+        # NOTE: we use `subprocess` rather than `multiprocessing` here
+        # because the caller might not have `if __name__ == "__main__":`,
+        # in that case we cannot use spawn method in multiprocessing.
+        # However, `can_actually_p2p` requires spawn method.
+        # The fix is, we use `subprocess` to call the function,
+        # where we have `if __name__ == "__main__":` in this file.
         input_bytes = pickle.dumps((batch_src, batch_tgt))
         returned = subprocess.run([sys.executable, __file__],
                                   input=input_bytes,
