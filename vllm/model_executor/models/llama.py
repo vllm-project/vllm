@@ -439,10 +439,6 @@ class LlamaForCausalLM(nn.Module):
                 
     def load_quantized_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
-        #with open("/projects/a.txt", "r") as f:
-        #    j = json.load(f)
-        #    for k, v in j.items():
-        #        params_dict[k].data.copy_(v)
         quant_shards = [
             ("mlp.gate_up_proj", "mlp.fc", 0),  # fc is gate_proj
             ("mlp.gate_up_proj", "mlp.gate", 1),  # gate is up_proj
@@ -453,7 +449,6 @@ class LlamaForCausalLM(nn.Module):
             ("self_attn.qkv_proj", "attention.qkv"),
         ]
         for name, loaded_weight in weights:
-            #print(name)
             name = name.replace('transformer', 'model')
             name = name.replace('kv_cache_scaling_factor', 'qkv.output_scaling_factor')
             loaded_weight = loaded_weight.to("cuda")

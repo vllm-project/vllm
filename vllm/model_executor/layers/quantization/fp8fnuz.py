@@ -173,7 +173,6 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
         layer.weights_scaling_factor = Parameter(max_w_scale, requires_grad=False)
 
         # WEIGHT
-        #   Transpose weight for passing to torch._scaled_mm
         weight = layer.weight
         layer.weight = Parameter(weight, requires_grad=False)
 
@@ -217,7 +216,7 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
         n = x.shape[0]
         k = x.shape[1]
         
-        solidx = self._tuned.get((m, n, k))
+        solidx = self._config._tuned.get((m, n, k))
         
         if is_hip() and bias is None and solidx is not None:
             res = ops.fp8_mm(x_quant,

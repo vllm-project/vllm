@@ -62,8 +62,6 @@ void fp8_mm(torch::Tensor& a,
     else {
         hipblas_out_type = HIP_R_16F;
     }
-    // auto options{at::TensorOptions().dtype(out_dtype).device(at::kCUDA)};
-    // auto result{torch::empty({a_sizes[0], b_sizes[1]}, options)};
 
     constexpr bool transpose_result = true;
     bool transpose_a;
