@@ -54,6 +54,7 @@ class EngineArgs:
     rope_scaling: Optional[dict] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
+    quantized_weights_path: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: Optional[int] = None
     max_seq_len_to_capture: int = 32768
@@ -337,6 +338,13 @@ class EngineArgs:
                             'None, we assume the model weights are not '
                             'quantized and use `dtype` to determine the data '
                             'type of the weights.')
+        parser.add_argument(
+            '--quantized-weights-path',
+            type=nullable_str,
+            default=None,
+            help='Path to the safetensor file containing the quantized weights '
+            'and scaling factors. This should generally be supplied, when '
+            'quantization is FP8.')
         parser.add_argument('--rope-scaling',
                             default=None,
                             type=json.loads,
@@ -562,10 +570,11 @@ class EngineArgs:
             self.trust_remote_code, self.dtype, self.seed, self.revision,
             self.code_revision, self.rope_scaling, self.tokenizer_revision,
             self.max_model_len, self.quantization,
-            self.quantization_param_path, self.enforce_eager,
-            self.max_context_len_to_capture, self.max_seq_len_to_capture,
-            self.max_logprobs, self.disable_sliding_window,
-            self.skip_tokenizer_init, self.served_model_name)
+            self.quantization_param_path, self.quantized_weights_path,
+            self.enforce_eager, self.max_context_len_to_capture,
+            self.max_seq_len_to_capture, self.max_logprobs,
+            self.disable_sliding_window, self.skip_tokenizer_init,
+            self.served_model_name)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

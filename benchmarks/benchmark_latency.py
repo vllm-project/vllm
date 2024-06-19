@@ -24,6 +24,7 @@ def main(args: argparse.Namespace):
               num_speculative_tokens=args.num_speculative_tokens,
               tokenizer=args.tokenizer,
               quantization=args.quantization,
+              quantized_weights_path=args.quantized_weights_path,
               tensor_parallel_size=args.tensor_parallel_size,
               trust_remote_code=args.trust_remote_code,
               dtype=args.dtype,
@@ -175,6 +176,13 @@ if __name__ == '__main__':
         'accuracy issues. FP8_E5M2 (without scaling) is only supported on '
         'cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is '
         'instead supported for common inference criteria.')
+    parser.add_argument(
+        '--quantized-weights-path',
+        type=str,
+        default=None,
+        help='Path to the safetensor file containing the quantized weights '
+        'and scaling factors. This should generally be supplied, when '
+        'quantization is FP8.')
     parser.add_argument(
         '--profile',
         action='store_true',

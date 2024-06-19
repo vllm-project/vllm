@@ -97,6 +97,7 @@ class ModelConfig:
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
         quantization_param_path: Optional[str] = None,
+        quantized_weights_path: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: Optional[int] = None,
@@ -116,6 +117,7 @@ class ModelConfig:
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
+        self.quantized_weights_path = quantized_weights_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         if self.max_context_len_to_capture is not None:

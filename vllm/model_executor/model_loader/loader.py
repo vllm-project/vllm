@@ -248,11 +248,11 @@ class DefaultModelLoader(BaseModelLoader):
                                                "fall_back_to_pt_during_load",
                                                True)), )
             if (model_config.quantization == 'fp8'
-                    and model_config.quantization_param_path is not None):
+                    and model_config.quantized_weights_path is not None):
                 model.load_quantized_weights(
                     safetensors_weights_iterator([
                         model_config.model +
-                        model_config.quantization_param_path
+                        model_config.quantized_weights_path
                     ]))
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
