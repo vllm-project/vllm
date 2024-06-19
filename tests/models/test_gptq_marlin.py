@@ -69,8 +69,7 @@ def test_models(
                      dtype=dtype,
                      quantization="marlin",
                      max_model_len=MAX_MODEL_LEN,
-                     tensor_parallel_size=1,
-                     enforce_eager=True) as gptq_marlin_model:
+                     tensor_parallel_size=1) as gptq_marlin_model:
 
         gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
@@ -85,8 +84,7 @@ def test_models(
                      dtype="half",
                      quantization="gptq",
                      max_model_len=MAX_MODEL_LEN,
-                     tensor_parallel_size=1,
-                     enforce_eager=True) as gptq_model:
+                     tensor_parallel_size=1) as gptq_model:
         gptq_outputs = gptq_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
 
