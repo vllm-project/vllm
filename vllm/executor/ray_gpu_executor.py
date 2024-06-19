@@ -169,9 +169,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 distributed_init_method=distributed_init_method,
             ) for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids)
         ]
-        if USE_RAY_COMPILED_DAG:
-            for kwargs in init_worker_all_kwargs:
-                kwargs["is_driver_worker"] = True
 
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
         self._run_workers("init_device")
@@ -317,7 +314,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             forward_dag = MultiOutputNode([
                 worker.execute_model_compiled_dag_remote.
                 bind(  # type: ignore[attr-defined]
-                    input_data) for worker in self.workers
+                    input_data) for worker in self.all_workers
             ])
         return forward_dag.experimental_compile()
 

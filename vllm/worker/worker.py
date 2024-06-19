@@ -61,9 +61,9 @@ class Worker(WorkerBase):
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
-        #if parallel_config and is_driver_worker:
-        #    assert rank % parallel_config.tensor_parallel_size == 0, \
-        #           "Driver worker should be rank 0 of tensor parallel group."
+        if parallel_config and is_driver_worker:
+            assert rank % parallel_config.tensor_parallel_size == 0, \
+                   "Driver worker should be rank 0 of tensor parallel group."
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
