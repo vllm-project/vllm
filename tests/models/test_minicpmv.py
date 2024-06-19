@@ -127,11 +127,11 @@ class MiniCPMV_VLLM:
             },
             sampling_params=sampling_params
         )
-        return outputs[0].outputs[0].text
+        return outputs[0].outputs[0].text, outputs[0].outputs[0].token_ids
 
 
 model_names = [
-    "/data1/hezhihui/projects/MiniCPM-V-2"
+    "openbmb/MiniCPM-V-2"
 ]
 
 
@@ -141,27 +141,28 @@ def get_hf_results(model_name, image, question):
     hf_model = hf_model.to(device='cuda', dtype=torch.bfloat16)
     hf_model.eval()
     msgs = [{'role': 'user', 'content': question}]
-    res, _, _ = hf_model.chat(
+    outputs, _, _ = hf_model.chat(
         image=image,
         msgs=msgs,
         context=None,
         tokenizer=tokenizer,
         sampling=False
     )
-    return res
+    output_ids = tokenizer.encode(outputs)[1:]
+    return outputs, output_ids
 
 
 def get_vllm_results(model_name, image, question):
     model = MiniCPMV_VLLM(model_name)
     sampling_params = SamplingParams(
-        use_beam_search=True,
-        length_penalty=1.2,
-        best_of=3,
+        use_beam_search=False,
+        # length_penalty=1.2,
+        # best_of=3,
         max_tokens=1024,
         temperature=0
     )
-    res = model.generate(image, question, sampling_params)
-    return res
+    outputs, output_ids = model.generate(image, question, sampling_params)
+    return outputs, output_ids[:-1]
 
 
 @pytest.mark.parametrize("model_name", model_names)
@@ -170,7 +171,10 @@ def test_models(model_name, image) -> None:
     if not torch.cuda.is_available():
         return
     image = Image.open(image).convert("RGB")
-    hf_outputs = get_hf_results(model_name, image, IMAGE_PROMPT)
-    vllm_outputs = get_vllm_results(model_name, image, IMAGE_PROMPT)
-    # print(hf_outputs)
-    # print(vllm_outputs)
+    hf_outputs, hf_output_ids = get_hf_results(model_name, image, IMAGE_PROMPT)
+    vllm_outputs, vllm_output_ids = get_vllm_results(model_name, image, IMAGE_PROMPT)
+    common_prefix_len = 0
+    for x in range(min(len(hf_output_ids), len(vllm_output_ids))):
+        if hf_output_ids[x] != vllm_output_ids[x]:
+            break
+        common_prefix_len += 1

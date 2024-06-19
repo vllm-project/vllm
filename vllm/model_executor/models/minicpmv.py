@@ -41,7 +41,8 @@ from torchvision.transforms import InterpolationMode
 from PIL import Image
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, VisionLanguageConfig
+from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
@@ -218,16 +219,17 @@ class Resampler(nn.Module):
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input()
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
-class MiniCPMV(nn.Module):
+class MiniCPMV(VisionLanguageModelBase):
 
     def __init__(
         self,
         config,
+        vision_language_config: VisionLanguageConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
-        super().__init__()
+        super().__init__(vision_language_config)
         self.config = config
         self.llm = MiniCPMForCausalLM(config,
                                       cache_config=cache_config,
@@ -403,7 +405,7 @@ class MiniCPMV(nn.Module):
 
         if multiple <= 1 or never_split:
             best_size = self.find_best_resize(original_size, scale_resolution,
-                                              patch_size)
+                                              patch_size, allow_upscale=True)
             # The resizing of torchvision is also avaliable in this funciton. 
             # But there are slight deviations between the results of torchvision resizing and pillow image resizing.
             # For the consistency with MiniCPM-V-2 in HF, we choose PIL resizing and this may take a little more time.
@@ -575,18 +577,18 @@ class MiniCPMV(nn.Module):
             input_ids = data['input_ids']
             image_bound = []
 
-        vllm_embedding = self.llm.model.embed_tokens(
+        vlm_embedding = self.llm.model.embed_tokens(
             input_ids) * self.llm.config.scale_emb
-        vision_hidden_states = vision_hidden_states.type(vllm_embedding.dtype)
+        vision_hidden_states = vision_hidden_states.type(vlm_embedding.dtype)
         if len(vision_hidden_states) > 0 and len(image_bound) > 0:
             image_indices = torch.stack([
                 torch.arange(r[0], r[1], dtype=torch.long) for r in image_bound
-            ]).to(vllm_embedding.device)
-            vllm_embedding.scatter_(
+            ]).to(vlm_embedding.device)
+            vlm_embedding.scatter_(
                 0,
-                image_indices.view(-1, 1).repeat(1, vllm_embedding.shape[-1]),
+                image_indices.view(-1, 1).repeat(1, vlm_embedding.shape[-1]),
                 vision_hidden_states.view(-1, vision_hidden_states.shape[-1]))
-        return vllm_embedding, vision_hidden_states
+        return vlm_embedding, vision_hidden_states
 
     def forward(
         self,
@@ -599,17 +601,18 @@ class MiniCPMV(nn.Module):
         image_input = kwargs.pop("pixel_values", None)
         if image_input is not None:
             image_input = image_input.float()
-        vllm_embeddings, vision_hidden_states = self.get_embedding(
+        vlm_embeddings, vision_hidden_states = self.get_embedding(
             {
                 "pixel_values": image_input,
                 "input_ids": input_ids
             }, self.config.im_start_token_id, self.config.im_end_token_id,
             self.config.unk_token_id)
+        
         output = self.llm(input_ids=None,
                           positions=positions,
                           kv_caches=kv_caches,
                           attn_metadata=attn_metadata,
-                          input_embeds=vllm_embeddings)
+                          input_embeds=vlm_embeddings)
         return output
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -621,7 +624,7 @@ class MiniCPMV(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
+        next_tokens = self.llm.sample(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):

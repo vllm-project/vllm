@@ -10,9 +10,10 @@ from transformers import PretrainedConfig, PreTrainedTokenizerBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
+from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_tpu)
+                        is_hip, is_neuron, is_tpu, is_xpu)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -302,7 +303,11 @@ class ModelConfig:
             return 1
 
         # For DBRX and MPT
-        if self.hf_config.model_type in ["dbrx", "mpt"]:
+        if self.hf_config.model_type == "mpt":
+            if "kv_n_heads" in self.hf_config.attn_config:
+                return self.hf_config.attn_config["kv_n_heads"]
+            return self.hf_config.num_attention_heads
+        if self.hf_config.model_type == "dbrx":
             return getattr(self.hf_config.attn_config, "kv_n_heads",
                            self.hf_config.num_attention_heads)
 
@@ -757,6 +762,8 @@ class DeviceConfig:
                 self.device_type = "tpu"
             elif is_cpu():
                 self.device_type = "cpu"
+            elif is_xpu():
+                self.device_type = "xpu"
             else:
                 # We don't call torch.cuda.is_available() here to
                 # avoid initializing CUDA before workers are forked
@@ -1287,7 +1294,10 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None and rope_scaling["type"] != "su":
+    # The correct one should be "longrope", kept "su" here
+    # to be backward compatible
+    if rope_scaling is not None and rope_scaling["type"] != "su" \
+        and rope_scaling["type"] != "longrope":
         if disable_sliding_window:
             # TODO(robertgshaw): Find a model that supports rope_scaling
             # with sliding window to see if this case should be allowed.
@@ -1362,6 +1372,17 @@ class DecodingConfig:
                              f"must be one of {valid_guided_backends}")
 
 
+@dataclass
+class ObservabilityConfig:
+    """Configuration for observability."""
+    otlp_traces_endpoint: Optional[str] = None
+
+    def __post_init__(self):
+        if not is_otel_installed() and self.otlp_traces_endpoint is not None:
+            raise ValueError("OpenTelemetry packages must be installed before "
+                             "configuring 'otlp_traces_endpoint'")
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     """Dataclass which contains all engine-related configuration. This
@@ -1378,6 +1399,7 @@ class EngineConfig:
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
+    observability_config: Optional[ObservabilityConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.

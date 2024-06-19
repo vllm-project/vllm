@@ -1,6 +1,6 @@
 # In this file, you can add more tests to run either by adding a new step or
 # adding a new command to an existing step. See different options here for examples.
-# This script will be feed into Jinja template in `test-template.j2` to generate
+# This script will be feed into Jinja template in `test-template-aws.j2` to generate
 # the final pipeline yaml file.
 
 steps:
@@ -100,13 +100,13 @@ steps:
 - label: Models Test
   #mirror_hardwares: [amd]
   commands:
-    - pytest -v -s models -m \"not llava\"
+    - pytest -v -s models -m \"not vlm\"
 
-- label: Llava Test
+- label: Vision Language Models Test
   mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models -m llava
+    - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test
   mirror_hardwares: [amd]
@@ -158,6 +158,15 @@ steps:
 - label: Quantization Test
   #mirror_hardwares: [amd]
   command: pytest -v -s quantization
+
+- label: Tracing Test
+  commands: 
+    - "pip install \
+        opentelemetry-sdk \
+        opentelemetry-api \
+        opentelemetry-exporter-otlp \
+        opentelemetry-semantic-conventions-ai"
+    - pytest -v -s tracing
 
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"
