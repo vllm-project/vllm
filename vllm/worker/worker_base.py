@@ -67,7 +67,8 @@ class WorkerBase(ABC):
 
     @abstractmethod
     def execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest] = None
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
@@ -176,7 +177,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         raise NotImplementedError
 
     def execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest] = None
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
