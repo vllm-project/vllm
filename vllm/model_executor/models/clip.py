@@ -153,6 +153,9 @@ class CLIPVisionTransformer(nn.Module):
         embed_dim = config.hidden_size
 
         self.embeddings = CLIPVisionEmbeddings(config)
+
+        # NOTE: This typo of "layrnorm" is not fixed on purpose to match
+        # the original transformers code and name of the model weights.
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         self.encoder = CLIPEncoder(config=config, quant_config=quant_config)
 
