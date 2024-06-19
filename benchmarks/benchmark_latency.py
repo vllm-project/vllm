@@ -29,6 +29,7 @@ def main(args: argparse.Namespace):
         tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
+        max_model_len=args.max_model_len,
         enforce_eager=args.enforce_eager,
         kv_cache_dtype=args.kv_cache_dtype,
         quantization_param_path=args.quantization_param_path,
@@ -150,6 +151,12 @@ if __name__ == '__main__':
     parser.add_argument('--trust-remote-code',
                         action='store_true',
                         help='trust remote code from huggingface')
+    parser.add_argument(
+        '--max-model-len',
+        type=int,
+        default=None,
+        help='Maximum length of a sequence (including prompt and output). '
+        'If None, will be derived from the model.')
     parser.add_argument(
         '--dtype',
         type=str,
