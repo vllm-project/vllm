@@ -10,5 +10,5 @@ def is_quant_method_supported(quant_method: str) -> bool:
 
     capability = torch.cuda.get_device_capability()
     capability = capability[0] * 10 + capability[1]
-    return (capability <
+    return (capability >=
             QUANTIZATION_METHODS[quant_method].get_min_capability())

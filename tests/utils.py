@@ -79,7 +79,7 @@ class RemoteOpenAIServer:
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
-        self._runner = self._RemoteRunner.remote(
+        self._runner = self._RemoteRunner.remote(  # type: ignore
             cli_args,
             wait_url=self.url_for("health"),
             wait_timeout=self.MAX_SERVER_START_WAIT_S)
