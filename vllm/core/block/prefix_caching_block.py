@@ -119,13 +119,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                                token_ids=token_ids,
                                                block_size=self._block_size,
                                                physical_block_id=None)
-        # TODO: Remove
-        # block = self._create_block(
-        #     prev_block=prev_block,
-        #     token_ids=token_ids,
-        #     block_size=self._block_size,
-        #     allocator=self,
-        # )
         assert block.content_hash is not None
 
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
@@ -201,19 +194,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._refcounter.incr(block_id)
 
             # the block comes from evictor already contain computed result
-            block = self._block_pool.create_block(prev_block=prev_block,
-                                                  token_ids=[],
-                                                  block_size=self._block_size,
-                                                  physical_block_id=block_id)
+            block = self._block_pool.acquire_block(prev_block=prev_block,
+                                                   token_ids=[],
+                                                   block_size=self._block_size,
+                                                   physical_block_id=block_id)
             block.computed = False
-            # block = self._create_block(
-            #     prev_block=prev_block,
-            #     token_ids=[],
-            #     block_size=self._block_size,
-            #     allocator=self,
-            #     block_id=block_id,
-            #     computed=True,
-            # )
+
             assert block.content_hash is None
 
             assert block.block_id not in self._blocks
@@ -326,14 +312,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                     token_ids=block.token_ids,
                     block_size=self._block_size,
                     physical_block_id=block.block_id))
-            # TODO: Remove
-            # self._create_block(
-            #     prev_block=prev_block,
-            #     token_ids=block.token_ids,
-            #     block_id=block.block_id,
-            #     block_size=self._block_size,
-            #     allocator=self,
-            # ))
+
             prev_block = forked_blocks[-1]
 
         return forked_blocks
@@ -473,30 +452,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             if self.block_is_computed(block_id):
                 ret.append(block_id)
         return ret
-
-    # TODO (alexm-neuralmagic): Remove
-    # def get_common_computed_block_ids(
-    #         self, seq_block_ids: List[List[int]]) -> List[int]:
-    # """Return the block ids that are common for a given sequence group.
-
-    # Only those blocks that are immutable and already be marked
-    # compyted would be taken consideration.
-    # """
-
-    # # NOTE We exclude the last block to avoid the case where the entire
-    # # prompt is cached. This would cause erroneous behavior in model
-    # # runner.
-
-    # ids_list = [
-    #     list(
-    #         takewhile(lambda block_id: self.block_is_computed(block_id),
-    #                   seq[:-1])) for seq in seq_block_ids
-    # ]
-    # # It returns a list of int although type annotation says list of string.
-    # return commonprefix([
-    #     ids for ids in ids_list  # type: ignore
-    #     if ids != []
-    # ])
 
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:
