@@ -65,9 +65,9 @@ done
 
 case "$SERVER" in
        tgi)
-			   echo "tgi"
-			   set -x
-			   docker run -e HF_TOKEN=$HF_TOKEN --gpus all --shm-size $SHM_SIZE -p $PORT:80 \
+               echo "tgi"
+               set -x
+               docker run -e HF_TOKEN=$HF_TOKEN --gpus all --shm-size $SHM_SIZE -p $PORT:80 \
                        -v $PWD/data:/data \
                        $TGI_IMAGE \
                        --model-id $MODEL \
