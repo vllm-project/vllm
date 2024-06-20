@@ -167,7 +167,7 @@ run_serving_tests() {
 
     # run the server
     echo "Running test case $test_name"
-    run_trt_server $server_params
+    run_trt_server "$server_params"
 
     # wait until the server is alive
     wait_for_server
