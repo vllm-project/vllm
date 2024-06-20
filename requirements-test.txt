@@ -1,0 +1,24 @@
+# testing
+pytest
+tensorizer>=2.9.0
+pytest-forked
+pytest-asyncio
+pytest-rerunfailures
+pytest-shard
+
+# testing utils
+awscli
+einops # required for MPT
+httpx
+peft
+requests==2.31  # required for python 3.8 testing
+ray
+sentence-transformers # required for embedding
+optimum     # required for hf gptq baselines
+auto-gptq   # required for hf gptq baselines
+
+# Benchmarking
+aiohttp
+
+# quantization
+bitsandbytes==0.42.0

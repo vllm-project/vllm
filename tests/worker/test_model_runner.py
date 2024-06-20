@@ -2,7 +2,8 @@ import pytest
 import torch
 
 from tests.nm_utils.utils_skip import should_skip_test_group
-from vllm.distributed.parallel_state import init_distributed_environment
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
@@ -297,6 +298,7 @@ def distributed_init():
         rank=0,
         distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
         local_rank=0)
+    ensure_model_parallel_initialized(1, 1)
 
 
 @pytest.mark.parametrize("batch_size", list(range(2, 128)))

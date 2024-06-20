@@ -81,5 +81,5 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         weight_scale = layer.weight_scale
 
         x_q, input_scales = custom_ops.scaled_int8_quant(x)
-        return custom_ops.cutlass_scaled_mm_dq(x_q, weight.t(), input_scales,
-                                               weight_scale, x.dtype)
+        return custom_ops.cutlass_scaled_mm(x_q, weight.t(), input_scales,
+                                            weight_scale, x.dtype)

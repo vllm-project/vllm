@@ -1,3 +1,8 @@
+# UPSTREAM SYNC:
+# Since this test is launched with torchrun, pytest.skip
+# an importing from test directory is having trouble.
+# So, we can have the should_skip_test_group logic here.
+
 import os
 
 import torch

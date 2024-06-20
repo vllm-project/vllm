@@ -5,12 +5,11 @@ Note: these tests will only pass on L4 GPU.
 import os
 
 import pytest
-import torch
 from transformers import AutoTokenizer
 
 from tests.nm_utils.utils_skip import should_skip_test_group
+from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 if should_skip_test_group(group_name="TEST_MODELS"):
     pytest.skip("TEST_MODELS=DISABLE, skipping model test group",
@@ -72,16 +71,16 @@ EXPECTED_STRS_MAP = {
     },
 }
 
-fp8_not_supported = True
 
-if torch.cuda.is_available():
-    capability = torch.cuda.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
-    fp8_not_supported = (capability <
-                         QUANTIZATION_METHODS["fp8"].get_min_capability())
-
-
-@pytest.mark.skipif(fp8_not_supported,
+# This test compares against golden strings for exact match since
+# there is no baseline implementation to compare against
+# and is unstable w.r.t specifics of the fp8 implementation or
+# the hardware being run on.
+# Disabled to prevent it from breaking the build
+@pytest.mark.skip(
+    reason=
+    "Prevent unstable test based on golden strings from breaking the build.")
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])

@@ -12,10 +12,16 @@ from vllm.outputs import (CompletionOutput, EmbeddingOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
-# UPSTREAM SYNC: use the current downstream.
-__version__ = "0.5.0"
+from .version import __version__
+
+
+def githash():
+    import torch
+    return torch.ops._C.githash()
+
 
 __all__ = [
+    "__version__",
     "githash",
     "LLM",
     "ModelRegistry",
@@ -34,8 +40,3 @@ __all__ = [
     "initialize_ray_cluster",
     "PoolingParams",
 ]
-
-
-def githash():
-    import torch
-    return torch.ops._C.githash()

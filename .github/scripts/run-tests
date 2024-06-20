@@ -109,6 +109,10 @@ do
     LOCAL_SUCCESS=0
     RESULT_XML=$(echo ${TEST} | sed -e "s/${TEST_DIR}/${RESULTS_DIR}/" | sed -e "s/.py/.xml/")
 
+    # report which test is being run
+    # (in CI, if a test hangs, this logs *which* test is running *before* it hangs)
+    echo "=== RUNNING TEST: ${TEST} ==="
+
     # this is a bit messy and brittle, but certain tests
     # need to be run with specific options
     if [[ "${TEST}" == *"kernels"* || "${TEST}" == *"samplers"* ]]; then
@@ -125,7 +129,18 @@ do
         pytest ${CC_PYTEST_FLAGS} --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
     fi
 
-    SUCCESS=$((SUCCESS + LOCAL_SUCCESS))
+    # if a file gets exit code 0, we are good
+    if [[ $LOCAL_SUCCESS == 0 ]]; then
+        echo "=== PASSED TEST: ${TEST} ==="
+    # if a file does not run any tests, pytest reports exit code of 5
+    # since we skip full modules in our skipping strategy, this is common
+    elif [[ $LOCAL_SUCCESS == 5 ]]; then
+        echo "=== SKIPPED TEST: ${TEST} ==="
+    # otherwise, report failure
+    else
+        echo "=== FAILED TEST: ${TEST} ==="
+        SUCCESS=$((SUCCESS + LOCAL_SUCCESS))
+    fi
 
 done
 

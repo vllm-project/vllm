@@ -2,8 +2,6 @@ import contextlib
 import gc
 import logging
 import os
-import subprocess
-import sys
 from typing import Any, Dict, List, Optional, Tuple, TypeVar
 
 import pytest
@@ -17,13 +15,14 @@ from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
 from tests.nm_utils.logging import make_logger
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
-from vllm.distributed import destroy_model_parallel
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu
+from vllm.utils import cuda_device_count_stateless, is_cpu
 
 logger = init_logger(__name__)
 
@@ -56,6 +55,7 @@ def _read_prompts(filename: str) -> List[str]:
 
 def cleanup():
     destroy_model_parallel()
+    destroy_distributed_environment()
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
@@ -767,18 +767,7 @@ def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
 
-    try:
-        out = subprocess.run([
-            sys.executable, "-c",
-            "import torch; print(torch.cuda.device_count())"
-        ],
-                             capture_output=True,
-                             check=True,
-                             text=True)
-    except subprocess.CalledProcessError as e:
-        logger.warning("Failed to get number of GPUs.", exc_info=e)
-        return 0
-    return int(out.stdout.strip())
+    return cuda_device_count_stateless()
 
 
 @pytest.fixture(scope="session")

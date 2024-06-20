@@ -7,10 +7,11 @@ import torch.distributed
 
 from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.distributed.communication_op import (  # noqa
-    graph_capture, tensor_model_parallel_all_reduce)
+    tensor_model_parallel_all_reduce)
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             get_world_group, graph_capture,
                                              init_distributed_environment)
 from vllm.utils import update_environment_variables
 
@@ -58,7 +59,8 @@ def worker_fn_wrapper(fn):
 
 @worker_fn_wrapper
 def worker_fn():
-    pynccl_comm = PyNcclCommunicator()
+    pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
+                                     device=get_world_group().device)
     tensor = torch.ones(16, 1024, 1024,
                         dtype=torch.float32).cuda(pynccl_comm.rank)
     with pynccl_comm.change_state(enable=True):
@@ -134,7 +136,8 @@ def test_pynccl_multiple_allreduce_with_vllm():
 def worker_fn_with_cudagraph():
     with torch.no_grad():
         graph = torch.cuda.CUDAGraph()
-        pynccl_comm = PyNcclCommunicator()
+        pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
+                                         device=get_world_group().device)
         # run something in the default stream to initialize torch engine
         a = torch.ones((4, 4), device=f'cuda:{pynccl_comm.rank}')
         torch.cuda.synchronize()
@@ -159,7 +162,8 @@ def test_pynccl_with_cudagraph():
 
 @worker_fn_wrapper
 def send_recv_worker_fn():
-    pynccl_comm = PyNcclCommunicator()
+    pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
+                                     device=get_world_group().device)
     if pynccl_comm.rank == 0:
         tensor = torch.ones(16, 1024, 1024,
                             dtype=torch.float32).cuda(pynccl_comm.rank)

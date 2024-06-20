@@ -3,11 +3,16 @@ from typing import List, Tuple
 import pytest
 from transformers import AutoTokenizer
 
+from tests.nm_utils.utils_skip import should_skip_test_group
 from vllm.config import VisionLanguageConfig
 
 from ..conftest import IMAGE_FILES
 
 pytestmark = pytest.mark.llava
+
+if should_skip_test_group(group_name="TEST_MODELS"):
+    pytest.skip("TEST_MODELS=DISABLE, skipping model test group",
+                allow_module_level=True)
 
 _PREFACE = (
     "A chat between a curious human and an artificial intelligence assistant. "
@@ -72,6 +77,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     return hf_input_ids, hf_output_str
 
 
+@pytest.mark.skip("Failing in NM Automation due to writing to file without "
+                  "permissions.")
 @pytest.mark.xfail(
     reason="Inconsistent image processor being used due to lack "
     "of support for dynamic image token replacement")

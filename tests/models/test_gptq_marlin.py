@@ -11,11 +11,10 @@ Run `pytest tests/models/test_gptq_marlin.py`.
 import os
 
 import pytest
-import torch
 
 from tests.models.utils import check_logprobs_close
 from tests.nm_utils.utils_skip import should_skip_test_group
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from tests.quantization.utils import is_quant_method_supported
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
 if should_skip_test_group(group_name="TEST_MODELS"):
@@ -25,14 +24,6 @@ if should_skip_test_group(group_name="TEST_MODELS"):
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
-
-gptq_marlin_not_supported = True
-
-if torch.cuda.is_available():
-    capability = torch.cuda.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
-    gptq_marlin_not_supported = (
-        capability < QUANTIZATION_METHODS["gptq_marlin"].get_min_capability())
 
 MODELS = [
     # act_order==False, group_size=channelwise
@@ -57,7 +48,7 @@ MODELS = [
 
 
 @pytest.mark.flaky(reruns=3)
-@pytest.mark.skipif(gptq_marlin_not_supported,
+@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])

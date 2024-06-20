@@ -39,6 +39,9 @@ runs:
       # testmo
       echo "XDG_CONFIG_HOME=/usr/local/apps" >> $GITHUB_ENV
       echo "PROJECT_ID=12" >> $GITHUB_ENV
+      # disable usage stats (writes to protected /usr/local/apps)
+      echo "VLLM_NO_USAGE_STATS=1" >> $GITHUB_ENV
+      echo "DO_NOT_TRACK=1" >> $GITHUB_ENV
     env:
         HF_TOKEN_SECRET: ${{ inputs.hf_token }}
     shell: bash
