@@ -186,7 +186,7 @@ class GPTJBlock(nn.Module):
             hidden_states = self.ipex_fusion(
                 mlp_output, attn_output,  residual
             )
-            if not self.mlp.fc_out.skip_bias_add:
+            if not self.mlp.fc_out.skip_bias_add and self.mlp.fc_out.bias is not None:
                 hidden_states = hidden_states + self.mlp.fc_out.bias
         else:
             mlp_output, _ = self.mlp.fc_out(mlp_output)
