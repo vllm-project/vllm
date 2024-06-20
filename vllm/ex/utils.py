@@ -555,27 +555,24 @@ class SubGraph:
         return first
 
     def last_input(self):
-        first = self.first_in_subgraph()
-        count = dict()
-
-        #for n in self.nodes:
-        #    count[n] = 0
+        # there has to be a smarter way to do this
+        first = next(iter(self.module.graph.nodes))
+        candidates = set(self.inputs)
 
         for n in self.inputs:
-            while n != first.prev:
-                if not n in count:
-                    count[n] = 0
-                count[n] = count[n] + 1
-                n = n.prev
+            p = n.prev
+            if len(candidates) == 1:
+                break
 
-        last = None
-        max_count = 0
-        for n in count.keys():
-            if count[n] > max_count:
-                max_count = count[n]
-                last = n
+            while p != first.prev:
+                if p in self.inputs:
+                    candidates.remove(p)
+                    break
+                p = p.prev
 
-        return last
+        assert len(candidates) == 1
+
+        return candidates.pop()
 
     def erase(self):
         for n in reversed(self.nodes):
