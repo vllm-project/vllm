@@ -90,6 +90,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         output_token_ids = self._process_seq_outputs(
             seq, valid_samples, sequence_group.sampling_params)
 
+        # FIXME: -1 is incorrect, it's scheduled_seq_group.token_chunk_size
         sequence_group.update_num_computed_tokens(len(output_token_ids) - 1)
 
     def _process_seq_outputs(self, seq: Sequence,

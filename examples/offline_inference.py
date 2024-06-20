@@ -8,7 +8,7 @@ prompts = [
     "The future of AI is",
 ]
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
 # Create an LLM.
 llm = LLM(model="facebook/opt-125m",
@@ -16,6 +16,7 @@ llm = LLM(model="facebook/opt-125m",
           num_speculative_tokens=5,
           use_v2_block_manager=True,
           enforce_eager=True)
+# llm = LLM(model="facebook/opt-125m")
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
