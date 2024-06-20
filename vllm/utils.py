@@ -40,6 +40,13 @@ STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
     "Prefix caching for encoder/decoder models " + \
                     "is not currently supported."
 
+STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
+    "Chunked prefill for encoder/decoder models " + \
+                    "is not currently supported."
+
+STR_ENCDECMR_CUDAGRAPH_UNSUPPORTED = \
+    "Currently CUDAGraph is not supported for encoder/decoder models"
+
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,

@@ -19,6 +19,8 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner import (LORA_WARMUP_RANK, ModelInput,
                                       ModelRunner)
+from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
+                        STR_ENCDECMR_CUDAGRAPH_UNSUPPORTED)
 
 logger = init_logger(__name__)
 
@@ -27,12 +29,6 @@ logger = init_logger(__name__)
 STR_ENCDECMR_ENCODER_DECODER_REQUIRED = \
     "Only encoder/decoder models may be executed " + \
         "using EncoderDecoderModelRunner"
-
-# Error message if EncoderDecoderModelRunner is used with
-# CUDAGraph
-STR_ENCDECMR_CUDAGRAPH_UNSUPPORTED = \
-    "Currently CUDAGraph is not supported for encoder/decoder models"
-
 
 class EncoderInput(NamedTuple):
     input_tokens: torch.Tensor
@@ -72,7 +68,7 @@ class EncoderDecoderModelRunner(ModelRunner):
             raise AttributeError(STR_ENCDECMR_ENCODER_DECODER_REQUIRED)
 
         if self.scheduler_config.chunked_prefill_enabled:
-            raise NotImplementedError()
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL)
 
     def _prepare_encoder_model_input(
             self, seq_group_metadata_list: List[SequenceGroupMetadata],

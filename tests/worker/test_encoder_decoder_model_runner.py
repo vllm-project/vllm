@@ -29,26 +29,33 @@ def _create_model_runner(model: str, *args,
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_prompt(batch_size):
     model_runner = _create_model_runner(
-        "facebook/opt-125m",
+        "facebook/bart-base",
         max_num_batched_tokens=100000,
         max_num_seqs=100000,
         enable_chunked_prefill=False,
     )
 
     seq_lens: List[int] = []
+    encoder_seq_lens: List[int] = []
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
     block_tables = {0: [1]}
+    cross_block_table = [2]
     for i in range(batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
         seq_data = SequenceData(list(range(seq_len)))
+        encoder_seq_len = (i+1) % (model_runner.block_size - 1) + 1
+        encoder_seq_lens.append(encoder_seq_len)
+        encoder_seq_data = SequenceData(list(range(encoder_seq_len)))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
             seq_data={0: seq_data},
             sampling_params=SamplingParams(temperature=0),
             block_tables=block_tables,
+            encoder_seq_data=encoder_seq_data,
+            cross_block_table=cross_block_table
         )
         assert seq_group_metadata.token_chunk_size == seq_data.get_len()
         seq_group_metadata_list.append(seq_group_metadata)
