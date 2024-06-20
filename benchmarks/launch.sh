@@ -19,9 +19,6 @@ usage() {
        exit 0
 }
 
-ARGS=`getopt -o hm:p: --long server:,port:,model:,max-batch-total-tokens:,shm-size:,\
-max-input-length:,max-total-tokens:,max-best-of:,max-concurrent-requests:,tgi-image:,help -n "$0" -- "$@"`
-
 # default value
 SERVER=tgi
 MODEL=facebook/opt-125m
@@ -34,6 +31,9 @@ MAX_TOTAL_TOKENS=2048
 MAX_CONCURRENT_REQUESTS=5000
 TGI_IMAGE=ghcr.io/huggingface/text-generation-inference:1.4.0
 SHARDED=false
+
+ARGS=`getopt -o hm:p: --long server:,port:,model:,max-batch-total-tokens:,shm-size:,\
+max-input-length:,max-total-tokens:,max-best-of:,max-concurrent-requests:,tgi-image:,help -n "$0" -- "$@"`
 
 if [ $? != 0 ]; then
        echo "Terminating..."
