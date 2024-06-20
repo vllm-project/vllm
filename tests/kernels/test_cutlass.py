@@ -28,6 +28,9 @@ def to_int8(tensor: torch.Tensor):
     return torch.round(tensor.clamp(min=-128, max=127)).to(dtype=torch.int8)
 
 
+def rand_int8(shape: tuple, device: str = "cuda"):
+    return to_int8(torch.randn(shape, device=device) * 255)
+
 def baseline_scaled_mm(a: torch.Tensor,
                        b: torch.Tensor,
                        scale_a: torch.Tensor,
@@ -220,6 +223,45 @@ def test_cutlass_int8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
             cutlass_int8_gemm_helper(m, nk, nk, per_act_token, per_out_ch,
                                      use_bias)
 
+
+def test_cutlass_int8_azp():
+    m = 512
+    n = 1024
+    k = 256
+
+    scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
+    scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
+
+    aq_i8 = rand_int8((m, k))
+    bq_i8 = rand_int8((n, k)).t()
+
+    aq_f32 = aq_i8.to(dtype=torch.float32)
+    bq_f32 = bq_i8.to(dtype=torch.float32)
+
+    azp_a = torch.rand((1, ), device="cuda", dtype=torch.float32) + 2.0
+    a_dq = scale_a * aq_f32 + azp_a
+    b_dq = scale_b * bq_f32
+
+    out_dtype = torch.bfloat16
+    baseline_dq = torch.mm(a_dq, b_dq).to(out_dtype)
+
+    J = torch.ones((1, k), device="cuda", dtype=torch.float32)
+    azp_bias = azp_a * scale_b * (J @ bq_f32).to(dtype=torch.float32)
+    assert azp_bias.shape == (1, n)
+    assert azp_bias[0, :].shape == (n, )
+
+    # baseline_q_no_azp = ops.cutlass_scaled_mm(
+    #     aq_i8, bq_i8, scale_a, scale_b,
+    #     out_dtype=out_dtype).to(dtype=torch.float32)
+    # baseline_q = (baseline_q_no_azp + azp_bias).to(out_dtype)
+    out = ops.cutlass_scaled_mm(aq_i8,
+                                bq_i8,
+                                scale_a,
+                                scale_b,
+                                out_dtype=out_dtype,
+                                bias=azp_bias[0, :])
+    assert torch.allclose(out, baseline_dq, rtol=1e-2, atol=1e0)
+    # assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
 
 # Test working with a subset of A and B
 def test_cutlass_subset():
