@@ -25,8 +25,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
-from vllm.model_executor.model_loader.utils import (handle_oom,
-                                                    get_model_architecture,
+from vllm.model_executor.model_loader.utils import (get_model_architecture,
+                                                    handle_oom,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,

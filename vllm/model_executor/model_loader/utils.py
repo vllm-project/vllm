@@ -53,7 +53,7 @@ def handle_oom(section_name: str) -> Callable:
             except torch.cuda.OutOfMemoryError as e:
                 msg = f"CUDA OutOfMemoryError occurred in: {section_name}\n"
                 msg += "Possible solutions:\n"
-                msg += "1. Use more devices by with tensor_parallel_size\n"
+                msg += "1. Use more devices with tensor_parallel_size\n"
                 msg += "2. Use a quantized checkpoint to reduce memory usage\n"
                 msg += "3. Use a machine with more device memory\n"
                 raise torch.cuda.OutOfMemoryError(msg) from e
