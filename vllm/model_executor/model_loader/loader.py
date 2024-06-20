@@ -788,9 +788,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         f"pack_factor not set for parameter {param_name}.")
 
                 num_elements = [0] * len(quant_states)
-                for seq, quant_state in enumerate(quant_states.items()):
+                for seq, quant_state in quant_states.items():
                     num_elements[seq] = math.prod(
-                        quant_state[1].shape) // pack_ratio
+                        quant_state.shape) // pack_ratio
 
                 offsets = np.concatenate(([0], np.cumsum(num_elements)))
                 set_weight_attrs(param, {"bnb_shard_offsets": offsets})
