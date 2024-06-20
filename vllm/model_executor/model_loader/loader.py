@@ -38,14 +38,6 @@ from vllm.utils import is_tpu
 
 logger = init_logger(__name__)
 
-ATTENTION_SINKS_MODELS = {
-    "LlamaForCausalLM",
-    "MixtralForCausalLM",
-    "FalconForCausalLM",
-    "BloomForCausalLM",
-    "MPTForCausalLM"
-}
-
 
 def _get_quantization_config(
         model_config: ModelConfig,
@@ -73,8 +65,7 @@ def _get_quantization_config(
 
 def _get_model_initialization_kwargs(
         model_class: Type[nn.Module], lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
-        use_attention_sinks: bool,
+        vision_language_config: Optional[VisionLanguageConfig]
 ) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
     extra_kwargs: Dict[str, Any] = {}
@@ -93,12 +84,6 @@ def _get_model_initialization_kwargs(
                              "or engine arguments.")
 
         extra_kwargs["vision_language_config"] = vision_language_config
-    
-    if use_attention_sinks:
-        if model_class.__name__ not in ATTENTION_SINKS_MODELS:
-            raise NotImplementedError("Currently attention sinks is only supported "
-                                      f"for {ATTENTION_SINKS_MODELS}.")
-    
     return extra_kwargs
 
 
@@ -114,8 +99,7 @@ def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
                        cache_config=cache_config,
                        quant_config=quant_config,
                        **_get_model_initialization_kwargs(
-                           model_class, lora_config, vision_language_config,
-                           model_config.use_attention_sinks))
+                           model_class, lora_config, vision_language_config))
 
 
 class BaseModelLoader(ABC):
@@ -387,8 +371,7 @@ class TensorizerLoader(BaseModelLoader):
                 quant_config = _get_quantization_config(
                     model_config, self.load_config)
                 extra_kwargs = _get_model_initialization_kwargs(
-                    model_class, lora_config, vision_language_config,
-                    model_config.use_attention_sinks)
+                    model_class, lora_config, vision_language_config)
                 extra_kwargs["quant_config"] = quant_config
                 extra_kwargs["cache_config"] = cache_config
 

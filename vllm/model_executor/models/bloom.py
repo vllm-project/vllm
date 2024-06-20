@@ -28,7 +28,6 @@ from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.attention_sinks import get_attention_sink
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -115,18 +114,6 @@ class BloomAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
 
-        if cache_config:
-            self.use_attention_sinks = cache_config.use_attention_sinks
-        else:
-            self.use_attention_sinks = False
-
-        if self.use_attention_sinks:
-            self.attention_sink = get_attention_sink(
-                self,
-                cache_config,
-                model_context_len=2048
-            )
-
     def forward(
         self,
         position_ids: torch.Tensor,
@@ -137,12 +124,7 @@ class BloomAttention(nn.Module):
         del position_ids  # Unused.
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-
-        if self.use_attention_sinks:
-            attn_output = self.attention_sink(q, k, v, None, kv_cache, attn_metadata)
-        else:
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.dense(attn_output)
         return output
 

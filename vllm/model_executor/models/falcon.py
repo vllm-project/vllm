@@ -32,7 +32,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.attention_sinks import get_attention_sink
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -141,11 +140,6 @@ class FalconAttention(nn.Module):
         assert not (self.use_rotary and self.use_alibi), (
             "Rotary and alibi are mutually exclusive.")
 
-        if cache_config:
-            self.use_attention_sinks = cache_config.use_attention_sinks
-        else:
-            self.use_attention_sinks = False
-
         if self.use_rotary:
             rope_theta = getattr(config, "rope_theta", 10000)
             max_position_embeddings = getattr(config,
@@ -175,22 +169,12 @@ class FalconAttention(nn.Module):
                                   alibi_slopes=alibi_slopes,
                                   quant_config=quant_config)
         else:
-            if self.use_attention_sinks:
-                raise ValueError("Attention sinks must be used with "
-                                 "either RoPE or ALiBi slopes.")
             self.attn = Attention(self.num_heads,
                                   self.head_dim,
                                   scale=self.inv_norm_factor,
                                   num_kv_heads=self.num_kv_heads,
                                   cache_config=cache_config,
                                   quant_config=quant_config)
-
-        if self.use_attention_sinks:
-            self.attention_sink = get_attention_sink(
-                self,
-                cache_config,
-                model_context_len=getattr(config, "max_position_embeddings", 8192)
-            )
 
     def forward(
         self,
@@ -203,14 +187,9 @@ class FalconAttention(nn.Module):
         if bias is not None:
             qkv += bias
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-        if self.use_attention_sinks:
-            attn_output = self.attention_sink(q, k, v, positions, kv_cache, attn_metadata)
-        else:
-            if self.use_rotary:
-                q, k = self.rotary_emb(positions, q, k)
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-
+        if self.use_rotary:
+            q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         attn_output, bias = self.dense(attn_output)
         return attn_output, bias
 

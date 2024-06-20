@@ -509,7 +509,7 @@ class EngineArgs:
             "--device",
             type=str,
             default=EngineArgs.device,
-            choices=["auto", "cuda", "neuron", "cpu"],
+            choices=["auto", "cuda", "neuron", "cpu", "tpu", "xpu"],
             help='Device type for vLLM execution.')
         parser.add_argument(
             "--use-attention-sinks",

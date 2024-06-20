@@ -11,8 +11,7 @@ import torch.nn as nn
 from vllm import _custom_ops as ops
 from vllm.attention import AttentionMetadata
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.attention.selector import _Backend, which_attn_to_use
-from vllm.config import CacheConfig
+from vllm.attention.selector import _Backend
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 
@@ -40,32 +39,35 @@ class StreamingAttentionSink(nn.Module):
         self.rotary_emb = rotary_emb_layer
         self.use_alibi = rotary_emb_layer is None
         self.attn = attn_layer
+        self.positions = None
 
         if attn_backend not in (_Backend.XFORMERS, _Backend.FLASH_ATTN):
             raise NotImplementedError(
                 'Attention sinks is only supported for '
                 'XFormers and FlashAttention currently.')
 
+    def save_positions(self, positions: torch.Tensor):
+        self.positions = positions
+    
     def forward(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        positions: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         if self.use_alibi:
             return self._forward_alibi(q, k, v, kv_cache, attn_metadata)
         else:
-            return self._forward_rope(q, k, v, positions, kv_cache, attn_metadata)
+            return self._forward_rope(q, k, v, kv_cache, attn_metadata)
     
     def _forward_rope(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        positions: torch.Tensor,
+        # positions: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
@@ -82,7 +84,7 @@ class StreamingAttentionSink(nn.Module):
         # what if metadata has both prefill and decode?
         if attn_metadata.prefill_metadata is not None:
             k_original = k.clone()
-            q, k = self.rotary_emb(positions, q, k)
+            q, k = self.rotary_emb(self.positions, q, k)
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
             
             if kv_cache is not None:
@@ -207,13 +209,13 @@ class StreamingAttentionSink(nn.Module):
                 if not within_context_len:
                     # cap number of tokens to consider with model context len
                     attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
-                    positions[i] = model_context_len - 1
+                    self.positions[i] = model_context_len - 1
 
             if not hasattr(attn_metadata, 'phys_bnums_list'):
                 attn_metadata.phys_bnums_list = phys_bnums_list
 
             # compute attention in kernel
-            q, k = self.rotary_emb(positions, q, k)
+            q, k = self.rotary_emb(self.positions, q, k)
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
                         
             # put original pre-rotated keys back in cache
@@ -304,42 +306,3 @@ class StreamingAttentionSink(nn.Module):
             attn_metadata.seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
             
             return attn_output
-
-
-def get_attention_sink(
-    model_attn: nn.Module,
-    cache_config: Optional[CacheConfig],
-    model_context_len: int,
-    dtype: torch.dtype
-) -> StreamingAttentionSink:
-    if cache_config is not None:
-        sliding_window = cache_config.sliding_window
-        kv_cache_dtype = cache_config.cache_dtype
-        block_size = cache_config.block_size
-    else:
-        sliding_window = None
-        kv_cache_dtype = "auto"
-        block_size = 16
-    
-    num_kv_heads = getattr(model_attn, "num_kv_heads", model_attn.num_heads)
-    attn_backend = which_attn_to_use(
-        model_attn.num_heads,
-        model_attn.head_dim,
-        num_kv_heads,
-        sliding_window,
-        dtype,
-        kv_cache_dtype,
-        block_size
-    )
-
-    return StreamingAttentionSink(
-        model_context_len,
-        block_size,
-        kv_cache_dtype,
-        attn_backend,
-        num_kv_heads,
-        model_attn.head_dim,
-        getattr(model_attn.attn, "kv_scale", 1.0),
-        getattr(model_attn, "rotary_emb", None),
-        model_attn.attn
-    )

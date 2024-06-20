@@ -209,12 +209,9 @@ class ModelRunner:
                     "Using FP8 KV cache but no scaling factors "
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
-                
+
         if self.model_config.use_attention_sinks:
-            apply_attn_sinks_to_model(self.model,
-                                      self.cache_config,
-                                      self.model_config.max_model_len,
-                                      self.model_config.dtype)
+            apply_attn_sinks_to_model(self.model, self.model_config, self.cache_config)
 
     def save_sharded_state(
         self,
