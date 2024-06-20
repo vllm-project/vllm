@@ -234,12 +234,12 @@ class ShmRingBufferIO:
         buffer: ShmRingBuffer
         if group_rank == writer_rank:
             buffer = ShmRingBuffer(n_reader, max_chunk_bytes, max_chunks)
-            dist.broadcast_object_list([buffer], src=global_ranks[0])
+            dist.broadcast_object_list([buffer], src=global_ranks[writer_rank])
             dist.barrier(pg)
             return ShmRingBufferIO(buffer, -1)
         else:
             recv = [None]
-            dist.broadcast_object_list(recv, src=global_ranks[0])
+            dist.broadcast_object_list(recv, src=global_ranks[writer_rank])
             dist.barrier(pg)
             buffer = recv[0]  # type: ignore
             rest_ranks = [r for r in ranks_inside_group if r != writer_rank]
