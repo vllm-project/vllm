@@ -488,12 +488,12 @@ class GroupCoordinator:
             dict), f"Expecting a dictionary, got {type(tensor_dict)}"
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
         # `metadata_list` lives in CPU memory.
-        # `broadcast_object_list` has serialization & deserialization,
+        # `send_object_list` has serialization & deserialization,
         # all happening on CPU. Therefore, we can use the CPU group.
         send_object_list([metadata_list], dst=dst, group=metadata_group)
         for tensor in tensor_list:
             if tensor.numel() == 0:
-                # Skip broadcasting empty tensors.
+                # Skip sending empty tensors.
                 continue
             if tensor.is_cpu:
                 # use metadata_group for CPU tensors
