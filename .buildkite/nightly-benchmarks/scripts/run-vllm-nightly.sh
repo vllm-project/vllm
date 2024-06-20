@@ -18,19 +18,7 @@ check_gpus() {
 
 kill_gpu_processes() {
   # kill all processes on GPU.
-  pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
-  if [ -z "$pids" ]; then
-      echo "No GPU processes found."
-  else
-      for pid in $pids; do
-          kill -9 "$pid"
-          echo "Killed process with PID: $pid"
-      done
-
-      echo "All GPU processes have been killed."
-  fi
-
-  # waiting for GPU processes to be fully killed
+  pkill pt_main_thread
   sleep 10
 
   # remove vllm config file
@@ -180,6 +168,19 @@ run_serving_tests() {
   done
 }
 
+
+upload_to_buildkite() {
+  # upload the benchmarking results to buildkite
+
+  # if the agent binary is not found, skip uploading the results, exit 0
+  if [ ! -f /workspace/buildkite-agent ]; then
+    echo "buildkite-agent binary not found. Skip uploading the results."
+    return 0
+  fi
+  /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/${CURRENT_LLM_SERVING_ENGINE}_nightly_results.md
+  /workspace/buildkite-agent artifact upload "$RESULTS_FOLDER/*"
+}
+
 main() {
 
   check_gpus
@@ -190,8 +191,12 @@ main() {
   mkdir -p $RESULTS_FOLDER
   BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
+  export CURRENT_LLM_SERVING_ENGINE=vllm
   run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
-  CURRENT_LLM_SERVING_ENGINE=vllm python3 $BENCHMARK_ROOT/scripts/summary-nightly-results.py
+
+  python3 -m pip install tabulate pandas
+  python3 $BENCHMARK_ROOT/scripts/summary-nightly-results.py
+  upload_to_buildkite
 
 }
 

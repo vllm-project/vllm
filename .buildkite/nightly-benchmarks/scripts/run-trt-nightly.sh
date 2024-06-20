@@ -238,6 +238,19 @@ run_serving_tests() {
   done
 }
 
+upload_to_buildkite() {
+  # upload the benchmarking results to buildkite
+
+  # if the agent binary is not found, skip uploading the results, exit 0
+  if [ ! -f /workspace/buildkite-agent ]; then
+    echo "buildkite-agent binary not found. Skip uploading the results."
+    return 0
+  fi
+  /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/${CURRENT_LLM_SERVING_ENGINE}_nightly_results.md
+  /workspace/buildkite-agent artifact upload "$RESULTS_FOLDER/*"
+}
+
+
 main() {
 
   check_gpus
@@ -250,8 +263,11 @@ main() {
   mkdir -p $RESULTS_FOLDER
   BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
+  export CURRENT_LLM_SERVING_ENGINE=trt
   run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
-  CURRENT_LLM_SERVING_ENGINE=trt python $BENCHMARK_ROOT/scripts/summary-nightly-results.py
+  python -m pip install tabulate pandas
+  python $BENCHMARK_ROOT/scripts/summary-nightly-results.py
+  upload_to_buildkite
 
 }
 
