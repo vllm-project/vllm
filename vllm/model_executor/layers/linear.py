@@ -113,16 +113,15 @@ class UnquantizedLinearMethod(LinearMethodBase):
             if bias is not None:
                 linear.bias = bias
             _disable_tpp()
-            if x.dtype is torch.bfloat16:
+            if layer.weight.dtype is torch.bfloat16:
                 _enable_tpp()
-            layer.ipex_linear = ipex.optimize(linear.eval(), dtype=x.dtype, inplace=True, conv_bn_folding=False, linear_bn_folding=False)
-            breakpoint()
+            layer.ipex_linear = ipex.llm.optimize(linear.eval(), dtype=layer.weight.dtype, inplace=True)
+
         if hasattr(layer, "ipex_linear"):
-            x_reshape = x.unsqueeze(0) if x.dim() == 2 else x
-            res = layer.ipex_linear(x_reshape)
-            res_reshape = res.squeeze(0) if x.dim() == 2 else res
-            return res_reshape
-        weight = layer.weightc
+            res = layer.ipex_linear(x)
+            return res
+
+        weight = layer.weight
         if self.separate_bias_add:
             if bias is not None:
                 return F.linear(x, weight) + bias

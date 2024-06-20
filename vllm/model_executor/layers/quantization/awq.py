@@ -160,12 +160,8 @@ class AWQLinearMethod(LinearMethodBase):
         pack_factor = self.quant_config.pack_factor
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
+        if not hasattr(layer,"ipex_qlinear") :
+            layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight, scales, qzeros, x.shape[-1], out_shape[-1], bias=bias, group_size=self.quant_config.group_size)
+        out = layer.ipex_qlinear(reshaped_x)
 
-        if not hasattr(layer,"ipex_linear") :
-            qweight_, scales_, zp_ = ipex.nn.utils._model_convert.prepack_awq_weight(qweight, qzeros, scales, 4, 128)
-            layer.ipex_linear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight_, scales_, zp_, x.shape[-1], out_shape[-1], bias=bias, group_size=128)
-        out = layer.ipex_linear(reshaped_x)
-
-        if bias is not None:
-            out.add_(bias)
         return out.reshape(out_shape)
