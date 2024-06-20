@@ -1,0 +1,33 @@
+version: "3"
+
+services:
+  vllm:
+    command: # python3 -m vllm.entrypoints.openai.api_server
+      ##########################################################################
+      --model ${MODEL_NAME:-facebook/opt-125m}
+      --dtype ${DATATYPE:-auto}
+      --tensor-parallel-size ${NUM_GPUS:-1}
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.9}
+      ##########################################################################
+    #container_name: vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              count: all
+              driver: nvidia
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+      - VLLM_API_KEY=${VLLM_API_KEY:-}
+    hostname: vllm
+    image: vllm/vllm-openai:latest
+    ipc: host
+    ports:
+      - "${PORT:-8000}:8000"
+    restart: on-failure:5
+    volumes:
+      #- ~/.cache/huggingface:/root/.cache/huggingface
+      - ${HOME:?err}/.cache/huggingface/hub:/root/.cache/huggingface/hub
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
