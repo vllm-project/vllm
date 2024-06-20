@@ -313,7 +313,7 @@ class SamplingTensors:
         *,
         extra_seeds_to_generate: int = 0,
         extra_entropy: Optional[Tuple[int, ...]] = None
-    ) -> Tuple["SamplingTensors", bool, bool, bool]:
+    ) -> Tuple["SamplingTensors", bool, bool, bool, int, bool]:
         """
         extra_seeds_to_generate: extra seeds to generate using the
             user-defined seed for each sequence.
@@ -438,7 +438,8 @@ class SamplingTensors:
             frequency_penalties, repetition_penalties, sampling_seeds,
             sample_indices, prompt_tokens, output_tokens, vocab_size,
             extra_seeds_to_generate, device, dtype)
-        return (sampling_tensors, do_penalties, do_top_p, do_top_k, max_k, do_min_p)
+        return (sampling_tensors, do_penalties, do_top_p, do_top_k, max_k,
+                do_min_p)
 
     @classmethod
     def from_lists(cls, temperatures: List[float], top_ps: List[float],

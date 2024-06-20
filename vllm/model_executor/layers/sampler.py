@@ -81,7 +81,8 @@ class Sampler(nn.Module):
 
         if do_top_p or do_top_k:
             logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
-                                        sampling_tensors.top_ks, do_top_p, max_k)
+                                        sampling_tensors.top_ks, do_top_p,
+                                        max_k)
 
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
@@ -229,8 +230,8 @@ def _apply_top_k_top_p(
 ) -> torch.Tensor:
     if not do_top_p:
         topk = torch.topk(logits, max_k)
-        indices_to_remove = logits < topk[0].gather(
-            1, (k-1).unsqueeze(1).to(torch.int64))
+        indices_to_remove = logits < topk[0].gather(1, (k - 1).unsqueeze(1).to(
+            torch.int64))
         return logits.masked_fill_(indices_to_remove, -float("inf"))
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
