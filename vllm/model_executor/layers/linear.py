@@ -2,7 +2,6 @@ from abc import abstractmethod
 from typing import List, Optional
 
 import torch
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
@@ -90,13 +89,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = layer.weight
-        if self.separate_bias_add:
-            if bias is not None:
-                return tgemm.mm(x, weight) + bias
-            return tgemm.mm(x, weight)
-        elif bias is not None:
-            return F.linear(x, weight, bias)
-        return tgemm.mm(x, weight)
+        if self.separate_bias_add and bias is not None:
+            return tgemm.mm(x, weight) + bias
+        return tgemm.mm(x, weight, bias)
 
 
 class LinearBase(torch.nn.Module):
