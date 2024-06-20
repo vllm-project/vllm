@@ -33,7 +33,7 @@ TGI_IMAGE=ghcr.io/huggingface/text-generation-inference:1.4.0
 SHARDED=false
 
 ARGS=`getopt -o hm:p: --long server:,port:,model:,max-batch-total-tokens:,shm-size:,\
-max-input-length:,max-total-tokens:,max-best-of:,max-concurrent-requests:,tgi-image:\
+max-input-length:,max-total-tokens:,max-best-of:,max-concurrent-requests:,tgi-image:,\
 sharded:,help -n "$0" -- "$@"`
 
 if [ $? != 0 ]; then
