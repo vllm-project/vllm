@@ -197,7 +197,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If this is not passed, the model's default chat template will be "
             "used instead."),
     )
-    template_kwargs: Optional[Dict[str, Any]] = Field(
+    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to the template renderer. "
                      "Will be accessible by the chat template."),
