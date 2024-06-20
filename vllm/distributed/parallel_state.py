@@ -691,8 +691,8 @@ def patch_tensor_parallel_group(world_group: Optional[GroupCoordinator],
         tp_group (Optional[GroupCoordinator]): the tp group coordinator
     """
     global TP_STATE_PATCHED
-    if (not TP_STATE_PATCHED and
-         world_group is not None and tp_group is not None):
+    if (not TP_STATE_PATCHED and world_group is not None
+            and tp_group is not None):
         TP_STATE_PATCHED = True
         old_world_group = get_world_group()
         old_tp_group = get_tp_group()
