@@ -1,4 +1,5 @@
-from typing import Dict, Optional, Type
+from pathlib import Path
+from typing import Dict, Optional, Type, Union
 
 from transformers import PretrainedConfig
 
@@ -18,8 +19,10 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "jais": JAISConfig,
 }
 
+_GGUF_ARCHITECTURE_REGISTRY: Dict[str, str] = {"llama": "LlamaForCausalLM"}
 
-def get_config(model: str,
+
+def get_config(model: Union[str, Path],
                trust_remote_code: bool,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None,
@@ -30,11 +33,17 @@ def get_config(model: str,
             from modelscope import AutoConfig
         else:
             from transformers import AutoConfig
+        is_gguf = Path(model).is_file() and Path(model).suffix == ".gguf"
+        gguf_file = None
+        if is_gguf:
+            gguf_file = Path(model).name
+            model = Path(model).parent
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
             revision=revision,
-            code_revision=code_revision)
+            code_revision=code_revision,
+            gguf_file=gguf_file)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
@@ -51,12 +60,17 @@ def get_config(model: str,
         config = config_class.from_pretrained(model,
                                               revision=revision,
                                               code_revision=code_revision)
+
+    if config.model_type in _GGUF_ARCHITECTURE_REGISTRY and is_gguf:
+        model_type = _GGUF_ARCHITECTURE_REGISTRY[config.model_type]
+        config.update({"architectures": [model_type]})
     for key, value in [("rope_scaling", rope_scaling),
                        ("rope_theta", rope_theta)]:
         if value is not None:
             logger.info("Updating %s from %r to %r", key,
                         getattr(config, key, None), value)
             config.update({key: value})
+
     return config
 
 

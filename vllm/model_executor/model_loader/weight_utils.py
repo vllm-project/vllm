@@ -15,6 +15,7 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from transformers.integrations.ggml import load_dequant_gguf_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import LoadConfig, ModelConfig
@@ -118,6 +119,9 @@ def convert_bin_to_safetensor_file(
 def get_quant_config(model_config: ModelConfig,
                      load_config: LoadConfig) -> QuantizationConfig:
     quant_cls = get_quantization_config(model_config.quantization)
+    # GGUF doesn't have config file
+    if model_config.quantization == "gguf":
+        return quant_cls()
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)
@@ -371,6 +375,32 @@ def pt_weights_iterator(
             yield name, param
         del state
         torch.cuda.empty_cache()
+
+
+def gguf_quant_weights_iterator(
+        gguf_file: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """Iterate over the quant weights in the model gguf files."""
+    from gguf import GGUFReader
+
+    reader = GGUFReader(gguf_file)
+    for tensor in reader.tensors:
+        name = tensor.name
+        shape = tensor.shape
+        weight = tensor.data
+        weight_type = tensor.tensor_type
+        # for F32, no need to rename
+        if weight_type.name != "F32" and "blk" in name:
+            weight_name = name.replace("weight", "qweight")
+            weight_type_name = name.replace("weight", "qweight_type")
+            for i, (new_name, param) in enumerate(
+                    zip([weight_type_name, weight_name],
+                        [weight_type, weight])):
+                param = torch.tensor(param).view(
+                    shape[-1], -1) if i == 1 else torch.tensor(param)
+                yield new_name, param
+        else:
+            weight = load_dequant_gguf_tensor(shape, weight_type, weight)
+            yield name, torch.from_numpy(weight.copy())
 
 
 def kv_cache_scales_loader(
