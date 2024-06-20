@@ -678,15 +678,22 @@ def model_parallel_is_initialized():
     return (_TP is not None and _PP is not None)
 
 
-OVERRIDE_TP_STATE = False
+TP_STATE_PATCHED = False
 
 
 @contextlib.contextmanager
-def patch_tensor_parallel_group(world_group, tp_group):
-    """Patch the tp group temporarily until this function ends."""
-    global OVERRIDE_TP_STATE
-    if not OVERRIDE_TP_STATE and world_group and tp_group:
-        OVERRIDE_TP_STATE = True
+def patch_tensor_parallel_group(world_group: Optional[GroupCoordinator],
+                                tp_group: Optional[GroupCoordinator]):
+    """Patch the tp group temporarily until this function ends.
+    It requires the world group to be patched together to keep the integrity.
+    Args:
+        world_group (Optional[GroupCoordinator]): the world group coordinator
+        tp_group (Optional[GroupCoordinator]): the tp group coordinator
+    """
+    global TP_STATE_PATCHED
+    if (not TP_STATE_PATCHED and
+         world_group is not None and tp_group is not None):
+        TP_STATE_PATCHED = True
         old_world_group = get_world_group()
         old_tp_group = get_tp_group()
         global _WORLD, _TP
@@ -696,8 +703,8 @@ def patch_tensor_parallel_group(world_group, tp_group):
         yield
     finally:
         # restore the original state
-        if OVERRIDE_TP_STATE:
-            OVERRIDE_TP_STATE = False
+        if TP_STATE_PATCHED:
+            TP_STATE_PATCHED = False
             _WORLD = old_world_group
             _TP = old_tp_group
 
