@@ -17,9 +17,9 @@ check_gpus() {
 }
 
 kill_gpu_processes() {
-  pkill text-generation || true
+  pkill tritonserver || true
   # waiting for GPU processes to be fully killed
-  sleep 10
+  sleep 20
   # Print the GPU memory usage
   # so that we know if all GPU processes are killed.
   gpu_memory_usage=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
