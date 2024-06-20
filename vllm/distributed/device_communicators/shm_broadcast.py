@@ -122,6 +122,7 @@ class ShmRingBufferIO:
         assert self._is_writer, "Only writers can acquire write"
         start_index = self.current_idx
         start_time = time.time()
+        n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
                 read_count = sum(metadata_buffer[1:])
@@ -133,10 +134,12 @@ class ShmRingBufferIO:
                                         1) % self.buffer.max_chunks
                     if self.current_idx == start_index:
                         # no empty block found
-                        if time.time() - start_time > self.WARNING_INTERVAL:
+                        if time.time(
+                        ) - start_time > self.WARNING_INTERVAL * n_warning:
                             logger.warning(
                                 "No available block found in %s second. ",
                                 self.WARNING_INTERVAL)
+                            n_warning += 1
                         # wait for a while (0.1 us)
                         time.sleep(1e-7)
                     continue
@@ -159,6 +162,7 @@ class ShmRingBufferIO:
         assert self._is_reader, "Only readers can acquire read"
         start_index = self.current_idx
         start_time = time.time()
+        n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
                 read_flag = metadata_buffer[self.reader_rank + 1]
@@ -172,10 +176,12 @@ class ShmRingBufferIO:
                                         1) % self.buffer.max_chunks
                     if self.current_idx == start_index:
                         # no block found
-                        if time.time() - start_time > self.WARNING_INTERVAL:
+                        if time.time(
+                        ) - start_time > self.WARNING_INTERVAL * n_warning:
                             logger.warning(
                                 "No available block found in %s second. ",
                                 self.WARNING_INTERVAL)
+                            n_warning += 1
                         # wait for a while (0.1 us)
                         time.sleep(1e-7)
                     continue
