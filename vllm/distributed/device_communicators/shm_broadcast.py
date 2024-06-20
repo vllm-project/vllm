@@ -228,6 +228,7 @@ class ShmRingBufferIO:
                                   writer_rank=0) -> "ShmRingBufferIO":
         group_rank = dist.get_rank(pg)
         group_world_size = dist.get_world_size(pg)
+        ranks_inside_group = list(range(group_world_size))
         global_ranks = dist.get_process_group_ranks(pg)
         n_reader = group_world_size - 1
         buffer: ShmRingBuffer
@@ -241,5 +242,5 @@ class ShmRingBufferIO:
             dist.broadcast_object_list(recv, src=global_ranks[0])
             dist.barrier(pg)
             buffer = recv[0]  # type: ignore
-            rest_ranks = [r for r in global_ranks if r != writer_rank]
+            rest_ranks = [r for r in ranks_inside_group if r != writer_rank]
             return ShmRingBufferIO(buffer, rest_ranks.index(group_rank))
