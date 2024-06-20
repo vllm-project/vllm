@@ -4,9 +4,9 @@ from typing import List, Optional
 import nvtx
 import torch
 
-from vllm.engine.arg_utils import FlexibleArgumentParser
 from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding,
                                                          get_rope)
+from vllm.utils import FlexibleArgumentParser
 
 
 def benchmark_rope_kernels_multi_lora(

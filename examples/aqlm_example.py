@@ -1,5 +1,5 @@
 from vllm import LLM, SamplingParams
-from vllm.engine.arg_utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser
 
 
 def main():

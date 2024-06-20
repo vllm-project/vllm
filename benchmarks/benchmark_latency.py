@@ -10,9 +10,10 @@ import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
-from vllm.engine.arg_utils import EngineArgs, FlexibleArgumentParser
+from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptStrictInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.utils import FlexibleArgumentParser
 
 
 def main(args: argparse.Namespace):

@@ -8,9 +8,9 @@ import argparse
 import json
 import ssl
 
-from vllm.engine.arg_utils import (AsyncEngineArgs, FlexibleArgumentParser,
-                                   nullable_str)
+from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.openai.serving_engine import LoRAModulePath
+from vllm.utils import FlexibleArgumentParser
 
 
 class LoRAParserAction(argparse.Action):

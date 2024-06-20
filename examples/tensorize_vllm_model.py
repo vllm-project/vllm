@@ -5,10 +5,11 @@ import os
 import uuid
 
 from vllm import LLM
-from vllm.engine.arg_utils import EngineArgs, FlexibleArgumentParser
+from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (TensorizerArgs,
                                                          TensorizerConfig,
                                                          tensorize_vllm_model)
+from vllm.utils import FlexibleArgumentParser
 
 # yapf conflicts with isort for this docstring
 # yapf: disable

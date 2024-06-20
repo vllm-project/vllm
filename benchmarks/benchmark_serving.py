@@ -45,7 +45,7 @@ except ImportError:
     from backend_request_func import get_tokenizer
 
 try:
-    from vllm.engine.arg_utils import FlexibleArgumentParser
+    from vllm.utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 

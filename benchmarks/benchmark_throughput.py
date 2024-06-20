@@ -10,8 +10,9 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
-from vllm.engine.arg_utils import EngineArgs, FlexibleArgumentParser
+from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.utils import FlexibleArgumentParser
 
 
 def sample_requests(

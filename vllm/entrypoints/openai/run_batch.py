@@ -5,8 +5,7 @@ from typing import Awaitable, List
 
 import aiohttp
 
-from vllm.engine.arg_utils import (AsyncEngineArgs, FlexibleArgumentParser,
-                                   nullable_str)
+from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
@@ -16,7 +15,7 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import random_uuid
+from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)

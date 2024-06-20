@@ -1,7 +1,6 @@
 import argparse
 import dataclasses
 import json
-import sys
 import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
@@ -12,31 +11,13 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          SpeculativeConfig, TokenizerPoolConfig,
                          VisionLanguageConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.utils import str_to_int_tuple
+from vllm.utils import FlexibleArgumentParser, str_to_int_tuple
 
 
 def nullable_str(val: str):
     if not val or val == "None":
         return None
     return val
-
-
-class FlexibleArgumentParser(argparse.ArgumentParser):
-    """ArgumentParser that allows both underscore and dash in names."""
-
-    def parse_args(self, args=None, namespace=None):
-        if args is None:
-            args = sys.argv[1:]
-
-        # Convert underscores to dashes in argument names
-        processed_args = []
-        for arg in args:
-            if arg.startswith('--'):
-                processed_args.append('--' + arg[2:].replace('_', '-'))
-            else:
-                processed_args.append(arg)
-
-        return super().parse_args(processed_args, namespace)
 
 
 @dataclass

@@ -14,11 +14,11 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from vllm.engine.arg_utils import AsyncEngineArgs, FlexibleArgumentParser
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import random_uuid
+from vllm.utils import FlexibleArgumentParser, random_uuid
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()

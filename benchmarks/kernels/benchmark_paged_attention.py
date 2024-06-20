@@ -5,8 +5,8 @@ from typing import List, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.engine.arg_utils import FlexibleArgumentParser
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
+                        create_kv_caches_with_random)
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512
