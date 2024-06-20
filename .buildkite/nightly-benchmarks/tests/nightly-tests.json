@@ -35,7 +35,8 @@
             "model_tp_size": 1,
             "max_batch_size": 256,
             "max_input_len": 10000,
-            "max_output_len": 10000
+            "max_output_len": 10000,
+            "trt_llm_version": "r24.04"
         },
         "trt_client_parameters": {
             "model": "meta-llama/Llama-2-7b-hf",
