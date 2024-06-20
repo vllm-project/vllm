@@ -353,7 +353,7 @@ class LlamaForCausalLM(nn.Module):
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
-        if config.tie_word_embeddings:
+        if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
         logit_scale = getattr(config, "logit_scale", 1.0)

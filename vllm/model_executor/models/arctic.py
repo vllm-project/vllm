@@ -413,6 +413,8 @@ class ArcticForCausalLM(nn.Module):
             self.vocab_size,
             config.hidden_size,
         )
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
         self.num_experts = config.num_local_experts
         self.num_experts_per_tok = config.num_experts_per_tok
         self.unpadded_vocab_size = config.vocab_size

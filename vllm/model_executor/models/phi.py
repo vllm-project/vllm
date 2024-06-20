@@ -258,6 +258,8 @@ class PhiForCausalLM(nn.Module):
         del lora_config  # Unused.
         super().__init__()
         self.config = config
+        # lm_head use bias, cannot share word embeddings
+        assert not config.tie_word_embeddings
         self.quant_config = quant_config
 
         self.model = PhiModel(config, cache_config, quant_config)

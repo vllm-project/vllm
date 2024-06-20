@@ -137,6 +137,8 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
             self.unpadded_vocab_size,
             config.text_config.hidden_size,
             org_num_embeddings=self.language_model.org_vocab_size)
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.language_model.embed_tokens.weight
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)

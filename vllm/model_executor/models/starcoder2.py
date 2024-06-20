@@ -241,7 +241,7 @@ class Starcoder2ForCausalLM(nn.Module):
                                      quant_config=quant_config)
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
-        if config.tie_word_embeddings:
+        if self.config.tie_word_embeddings:
             self.lm_head_weight = self.model.embed_tokens.weight
         else:
             self.unpadded_vocab_size = config.vocab_size
