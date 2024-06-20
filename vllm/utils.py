@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import datetime
 import enum
@@ -158,6 +159,26 @@ def is_tpu() -> bool:
     except ImportError:
         libtpu = None
     return libtpu is not None
+
+
+@lru_cache(maxsize=None)
+def is_xpu() -> bool:
+    from importlib.metadata import version
+    is_xpu_flag = "xpu" in version("vllm")
+    # vllm is not build with xpu
+    if not is_xpu_flag:
+        return False
+    try:
+        import intel_extension_for_pytorch as ipex  # noqa: F401
+        _import_ipex = True
+    except ImportError as e:
+        logger.warning("Import Error for IPEX: %s", e.msg)
+        _import_ipex = False
+    # ipex dependency is not ready
+    if not _import_ipex:
+        logger.warning("not found ipex lib")
+        return False
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 @lru_cache(maxsize=None)
@@ -482,6 +503,9 @@ def is_pin_memory_available() -> bool:
         print_warning_once("Using 'pin_memory=False' as WSL is detected. "
                            "This may slow down the performance.")
         return False
+    elif is_xpu():
+        print_warning_once("Pin memory is not supported on XPU.")
+        return False
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
@@ -497,8 +521,12 @@ class CudaMemoryProfiler:
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        torch.cuda.reset_peak_memory_stats(self.device)
-        mem = torch.cuda.max_memory_allocated(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.device)
+            mem = torch.cuda.max_memory_allocated(self.device)
+        elif is_xpu():
+            torch.xpu.reset_peak_memory_stats(self.device)
+            mem = torch.xpu.max_memory_allocated(self.device)
         return mem
 
     def __enter__(self):
@@ -736,3 +764,33 @@ def cuda_device_count_stateless() -> int:
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
 
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+#From: https://stackoverflow.com/a/4104188/2749989
+def run_once(f):
+
+    def wrapper(*args, **kwargs) -> Any:
+        if not wrapper.has_run:  # type: ignore[attr-defined]
+            wrapper.has_run = True  # type: ignore[attr-defined]
+            return f(*args, **kwargs)
+
+    wrapper.has_run = False  # type: ignore[attr-defined]
+    return wrapper
+
+
+class FlexibleArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that allows both underscore and dash in names."""
+
+    def parse_args(self, args=None, namespace=None):
+        if args is None:
+            args = sys.argv[1:]
+
+        # Convert underscores to dashes and vice versa in argument names
+        processed_args = []
+        for arg in args:
+            if arg.startswith('--'):
+                processed_args.append('--' + arg[len('--'):].replace('_', '-'))
+            else:
+                processed_args.append(arg)
+
+        return super().parse_args(processed_args, namespace)
