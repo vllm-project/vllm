@@ -15,13 +15,13 @@ latency_column_mapping = {
     "avg_latency": "Mean latency (ms)",
     # "P10": "P10 (s)",
     # "P25": "P25 (s)",
-    "P50": "Median",
+    "P50": "Median latency (ms)",
     # "P75": "P75 (s)",
     # "P90": "P90 (s)",
-    "P99": "P99",
+    "P99": "P99 latency (ms)",
 }
 
-# thoughput tests and the keys that will be printed into markdown
+# throughput tests and the keys that will be printed into markdown
 throughput_results = []
 throughput_results_column_mapping = {
     "test_name": "Test name",
@@ -43,15 +43,14 @@ serving_column_mapping = {
     # "input_throughput": "Input Tput (tok/s)",
     # "output_throughput": "Output Tput (tok/s)",
     "mean_ttft_ms": "Mean TTFT (ms)",
-    # do not say TTFT again to avoid the table getting too wide
-    "median_ttft_ms": "Median",
-    "p99_ttft_ms": "P99",
+    "median_ttft_ms": "Median TTFT (ms)",
+    "p99_ttft_ms": "P99 TTFT (ms)",
     # "mean_tpot_ms": "Mean TPOT (ms)",
     # "median_tpot_ms": "Median",
     # "p99_tpot_ms": "P99",
     "mean_itl_ms": "Mean ITL (ms)",
-    "median_itl_ms": "Median",
-    "p99_itl_ms": "P99",
+    "median_itl_ms": "Median ITL (ms)",
+    "p99_itl_ms": "P99 ITL (ms)",
 }
 
 
@@ -183,3 +182,11 @@ if __name__ == "__main__":
             serving_tests_markdown_table=serving_md_table,
             benchmarking_results_in_json_string=processed_results_json)
         f.write(results)
+
+    # document benchmarking results in json
+    with open(results_folder / "benchmark_results.json", "w") as f:
+
+        results = latency_results.to_dict(
+            orient='records') + throughput_results.to_dict(
+                orient='records') + serving_results.to_dict(orient='records')
+        f.write(json.dumps(results))

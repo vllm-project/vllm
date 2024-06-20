@@ -144,6 +144,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "half",
         *,
+        model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
     ) -> None:
@@ -166,11 +167,13 @@ class HfRunner:
             else:
                 auto_cls = AutoModelForCausalLM
 
+            model_kwargs = model_kwargs if model_kwargs is not None else {}
             self.model = self.wrap_device(
                 auto_cls.from_pretrained(
                     model_name,
                     torch_dtype=torch_dtype,
                     trust_remote_code=True,
+                    **model_kwargs,
                 ))
 
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -362,7 +365,7 @@ class HfRunner:
         cleanup()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def hf_runner():
     return HfRunner
 
@@ -382,6 +385,7 @@ class VllmRunner:
         block_size: int = 16,
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
+        enforce_eager: bool = False,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -390,6 +394,7 @@ class VllmRunner:
             trust_remote_code=True,
             dtype=dtype,
             swap_space=swap_space,
+            enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
             max_model_len=max_model_len,
