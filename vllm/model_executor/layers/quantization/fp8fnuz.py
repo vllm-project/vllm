@@ -21,7 +21,11 @@ logger = init_logger(__name__)
 
 
 class Fp8FnuzConfig(QuantizationConfig):
-    def __init__(self) -> None:
+    def __init__(self, config) -> None:
+        self.quantized_weights_path = config["quantized_weights"]
+        self.shard_layers = config["shard_layers"]
+        self.quant_layers = config["quant_layers"]
+        self.scaling_factors = config["scaling_factors"]
         # Get the output type for fp8 gemm
         if env.VLLM_FP8_GEMM_OUTPUT_TYPE == "float16":
             self.out_dtype = torch.float16
@@ -47,7 +51,7 @@ class Fp8FnuzConfig(QuantizationConfig):
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
-        return []
+        return ["serenity_config.json"]
 
     @classmethod
     def from_config(cls, config) -> "Fp8FnuzConfig":

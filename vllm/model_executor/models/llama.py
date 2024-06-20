@@ -47,8 +47,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+from vllm.model_executor.model_loader.weight_utils import safetensors_weights_iterator
 from vllm.utils import is_hip, print_warning_once
 
+import os.path
 
 class LlamaMLP(nn.Module):
 
@@ -437,22 +439,37 @@ class LlamaForCausalLM(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
                 
-    def load_quantized_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_quantized_weights(self, 
+                               model_name_or_path: str,
+                               quant_config: QuantizationConfig):
+        weights = safetensors_weights_iterator(
+                [os.path.join(model_name_or_path,
+                    quant_config.quantized_weights_path)])
         params_dict = dict(self.named_parameters())
         quant_shards = [
-            ("mlp.gate_up_proj", "mlp.fc", 0),  # fc is gate_proj
-            ("mlp.gate_up_proj", "mlp.gate", 1),  # gate is up_proj
+            (param_name, weight_name, quant_config.shard_layers[param_name][weight_name]) 
+                for param_name in quant_config.shard_layers 
+                    for weight_name in quant_config.shard_layers[param_name]
         ]
         quant_map = [
-            ("mlp.down_proj", "mlp.proj"),
-            ("self_attn.o_proj", "attention.dense"),
-            ("self_attn.qkv_proj", "attention.qkv"),
+            (param_name, quant_config.quant_layers[param_name]) 
+                for param_name in quant_config.quant_layers
+        ]
+        scale_map = [
+            (param_name, quant_config.scaling_factors[param_name]) 
+                for param_name in quant_config.scaling_factors
         ]
         for name, loaded_weight in weights:
-            name = name.replace('transformer', 'model')
-            name = name.replace('kv_cache_scaling_factor', 'qkv.output_scaling_factor')
-            loaded_weight = loaded_weight.to("cuda")
-            if loaded_weight.dtype == torch.int8:
+            if "zero_point" in name:
+                continue
+            if len(loaded_weight.shape) == 0:
+                loaded_weight = torch.Tensor([loaded_weight])
+            # replace the name for scaling factor
+            for (scale_name, weight_name) in scale_map:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, scale_name)
+            if is_hip() and loaded_weight.dtype == torch.int8:
                 loaded_weight[loaded_weight == -128] = 0
                 assert loaded_weight.is_contiguous
                 loaded_weight = loaded_weight.view(torch.float8_e4m3fnuz)
