@@ -7,6 +7,10 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
+from tests.kernels.utils import (override_backend_env_variable,
+                                 STR_XFORMERS_ATTN_VAL)
+
+BACKEND_NAMES = [STR_XFORMERS_ATTN_VAL]
 
 
 def _create_model_runner(model: str, *args,
@@ -27,7 +31,12 @@ def _create_model_runner(model: str, *args,
 
 
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
-def test_prepare_prompt(batch_size):
+@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
+def test_prepare_prompt(batch_size, backend_name, monkeypatch):
+
+    # Force Attention wrapper backend
+    override_backend_env_variable(monkeypatch, backend_name)
+
     model_runner = _create_model_runner(
         "facebook/bart-base",
         max_num_batched_tokens=100000,
@@ -45,7 +54,7 @@ def test_prepare_prompt(batch_size):
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
         seq_data = SequenceData(list(range(seq_len)))
-        encoder_seq_len = (i+1) % (model_runner.block_size - 1) + 1
+        encoder_seq_len = (i + 1) % (model_runner.block_size - 1) + 1
         encoder_seq_lens.append(encoder_seq_len)
         encoder_seq_data = SequenceData(list(range(encoder_seq_len)))
         seq_group_metadata = SequenceGroupMetadata(
@@ -55,8 +64,7 @@ def test_prepare_prompt(batch_size):
             sampling_params=SamplingParams(temperature=0),
             block_tables=block_tables,
             encoder_seq_data=encoder_seq_data,
-            cross_block_table=cross_block_table
-        )
+            cross_block_table=cross_block_table)
         assert seq_group_metadata.token_chunk_size == seq_data.get_len()
         seq_group_metadata_list.append(seq_group_metadata)
 
@@ -66,6 +74,8 @@ def test_prepare_prompt(batch_size):
         expected_selected_token_indices.append(selected_token_start_idx +
                                                seq_len - 1)
         selected_token_start_idx += seq_len
+
+    # Decoder model input
     model_input = model_runner._prepare_model_input(seq_group_metadata_list)
     input_tokens = model_input.input_tokens
     input_positions = model_input.input_positions
@@ -74,6 +84,15 @@ def test_prepare_prompt(batch_size):
     slot_mapping = model_input.slot_mapping
     assert return_seq_lens == seq_lens
     assert len(slot_mapping) == len(input_tokens)
+
+    # Encoder model input
+    encoder_model_input = model_runner._prepare_encoder_model_input(
+        seq_group_metadata_list, attn_metadata)
+    encoder_input_tokens = encoder_model_input.input_tokens
+    encoder_input_positions = encoder_model_input.input_positions
+    cross_slot_mapping = attn_metadata.cross_slot_mapping
+    assert len(encoder_input_tokens) == sum(encoder_seq_lens)
+    assert len(cross_slot_mapping) == len(encoder_input_tokens)
 
     # Verify input metadata is correct for prompts.
     device = model_runner.device
@@ -146,8 +165,13 @@ def test_prepare_prompt(batch_size):
     torch.testing.assert_close(actual, expected)
 
 
-def test_empty_seq_group():
+@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
+def test_empty_seq_group(backend_name, monkeypatch):
     """Verify prepare prompt and decode returns empty output."""
+
+    # Force Attention wrapper backend
+    override_backend_env_variable(monkeypatch, backend_name)
+
     model_runner = _create_model_runner(
         "facebook/bart-base",
         seed=0,

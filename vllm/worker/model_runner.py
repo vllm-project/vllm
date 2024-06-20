@@ -278,7 +278,8 @@ class ModelRunner:
         lora_prompt_mapping: List[int] = [],
         lora_requests: Set[LoRARequest] = set(),
         multi_modal_kwargs_list: Dict[str,
-                                      List[torch.Tensor]] = defaultdict(list)
+                                      List[torch.Tensor]] = defaultdict(list),
+        is_encoder_seq: bool = False
     ) -> Tuple[bool, int, int, int]:
 
         if is_prompt:
@@ -289,8 +290,12 @@ class ModelRunner:
             # TODO(sang): Fix it.
             context_len = seq_data.get_len() - 1
 
-        seq_len = min(seq_data.get_len(),
-                      context_len + seq_group_metadata.token_chunk_size)
+        if is_encoder_seq:
+            seq_len = seq_data.get_len()
+        else:
+            seq_len = min(seq_data.get_len(),
+                        context_len + seq_group_metadata.token_chunk_size)
+        
         if is_prompt:
             tokens = seq_data.get_token_ids()[context_len:seq_len]
         else:

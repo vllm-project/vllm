@@ -30,6 +30,7 @@ STR_ENCDECMR_ENCODER_DECODER_REQUIRED = \
     "Only encoder/decoder models may be executed " + \
         "using EncoderDecoderModelRunner"
 
+
 class EncoderInput(NamedTuple):
     input_tokens: torch.Tensor
     input_positions: torch.Tensor
@@ -130,7 +131,7 @@ class EncoderDecoderModelRunner(ModelRunner):
                 sliding_window_blocks * self.block_size
 
         for seq_group_metadata in seq_group_metadata_list:
-            computed_block_nums = seq_group_metadata.computed_block_nums
+            computed_block_nums = None #seq_group_metadata.computed_block_nums
             if (self.scheduler_config is not None
                     and self.scheduler_config.chunked_prefill_enabled
                     and not (computed_block_nums is None
@@ -153,7 +154,7 @@ class EncoderDecoderModelRunner(ModelRunner):
                 paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
                 sliding_window_blocks, block_aligned_sliding_window,
                 lora_index_mapping, lora_prompt_mapping, lora_requests,
-                multi_modal_kwargs_list)
+                multi_modal_kwargs_list, is_encoder_seq=True)
 
         max_query_len = max(query_lens)
         max_seq_len = max(prefill_seq_lens, default=0)
