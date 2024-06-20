@@ -15,7 +15,6 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 from starlette.routing import Mount
 
-import vllm
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -29,6 +28,7 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
+from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -36,7 +36,7 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 
-logger = init_logger(__name__)
+logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
 
@@ -93,7 +93,7 @@ async def show_available_models():
 
 @app.get("/version")
 async def show_version():
-    ver = {"version": vllm.__version__}
+    ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
 
 
@@ -174,7 +174,7 @@ if __name__ == "__main__":
             raise ValueError(f"Invalid middleware {middleware}. "
                              f"Must be a function or a class.")
 
-    logger.info("vLLM API server version %s", vllm.__version__)
+    logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
     if args.served_model_name is not None:
@@ -183,6 +183,16 @@ if __name__ == "__main__":
         served_model_names = [args.model]
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
+
+    # Enforce pixel values as image input type for vision language models
+    # when serving with API server
+    if engine_args.image_input_type is not None and \
+        engine_args.image_input_type.upper() != "PIXEL_VALUES":
+        raise ValueError(
+            f"Invalid image_input_type: {engine_args.image_input_type}. "
+            "Only --image-input-type 'pixel_values' is supported for serving "
+            "vision language models with the vLLM API server.")
+
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
 
