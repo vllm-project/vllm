@@ -23,6 +23,7 @@ def cutlass_fp8_supported() -> bool:
 
     return ops.cutlass_kernels_support_fp8(capability)
 
+
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
 
