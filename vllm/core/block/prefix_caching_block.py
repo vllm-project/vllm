@@ -48,12 +48,20 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # A mapping of blockId to Block to track those cached blocks
         self._blocks: Dict[BlockId, Block] = {}
 
+        # Pre-allocate "num_blocks * extra_factor" block objects.
+        # The "* extra_factor" is a buffer to allow more block objects
+        # than physical blocks
+        extra_factor = 4
+        self._block_pool = BlockPool(self._create_block, self,
+                                     num_blocks * extra_factor)
+
         # An allocator for blocks that do not have prefix hashes.
         self._hashless_allocator = NaiveBlockAllocator(
             create_block=self._create_block,  # type: ignore
             num_blocks=num_blocks,
             block_size=block_size,
             block_ids=block_ids,
+            block_pool=self._block_pool,
         )
 
         self._block_size = block_size
@@ -71,10 +79,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             refcounter=self._refcounter.as_readonly(),
             allocator=self,
         )
-
-        # Pre-allocate "num_blocks * 2" block objects. The "* 2" is
-        # a buffer to allow more block objects than physical blocks
-        self._block_pool = BlockPool(self._create_block, self, num_blocks * 2)
 
     # Implements Block.Factory.
     def _create_block(
@@ -115,23 +119,30 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
-        block = self._block_pool.acquire_block(prev_block=prev_block,
-                                               token_ids=token_ids,
-                                               block_size=self._block_size,
-                                               physical_block_id=None)
+        block = self._block_pool.init_block(prev_block=prev_block,
+                                            token_ids=token_ids,
+                                            block_size=self._block_size,
+                                            physical_block_id=None)
         assert block.content_hash is not None
 
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
             block.block_id = cached_block_id
-            self._incr_refcount_cached_block(block, block.block_id)
+            self._incr_refcount_cached_block(block)
             return block
 
-        self._block_pool.release_block(block)
+        self._block_pool.free_block(block)
 
         block = self.allocate_mutable_block(prev_block)
         block.append_token_ids(token_ids)
+
         assert block.content_hash is not None
+        assert block.block_id is not None
+
+        # Cache current block since it is full and its status as "computed"
+        # TODO: Verify this change with Cade
+        self._cached_blocks[block.content_hash] = block.block_id
+        block.computed = True
 
         return block
 
@@ -194,10 +205,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._refcounter.incr(block_id)
 
             # the block comes from evictor already contain computed result
-            block = self._block_pool.acquire_block(prev_block=prev_block,
-                                                   token_ids=[],
-                                                   block_size=self._block_size,
-                                                   physical_block_id=block_id)
+            block = self._block_pool.init_block(prev_block=prev_block,
+                                                token_ids=[],
+                                                block_size=self._block_size,
+                                                physical_block_id=block_id)
             block.computed = False
 
             assert block.content_hash is None
@@ -210,30 +221,44 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # No block available in hashless allocator, nor in unused cache blocks.
         raise BlockAllocator.NoFreeBlocksError()
 
-    def _incr_refcount_cached_block(self, block: Block,
-                                    block_id: BlockId) -> None:
-        # now _incr_refcount_cached_block comes from two place
-        # allocate_immutable/promote_to_immutable_block where hit
-        # _cached_blocks hash key.
-        # In both cases, it means that already exists a already
-        # computed block which shared with block now
+    def _incr_refcount_cached_block(self, block: Block) -> None:
+        # Set this block to be "computed" since it is pointing to a
+        # cached block id (which was already computed)
         block.computed = True
+
+        block_id = block.block_id
+        assert block_id is not None
 
         refcount = self._refcounter.incr(block_id)
         if refcount == 1:
-            # if block get referred, then it shall not be in evictor
-            # and put it into _blocks for tracking
+            # In case a cached block was evicted, restore its tracking
             if block_id in self.evictor:
                 self.evictor.remove(block_id)
             self._blocks[block_id] = block
 
-    def free_block_id(self, block: Block) -> None:
-        assert (block.block_id
-                is not None), "freeing unallocated block is undefined"
+    def _decr_refcount_cached_block(self, block: Block) -> None:
+        # Ensure this is immutable/cached block
+        assert block.computed
 
-        self._free_block_id_for_block(block.block_id, block)
+        block_id = block.block_id
+        assert block_id is not None
 
-        block.block_id = None
+        refcount = self._refcounter.decr(block_id)
+        if refcount > 0:
+            # Still in use
+            return
+
+        # No longer used
+        assert block.content_hash in self._cached_blocks
+        assert block.block_id is not None
+
+        # Stop tracking the block
+        del self._blocks[block.block_id]
+
+        # Add the cached block to the evictor
+        # (This keeps the cached block around so it can be reused)
+        self.evictor.add(block.block_id, block.content_hash,
+                         block.num_token_ids, block.last_accessed)
 
     def free(self, block: Block) -> None:
         """Decrement the refcount of the block. If the decremented refcount is
@@ -245,47 +270,30 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert (block.block_id
                 is not None), "freeing unallocated block is undefined"
 
-        self._free_block_id_for_block(block.block_id, block)
-
-        # TODO: Verify if needed
-        # block.block_id = None
-
-        # The pool is for promoted blocks only
         if block.computed:
-            self._block_pool.release_block(block)
+            # Immutable
+            assert block.content_hash is not None
+            self._decr_refcount_cached_block(block)
+            self._block_pool.free_block(block)
+        else:
+            # Mutable
+            assert block.content_hash is None
+            self._free_hashless_block(block)
 
-    def _free_block_id_for_block(self, block_id: BlockId,
-                                 block: Block) -> None:
+    def _free_hashless_block(self, block: Block) -> None:
         assert isinstance(block, PrefixCachingBlock)
 
-        # if we comes from promote_to_immutable_block, it means that
-        # block.content_hash is never None.
-        # However we need to release the same content block, so that
-        # physical block could get reused.
-        if block.block_id != block_id or block.content_hash is None:
-            refcount = self._refcounter.get(block_id)
-            # We have fork case where block would get more than one ref,
-            # so we cannot free it from tracking if ref cnt large than 1
-            assert block.block_id is not None
-            refcount = self._refcounter.get(block.block_id)
-            if refcount == 1:
-                del self._blocks[block.block_id]
+        block_id = block.block_id
+        assert block_id is not None
 
-            # Here, we only want to free the block id inside
-            # "_hashless_allocator", since we are going to reuse the
-            # block object for promotion to immutable
-            return self._hashless_allocator.free_block_id(block)
+        # We may have a fork case where block is shared,
+        # in which case, we cannot remove it from tracking
+        refcount = self._refcounter.get(block_id)
+        if refcount == 1:
+            del self._blocks[block_id]
 
-        refcount = self._refcounter.decr(block_id)
-
-        # If no longer used, add the block to the evictor.
-        if refcount == 0:
-            assert block.content_hash in self._cached_blocks
-            assert block.block_id is not None
-            del self._blocks[block.block_id]
-
-            self.evictor.add(block.block_id, block.content_hash,
-                             block.num_token_ids, block.last_accessed)
+        # Decrement refcount and free to block pool
+        self._hashless_allocator.free(block)
 
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
@@ -307,11 +315,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             assert refcount != 1, "can't fork free'd block"
 
             forked_blocks.append(
-                self._block_pool.acquire_block(
-                    prev_block=prev_block,
-                    token_ids=block.token_ids,
-                    block_size=self._block_size,
-                    physical_block_id=block.block_id))
+                self._block_pool.init_block(prev_block=prev_block,
+                                            token_ids=block.token_ids,
+                                            block_size=self._block_size,
+                                            physical_block_id=block.block_id))
 
             prev_block = forked_blocks[-1]
 
@@ -350,7 +357,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             return True
         return False
 
-    def promote_to_immutable_block(self, block: Block) -> BlockId:
+    def promote_to_immutable_block(self, block: Block) -> Optional[Block]:
         """Once a mutable block is full, it can be promoted to an immutable
         block. This means that its content can be referenced by future blocks
         having the same prefix.
@@ -363,26 +370,55 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block: The mutable block to be promoted.
 
         Returns:
-            BlockId: Either the original block index, or the block index of
-                the previously cached block matching the same content.
+            BlockId: None if the block was not promoted. Otherwise, either the 
+                original block, or the cached block that points to previously 
+                cached block id (that matches the same content)
         """
-        assert block.content_hash is not None
+        if block.content_hash is None:
+            # No promotion
+            return None
+
+        # Can promote
+
         assert block.block_id is not None
         assert self._refcounter.get(block.block_id) > 0
 
-        # If the content hash does not have a corresponding cached block,
-        # set this block as the cached block.
         if block.content_hash not in self._cached_blocks:
+            # No cached content hash => Set this block as cached
             self._cached_blocks[block.content_hash] = block.block_id
-        else:
-            self._free_block_id_for_block(
-                self._cached_blocks[block.content_hash], block)
-            self._incr_refcount_cached_block(
-                block, self._cached_blocks[block.content_hash])
+            block.computed = True
+            return block
 
-        return self._cached_blocks[block.content_hash]
+        # Reuse the cached content hash
+        cached_block_id = self._cached_blocks[block.content_hash]
 
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
+        # Store block data
+        prev_block = block.prev_block
+        token_ids = block.token_ids
+
+        # Release the hashless block
+        self._free_hashless_block(block)
+
+        # Get a new (promoted) block that will hold old block's data
+        # and point to the cached block id
+        cached_block = self._block_pool.init_block(
+            prev_block=prev_block,
+            token_ids=token_ids,
+            block_size=self._block_size,
+            physical_block_id=cached_block_id)
+
+        # Increment refcount of the cached block and possibly restore
+        # it from the evictor
+        self._incr_refcount_cached_block(cached_block)
+
+        return cached_block
+
+    def is_appendable(self, block: Block) -> bool:
+        """Checks if the block is not shared
+        """
+        return self._cow_tracker.is_appendable(block)
+
+    def cow_block_if_not_appendable(self, block: Block) -> Optional[Block]:
         """Performs a copy-on-write operation on the given block if it is not
         appendable.
 
@@ -390,9 +426,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block (Block): The block to check for copy-on-write.
 
         Returns:
-            Optional[BlockId]: The block index of the new block if a copy-on
-                -write operation was performed, or the original block index if
-                no copy-on-write was necessary.
+            Optional[Block]: If copy-on-write was performed, then the newly 
+                allocated block is returned. Else, None.
         """
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
@@ -579,17 +614,13 @@ class PrefixCachingBlock(Block):
                 token_ids=token_ids,
                 block_size=block_size,
                 block_id=block_id,
-                allocator=self._allocator,
-                _cow_target=self)
+                allocator=self._allocator)
         else:
-            self._block = NaiveBlock(
-                prev_block=prev_block,
-                token_ids=token_ids,
-                block_size=block_size,
-                block_id=block_id,
-                allocator=self._allocator,
-                _cow_target=self,
-            )
+            self._block = NaiveBlock(prev_block=prev_block,
+                                     token_ids=token_ids,
+                                     block_size=block_size,
+                                     block_id=block_id,
+                                     allocator=self._allocator)
 
         self._update_num_token_ids()
 
@@ -627,22 +658,24 @@ class PrefixCachingBlock(Block):
         """Appends the given token IDs to the block and registers the block as
         immutable if the block becomes full.
 
-        Internally, the naive block handles CoW.
-
         Args:
             token_ids (List[int]): The token IDs to be appended to the block.
         """
+        assert self._allocator.is_appendable(
+            self
+        ), "Block with id = {} is not appendable for token_ids = {}".format(
+            self.block_id, token_ids)
+
+        # Ensure this is mutable block (not promoted)
+        assert self.content_hash is None
+        assert not self.computed
+
+        # Ensure there are input tokens
         assert token_ids
 
-        # naive block handles CoW.
+        # Add new tokens
         self._block.append_token_ids(token_ids)
         self._update_num_token_ids()
-
-        # If the content hash is present, then the block can be made immutable.
-        # Register ourselves with the allocator, potentially replacing the
-        # physical block index.
-        if self.content_hash is not None:
-            self.block_id = (self._allocator.promote_to_immutable_block(self))
 
     @property
     def block_id(self) -> Optional[int]:

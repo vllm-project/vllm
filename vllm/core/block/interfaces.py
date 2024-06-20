@@ -9,7 +9,8 @@ BlockId = int
 class Block(ABC):
 
     @abstractmethod
-    def append_token_ids(self, token_ids: Optional[List[int]]) -> None:
+    def append_token_ids(self,
+                         token_ids: Optional[List[int]]) -> Optional["Block"]:
         pass
 
     @property
@@ -117,10 +118,6 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def free_block_id(self, block: Block) -> None:
-        pass
-
-    @abstractmethod
     def free(self, block: Block) -> None:
         pass
 
@@ -177,13 +174,16 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def cow_block_if_not_appendable(self, block: Block) -> Optional["BlockId"]:
+    def is_appendable(self, block: Block) -> bool:
         """NOTE: This should not be used besides Block"""
         pass
 
     @abstractmethod
-    def promote_to_immutable_block(self, block: Block) -> BlockId:
-        """NOTE: This should not be used besides Block"""
+    def cow_block_if_not_appendable(self, block: Block) -> Optional[Block]:
+        pass
+
+    @abstractmethod
+    def promote_to_immutable_block(self, block: Block) -> Optional[Block]:
         pass
 
     @abstractmethod
@@ -282,4 +282,12 @@ class DeviceAwareBlockAllocator(ABC):
         been dropped due to sliding window.
         There is at most one null block per allocator.
         """
+        pass
+
+    @abstractmethod
+    def cow_block_if_not_appendable(self, block: Block) -> Optional[Block]:
+        pass
+
+    @abstractmethod
+    def promote_to_immutable_block(self, block: Block) -> Optional[Block]:
         pass

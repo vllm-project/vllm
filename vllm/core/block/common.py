@@ -114,15 +114,22 @@ class CopyOnWriteTracker:
         self._refcounter = refcounter
         self._allocator = allocator
 
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
+    def is_appendable(self, block: Block) -> bool:
+        block_id = block.block_id
+        if block_id is None:
+            return True
+
+        refcount = self._refcounter.get(block_id)
+        return refcount <= 1
+
+    def cow_block_if_not_appendable(self, block: Block) -> Optional[Block]:
         """Performs a copy-on-write operation on the given block if it is not
         appendable.
 
         This method checks the reference count of the given block. If the
         reference count is greater than 1, indicating that the block is shared,
         a copy-on-write operation is performed. The original block is freed,
-        and a new block is allocated with the same content. The new block index
-        is returned.
+        and a new block is allocated with the same content.
 
         Args:
             block (Block): The block to check for copy-on-write.
@@ -132,30 +139,31 @@ class CopyOnWriteTracker:
                 -write operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
-        block_id = block.block_id
-        if block_id is None:
-            return block_id
+        if self.is_appendable(block):
+            return None
 
-        refcount = self._refcounter.get(block_id)
-        assert refcount != 0
-        if refcount > 1:
-            src_block_id = block_id
+        # Get data from old block
+        prev_block = block.prev_block
+        token_ids = block.token_ids
+        old_block_id = block.block_id
 
-            # Decrement refcount of the old physical block. Note that
-            # we do not free the actual block object here since it is
-            # going to reused by the caller.
-            self._allocator.free_block_id(block)
+        # Mark the block as free and decrement its refcount
+        self._allocator.free(block)
 
-            # Allocate a fresh new block.
-            block_id = self._allocator.allocate_mutable_block(
-                prev_block=block.prev_block).block_id
+        # Allocate a new block
+        new_block = self._allocator.allocate_mutable_block(
+            prev_block=prev_block)
+        # Copy the tokens to the new block
+        new_block.append_token_ids(token_ids)
 
-            # Track src/dst copy.
-            assert src_block_id is not None
-            assert block_id is not None
-            self._copy_on_writes.append((src_block_id, block_id))
+        new_block_id = new_block.block_id
 
-        return block_id
+        # Track src/dst copy.
+        assert old_block_id is not None
+        assert new_block_id is not None
+        self._copy_on_writes.append((old_block_id, new_block_id))
+
+        return new_block
 
     def clear_cows(self) -> List[Tuple[BlockId, BlockId]]:
         """Clears the copy-on-write tracking information and returns the current

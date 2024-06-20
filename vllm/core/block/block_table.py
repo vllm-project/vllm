@@ -56,6 +56,22 @@ class BlockList:
         return self._block_ids
 
 
+def append_token_ids_and_update_allocator(
+        block: Block, token_ids: List[int],
+        allocator: DeviceAwareBlockAllocator) -> Block:
+    new_block = allocator.cow_block_if_not_appendable(block)
+    if new_block:
+        block = new_block
+
+    block.append_token_ids(token_ids)
+
+    immutable_block = allocator.promote_to_immutable_block(block)
+    if immutable_block:
+        block = immutable_block
+
+    return block
+
+
 class BlockTable:
     """A class to manage blocks for a specific sequence.
 
@@ -193,11 +209,14 @@ class BlockTable:
                                     num_lookahead_slots)
 
         # Update the blocks with the new tokens
-        blocks = self.blocks[self._num_full_slots // self._block_size:]
+        first_block_idx = self._num_full_slots // self._block_size
         token_blocks = self._chunk_token_blocks_for_append(token_ids)
 
-        for block, token_block in zip(blocks, token_blocks):
-            block.append_token_ids(token_block)
+        for i, token_block in enumerate(token_blocks):
+            cur_block_idx = first_block_idx + i
+            self._blocks[
+                cur_block_idx] = append_token_ids_and_update_allocator(
+                    self._blocks[cur_block_idx], token_block, self._allocator)
 
         self._num_full_slots += len(token_ids)
 
@@ -328,7 +347,11 @@ class BlockTable:
 
             block = self._allocator.allocate_mutable_block(
                 prev_block=prev_block, device=device)
+
+            # Note that no copy-on-write or immutable promotion can happen
+            # here since this block is fresh and not full
             block.append_token_ids(cur_token_ids)
+
             blocks.append(block)
 
         return blocks

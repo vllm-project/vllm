@@ -170,17 +170,6 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].allocate_immutable_block(
             prev_block, token_ids)
 
-    def free_block_id(self, block: Block) -> None:
-        """Frees the underlying physical block_id of the given block object
-
-        Args:
-            block (Block): The block for which to free the physical block id
-        """
-        block_id = block.block_id
-        assert block_id is not None
-        allocator = self._block_ids_to_allocator[block_id]
-        allocator.free_block_id(block)
-
     def free(self, block: Block) -> None:
         """Frees the memory occupied by the given block.
 
@@ -333,11 +322,13 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def all_block_ids(self) -> FrozenSet[int]:
         return frozenset(self._block_ids_to_allocator.keys())
 
-    def promote_to_immutable_block(self, block: Block) -> BlockId:
-        raise NotImplementedError
+    def promote_to_immutable_block(self, block: Block) -> Optional[Block]:
+        device = Device.GPU
+        return self._allocators[device].promote_to_immutable_block(block)
 
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
-        raise NotImplementedError
+    def cow_block_if_not_appendable(self, block: Block) -> Optional[Block]:
+        device = Device.GPU
+        return self._allocators[device].cow_block_if_not_appendable(block)
 
     def get_and_reset_swaps(self) -> List[Tuple[int, int]]:
         """Returns and clears the mapping of source to destination block IDs.
