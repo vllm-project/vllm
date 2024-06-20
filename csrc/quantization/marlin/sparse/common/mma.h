@@ -17,6 +17,7 @@
 
 #pragma once
 #include "base.h"
+#include <cudaTypedefs.h>
 
 namespace marlin_24 {
 
@@ -26,7 +27,7 @@ namespace marlin_24 {
 //  | Advisory: Modifier ‘.sp::ordered_metadata’ should be used on instruction
 //  | ‘mma’ instead of modifier ‘.sp’ as it is expected to have substantially
 //  | reduced performance on some future architectures
-#if defined CUDA_VERSION && CUDA_VERSION >= 12500
+#if defined CUDA_VERSION && CUDA_VERSION >= 12050
   #define MMA_SP_INST \
     "mma.sp::ordered_metadata.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
 #else

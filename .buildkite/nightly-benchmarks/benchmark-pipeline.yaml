@@ -17,6 +17,7 @@ steps:
     plugins:
     - kubernetes:
         podSpec:
+          priorityClassName: perf-benchmark
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
             command:
