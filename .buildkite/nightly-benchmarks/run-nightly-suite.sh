@@ -55,6 +55,12 @@ main() {
         bash ../.buildkite/nightly-benchmarks/scripts/run-tgi-nightly.sh
     fi
 
+    # run trt
+    if which trtllm-build >/dev/null; then
+        echo "trtllm is available, redirect to run-trt-nightly.sh"
+        bash ../.buildkite/nightly-benchmarks/scripts/run-trt-nightly.sh
+    fi
+
 }
 
 main "$@"
