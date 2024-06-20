@@ -2,6 +2,7 @@ import argparse
 from typing import List, Tuple
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
+from vllm.utils import FlexibleArgumentParser
 
 
 def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
@@ -55,7 +56,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description='Demo on using the LLMEngine class directly')
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()

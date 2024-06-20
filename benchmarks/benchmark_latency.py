@@ -13,6 +13,7 @@ from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptStrictInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.utils import FlexibleArgumentParser
 
 
 def main(args: argparse.Namespace):
@@ -120,7 +121,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')

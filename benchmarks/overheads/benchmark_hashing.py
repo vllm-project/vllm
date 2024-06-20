@@ -1,8 +1,8 @@
-import argparse
 import cProfile
 import pstats
 
 from vllm import LLM, SamplingParams
+from vllm.utils import FlexibleArgumentParser
 
 # A very long prompt, total number of tokens is about 15k.
 LONG_PROMPT = ["You are an expert in large language models, aren't you?"
@@ -47,7 +47,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description='Benchmark the performance of hashing function in'
         'automatic prefix caching.')
     parser.add_argument('--model', type=str, default='lmsys/longchat-7b-16k')

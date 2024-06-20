@@ -1,5 +1,4 @@
 """vllm.entrypoints.api_server with some extra logging for testing."""
-import argparse
 from typing import Any, Dict
 
 import uvicorn
@@ -8,6 +7,7 @@ from fastapi.responses import JSONResponse, Response
 import vllm.entrypoints.api_server
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.utils import FlexibleArgumentParser
 
 app = vllm.entrypoints.api_server.app
 
@@ -33,7 +33,7 @@ def stats() -> Response:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = FlexibleArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser = AsyncEngineArgs.add_cli_args(parser)
