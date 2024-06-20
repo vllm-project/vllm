@@ -135,7 +135,7 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
         })
         
         self._create_scale_param(
-                scale_name="weights_scaling_factor",
+                scale_name="weight_scaling_factor",
                 layer=layer,
                 output_partition_sizes=output_partition_sizes,
                 **extra_weight_attrs)
@@ -163,18 +163,18 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
         layer.output_scaling_factor = Parameter(layer.output_scaling_factor.reciprocal().max(),
                                                     requires_grad=False)
 
-        max_w_scale = layer.weights_scaling_factor.max()
+        max_w_scale = layer.weight_scaling_factor.max()
         if len(layer.logical_widths) > 1:
             start = 0
             for idx, logical_width in enumerate(layer.logical_widths):
                 end = start + logical_width
                 weight_dq = _per_tensor_dequantize(layer.weight[start:end, :],
-                                                  layer.weights_scaling_factor[idx])
+                                                  layer.weight_scaling_factor[idx])
 
                 layer.weight[start:end, :] = _per_tensor_quantize(
                     weight_dq, max_w_scale)
                 start = end
-        layer.weights_scaling_factor = Parameter(max_w_scale, requires_grad=False)
+        layer.weight_scaling_factor = Parameter(max_w_scale, requires_grad=False)
 
         # WEIGHT
         weight = layer.weight
@@ -210,7 +210,7 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
         weight: torch.Tensor = layer.weight
 
         asf: torch.Tensor = layer.activation_scaling_factor * 2
-        wsf: torch.Tensor = layer.weights_scaling_factor * 2
+        wsf: torch.Tensor = layer.weight_scaling_factor * 2
         osf: Optional[torch.Tensor] = layer.output_scaling_factor / 2 \
             if self._config.out_dtype == torch.float8_e4m3fnuz else None
         
