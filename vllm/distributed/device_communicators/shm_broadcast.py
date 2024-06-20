@@ -188,25 +188,32 @@ class ShmRingBufferIO:
                 metadata_buffer[self.reader_rank + 1] = 1
                 break
 
+    def enqueue(self, obj):
+        assert self._is_writer, "Only writers can enqueue"
+        serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+        if len(serialized_obj) > self.buffer.max_chunk_bytes:
+            raise RuntimeError(
+                f"{len(serialized_obj)=} larger than the allowed value "
+                f"{self.buffer.max_chunk_bytes},"
+                "Please increase the max_chunk_bytes parameter.")
+        with self.acquire_write() as buf:
+            buf[:len(serialized_obj)] = serialized_obj
+
+    def dequeue(self):
+        assert self._is_reader, "Only readers can dequeue"
+        with self.acquire_read() as buf:
+            # no need to know the size of serialized object
+            # pickle format itself contains the size information internally
+            # see https://docs.python.org/3/library/pickle.html
+            obj = pickle.loads(buf)
+        return obj
+
     def broadcast_object(self, obj=None):
         if self._is_writer:
-            serialized_obj = pickle.dumps(obj,
-                                          protocol=pickle.HIGHEST_PROTOCOL)
-            if len(serialized_obj) > self.buffer.max_chunk_bytes:
-                raise RuntimeError(
-                    f"{len(serialized_obj)=} larger than the allowed value "
-                    f"{self.buffer.max_chunk_bytes},"
-                    "Please increase the max_chunk_bytes parameter.")
-            with self.acquire_write() as buf:
-                buf[:len(serialized_obj)] = serialized_obj
+            self.enqueue(obj)
             return obj
         else:
-            with self.acquire_read() as buf:
-                # no need to know the size of serialized object
-                # pickle format itself contains the size information internally
-                # see https://docs.python.org/3/library/pickle.html
-                obj = pickle.loads(buf)
-            return obj
+            return self.dequeue()
 
 
 def create_shm_ringbuffer_io(pg: ProcessGroup,
