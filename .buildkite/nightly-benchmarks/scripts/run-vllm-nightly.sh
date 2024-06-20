@@ -17,9 +17,25 @@ check_gpus() {
 }
 
 kill_gpu_processes() {
-  pkill lmdeploy || true
+  # kill all processes on GPU.
+  pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
+  if [ -z "$pids" ]; then
+      echo "No GPU processes found."
+  else
+      for pid in $pids; do
+          kill -9 "$pid"
+          echo "Killed process with PID: $pid"
+      done
+
+      echo "All GPU processes have been killed."
+  fi
+
   # waiting for GPU processes to be fully killed
   sleep 10
+
+  # remove vllm config file
+  rm -rf ~/.config/vllm
+
   # Print the GPU memory usage
   # so that we know if all GPU processes are killed.
   gpu_memory_usage=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
@@ -175,7 +191,7 @@ main() {
   BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
   run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
-  CURRENT_LLM_SERVING_ENGINE=vllm python $BENCHMARK_ROOT/scripts/summary-nightly-results.py
+  CURRENT_LLM_SERVING_ENGINE=vllm python3 $BENCHMARK_ROOT/scripts/summary-nightly-results.py
 
 }
 
