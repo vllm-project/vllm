@@ -1,5 +1,6 @@
 #!/bin/bash
 # partially copied from from .buildkite/test-pipeline.yml
+set -e
 
 cd tests || exit 1
 
