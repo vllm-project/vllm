@@ -48,16 +48,16 @@
         },
         "vllm_server_parameters": {
             "model": "meta-llama/Llama-2-7b-hf",
-            "tensor_parallel_size": 1
+            "tensor_parallel_size": 1,
+            "disable_log_stats": "",
+            "disable_log_requests": ""
         },
         "vllm_client_parameters": {
             "model": "meta-llama/Llama-2-7b-hf",
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 200,
-            "disable_log_stats": "",
-            "disable_log_requests": ""
+            "num_prompts": 200
         }
     }
 ]
