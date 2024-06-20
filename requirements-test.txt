@@ -21,3 +21,6 @@ aiohttp
 
 # quantization
 bitsandbytes==0.42.0
+
+# Flashinfer
+https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.5/flashinfer-0.0.5+cu121torch2.3-cp310-cp310-linux_x86_64.whl

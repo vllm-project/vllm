@@ -1023,10 +1023,19 @@ class ModelRunner:
                     last_page_len_buffer = torch.empty(batch_size,
                                                        dtype=torch.int32,
                                                        device=self.device)
+                    
+                    num_qo_heads = self.model_config.get_num_attention_heads(
+                            self.parallel_config)
+                    num_kv_heads = self.model_config.get_num_kv_heads(
+                            self.parallel_config)
+                    if num_qo_heads // num_kv_heads >= 4:
+                        use_tensor_cores = False
+                    else:
+                        use_tensor_cores = False
                     decode_wrapper = \
                         CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
                         decode_workspace_buffer, indptr_buffer, indices_buffer,
-                        last_page_len_buffer, "NHD")
+                        last_page_len_buffer, "NHD", use_tensor_cores)
                     kv_cache_dtype = get_kv_cache_torch_dtype(
                         self.kv_cache_dtype, self.model_config.dtype)
 
@@ -1051,10 +1060,8 @@ class ModelRunner:
                         paged_kv_indices=paged_kv_indices_tensor_host,
                         paged_kv_last_page_len=
                         paged_kv_last_page_len_tensor_host,
-                        num_qo_heads=self.model_config.get_num_attention_heads(
-                            self.parallel_config),
-                        num_kv_heads=self.model_config.get_num_kv_heads(
-                            self.parallel_config),
+                        num_qo_heads=num_qo_heads,
+                        num_kv_heads=num_kv_heads,
                         head_dim=self.model_config.get_head_size(),
                         page_size=self.block_size,
                         seq_start_loc=None,
