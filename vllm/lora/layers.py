@@ -21,8 +21,8 @@ from vllm.distributed.utils import divide
 
 # from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.lora.punica import (
-    add_lora_triton,
-    add_expand_triton,
+    add_lora,
+    add_expand,
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -73,7 +73,7 @@ def _not_fully_sharded_can_replace(can_replace):
     return dec
 
 
-def _apply_expand_triton(
+def _apply_expand(
     x: torch.Tensor,
     lora_b_stacked: torch.Tensor,
     lora_index_tensor: torch.Tensor,
@@ -86,7 +86,7 @@ def _apply_expand_triton(
     output = output.view(-1, output.shape[-1])
     token_num = indices_info[0]
     is_prefilling = bool(indices_info[5])
-    add_expand_triton(
+    add_expand(
         output,
         x,
         lora_b_stacked,
@@ -98,15 +98,14 @@ def _apply_expand_triton(
     return output.view_as(org_output)
 
 
-def _apply_lora_triton(
-    x: torch.Tensor,
-    lora_a_stacked: torch.Tensor,
-    lora_b_stacked: torch.Tensor,
-    lora_index_tensor: torch.Tensor,
-    indices_info: List[int],
-    output: torch.Tensor,
-) -> torch.Tensor:
-    """Applies lora to each input.   This method applies all loras to each
+def _apply_lora(x: torch.Tensor,
+                lora_a_stacked: torch.Tensor,
+                lora_b_stacked: torch.Tensor,
+                lora_index_tensor: torch.Tensor,
+                indices_info: List[int],
+                output: torch.Tensor,
+                cache_clear: bool = False) -> torch.Tensor:
+    """Applies lora to each input. This method applies all loras to each
     input. It uses the `lora_index_tensor` vector to determine which lora
     yields the correct output. An index of -1 means no lora should be
     applied. This method adds the final lora results to the output.
@@ -117,9 +116,9 @@ def _apply_lora_triton(
         lora_b_stacked (torch.Tensor): (num_loras, output_dim, lora_rank)
         lora_index_tensor (torch.Tensor): (batch_size*seq_number,). The LoRA
         index corresponding to each token
-        indices_info: List[int]: 5 is the number of indicies tensors.
-        # base_indices, sampler_indices, sampler_indices_padded,
-        # embeddings_indices,prefilling or decoding
+        indices_len(List):(6,), It contains  (base_indices, sampler_indices, 
+            sampler_indices_padded,embeddings_indices, long_lora_indices,
+            prefilling flag). 
         output (torch.Tensor):  (batch_size, output_dim)
 
     Returns:
@@ -131,42 +130,34 @@ def _apply_lora_triton(
     output = output.view(-1, output.shape[-1])
 
     token_num = indices_info[0]
+
     is_prefilling = bool(indices_info[5])
-    add_lora_triton(
-        output,
-        x,
-        lora_a_stacked,
-        lora_b_stacked,
-        lora_index_tensor[:token_num],
-        0,
-        1.0,
-        is_prefilling,
-    )
+    add_lora(output,
+             x,
+             lora_a_stacked,
+             lora_b_stacked,
+             lora_index_tensor[:token_num],
+             0,
+             1.0,
+             is_prefilling,
+             cache_clear=cache_clear)
     return output.view_as(org_output)
 
 
-def _apply_lora_triton_nslice(
-    x: torch.Tensor,
-    lora_a_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    lora_b_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    lora_index_tensor: torch.Tensor,
-    indices_info: List[int],
-    output: torch.Tensor,
-    output_slices: Tuple[int, ...],
-) -> torch.Tensor:
-    """_summary_
-
-    Args:
-        x (torch.Tensor): _description_
-        lora_a_stacked (Tuple[torch.Tensor, torch.Tensor, torch.Tensor]): _description_
-        lora_b_stacked (Tuple[torch.Tensor, torch.Tensor, torch.Tensor]): _description_
-        lora_index_tensor (torch.Tensor): _description_
-        indices_info (List[int]): _description_
-        output (torch.Tensor): _description_
-        output_slices (Tuple[int, ...]): _description_
-
-    Returns:
-        torch.Tensor: _description_
+def _apply_lora_packed_nslice(x: torch.Tensor,
+                              lora_a_stacked: Tuple[torch.Tensor, torch.Tensor,
+                                                    torch.Tensor],
+                              lora_b_stacked: Tuple[torch.Tensor, torch.Tensor,
+                                                    torch.Tensor],
+                              lora_index_tensor: torch.Tensor,
+                              indices_info: List[int],
+                              output: torch.Tensor,
+                              output_slices: Tuple[int, ...],
+                              cache_clear: bool = False) -> torch.Tensor:
+    """
+    Applies lora to each input. Similar to _apply_lora, This method is 
+    used for layers that are composed of multiple sublayers
+    (slices) packed together.
     """
     org_output = output
     x = x.view(-1, x.shape[-1])
@@ -177,18 +168,17 @@ def _apply_lora_triton_nslice(
     offset_left = 0
     # TODO fuse these kernels
     for slice_idx in range(len(output_slices)):
-        add_lora_triton(
-            output,
-            x,
-            lora_a_stacked[slice_idx],
-            lora_b_stacked[slice_idx],
-            lora_index_tensor[:token_num],
-            0,
-            1.0,
-            is_prefilling,
-            offset_left,
-            output_slices[slice_idx],
-        )
+        add_lora(output,
+                 x,
+                 lora_a_stacked[slice_idx],
+                 lora_b_stacked[slice_idx],
+                 lora_index_tensor[:token_num],
+                 0,
+                 1.0,
+                 is_prefilling,
+                 offset_left,
+                 output_slices[slice_idx],
+                 cache_clear=cache_clear)
         offset_left += output_slices[slice_idx]
 
     return output.view_as(org_output)
@@ -407,7 +397,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 full_lora_a_embeddings.shape[1],
                 -1,
             )
-        _apply_expand_triton(
+        _apply_expand(
             full_lora_a_embeddings,
             self.lora_b_stacked,
             self.indices,
@@ -526,7 +516,7 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        _apply_lora_triton(
+        _apply_lora(
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
@@ -687,7 +677,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        _apply_lora_triton_nslice(
+        _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
@@ -957,7 +947,7 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        _apply_lora_triton_nslice(
+        _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
@@ -1078,7 +1068,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
     def apply(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x)
         # maybe we need not  restrict  range to [:batch_size]
-        _apply_lora_triton(
+        _apply_lora(
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
@@ -1301,7 +1291,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         # sampler_indices
         sampler_indices = self.indices_len[1]
         is_prefilling = False
-        add_lora_triton(
+        add_lora(
             logits,
             hidden_states,
             self.lora_a_stacked,

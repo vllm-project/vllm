@@ -103,8 +103,10 @@ def bgmv_expand(
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch
         batchs (int): batch size
-        add_inputs (bool, optional): _description_. Defaults to False.
-        cast_type (bool, optional): _description_. Defaults to False.
+        add_inputs (bool, optional):  Defaults to False. adds the final lora 
+            results to the output.
+        override_config (Optional[Dict[str, int]], optional): Defaults to None. 
+            Triton grid config
     """
 
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]

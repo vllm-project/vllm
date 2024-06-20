@@ -1,6 +1,7 @@
 import functools
 import json
 import os
+import torch
 from typing import Dict
 
 
@@ -9,8 +10,7 @@ def _get_config_file_name(
     batchs: int,
     hidden_size: int,
 ) -> str:
-    # device_name = torch.cuda.get_device_name().replace(" ", "_")
-    device_name = "NVIDIA_GeForce_RTX_3090"
+    device_name = torch.cuda.get_device_name().replace(" ", "_")
     return (f"op_type={op_type},batchs={batchs},hidden_size={hidden_size} " +
             f"device_name={device_name}.json")
 

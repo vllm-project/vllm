@@ -109,7 +109,9 @@ def bgmv_expand_slice(
         slice_offst (int): output_tensor's offst
         slice_size (int): current output_tensor's size
         batchs (int): batch size
-        add_inputs (bool, optional): _description_. Defaults to False.
+        add_inputs (bool, optional): Defaults to False.
+        override_config (Optional[Dict[str, int]], optional): Defaults to None. 
+            Triton grid config
     """
 
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]

@@ -20,13 +20,16 @@ TOLERANCES = {
     torch.bfloat16: (3e-2, 2e-2),
 }
 
+STAGES = [0, 1]  #prefilling(1) or decoding(0)
+
 
 @pytest.mark.parametrize("m", TENSOR_SIZES)
 @pytest.mark.parametrize("n", TENSOR_SIZES)
 @pytest.mark.parametrize("k", BATCH_SIZES)
 @pytest.mark.parametrize("rank", RANKS)
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_apply_lora(m, n, k, rank, dtype) -> None:
+@pytest.mark.parametrize("stage", STAGES)
+def test_apply_lora(m, n, k, rank, dtype, stage) -> None:
     manager = DummyLoRAManager()
 
     module_name = "module"
@@ -53,19 +56,31 @@ def test_apply_lora(m, n, k, rank, dtype) -> None:
     for i in range(lora_a_stack.shape[0]):
         lora_a_stack[i][0] = lora.lora_a.T
         lora_b_stack[i][0] = (lora.lora_b * lora.scaling).T
-
+    indices_info = [None] * 6
+    indices_info[0] = k
+    indices_info[5] = stage
     output = torch.zeros(k, m, device="cuda", dtype=dtype)
-    _apply_lora(
-        input, lora_a_stack, lora_b_stack,
-        torch.randint(0, lora_a_stack.shape[0], (len(input), ), device="cuda"),
-        output)
+    _apply_lora(input,
+                lora_a_stack,
+                lora_b_stack,
+                torch.randint(0,
+                              lora_a_stack.shape[0], (len(input), ),
+                              device="cuda"),
+                indices_info,
+                output,
+                cache_clear=True)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
 
     output[:] = 0
-    _apply_lora(input, lora_a_stack, lora_b_stack,
-                torch.full((len(input), ), -1, device="cuda"), output)
+    _apply_lora(input,
+                lora_a_stack,
+                lora_b_stack,
+                torch.full((len(input), ), -1, device="cuda"),
+                indices_info,
+                output,
+                cache_clear=True)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -76,7 +91,8 @@ def test_apply_lora(m, n, k, rank, dtype) -> None:
 @pytest.mark.parametrize("k", BATCH_SIZES)
 @pytest.mark.parametrize("rank", RANKS)
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
+@pytest.mark.parametrize("stage", STAGES)
+def test_apply_lora_packed_2slice(m, n, k, rank, dtype, stage) -> None:
     if m % 2 != 0:
         pytest.skip("m must be divisible by 2")
     if m // 2 not in TENSOR_SIZES:
@@ -91,7 +107,7 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
     lora_1 = manager.get_module_lora(module_name + "1")
     manager.init_random_lora(module_name + "2", weight, rank=rank)
     lora_2 = manager.get_module_lora(module_name + "2")
-
+    
     input = torch.rand(k, n, device="cuda", dtype=dtype)
     expected = torch.cat([
         input @ lora_1.lora_a @ lora_1.lora_b * lora_1.scaling,
@@ -120,21 +136,32 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
         lora_b_stacks[0][i][0] = (lora_1.lora_b * lora_1.scaling).T
         lora_a_stacks[1][i][0] = lora_2.lora_a.T
         lora_b_stacks[1][i][0] = (lora_2.lora_b * lora_2.scaling).T
-
+    indices_info = [None] * 6
+    indices_info[0] = k
+    indices_info[5] = stage
     output = torch.zeros(k, m, device="cuda", dtype=dtype)
-    _apply_lora_packed_nslice(
-        input, lora_a_stacks, lora_b_stacks,
-        torch.randint(0,
-                      lora_a_stacks[0].shape[0], (len(input), ),
-                      device="cuda"), output, (m // 2, m // 2))
+    _apply_lora_packed_nslice(input,
+                              lora_a_stacks,
+                              lora_b_stacks,
+                              torch.randint(0,
+                                            lora_a_stacks[0].shape[0],
+                                            (len(input), ),
+                                            device="cuda"),
+                              indices_info,
+                              output, (m // 2, m // 2),
+                              cache_clear=True)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
 
     output[:] = 0
-    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks,
+    _apply_lora_packed_nslice(input,
+                              lora_a_stacks,
+                              lora_b_stacks,
                               torch.full((len(input), ), -1, device="cuda"),
-                              output, (m // 2, m // 2))
+                              indices_info,
+                              output, (m // 2, m // 2),
+                              cache_clear=True)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -145,7 +172,8 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
 @pytest.mark.parametrize("k", BATCH_SIZES)
 @pytest.mark.parametrize("rank", RANKS)
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
+@pytest.mark.parametrize("stage", STAGES)
+def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype, stage) -> None:
     manager = DummyLoRAManager()
 
     module_name = "module"
@@ -204,21 +232,32 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
         lora_b_stacks[1][i][0] = (lora_k.lora_b * lora_k.scaling).T
         lora_a_stacks[2][i][0] = lora_v.lora_a.T
         lora_b_stacks[2][i][0] = (lora_v.lora_b * lora_v.scaling).T
-
+    indices_info = [None] * 6
+    indices_info[0] = k
+    indices_info[5] = stage  #decoding stage
     output = torch.zeros(k, sum(qkv), device="cuda", dtype=dtype)
-    _apply_lora_packed_nslice(
-        input, lora_a_stacks, lora_b_stacks,
-        torch.randint(0,
-                      lora_a_stacks[0].shape[0], (len(input), ),
-                      device="cuda"), output, (qkv[0], qkv[1], qkv[2]))
+    _apply_lora_packed_nslice(input,
+                              lora_a_stacks,
+                              lora_b_stacks,
+                              torch.randint(0,
+                                            lora_a_stacks[0].shape[0],
+                                            (len(input), ),
+                                            device="cuda"),
+                              indices_info,
+                              output, (qkv[0], qkv[1], qkv[2]),
+                              cache_clear=True)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
 
     output[:] = 0
-    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks,
+    _apply_lora_packed_nslice(input,
+                              lora_a_stacks,
+                              lora_b_stacks,
                               torch.full((len(input), ), -1, device="cuda"),
-                              output, (qkv[0], qkv[1], qkv[2]))
+                              indices_info,
+                              output, (qkv[0], qkv[1], qkv[2]),
+                              cache_clear=True)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()

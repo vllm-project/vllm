@@ -122,8 +122,8 @@ def sgmv_expand(
         batchs (int): batch size
         max_seq_length (int):  The max sequence lengths of the sequences
             in the batch
-        add_inputs (bool, optional): _description_. Defaults to False.
-        cast_type (bool, optional): _description_. Defaults to False.
+        add_inputs (bool, optional):  Defaults to False. adds the final lora 
+            results to the output.
     """
 
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]

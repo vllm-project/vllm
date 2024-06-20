@@ -18,9 +18,9 @@ from vllm.lora.layers import (
     RowParallelLinearWithLoRA,
 )
 from vllm.lora.punica import (
-    add_shrink_triton,
-    add_expand_triton,
-    add_expand_slice_triton,
+    add_shrink,
+    add_expand,
+    add_expand_slice,
 )
 
 if TYPE_CHECKING:
@@ -71,18 +71,9 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
             dtype=torch.float32,
             device=x.device,
         )
-
-        # bgmv(
-        #     buffer,
-        #     x,
-        #     self.lora_a_stacked,
-        #     self.indices[: self.indices_len[0]],
-        #     0,
-        #     1.0,
-        # )
         token_num = self.indices_len[0]
-        is_prefilling = bool(self.indices_len[4])
-        add_shrink_triton(
+        is_prefilling = bool(self.indices_len[5])
+        add_shrink(
             buffer,
             x,
             self.lora_a_stacked,
@@ -92,15 +83,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
             is_prefilling,
         )
         buffer = tensor_model_parallel_all_gather(buffer)
-        # bgmv(
-        #     output,
-        #     buffer,
-        #     self.lora_b_stacked,
-        #     self.indices[: self.indices_len[0]],
-        #     0,
-        #     1.0,
-        # )
-        add_expand_triton(
+        add_expand(
             output,
             buffer,
             self.lora_b_stacked,
@@ -110,7 +93,6 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
             add_input=True,
         )
         # now have column partitioned output
-
         output = output.view(*out_orig_shape)
         return output
 
@@ -138,7 +120,7 @@ def _mcp_apply(x, bias, layer):
     MergedColumnParallelLinearWithShardedLoRA and
     QKVParallelLinearWithShardedLora share the same
     LoRa weight application method.
-
+    
     The main difference is the step by shard_size for lora_b which can
     vary for QKVParallelLinearWithShardedLora but is constant for
     MergedColumnParallelLinearWithShardedLoRA.
@@ -155,18 +137,10 @@ def _mcp_apply(x, bias, layer):
         device=x.device,
     )
     token_num = layer.indices_len[0]
-    is_prefilling = bool(layer.indices_len[4])
+    is_prefilling = bool(layer.indices_len[5])
     for idx in range(n):
-        # bgmv(
-        #     buffers[idx],
-        #     x,
-        #     layer.lora_a_stacked[idx],
-        #     layer.indices[: layer.indices_len[0]],
-        #     0,
-        #     1.0,
-        # )
 
-        add_shrink_triton(
+        add_shrink(
             buffers[idx],
             x,
             layer.lora_a_stacked[idx],
@@ -180,17 +154,7 @@ def _mcp_apply(x, bias, layer):
     left_offset = 0
     for idx in range(n):
         shard_size = layer.lora_b_stacked[idx].shape[2]
-        # dispatch_bgmv_low_level(
-        #     output,
-        #     buffers[idx],
-        #     layer.lora_b_stacked[idx],
-        #     layer.indices[: layer.indices_len[0]],
-        #     0,
-        #     1.0,
-        #     left_offset,
-        #     shard_size,
-        # )
-        add_expand_slice_triton(
+        add_expand_slice(
             output,
             buffers[idx],
             layer.lora_b_stacked[idx],
@@ -328,17 +292,9 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             dtype=torch.float32,
             device=x.device,
         )
-        # bgmv(
-        #     buffer,
-        #     x,
-        #     self.lora_a_stacked,
-        #     self.indices[: self.indices_len[0]],
-        #     0,
-        #     1.0,
-        # )
         token_num = self.indices_len[0]
-        is_prefilling = bool(self.indices_len[4])
-        add_shrink_triton(
+        is_prefilling = bool(self.indices_len[5])
+        add_shrink(
             buffer,
             x,
             self.lora_a_stacked,
@@ -357,17 +313,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # reduced before being used
         shard_size = self.lora_b_stacked.shape[2]
         start_idx = self.tp_rank * shard_size
-        # dispatch_bgmv_low_level(
-        #     output,
-        #     buffer,
-        #     self.lora_b_stacked,
-        #     self.indices[: self.indices_len[0]],
-        #     0,
-        #     1.0,
-        #     start_idx,
-        #     shard_size,
-        # )
-        add_expand_slice_triton(
+        add_expand_slice(
             output,
             buffer,
             self.lora_b_stacked,

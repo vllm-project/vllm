@@ -97,6 +97,8 @@ def bgmv_shrink(
             corresponding to each batch
         batchs (int): batch size
         scaling (float):  Scaling factor.
+        override_config (Optional[Dict[str, int]], optional): Defaults to None. 
+            Triton grid config
     """
     assert inputs.dtype == lora_a_weights.dtype
     assert inputs.dtype in [torch.float16, torch.bfloat16]

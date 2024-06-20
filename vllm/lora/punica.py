@@ -12,7 +12,12 @@ from vllm.lora.ops.sgmv_shrink import sgmv_shrink
 _PARAMS_CACHE: Dict[int, Tuple] = {}
 
 
-def _compute_params(token_lora_tensor: torch.Tensor):
+def _compute_params(
+    token_lora_tensor: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, ]:
+    """
+    Get the information required for the sgmv kernel.
+    """
     pointer = token_lora_tensor.data_ptr()
     if pointer not in _PARAMS_CACHE:
         lora_indices_tensor, seq_length_tensor = torch.unique_consecutive(
@@ -36,6 +41,7 @@ def reset_params_cache():
     """At the beginning of the prefilling stage, we need  clear the
     cache explicitly
     """
+    #TODO release gpu memory
     _PARAMS_CACHE.clear()
 
 
@@ -46,7 +52,7 @@ def _get_prefilling_params(token_lora_tensor: torch.Tensor,
     return _compute_params(token_lora_tensor)
 
 
-def add_shrink_triton(
+def add_shrink(
     y: torch.Tensor,
     x: torch.Tensor,
     w_t_all: torch.Tensor,
@@ -56,6 +62,10 @@ def add_shrink_triton(
     is_prefilling: bool,
     cache_clear: bool = False,
 ):
+    """
+    y=x@w_t_all
+    When `is_prefilling` is True, will lanuch `sgmv_shrink`
+    """
     if is_prefilling:
         (
             b_seq_start_tensor,
@@ -79,7 +89,7 @@ def add_shrink_triton(
         bgmv_shrink(x, w_t_all, y, lora_indices_tensor, scale)
 
 
-def add_expand_triton(
+def add_expand(
     y: torch.Tensor,
     x: torch.Tensor,
     w_t_all: torch.Tensor,
@@ -89,6 +99,10 @@ def add_expand_triton(
     add_input: bool = True,
     cache_clear: bool = False,
 ):
+    """
+    y+=x@w_t_all
+    When `is_prefilling` is True, will lanuch `sgmv_expand`, 
+    """
     if is_prefilling:
         (
             b_seq_start_tensor,
@@ -112,7 +126,7 @@ def add_expand_triton(
         bgmv_expand(x, w_t_all, y, lora_indices_tensor, add_inputs=add_input)
 
 
-def add_expand_slice_triton(
+def add_expand_slice(
     y: torch.Tensor,
     x: torch.Tensor,
     w_t_all: torch.Tensor,
@@ -124,6 +138,9 @@ def add_expand_slice_triton(
     add_input: bool = True,
     cache_clear: bool = False,
 ):
+    """
+    y+=x@w_t_all
+    """
     if is_prefilling:
         (
             b_seq_start_tensor,
@@ -157,7 +174,7 @@ def add_expand_slice_triton(
         )
 
 
-def add_lora_triton(
+def add_lora(
     y: torch.Tensor,
     x: torch.Tensor,
     wa_t_all: torch.Tensor,
@@ -173,9 +190,29 @@ def add_lora_triton(
     cache_clear: bool = False,
 ):
     """
-    Same as `add_lora_triton` but you can operate on slices of y.
-    Pass whole y, define y_offset and y_slice_size.
+    Semantics:
+      y[i] += (
+          x[i].unsqueeze(0)
+          @ wa_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
+          @ wb_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
+          * scale
+        ).squeeze(0)
+    Args:
+        y (torch.Tensor):  Output tensor. Will be changed in-place.
+        x (torch.Tensor): Input tensor
+        wa_t_all (torch.Tensor): lora_a's weight
+        wb_t_all (torch.Tensor): lora_b's weight
+        lora_indices_tensor (torch.Tensor): _description_
+        layer_idx (int): Layer index of LoRA weights.
+        scale (float): Scaling factor.
+        is_prefilling (bool): prefiling stage
+        y_offset (Optional[int], optional): Offset to apply to the starting 
+            column of y.
+        y_slice_size (Optional[int], optional): Size of the y column slice..
+        buffer (Optional[torch.Tensor], optional): Defaults to None.
+        cache_clear (bool, optional):  Defaults to False.
     """
+
     r = wb_t_all.size(-1)
     if buffer is None:
         # We set the buffer to be float32 by default ,refer to:
@@ -184,7 +221,7 @@ def add_lora_triton(
                              dtype=torch.float32,
                              device=x.device)
 
-    add_shrink_triton(
+    add_shrink(
         buffer,
         x,
         wa_t_all,
@@ -195,7 +232,7 @@ def add_lora_triton(
         cache_clear=cache_clear,
     )
     if y_offset is None and y_slice_size is None:
-        add_expand_triton(
+        add_expand(
             y,
             buffer,
             wb_t_all,
@@ -206,7 +243,7 @@ def add_lora_triton(
             cache_clear=cache_clear,
         )
     else:
-        add_expand_slice_triton(
+        add_expand_slice(
             y,
             buffer,
             wb_t_all,

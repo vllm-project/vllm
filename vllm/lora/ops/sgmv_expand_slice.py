@@ -133,7 +133,8 @@ def sgmv_expand_slice(
             in the batch
         slice_offst (int): output_tensor's offst
         slice_size (int): current output_tensor's size
-        add_inputs (bool, optional): _description_. Defaults to False.
+        add_inputs (bool, optional):  Defaults to False. adds the final lora 
+            results to the output..
     """
 
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]

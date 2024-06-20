@@ -84,10 +84,10 @@ def convert_mapping(
             long_lora_indices: Tensor of shape [batch_size] mapping
                 requests to RoPE offsets and rot dims for long LoRAs.
                 None if long context lora doesn't exist.
-            indices_len: List of lengths of the above tensors.
-                Used to index into each tensor. It contains length for
+            indices_len: List of lengths of the above tensors and prefilling 
+                flag.Used to index into each tensor. It contains  
                 (base_indices, sampler_indices, sampler_indices_padded,
-                embeddings_indices, long_lora_indices,prefilling stage flag). 
+                embeddings_indices, long_lora_indices,prefilling  flag). 
     """
     index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
@@ -153,8 +153,10 @@ def convert_mapping(
     if long_lora_indices_len is not None:
         indices_len.append(long_lora_indices_len)
     else:
-        #If long_lora doesn'texist,append None
+        #If long_lora doesn't exist,append None
         indices_len.append(None)
+    # Append a prefilling flag to help selecting the appropriate lora
+    # ops (sgmv or bgmv)
     indices_len.append(int(mapping.is_prefilling))
     return (
         base_indices,

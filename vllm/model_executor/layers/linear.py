@@ -93,6 +93,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
             if bias is not None:
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
+        
         return F.linear(x, weight, bias)
 
 
