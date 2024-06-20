@@ -21,7 +21,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     target_yaml_file=".buildkite/nightly-benchmarks/benchmark-pipeline.yaml"
   fi
 
-  if [[ $PR_LABELS == *"comp-benchmarks"* ]]; then
+  if [[ $PR_LABELS == *"nightly-benchmarks"* ]]; then
     echo "This PR has the 'nightly-benchmark' label. Proceeding with the nightly benchmarks."
     target_yaml_file=".buildkite/nightly-benchmarks/nightly-pipeline.yaml"
   fi
