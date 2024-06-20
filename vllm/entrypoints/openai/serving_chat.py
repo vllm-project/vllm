@@ -222,6 +222,8 @@ class OpenAIServingChat(OpenAIServing):
                 conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
+                chat_template=request.chat_template,
+                **request.template_kwargs,
             )
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)

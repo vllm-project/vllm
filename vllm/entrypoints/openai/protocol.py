@@ -190,6 +190,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "special tokens so this should be set to False (as is the "
             "default)."),
     )
+    chat_template: Optional[str] = Field(
+        default=None,
+        description=(
+            "A Jinja template to use for this conversion. "
+            "If this is not passed, the model's default chat template will be "
+            "used instead."),
+    )
+    template_kwargs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the template renderer. "
+                     "Will be accessible by the chat template."),
+    )
     include_stop_str_in_output: Optional[bool] = Field(
         default=False,
         description=(
