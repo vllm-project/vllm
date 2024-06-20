@@ -82,7 +82,7 @@ run_serving_tests() {
     # check if there is enough GPU to run the test
     tp=$(echo "$server_params" | jq -r '.num_shard')
     if [[ $gpu_count -lt $tp ]]; then
-      echo "Required num-shard $tp but only $gpu_count GPU found. Skip testcase $testname."
+      echo "Required num-shard $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
     fi
 
