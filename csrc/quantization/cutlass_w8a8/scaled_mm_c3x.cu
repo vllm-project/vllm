@@ -106,7 +106,7 @@ template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
 struct ScaledEpilogue
     : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
  private:
-  using SUPER = ScaledEpilogue<ElementAcc, ElementD, EpilogueDescriptor>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
   using Accum = typename SUPER::Accum;
   using ScaleA = typename SUPER::ScaleA;
   using ScaleB = typename SUPER::ScaleB;
