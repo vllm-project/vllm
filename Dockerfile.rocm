@@ -109,7 +109,7 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
     if [ "$BUILD_TRITON" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
-    && git clone https://github.com/ROCm/triton.git \
+    && git clone https://github.com/OpenAI/triton.git \
     && cd triton/python \
     && python3 setup.py bdist_wheel --dist-dir=/install; \
     # Create an empty directory otherwise as later build stages expect one
