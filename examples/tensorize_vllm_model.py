@@ -5,7 +5,7 @@ import os
 import uuid
 
 from vllm import LLM
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import EngineArgs, FlexibleArgumentParser
 from vllm.model_executor.model_loader.tensorizer import (TensorizerArgs,
                                                          TensorizerConfig,
                                                          tensorize_vllm_model)
@@ -96,7 +96,7 @@ deserialization in this example script, although `--tensorizer-uri` and
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="An example script that can be used to serialize and "
         "deserialize vLLM models. These models "
         "can be loaded using tensorizer directly to the GPU "

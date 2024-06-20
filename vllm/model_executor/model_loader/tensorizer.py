@@ -14,7 +14,7 @@ from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import EngineArgs, FlexibleArgumentParser
 from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -177,8 +177,7 @@ class TensorizerArgs:
                 self.deserializer_params['encryption'] = decryption_params
 
     @staticmethod
-    def add_cli_args(
-            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Tensorizer CLI arguments"""
 
         # Tensorizer options arg group

@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import json
+import sys
 import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
@@ -18,6 +19,24 @@ def nullable_str(val: str):
     if not val or val == "None":
         return None
     return val
+
+
+class FlexibleArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that allows both underscore and dash in names."""
+
+    def parse_args(self, args=None, namespace=None):
+        if args is None:
+            args = sys.argv[1:]
+
+        # Convert underscores to dashes in argument names
+        processed_args = []
+        for arg in args:
+            if arg.startswith('--'):
+                processed_args.append('--' + arg[2:].replace('_', '-'))
+            else:
+                processed_args.append(arg)
+
+        return super().parse_args(processed_args, namespace)
 
 
 @dataclass
@@ -110,7 +129,7 @@ class EngineArgs:
 
     @staticmethod
     def add_cli_args_for_vlm(
-            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+            parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         parser.add_argument('--image-input-type',
                             type=nullable_str,
                             default=None,
@@ -156,8 +175,7 @@ class EngineArgs:
         return parser
 
     @staticmethod
-    def add_cli_args(
-            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
         # Model arguments
@@ -800,8 +818,8 @@ class AsyncEngineArgs(EngineArgs):
     max_log_len: Optional[int] = None
 
     @staticmethod
-    def add_cli_args(parser: argparse.ArgumentParser,
-                     async_args_only: bool = False) -> argparse.ArgumentParser:
+    def add_cli_args(parser: FlexibleArgumentParser,
+                     async_args_only: bool = False) -> FlexibleArgumentParser:
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
         parser.add_argument('--engine-use-ray',
@@ -822,13 +840,13 @@ class AsyncEngineArgs(EngineArgs):
 
 # These functions are used by sphinx to build the documentation
 def _engine_args_parser():
-    return EngineArgs.add_cli_args(argparse.ArgumentParser())
+    return EngineArgs.add_cli_args(FlexibleArgumentParser())
 
 
 def _async_engine_args_parser():
-    return AsyncEngineArgs.add_cli_args(argparse.ArgumentParser(),
+    return AsyncEngineArgs.add_cli_args(FlexibleArgumentParser(),
                                         async_args_only=True)
 
 
 def _vlm_engine_args_parser():
-    return EngineArgs.add_cli_args_for_vlm(argparse.ArgumentParser())
+    return EngineArgs.add_cli_args_for_vlm(FlexibleArgumentParser())

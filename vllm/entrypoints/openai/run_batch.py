@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import sys
 from io import StringIO
@@ -6,7 +5,8 @@ from typing import Awaitable, List
 
 import aiohttp
 
-from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
+from vllm.engine.arg_utils import (AsyncEngineArgs, FlexibleArgumentParser,
+                                   nullable_str)
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible batch runner.")
     parser.add_argument(
         "-i",

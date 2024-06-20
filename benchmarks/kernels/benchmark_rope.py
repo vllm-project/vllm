@@ -1,10 +1,10 @@
-import argparse
 from itertools import accumulate
 from typing import List, Optional
 
 import nvtx
 import torch
 
+from vllm.engine.arg_utils import FlexibleArgumentParser
 from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding,
                                                          get_rope)
 
@@ -86,7 +86,7 @@ def benchmark_rope_kernels_multi_lora(
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Benchmark the rotary embedding kernels.")
     parser.add_argument("--is-neox-style", type=bool, default=True)
     parser.add_argument("--batch-size", type=int, default=16)
