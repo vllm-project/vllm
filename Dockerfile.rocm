@@ -55,15 +55,15 @@ RUN pip install --no-cache-dir fastapi ninja tokenizers pandas
 RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-5.7"*) \
             pip uninstall -y torch \
-            && pip install --no-cache-dir --pre 'torch >=2.4.0.dev20240601, <2.5.0' \
+            && pip install --no-cache-dir --pre torch==2.4.0.dev20240612 \
                --index-url https://download.pytorch.org/whl/nightly/rocm5.7;; \
         *"rocm-6.0"*) \
             pip uninstall -y torch \
-            && pip install --no-cache-dir --pre 'torch >=2.4.0.dev20240601, <2.5.0' \
+            && pip install --no-cache-dir --pre torch==2.4.0.dev20240612 \
                --index-url https://download.pytorch.org/whl/nightly/rocm6.0;; \
         *"rocm-6.1"*) \
             pip uninstall -y torch \
-            && pip install --no-cache-dir --pre 'torch >=2.4.0.dev20240601, <2.5.0' \
+            && pip install --no-cache-dir --pre torch==2.4.0.dev20240612 \
                --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
         *) ;; esac
 
@@ -153,7 +153,10 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
         *"rocm-6.0"*) \
             patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h rocm_patch/rocm_bf16.patch;; \
         *"rocm-6.1"*) \
-            cp rocm_patch/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6;; \
+            # Bring in upgrades to HIP graph earlier than ROCm 6.2 for vLLM
+            cp rocm_patch/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6 \
+            # Prevent interference if torch bundles its own HIP runtime
+            && rm -f "$(python3 -c 'import torch; print(torch.__path__[0])')"/lib/libamdhip64.so || true;; \
         *) ;; esac \
     && python3 setup.py clean --all \
     && python3 setup.py develop
