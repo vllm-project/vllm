@@ -45,6 +45,17 @@
             "num_prompts": 200,
             "port": 8000,
             "endpoint": "/v2/models/ensemble/generate_stream"
+        },
+        "vllm_server_parameters": {
+            "model": "meta-llama/Llama-2-7b-hf",
+            "tensor_parallel_size": 1
+        },
+        "vllm_client_parameters": {
+            "model": "meta-llama/Llama-2-7b-hf",
+            "backend": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200
         }
     }
 ]

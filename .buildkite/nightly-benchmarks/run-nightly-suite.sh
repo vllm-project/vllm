@@ -61,6 +61,12 @@ main() {
         bash ../.buildkite/nightly-benchmarks/scripts/run-trt-nightly.sh
     fi
 
+    # run vllm
+    if python3 -c "import vllm" &> /dev/null; then
+        echo "vllm is available, redirect to run-vllm-nightly.sh"
+        bash ../.buildkite/nightly-benchmarks/scripts/run-vllm-nightly.sh
+    fi
+
 }
 
 main "$@"

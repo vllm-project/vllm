@@ -69,16 +69,15 @@ run_serving_tests() {
       echo "Skip test case $test_name."
       continue
     fi
-    
-    # append lmdeploy to the test name
-    test_name=lmdeploy_$test_name
+
+    # append vllm to the test name
+    test_name=vllm_$test_name
 
     
 
     # get client and server arguments
-    server_params=$(echo "$params" | jq -r '.lmdeploy_server_parameters')
-    client_params=$(echo "$params" | jq -r '.lmdeploy_client_parameters')
-    model=$(echo "$params" | jq -r '.lmdeploy_server_model')
+    server_params=$(echo "$params" | jq -r '.vllm_server_parameters')
+    client_params=$(echo "$params" | jq -r '.vllm_client_parameters')
     server_args=$(json2args "$server_params")
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
@@ -86,20 +85,24 @@ run_serving_tests() {
     echo "Running over qps list $qps_list"
 
     # check if there is enough GPU to run the test
-    tp=$(echo "$server_params" | jq -r '.tp')
+    tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
     if [[ $gpu_count -lt $tp ]]; then
       echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
     fi
 
-    # prepare tokenizer
-    rm -rf /tokenizer_cache
-    mkdir /tokenizer_cache
-    python ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
-      --model "$model" \
-      --cachedir /tokenizer_cache
+    # check if server model and client model is aligned
+    server_model=$(echo "$server_params" | jq -r '.model')
+    client_model=$(echo "$client_params" | jq -r '.model')
+    if [[ $server_model != "$client_model" ]]; then
+      echo "Server model and client model must be the same. Skip testcase $test_name."
+      continue
+    fi
 
-    server_command="lmdeploy serve api_server $model $server_args"
+
+    server_command="python3 \
+      -m vllm.entrypoints.openai.api_server \
+      $server_args"
 
     # run the server
     echo "Running test case $test_name"
@@ -128,8 +131,7 @@ run_serving_tests() {
       new_test_name=$test_name"_qps_"$qps
 
       client_command="python3 benchmark_serving.py \
-        --backend lmdeploy \
-        --tokenizer /tokenizer_cache \
+        --backend vllm \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \
@@ -146,7 +148,7 @@ run_serving_tests() {
         --arg server "$server_command" \
         --arg client "$client_command" \
         --arg gpu "$gpu_type" \
-        --arg engine "lmdeploy" \
+        --arg engine "vllm" \
         '{
           server_command: $server,
           client_command: $client,
@@ -173,7 +175,7 @@ main() {
   BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
   run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
-  CURRENT_LLM_SERVING_ENGINE=lmdeploy python $BENCHMARK_ROOT/scripts/summary-nightly-results.py
+  CURRENT_LLM_SERVING_ENGINE=vllm python $BENCHMARK_ROOT/scripts/summary-nightly-results.py
 
 }
 

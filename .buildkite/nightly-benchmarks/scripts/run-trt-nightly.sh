@@ -140,7 +140,7 @@ run_serving_tests() {
   jq -c '.[]' "$serving_test_file" | while read -r params; do
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
-    # append tgi to the test name
+    # append trt to the test name
     test_name=trt_$test_name
 
     # if TEST_SELECTOR is set, only run the test cases that match the selector
@@ -222,7 +222,7 @@ run_serving_tests() {
         --arg server "$server_command" \
         --arg client "$client_command" \
         --arg gpu "$gpu_type" \
-        --arg engine "tgi" \
+        --arg engine "trt" \
         '{
           server_command: $server,
           client_command: $client,
