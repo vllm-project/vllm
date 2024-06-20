@@ -100,6 +100,7 @@ def register_defaults():
     register_fusable('_operator.mul')
     register_fusable('_operator.getitem')
     register_fusable('torch.relu')
+    register_fusable('torch.narrow')
     register_fusable('torch.nn.functional.silu')
     register_fusable('torch.matmul', True)
     register_fusable('torch.ops._C.silu_and_mul')
