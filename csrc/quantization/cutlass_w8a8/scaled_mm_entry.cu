@@ -25,6 +25,22 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b_scales);
 #endif
 
+bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability) {
+  // CUTLASS FP8 kernels need at least
+  //   CUDA 12.0 on SM90 systems (Hopper)
+  //   CUDA 12.4 on SM89 systems (Lovelace)
+
+#if defined CUDA_VERSION
+  if (cuda_device_capability >= 90) {
+    return CUDA_VERSION >= 12000;
+  } else if (cuda_device_capability >= 89) {
+    return CUDA_VERSION >= 12040;
+  }
+#endif
+
+  return false;
+}
+
 void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales) {
