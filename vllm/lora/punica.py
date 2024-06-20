@@ -4,7 +4,6 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
-<<<<<<< HEAD
 from vllm.lora.ops.bgmv_expand import bgmv_expand
 from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
 from vllm.lora.ops.bgmv_shrink import bgmv_shrink
@@ -47,23 +46,6 @@ def reset_params_cache():
     #TODO release gpu memory
     _PARAMS_CACHE.clear()
 
-=======
-from vllm import _custom_ops as ops
-
-
-def _check_punica_support():
-    if ops.is_custom_op_supported("_punica_C::dispatch_bgmv"):
-        return
-
-    if torch.cuda.get_device_capability() < (8, 0):
-        raise ImportError(
-            "punica LoRA kernels require compute capability >= 8.0")
-    else:
-        raise ImportError(
-            "punica LoRA kernels could not be imported. If you built vLLM "
-            "from source, make sure VLLM_INSTALL_PUNICA_KERNELS=1 env var "
-            "was set.")
->>>>>>> main
 
 def _get_prefilling_params(token_lora_tensor: torch.Tensor,
                            cache_clear: bool = False):
@@ -86,7 +68,6 @@ def add_shrink(
     y=x@w_t_all
     When `is_prefilling` is True, will launch `sgmv_shrink`
     """
-<<<<<<< HEAD
     if is_prefilling:
         (
             b_seq_start_tensor,
@@ -108,11 +89,6 @@ def add_shrink(
         )
     else:
         bgmv_shrink(x, w_t_all, y, lora_indices_tensor, scale)
-=======
-    _check_punica_support()
-
-    ops.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
->>>>>>> main
 
 
 def add_expand(
@@ -129,7 +105,6 @@ def add_expand(
     y+=x@w_t_all
     When `is_prefilling` is True, will launch `sgmv_expand`, 
     """
-<<<<<<< HEAD
     if is_prefilling:
         (
             b_seq_start_tensor,
@@ -151,21 +126,6 @@ def add_expand(
         )
     else:
         bgmv_expand(x, w_t_all, y, lora_indices_tensor, add_inputs=add_input)
-=======
-    _check_punica_support()
-
-    ops.dispatch_bgmv_low_level(
-        y,
-        x,
-        w_t_all,
-        indicies,
-        layer_idx,
-        scale,
-        x.size(1),
-        y_slice_size,
-        y_offset,
-    )
->>>>>>> main
 
 
 def add_expand_slice(
@@ -183,7 +143,6 @@ def add_expand_slice(
     """
     y+=x@w_t_all
     """
-<<<<<<< HEAD
     if is_prefilling:
         (
             b_seq_start_tensor,
@@ -216,36 +175,6 @@ def add_expand_slice(
             add_inputs=add_input,
         )
 
-=======
-    _check_punica_support()
-
-    r = wb_t_all.size(-1)
-    if buffer is None:
-        # We set the buffer to be float32 by default to avoid
-        # numerical inaccuracies that would otherwise happen
-        # due to downcasting.
-        buffer = torch.zeros((x.size(0), r),
-                             dtype=torch.float32,
-                             device=x.device)
-    ops.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
-    ops.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx, scale)
-
-
-def add_lora_slice(y: torch.Tensor,
-                   x: torch.Tensor,
-                   wa_t_all: torch.Tensor,
-                   wb_t_all: torch.Tensor,
-                   indicies: torch.LongTensor,
-                   layer_idx: int,
-                   scale: float,
-                   y_offset: int,
-                   y_slice_size: int,
-                   *,
-                   buffer: Optional[torch.Tensor] = None):
-    """
-    Same as `add_lora` but you can operate on slices of y.
-    Pass whole y, define y_offset and y_slice_size.
->>>>>>> main
 
 def add_lora(
     y: torch.Tensor,
@@ -285,10 +214,6 @@ def add_lora(
         buffer (Optional[torch.Tensor], optional): Defaults to None.
         cache_clear (bool, optional):  Defaults to False.
     """
-<<<<<<< HEAD
-=======
-    _check_punica_support()
->>>>>>> main
 
     r = wb_t_all.size(-1)
     if buffer is None:
@@ -297,27 +222,13 @@ def add_lora(
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
-<<<<<<< HEAD
 
     add_shrink(
-=======
-    ops.dispatch_bgmv_low_level(
->>>>>>> main
         buffer,
         x,
         wa_t_all,
         lora_indices_tensor,
         0,
-<<<<<<< HEAD
-=======
-    )
-    ops.dispatch_bgmv_low_level(
-        y,
-        buffer,
-        wb_t_all,
-        indicies,
-        layer_idx,
->>>>>>> main
         scale,
         is_prefilling,
         cache_clear=cache_clear,

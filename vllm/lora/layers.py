@@ -258,27 +258,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.embeddings_weights: Optional[torch.Tensor]
 
     def create_lora_weights(
-<<<<<<< HEAD
-        self,
-        max_loras: int,
-        lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
-    ) -> None:
-        lora_vocab_start_idx = self.base_layer.org_vocab_size
-        weights_idx = None
-        if self.base_layer.vocab_end_index > lora_vocab_start_idx:
-            # We can start adding lora weights
-            weights_idx = max(
-                lora_vocab_start_idx - self.base_layer.vocab_start_index, 0)
-            self.embeddings_slice = (
-                self.base_layer.vocab_start_index -
-                self.base_layer.org_vocab_size + weights_idx,
-                self.base_layer.vocab_end_index -
-                self.base_layer.org_vocab_size,
-            )
-            self.embeddings_weights = self.base_layer.weight.data[weights_idx:]
-            self.embeddings_weights.fill_(0)
-=======
             self,
             max_loras: int,
             lora_config: LoRAConfig,
@@ -297,7 +276,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 self.base_layer.org_vocab_size)
             self.base_layer.weight.data[
                 self.base_layer.num_org_embeddings_per_partition:].fill_(0)
->>>>>>> main
         else:
             self.embeddings_slice = None
             self.embeddings_weights = None
