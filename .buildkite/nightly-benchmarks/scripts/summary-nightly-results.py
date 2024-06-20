@@ -54,16 +54,17 @@ if __name__ == "__main__":
 
 
     serving_results = pd.DataFrame.from_dict(serving_results)
-    serving_md_table = tabulate(serving_results,
-                                headers='keys',
-                                tablefmt='pipe',
-                                showindex=False)
 
 
     if not serving_results.empty:
         serving_results = serving_results[list(
             serving_column_mapping.keys())].rename(
                 columns=serving_column_mapping)
+            
+    serving_md_table = tabulate(serving_results,
+                                headers='keys',
+                                tablefmt='pipe',
+                                showindex=False)
             
             
     prefix = os.environ.get("CURRENT_LLM_SERVING_ENGINE")
