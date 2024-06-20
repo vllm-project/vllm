@@ -21,7 +21,7 @@ def cutlass_fp8_supported() -> bool:
     capability = torch.cuda.get_device_capability()
     capability = capability[0] * 10 + capability[1]
 
-    return ops.cutlass_kernels_support_fp8(capability)
+    return ops.cutlass_scaled_mm_supports_fp8(capability)
 
 
 class Fp8Config(QuantizationConfig):

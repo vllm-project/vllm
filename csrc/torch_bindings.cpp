@@ -135,9 +135,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization.
-  ops.def("cutlass_kernels_support_fp8", &cutlass_kernels_support_fp8);
-  ops.impl("cutlass_kernels_support_fp8", torch::kCUDA,
-           &cutlass_kernels_support_fp8);
+  ops.def("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
+  ops.impl("cutlass_scaled_mm_supports_fp8", torch::kCUDA,
+           &cutlass_scaled_mm_supports_fp8);
 
   ops.def(
       "cutlass_scaled_mm(Tensor! out, Tensor a,"
