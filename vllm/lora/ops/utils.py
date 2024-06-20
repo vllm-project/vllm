@@ -1,8 +1,9 @@
 import functools
 import json
 import os
-import torch
 from typing import Dict
+
+import torch
 
 
 def _get_config_file_name(

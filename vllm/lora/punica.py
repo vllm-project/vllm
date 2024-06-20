@@ -1,7 +1,9 @@
 # Based on code from https://github.com/punica-ai/punica
 
-from typing import Optional, Dict, Tuple
+from typing import Dict, Optional, Tuple
+
 import torch
+
 from vllm.lora.ops.bgmv_expand import bgmv_expand
 from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
 from vllm.lora.ops.bgmv_shrink import bgmv_shrink
@@ -64,7 +66,7 @@ def add_shrink(
 ):
     """
     y=x@w_t_all
-    When `is_prefilling` is True, will lanuch `sgmv_shrink`
+    When `is_prefilling` is True, will launch `sgmv_shrink`
     """
     if is_prefilling:
         (
@@ -101,7 +103,7 @@ def add_expand(
 ):
     """
     y+=x@w_t_all
-    When `is_prefilling` is True, will lanuch `sgmv_expand`, 
+    When `is_prefilling` is True, will launch `sgmv_expand`, 
     """
     if is_prefilling:
         (
@@ -133,8 +135,8 @@ def add_expand_slice(
     lora_indices_tensor: torch.Tensor,
     layer_idx: int,
     is_prefilling: bool,
-    y_offset: int,
-    y_slice_size: int,
+    y_offset: Optional[int],
+    y_slice_size: Optional[int],
     add_input: bool = True,
     cache_clear: bool = False,
 ):

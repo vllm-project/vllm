@@ -107,7 +107,7 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype, stage) -> None:
     lora_1 = manager.get_module_lora(module_name + "1")
     manager.init_random_lora(module_name + "2", weight, rank=rank)
     lora_2 = manager.get_module_lora(module_name + "2")
-    
+
     input = torch.rand(k, n, device="cuda", dtype=dtype)
     expected = torch.cat([
         input @ lora_1.lora_a @ lora_1.lora_b * lora_1.scaling,

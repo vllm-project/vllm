@@ -7,21 +7,13 @@ from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
 from vllm.distributed.communication_op import (
-    tensor_model_parallel_all_gather,
-    tensor_model_parallel_all_reduce,
-)
+    tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-from vllm.lora.layers import (
-    ColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithLoRA,
-    MergedQKVParallelLinearWithLora,
-    RowParallelLinearWithLoRA,
-)
-from vllm.lora.punica import (
-    add_shrink,
-    add_expand,
-    add_expand_slice,
-)
+from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithLora,
+                              RowParallelLinearWithLoRA)
+from vllm.lora.punica import add_expand, add_expand_slice, add_shrink
 
 if TYPE_CHECKING:
     pass
