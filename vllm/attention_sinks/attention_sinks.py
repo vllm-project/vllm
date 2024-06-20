@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm._C import cache_ops
+from vllm import _custom_ops as ops
 from vllm.attention import AttentionMetadata
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend, which_attn_to_use
@@ -90,7 +90,7 @@ class StreamingAttentionSink(nn.Module):
                 v = v.view(-1, self.num_kv_heads, self.head_dim)
 
                 if self.attn_backend == _Backend.FLASH_ATTN:
-                    cache_ops.reshape_and_cache_flash(
+                    ops.reshape_and_cache_flash(
                         k_original,
                         v,
                         key_cache,
@@ -237,7 +237,7 @@ class StreamingAttentionSink(nn.Module):
             v = v.view(-1, self.num_kv_heads, self.head_dim)
 
             if self.attn_backend == _Backend.FLASH_ATTN:
-                cache_ops.reshape_and_cache_flash(
+                ops.reshape_and_cache_flash(
                     k_original,
                     v,
                     key_cache,
@@ -309,7 +309,8 @@ class StreamingAttentionSink(nn.Module):
 def get_attention_sink(
     model_attn: nn.Module,
     cache_config: Optional[CacheConfig],
-    model_context_len: int
+    model_context_len: int,
+    dtype: torch.dtype
 ) -> StreamingAttentionSink:
     if cache_config is not None:
         sliding_window = cache_config.sliding_window
@@ -326,7 +327,7 @@ def get_attention_sink(
         model_attn.head_dim,
         num_kv_heads,
         sliding_window,
-        torch.get_default_dtype(),
+        dtype,
         kv_cache_dtype,
         block_size
     )

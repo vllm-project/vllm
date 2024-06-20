@@ -7,7 +7,7 @@ from huggingface_hub import login
 from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 
 
-login(token=os.environ.get("HF_TOKEN"))
+# login(token=os.environ.get("HF_TOKEN"))
 
 MAX_GEN_TOKENS = 500
 beam_search_params = SamplingParams(
@@ -94,12 +94,12 @@ def main():
     engine = LLMEngine.from_engine_args(args)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     # prompts = get_prompt(model, magic_word=True)
-    # prompts = get_long_prompt()
-    # process_requests(engine, prompts, tokenizer)
+    prompts = get_long_prompt()
+    process_requests(engine, prompts, tokenizer)
 
-    model = engine.model_executor.driver_worker.model_runner.model
-    for module_name, module in model.named_modules(remove_duplicate=False):
-        print(module_name)
+    # model = engine.model_executor.driver_worker.model_runner.model
+    # for module_name, module in model.named_modules(remove_duplicate=False):
+    #     print(module_name)
         # parts = module_name.split(".")
         # if len(parts) != 5: continue
         # if parts[-1] == "attn":

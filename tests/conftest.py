@@ -13,13 +13,14 @@ from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
-from vllm.distributed import destroy_model_parallel
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu
+from vllm.utils import cuda_device_count_stateless, is_cpu
 
 logger = init_logger(__name__)
 
@@ -29,24 +30,19 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 # Multi modal related
 # You can use `.buildkite/download-images.sh` to download the assets
-_PIXEL_VALUES_FILES = [
+PIXEL_VALUES_FILES = [
     os.path.join(_TEST_DIR, "images", filename) for filename in
     ["stop_sign_pixel_values.pt", "cherry_blossom_pixel_values.pt"]
 ]
-_IMAGE_FEATURES_FILES = [
+IMAGE_FEATURES_FILES = [
     os.path.join(_TEST_DIR, "images", filename) for filename in
     ["stop_sign_image_features.pt", "cherry_blossom_image_features.pt"]
 ]
-_IMAGE_FILES = [
+IMAGE_FILES = [
     os.path.join(_TEST_DIR, "images", filename)
     for filename in ["stop_sign.jpg", "cherry_blossom.jpg"]
 ]
-_IMAGE_PROMPTS = [
-    "<image>\nUSER: What's the content of the image?\nASSISTANT:",
-    "<image>\nUSER: What is the season?\nASSISTANT:"
-]
-assert len(_PIXEL_VALUES_FILES) == len(_IMAGE_FEATURES_FILES) == len(
-    _IMAGE_FILES) == len(_IMAGE_PROMPTS)
+assert len(PIXEL_VALUES_FILES) == len(IMAGE_FEATURES_FILES) == len(IMAGE_FILES)
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -57,6 +53,7 @@ def _read_prompts(filename: str) -> List[str]:
 
 def cleanup():
     destroy_model_parallel()
+    destroy_distributed_environment()
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
@@ -85,13 +82,8 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 
 
 @pytest.fixture(scope="session")
-def hf_image_prompts() -> List[str]:
-    return _IMAGE_PROMPTS
-
-
-@pytest.fixture(scope="session")
 def hf_images() -> List[Image.Image]:
-    return [Image.open(filename) for filename in _IMAGE_FILES]
+    return [Image.open(filename) for filename in IMAGE_FILES]
 
 
 @pytest.fixture()
@@ -101,26 +93,17 @@ def vllm_images(request) -> List[MultiModalData]:
             VisionLanguageConfig.ImageInputType.IMAGE_FEATURES):
         return [
             ImageFeatureData(torch.load(filename))
-            for filename in _IMAGE_FEATURES_FILES
+            for filename in IMAGE_FEATURES_FILES
         ]
     else:
         return [
-            ImagePixelData(Image.open(filename)) for filename in _IMAGE_FILES
+            ImagePixelData(Image.open(filename)) for filename in IMAGE_FILES
         ]
 
 
 @pytest.fixture()
 def vllm_image_tensors(request) -> List[torch.Tensor]:
-    return [torch.load(filename) for filename in _PIXEL_VALUES_FILES]
-
-
-@pytest.fixture()
-def vllm_image_prompts(request) -> List[str]:
-    vision_language_config = request.getfixturevalue("model_and_config")[1]
-    return [
-        "<image>" * (vision_language_config.image_feature_size - 1) + p
-        for p in _IMAGE_PROMPTS
-    ]
+    return [torch.load(filename) for filename in PIXEL_VALUES_FILES]
 
 
 @pytest.fixture
@@ -161,6 +144,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "half",
         *,
+        model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
     ) -> None:
@@ -183,11 +167,13 @@ class HfRunner:
             else:
                 auto_cls = AutoModelForCausalLM
 
+            model_kwargs = model_kwargs if model_kwargs is not None else {}
             self.model = self.wrap_device(
                 auto_cls.from_pretrained(
                     model_name,
                     torch_dtype=torch_dtype,
                     trust_remote_code=True,
+                    **model_kwargs,
                 ))
 
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -371,12 +357,15 @@ class HfRunner:
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         return self.model.encode(prompts)
 
-    def __del__(self):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
         del self.model
         cleanup()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def hf_runner():
     return HfRunner
 
@@ -396,6 +385,7 @@ class VllmRunner:
         block_size: int = 16,
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
+        enforce_eager: bool = False,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -404,6 +394,7 @@ class VllmRunner:
             trust_remote_code=True,
             dtype=dtype,
             swap_space=swap_space,
+            enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
             max_model_len=max_model_len,
@@ -525,7 +516,10 @@ class VllmRunner:
             outputs.append(embedding)
         return outputs
 
-    def __del__(self):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
         del self.model
         cleanup()
 
@@ -559,3 +553,11 @@ def caplog_vllm(temporary_enable_log_propagate, caplog):
     # To capture vllm log, we should enable propagate=True temporarily
     # because caplog depends on logs propagated to the root logger.
     yield caplog
+
+
+@pytest.fixture(scope="session")
+def num_gpus_available():
+    """Get number of GPUs without initializing the CUDA context
+    in current process."""
+
+    return cuda_device_count_stateless()
