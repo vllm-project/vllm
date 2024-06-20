@@ -152,6 +152,7 @@ run_serving_tests() {
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.trt_server_parameters')
     client_params=$(echo "$params" | jq -r '.trt_client_parameters')
+    model=$(echo "$client_params" | jq -r '.model')
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
@@ -163,6 +164,15 @@ run_serving_tests() {
       echo "Required model_tp_size $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
     fi
+
+
+    # prepare tokenizer
+    cd /vllm/benchmarks
+    rm -rf /tokenizer_cache
+    mkdir /tokenizer_cache
+    python ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
+      --model "$model" \
+      --cachedir /tokenizer_cache
 
 
     # run the server
@@ -179,6 +189,9 @@ run_serving_tests() {
       echo "trt failed to start within the timeout period."
     fi
 
+    # go back to vllm benchmarking directory
+    cd /vllm/benchmarks
+
     # iterate over different QPS
     for qps in $qps_list; do
       # remove the surrounding single quote from qps
@@ -191,7 +204,8 @@ run_serving_tests() {
       new_test_name=$test_name"_qps_"$qps
 
       client_command="python3 benchmark_serving.py \
-        --backend trt \
+        --backend tensorrt-llm \
+        --tokenizer /tokenizer_cache \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \
