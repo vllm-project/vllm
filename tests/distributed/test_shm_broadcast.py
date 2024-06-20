@@ -43,9 +43,10 @@ def worker_fn_wrapper(fn):
 
 @worker_fn_wrapper
 def worker_fn():
+    writer_rank = 2
     broadcaster = ShmRingBufferIO.create_from_process_group(
-        dist.group.WORLD, 1024, 1)
-    if dist.get_rank() == 0:
+        dist.group.WORLD, 1024, 1, writer_rank)
+    if dist.get_rank() == writer_rank:
         broadcaster.broadcast_object(0)
         broadcaster.broadcast_object(1)
     else:
