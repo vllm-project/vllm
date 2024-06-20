@@ -51,16 +51,19 @@ WORKDIR ${APP_MOUNT}
 
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir fastapi ninja tokenizers pandas
-# Install torch >= 2.3.0 on ROCm 6.X
+# Install torch == 2.4.0 on ROCm
 RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
+        *"rocm-5.7"*) \
+            pip uninstall -y torch \
+            && pip install --no-cache-dir --pre 'torch >=2.4.0.dev20240601, <2.5.0' \
+               --index-url https://download.pytorch.org/whl/nightly/rocm5.7;; \
         *"rocm-6.0"*) \
-            python3 -m pip uninstall -y torch \
-            && python3 -m pip install --no-cache-dir torch==2.3.0 \
-               --index-url https://download.pytorch.org/whl/rocm6.0;; \
+            pip uninstall -y torch \
+            && pip install --no-cache-dir --pre 'torch >=2.4.0.dev20240601, <2.5.0' \
+               --index-url https://download.pytorch.org/whl/nightly/rocm6.0;; \
         *"rocm-6.1"*) \
-            python3 -m pip uninstall -y torch \
-            && python3 -m pip install --no-cache-dir --pre "torch >= 2.3.0, <=2.4.0" \
-               # TODO: Use stable torch wheels once they are released.
+            pip uninstall -y torch \
+            && pip install --no-cache-dir --pre 'torch >=2.4.0.dev20240601, <2.5.0' \
                --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
         *) ;; esac
 
@@ -101,7 +104,7 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
 ### Triton build stage
 FROM base AS build_triton
 ARG BUILD_TRITON
-# build triton
+# Build triton
 RUN --mount=type=cache,target=${CCACHE_DIR} \
     if [ "$BUILD_TRITON" = "1" ]; then \
     mkdir -p libs \
@@ -114,22 +117,14 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
     fi
 
 
+### AMD-SMI build stage
+FROM base AS build_amdsmi
+RUN cd /opt/rocm/share/amd_smi \
+    && pip wheel . --wheel-dir=/install
+
+
 ### Final vLLM build stage
 FROM base AS final
-
-# Copy flash-attn wheel(s) if any
-RUN --mount=type=bind,from=build_fa,src=/install,target=/install \
-    mkdir -p libs && cp /install/*.whl libs
-
-# Copy triton wheel(s) if any
-RUN --mount=type=bind,from=build_triton,src=/install,target=/install \
-    mkdir -p libs && cp /install/*.whl libs
-
-# Install any dependencies that were built
-RUN --mount=type=cache,target=/root/.cache/pip \
-    if ls libs/*.whl; then \
-    pip install libs/*.whl; fi
-
 # Import the vLLM development directory from the build context
 COPY . .
 
@@ -179,8 +174,17 @@ RUN --mount=type=bind,from=build_fa,src=/install,target=/install \
         # Preemptively uninstall to avoid same-version no-installs
         && pip uninstall -y flash-attn; fi
 
+# Copy amdsmi wheel(s) if any
+RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install \
+    mkdir -p libs \
+    && if ls /install/*.whl; then \
+        cp /install/*.whl libs \
+        # Preemptively uninstall to avoid same-version no-installs
+        && pip uninstall -y amdsmi; fi
+
 # Install any dependencies that were built
-RUN if ls libs/*.whl; then \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if ls libs/*.whl; then \
     pip install libs/*.whl; fi
 
 CMD ["/bin/bash"]
