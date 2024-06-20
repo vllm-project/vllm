@@ -483,6 +483,8 @@ class SubGraph:
         self.outputs = []
         self.all_input_nodes = fg.all_input_nodes
         self.all_node_users = fg.all_node_users
+        self.all_renamed_input_nodes = fg.all_renamed_input_nodes
+        self.all_renamed_node_users = fg.all_renamed_node_users
         self.build(nodes)
 
     def in_subgraph(self, n: torch.fx.Node) -> bool:
@@ -517,7 +519,8 @@ class SubGraph:
         worklist: collections.deque = collections.deque()
 
         #all_input_nodes, all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
-        all_input_nodes, all_node_users = self.all_input_nodes, self.all_node_users
+        #all_input_nodes, all_node_users = self.all_input_nodes, self.all_node_users
+        all_input_nodes, all_node_users = self.all_renamed_input_nodes, self.all_renamed_node_users
 
         for n in self.nodes:
             count = len(
@@ -581,6 +584,7 @@ class SubGraph:
 
         # TODO: make a function to get/recompute these on demand
         # TODO: be smarter with updating just for deleted/new nodes
+        self.all_renamed_input_nodes, self.all_renamed_node_users = gather_all_input_nodes(self.module.graph.nodes, True)
         self.all_input_nodes, self.all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
 
         #try:
