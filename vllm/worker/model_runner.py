@@ -1023,13 +1023,13 @@ class ModelRunner:
                     last_page_len_buffer = torch.empty(batch_size,
                                                        dtype=torch.int32,
                                                        device=self.device)
-                    
+
                     num_qo_heads = self.model_config.get_num_attention_heads(
-                            self.parallel_config)
+                        self.parallel_config)
                     num_kv_heads = self.model_config.get_num_kv_heads(
-                            self.parallel_config)
+                        self.parallel_config)
                     if num_qo_heads // num_kv_heads >= 4:
-                        use_tensor_cores = True
+                        use_tensor_cores = False
                     else:
                         use_tensor_cores = False
                     decode_wrapper = \
