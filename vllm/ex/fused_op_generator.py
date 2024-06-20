@@ -109,6 +109,8 @@ class FusedOpGenerator:
             return 'torch::kFloat16'
         elif s == 'torch::float32':
             return 'torch::kFloat32'
+        elif s == 'torch::float8_e4m3fn':
+            return 'torch::kFloat8_e4m3fn'
         elif s in ['cpu', 'cuda', 'hip', 'fpga', 'ort', 'xla', 'mps', 'xpu', 'hpu', 've', 'ipu', 'mtia']:
             return f'torch::k{s.upper()}'
         elif s in ['meta', 'vulkan', 'metal', 'lazy']:
@@ -161,11 +163,16 @@ class FusedOpGenerator:
         tensor = n.args[0]
         idx = n.args[1]
 
-        assert isinstance(idx, tuple) or self.is_simple_slice(idx)
+        #assert isinstance(idx, tuple) or self.is_simple_slice(idx)
+        if not (isinstance(idx, tuple) or self.is_simple_slice(idx) or isinstance(idx, int)):
+            raise FusionFail(f"unsupported slice: {idx}")
 
         if self.is_simple_slice(idx):
             call_str = f"  auto {self.mangle(n.name, '_')} = {self.mangle(str(tensor), '_')}.slice({self.convert_slice_args(idx)});"
+        elif isinstance(idx, int):
+            call_str = f"  auto {self.mangle(n.name, '_')} = {self.mangle(str(tensor), '_')}[{idx}];"
         else:
+            # Note: this code works but requires pybind which we don't want to use.
             call_str = f"  auto {self.mangle(n.name, '_')} = to_tensor("
             call_str = call_str + f"py::reinterpret_steal<py::object>(THPVariable_Wrap({self.mangle(str(tensor), '_')}))["
             call_str = call_str + f"py::make_tuple("
@@ -189,7 +196,7 @@ class FusedOpGenerator:
         user_to_last_uses: Dict[torch.fx.Node, List[torch.fx.Node]] = {}
 
         def register_last_uses(n: torch.fx.Node, user: torch.fx.Node):
-            if n not in node_to_last_use:
+            if n not in node_to_last_use and self.arg_schema_type(n) == 'Tensor':
                 node_to_last_use[n] = user
                 user_to_last_uses.setdefault(user, []).append(n)
 
@@ -223,16 +230,30 @@ class FusedOpGenerator:
                 n.name, '_') + " = torch::Tensor();"
         return to_delete_str
 
-    #
+
+    def arg_schema_type(self, n: torch.fx.Node, add_prefix: bool = False) -> str:
+        if n.type is not None:
+            ty = n.type.__name__
+        elif n.meta.get('type') and n.meta.get('type').__name__ != 'FakeTensor':
+            ty = n.meta.get('type').__name__
+            if ty == 'Size':
+                return 'std::vector<int64_t> const' if add_prefix else 'int[]'
+        else:
+            # this default is a bit sketchy
+            ty = "Tensor"
+
+        return ty if not add_prefix else f"torch::{ty}"
+
     # Generate naive C++/CUDA code for a stack of fused ops.
     #
     # TODO:
-    # - use cutlass
     # - handle kwargs
     #
     # See https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit?pli=1#heading=h.rmcmku6fe6ug
     #
     # Note: node.meta['tensor_meta'] will have shape and dtype fields
+    #
+    # TODO: can this be called from multiple threads/workers?????????
     #
     def make_fused_op(
         self, inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
@@ -254,9 +275,11 @@ class FusedOpGenerator:
 
         cxx_arg_sig = ''
         sep = ''
+        arg_types = [f"{self.arg_schema_type(inp, True)}" for inp in inputs]
+        logger.debug(f"fused op argument types: {arg_types}")
         for i, n in enumerate(inputs):
-            #cxx_arg_sig = cxx_arg_sig + sep + f"torch::Tensor const& {n}"
-            cxx_arg_sig = cxx_arg_sig + sep + f"torch::Tensor& {n}"
+            #cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]} const& {n}"
+            cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {n}"
             sep = ", "
 
         arg_sig = self.generate_op_schema(inputs, outputs, nodes, kwargs)
@@ -377,8 +400,7 @@ class FusedOpGenerator:
         arg_sig = ""
         for i, n in enumerate(inputs):
             # TODO: the Tensor default here is sketchy
-            arg_type = self.mangle(
-                n.type.__name__ if n.type is not None else "Tensor", '::')
+            arg_type = self.mangle(self.arg_schema_type(n), '::')
             arg_name = self.mangle(n.name, '_')
             arg_sig = arg_sig + sep + f"{arg_type} {arg_name}"
             sep = ", "
@@ -392,8 +414,7 @@ class FusedOpGenerator:
 
         for i, n in enumerate(outputs):
             # TODO: the Tensor default here is sketchy
-            arg_type = self.mangle(
-                n.type.__name__ if n.type is not None else "Tensor", '::')
+            arg_type = self.mangle(self.arg_schema_type(n), '::')
             arg_sig = arg_sig + sep + arg_type
             sep = ", "
 

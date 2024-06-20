@@ -23,7 +23,7 @@ Fuse all the nodes in the given sub-graph into a single function call.
 """
 def fuse_graph_nodes(
     cc: CodeCache,
-    fgen: FusedOpGenerator,
+    global_fgen: FusedOpGenerator,
     sub: SubGraph,
 ):
     outputs = sub.outputs
@@ -56,6 +56,12 @@ def fuse_graph_nodes(
 
     # Lookup or create the fused operation.
     try:
+        # Note: we are ignoring the global FusedOpGenerator since it appears
+        # it can get called from multiple threads simultaneously.  Since we
+        # aren't planning on building multiple ops at the same time, using a
+        # local generator is fine.
+        fgen = FusedOpGenerator()
+
         fn_key = fgen.make_fused_op(inputs, outputs, nodes_to_fuse, kwargs)
 
         def generate() -> Optional[Callable]:
@@ -143,6 +149,7 @@ def is_compute(node: torch.fx.Node) -> bool:
 def is_getitem(a: torch.fx.Node) -> bool:
     return is_call(a) and node_function_target(a) == '_operator.getitem'
 
+
 def is_get_attr(a: torch.fx.Node) -> bool:
     return a.op == 'get_attr'
 
@@ -193,11 +200,12 @@ def dump_partitions(node_map: Dict[torch.fx.Node, int]) -> str:
     return part_str
 
 
+# TODO: put trivialness flag in registration
 def non_trivial_op(n: torch.fx.Node) -> bool:
     if not is_call(n):
         return False
     trg = node_function_target(n)
-    return trg not in ['_operator.getitem', 'torch.empty', 'torch.empty_like']
+    return trg not in ['_operator.getitem', 'torch.empty', 'torch.empty_like', 'torch.narrow']
 
 
 """

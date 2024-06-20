@@ -88,7 +88,8 @@ used for name mangling.
 """
 def argument_type_str(arg: torch.fx.node.Argument):
     if isinstance(arg, torch.fx.Node):
-        return str(extract_node_type(arg))
+        ty = extract_node_type(arg)
+        return str(ty) if ty else arg.meta.get('type').__name__
     elif isinstance(arg, torch.Tensor):
         return str(arg.dtype)
     elif isinstance(arg, torch.dtype):
