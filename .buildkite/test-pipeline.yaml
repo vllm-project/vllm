@@ -37,6 +37,9 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   commands:
+  # FIXIT: find out which code initialize cuda before running the test
+  # before the fix, we need to use spawn to test it
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
@@ -55,6 +58,9 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   commands:
+  # FIXIT: find out which code initialize cuda before running the test
+  # before the fix, we need to use spawn to test it
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s distributed/test_pynccl.py
   # We want to test that models which use 2 GPUs work with 4 GPUs, which is why we duplicate them here.
   # See https://github.com/vllm-project/vllm/pull/5473#issuecomment-2166601837 for context.
@@ -145,6 +151,9 @@ steps:
   num_gpus: 4
   # This test runs llama 13B, so it is required to run on 4 GPUs.
   commands:
+    # FIXIT: find out which code initialize cuda before running the test
+    # before the fix, we need to use spawn to test it
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -x lora/test_long_context.py
 
 - label: Tensorizer Test
