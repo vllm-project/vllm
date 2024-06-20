@@ -162,7 +162,7 @@ class backend_class:
 
     # TODO: this probably needs additional context to avoid collisions, e.g.
     # module/model name.
-    cc = CodeCache()
+    cc = CodeCache(disable=False)
 
     def __init__(self, backend: Optional[str] = 'inductor'):
         self.backend = backend

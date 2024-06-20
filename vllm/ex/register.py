@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+# TODO: use OpSupport as value in FUSABLE map instead of bool
 class OpSupport:
 
     def __init__(self,
@@ -30,7 +31,7 @@ SUPPORTED: Dict[str, Optional[Set[str]]] = dict()
 # Dictionary of fusable operations. The key is the operation name and
 # the value indicates whether the operation is "compute" (e.g. gemm) or
 # not.
-FUSABLE = dict()
+FUSABLE : Dict[str, bool] = dict()
 
 """
 Extract a string operator name from a Callable (or string).
@@ -88,10 +89,6 @@ Register default supported operations.
 """
 def register_defaults():
     logger.debug("REGISTER DEFAULTS")
-    #register_supported('torch.empty')  # maybe TBD
-    #register_supported('torch.empty_like')  # maybe TBD
-    register_fusable('torch.empty')
-    register_fusable('torch.empty_like')
     # methods need to be supported via function object and not name.
     register_fusable(torch.Tensor.to)
     register_fusable(torch.Tensor.transpose)
@@ -99,6 +96,8 @@ def register_defaults():
     register_fusable('_operator.add')
     register_fusable('_operator.mul')
     register_fusable('_operator.getitem')
+    register_fusable('torch.empty')
+    register_fusable('torch.empty_like')
     register_fusable('torch.relu')
     register_fusable('torch.narrow')
     register_fusable('torch.nn.functional.silu')
@@ -109,7 +108,7 @@ def register_defaults():
     register_fusable('torch.ops._C.fused_add_rms_norm', True)
     register_fusable('torch._C._nn.linear', True)
     register_fusable('torch.ops._C.cutlass_scaled_mm_dq', True)
-    if False:  # functionalization
+    if False:  # TODO: functionalization
         register_fusable('torch.ops._C.cutlass_scaled_mm_dq_', True)
         register_fusable('torch.ops._C.static_scaled_int8_quant_')
 

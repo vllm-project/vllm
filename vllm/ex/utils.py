@@ -86,7 +86,7 @@ def node_function_target(node: torch.fx.Node) -> str:
 Return a string representation of the type of the given argument.  This is
 used for name mangling.
 """
-def argument_type_str(arg: torch.fx.node.Argument):
+def argument_type_str(arg: torch.fx.node.Argument, include_constants: bool = False):
     if isinstance(arg, torch.fx.Node):
         ty = extract_node_type(arg)
         return str(ty) if ty else arg.meta.get('type').__name__
@@ -96,7 +96,10 @@ def argument_type_str(arg: torch.fx.node.Argument):
         return str(arg)
     elif (isinstance(arg, str) or isinstance(arg, int)
           or isinstance(arg, float) or isinstance(arg, bool)):
-        return type(arg).__name__
+        if include_constants:
+            return f"{type(arg).__name__}_{str(arg).replace('-','_').replace('.','_')}"
+        else:
+            return type(arg).__name__
     elif (isinstance(arg, types.EllipsisType)
           or isinstance(arg, types.NoneType)):
         return str(arg)
@@ -150,7 +153,7 @@ def mangle_name(nodes: List[torch.fx.Node], rep: str = "_P_") -> str:
     for n in nodes:
         fn = node_function_target(n)
         types = [
-            argument_type_str(arg).replace("torch.", "") for arg in n.args
+            argument_type_str(arg, True).replace("torch.", "") for arg in n.args
         ]
         name = name + sep + f"{fn}_{'_'.join(types)}"
         sep = "_"

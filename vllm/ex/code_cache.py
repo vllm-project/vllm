@@ -14,10 +14,14 @@ class CodeCache:
     Mangled function names should be generated with (or be compatible with) the
     'utils.mangle_name' function.
 
+    The 'disable' option turns off the cache, so it will always call the generate
+    function in 'lookup_or_create'.
+
     Note: the CodeCache can be initialized with pre-compiled functions.
     """
-    def __init__(self):
+    def __init__(self, disable: bool = False):
         self.cache = dict()
+        self.disable = disable
 
     """
     Lookup a Callable for a function based on the 'mangled_name'.  If the name
@@ -29,7 +33,7 @@ class CodeCache:
     """
     def lookup_or_create(self, mangled_name: str,
                          generator: Callable) -> Optional[Callable]:
-        if not mangled_name in self.cache:
+        if self.disable or not mangled_name in self.cache:
             try:
                 self.cache[mangled_name] = generator()
             except Exception as ex:
