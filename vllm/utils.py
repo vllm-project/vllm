@@ -780,7 +780,8 @@ def _cuda_device_count_stateless(
     if not torch.cuda._is_compiled():
         return 0
     # bypass _device_count_nvml() if rocm (not supported)
-    nvml_count = -1 if torch.version.hip else torch.cuda._device_count_nvml()
+    nvml_count = torch.cuda._device_count_amdsmi() if (
+        torch.version.hip) else torch.cuda._device_count_nvml()
     r = torch._C._cuda_getDeviceCount() if nvml_count < 0 else nvml_count
     return r
 
@@ -795,8 +796,9 @@ def cuda_device_count_stateless() -> int:
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
-
-    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+    visible_devices = envs.HIP_VISIBLE_DEVICES if (
+        torch.version.hip) else envs.CUDA_VISIBLE_DEVICES
+    return _cuda_device_count_stateless(visible_devices)
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
