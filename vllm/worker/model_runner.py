@@ -1029,7 +1029,7 @@ class ModelRunner:
                     num_kv_heads = self.model_config.get_num_kv_heads(
                         self.parallel_config)
                     if num_qo_heads // num_kv_heads >= 4:
-                        use_tensor_cores = False
+                        use_tensor_cores = True
                     else:
                         use_tensor_cores = False
                     decode_wrapper = \
