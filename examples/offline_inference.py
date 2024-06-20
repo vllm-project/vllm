@@ -11,13 +11,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
-model_path = "/home/sobey/SSD/Qwen-1.5/qwen/Qwen1.5-MoE-A2.7B-Chat"
-llm = LLM(
-    model=model_path,
-    trust_remote_code=True,
-    tensor_parallel_size=1,
-    gpu_memory_utilization=0.5,
-)
+llm = LLM(model="facebook/opt-125m")
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
