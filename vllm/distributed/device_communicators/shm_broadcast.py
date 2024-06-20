@@ -1,11 +1,11 @@
 import pickle
 import time
-import torch
 from contextlib import contextmanager
 from multiprocessing import shared_memory
-from unittest.mock import patch
 from typing import Optional
+from unittest.mock import patch
 
+import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
@@ -112,8 +112,9 @@ class ShmRingBufferIO:
         self._is_writer = self.reader_rank == -1
         self._is_reader = not self._is_writer
         if self._is_reader:
-            assert self.reader_rank >= 0 and self.reader_rank < buffer.n_reader, \
-                f"Invalid reader rank {self.reader_rank} for buffer created with {buffer.n_reader} readers"
+            assert 0 <= self.reader_rank < buffer.n_reader, \
+                (f"Invalid reader rank {self.reader_rank} for buffer"
+                f" created with {buffer.n_reader} readers")
         self.current_idx = 0
 
     @contextmanager
@@ -215,23 +216,22 @@ class ShmRingBufferIO:
         else:
             return self.dequeue()
 
-
-def create_shm_ringbuffer_io(pg: ProcessGroup,
-                             max_chunk_bytes,
-                             max_chunks,
-                             writer_rank=0):
-    group_rank = dist.get_rank(pg)
-    group_world_size = dist.get_world_size(pg)
-    global_ranks = dist.get_process_group_ranks(pg)
-    n_reader = group_world_size - 1
-    buffer: ShmRingBuffer
-    if group_rank == writer_rank:
-        buffer = ShmRingBuffer(n_reader, max_chunk_bytes, max_chunks)
-        dist.broadcast_object_list([buffer], src=global_ranks[0])
-        return ShmRingBufferIO(buffer, -1)
-    else:
-        recv = [None]
-        dist.broadcast_object_list(recv, src=global_ranks[0])
-        buffer = recv[0]  # type: ignore
-        rest_ranks = [r for r in global_ranks if r != writer_rank]
-        return ShmRingBufferIO(buffer, rest_ranks.index(group_rank))
+    def create_from_process_group(pg: ProcessGroup,
+                                  max_chunk_bytes,
+                                  max_chunks,
+                                  writer_rank=0) -> "ShmRingBufferIO":
+        group_rank = dist.get_rank(pg)
+        group_world_size = dist.get_world_size(pg)
+        global_ranks = dist.get_process_group_ranks(pg)
+        n_reader = group_world_size - 1
+        buffer: ShmRingBuffer
+        if group_rank == writer_rank:
+            buffer = ShmRingBuffer(n_reader, max_chunk_bytes, max_chunks)
+            dist.broadcast_object_list([buffer], src=global_ranks[0])
+            return ShmRingBufferIO(buffer, -1)
+        else:
+            recv = [None]
+            dist.broadcast_object_list(recv, src=global_ranks[0])
+            buffer = recv[0]  # type: ignore
+            rest_ranks = [r for r in global_ranks if r != writer_rank]
+            return ShmRingBufferIO(buffer, rest_ranks.index(group_rank))

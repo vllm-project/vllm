@@ -2,7 +2,7 @@ import multiprocessing
 
 import torch.distributed as dist
 
-from vllm.distributed.device_communicators.shm_broadcast import create_shm_ringbuffer_io
+from vllm.distributed.device_communicators.shm_broadcast import ShmRingBufferIO
 from vllm.utils import update_environment_variables
 
 
@@ -42,7 +42,8 @@ def worker_fn_wrapper(fn):
 
 @worker_fn_wrapper
 def worker_fn():
-    broadcaster = create_shm_ringbuffer_io(dist.group.WORLD, 1024, 1)
+    broadcaster = ShmRingBufferIO.create_from_process_group(
+        dist.group.WORLD, 1024, 1)
     if dist.get_rank() == 0:
         broadcaster.broadcast_object(0)
         broadcaster.broadcast_object(1)

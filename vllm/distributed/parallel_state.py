@@ -164,10 +164,10 @@ class GroupCoordinator:
             self.ca_comm = None
 
         from vllm.distributed.device_communicators.shm_broadcast import (
-            ShmRingBufferIO, create_shm_ringbuffer_io)
+            ShmRingBufferIO)
         self.shm_broadcaster: Optional[ShmRingBufferIO] = None
         if self.world_size > 1 and is_in_the_same_node(self.cpu_group):
-            self.shm_broadcaster = create_shm_ringbuffer_io(
+            self.shm_broadcaster = ShmRingBufferIO.create_from_process_group(
                 self.cpu_group, 1 << 20, 6)
 
     @property
