@@ -181,7 +181,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/custom_all_reduce.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
+    "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
+    "csrc/quantization/qqq/qqq_gemm_kernel.cu")
 
   #
   # The CUTLASS kernels for Hopper require sm90a to be enabled.
