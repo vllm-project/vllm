@@ -2,7 +2,8 @@ import multiprocessing
 
 import torch.distributed as dist
 
-from vllm.distributed.device_communicators.shm_broadcast import ShmRingBufferIO
+from vllm.distributed.device_communicators.shm_broadcast import (
+    ShmRingBuffer, ShmRingBufferIO)
 from vllm.utils import update_environment_variables
 
 
@@ -56,3 +57,13 @@ def worker_fn():
 
 def test_shm_broadcast():
     distributed_run(worker_fn, 4)
+
+
+def test_singe_process():
+    buffer = ShmRingBuffer(1, 1024, 4)
+    reader = ShmRingBufferIO(buffer, reader_rank=0)
+    writer = ShmRingBufferIO(buffer, reader_rank=-1)
+    writer.enqueue([0])
+    writer.enqueue([1])
+    assert reader.dequeue() == [0]
+    assert reader.dequeue() == [1]
