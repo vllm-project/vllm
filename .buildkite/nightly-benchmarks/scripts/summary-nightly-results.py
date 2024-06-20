@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import pandas as pd
+from tabulate import tabulate
 
 results_folder = Path("results/")
 
@@ -53,6 +54,10 @@ if __name__ == "__main__":
 
 
     serving_results = pd.DataFrame.from_dict(serving_results)
+    serving_md_table = tabulate(serving_results,
+                                headers='keys',
+                                tablefmt='pipe',
+                                showindex=False)
 
 
     if not serving_results.empty:
@@ -62,6 +67,12 @@ if __name__ == "__main__":
             
             
     prefix = os.environ.get("CURRENT_LLM_SERVING_ENGINE")
+
+    # document benchmarking results in markdown
+    with open(results_folder / f"{prefix}_nightly_results.md", "w") as f:
+        f.write(serving_md_table)
+        f.write('\n')
+        
 
     # document benchmarking results in json
     with open(results_folder / f"{prefix}_nightly_results.json", "w") as f:
