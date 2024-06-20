@@ -28,12 +28,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
 
 import torch
+import torch.distributed
 from torch.distributed import Backend, ProcessGroup
+from torch.distributed.distributed_c10d import (_get_pg_default_device,
+                                                _object_to_tensor,
+                                                _tensor_to_object)
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-
-from .object_list_ops import recv_object_list, send_object_list
 
 
 @dataclass
@@ -344,37 +346,61 @@ class GroupCoordinator:
                                                 group=self.device_group)
         return obj_list
 
-    def send_object_list(self,
-                         obj_list: List[Any],
-                         dst: int,
-                         group: Optional[ProcessGroup] = None):
+    def send_object(self,
+                    obj: Any,
+                    dst: int,
+                    group: Optional[ProcessGroup] = None) -> None:
         """Send the input object list to the destination rank."""
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
-            return obj_list
-        # Send.
-        send_object_list(obj_list,
-                         dst=self.ranks[dst],
-                         group=self.device_group)
-        return obj_list
+            return obj
 
-    def recv_object_list(self,
-                         obj_list: List[Any],
-                         src: int,
-                         group: Optional[ProcessGroup] = None):
+        current_device = _get_pg_default_device(group)
+        # Serialize object to tensor.
+        object_tensor, size_tensor = _object_to_tensor(obj, current_device,
+                                                       group)
+
+        # Send object size
+        torch.distributed.send(size_tensor, dst=dst, group=group)
+
+        # Send object
+        torch.distributed.send(object_tensor, dst=dst, group=group)
+
+        return None
+
+    def recv_object(self,
+                    src: int,
+                    group: Optional[ProcessGroup] = None) -> Any:
         """Receive the input object list from the source rank."""
         assert src < self.world_size, f"Invalid src rank ({src})"
 
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
-            return obj_list
-        # Receive.
-        recv_object_list(obj_list,
-                         src=self.ranks[src],
-                         group=self.device_group)
-        return obj_list
+            return None
+
+        current_device = _get_pg_default_device(group)
+
+        size_tensor = torch.empty(1, dtype=torch.long, device=current_device)
+
+        # Receive object size
+        rank_size = torch.distributed.recv(size_tensor, src=src, group=group)
+
+        # Tensor to receive serialized objects into.
+        object_tensor = torch.empty(  # type: ignore[call-overload]
+            size_tensor.item(),  # type: ignore[arg-type]
+            dtype=torch.uint8,
+            device=current_device)
+
+        rank_object = torch.distributed.recv(object_tensor,
+                                             src=src,
+                                             group=group)
+        assert (rank_size == rank_object
+                ), "Mismatch in return ranks for object sizes and objects."
+        # Deserialize objects using their stored sizes.
+
+        return _tensor_to_object(object_tensor, size_tensor.item(), group)
 
     def broadcast_tensor_dict(
         self,
@@ -490,7 +516,7 @@ class GroupCoordinator:
         # `metadata_list` lives in CPU memory.
         # `send_object_list` has serialization & deserialization,
         # all happening on CPU. Therefore, we can use the CPU group.
-        send_object_list([metadata_list], dst=dst, group=metadata_group)
+        self.send_object(metadata_list, dst=dst, group=metadata_group)
         for tensor in tensor_list:
             if tensor.numel() == 0:
                 # Skip sending empty tensors.
@@ -517,11 +543,9 @@ class GroupCoordinator:
         assert src < self.world_size, f"Invalid src rank ({src})"
         src = self.ranks[src]
 
-        recv_metadata_list = [None]
-        recv_object_list(recv_metadata_list, src=src, group=metadata_group)
-        assert recv_metadata_list[0] is not None
+        recv_metadata_list = self.recv_object(src=src, group=metadata_group)
         tensor_dict = {}
-        for key, value in recv_metadata_list[0]:
+        for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
