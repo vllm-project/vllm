@@ -6,9 +6,15 @@ RUN apt-get update  -y \
     && apt-get install -y git wget vim numactl gcc-12 g++-12 python3 python3-pip libtcmalloc-minimal4 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
-RUN echo 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD' >> ~/.bashrc
 
-RUN pip install https://intel-extension-for-pytorch.s3.amazonaws.com/ipex_dev/cpu/intel_extension_for_pytorch-2.3.100%2Bgit0eb3473-cp310-cp310-linux_x86_64.whl
+
+RUN git clone https://github.com/intel/intel-extension-for-pytorch \
+    && cp intel-extension-for-pytorch/scripts/compile_bundle.sh . \
+    && bash compile_bundle.sh
+
+
+RUN pip install intel-extension-for-pytorch/dist/intel_extension_for_pytorch*linux_x86_64.whl
+RUN echo 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD' >> ~/.bashrc
 
 RUN pip install --upgrade pip \
     && pip install wheel packaging ninja "setuptools>=49.4.0" numpy
