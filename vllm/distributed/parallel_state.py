@@ -33,6 +33,8 @@ from torch.distributed import Backend, ProcessGroup
 import vllm.envs as envs
 from vllm.logger import init_logger
 
+from .object_list_ops import recv_object_list, send_object_list
+
 
 @dataclass
 class GraphCaptureContext:
@@ -342,6 +344,38 @@ class GroupCoordinator:
                                                 group=self.device_group)
         return obj_list
 
+    def send_object_list(self,
+                         obj_list: List[Any],
+                         dst: int,
+                         group: Optional[ProcessGroup] = None):
+        """Send the input object list to the destination rank."""
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+
+        # Bypass the function if we are using only 1 GPU.
+        if self.world_size == 1:
+            return obj_list
+        # Send.
+        send_object_list(obj_list,
+                         dst=self.ranks[dst],
+                         group=self.device_group)
+        return obj_list
+
+    def recv_object_list(self,
+                         obj_list: List[Any],
+                         src: int,
+                         group: Optional[ProcessGroup] = None):
+        """Receive the input object list from the source rank."""
+        assert src < self.world_size, f"Invalid src rank ({src})"
+
+        # Bypass the function if we are using only 1 GPU.
+        if self.world_size == 1:
+            return obj_list
+        # Receive.
+        recv_object_list(obj_list,
+                         src=self.ranks[src],
+                         group=self.device_group)
+        return obj_list
+
     def broadcast_tensor_dict(
         self,
         tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
@@ -433,6 +467,82 @@ class GroupCoordinator:
                 async_handle.wait()
         return tensor_dict
 
+    def send_tensor_dict(
+            self, tensor_dict: Dict[Any, Union[torch.Tensor, Any]],
+            dst: int) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+        """Send the input tensor dictionary.
+        NOTE: `dst` is the local rank of the source rank.
+        """
+        # Bypass the function if we are using only 1 GPU.
+        if not torch.distributed.is_initialized() or self.world_size == 1:
+            return tensor_dict
+
+        group = self.device_group
+        metadata_group = self.cpu_group
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+        dst = self.ranks[dst]
+
+        metadata_list: List[Tuple[Any, Any]] = []
+        assert isinstance(
+            tensor_dict,
+            dict), f"Expecting a dictionary, got {type(tensor_dict)}"
+        metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
+        # `metadata_list` lives in CPU memory.
+        # `broadcast_object_list` has serialization & deserialization,
+        # all happening on CPU. Therefore, we can use the CPU group.
+        send_object_list([metadata_list], dst=dst, group=metadata_group)
+        for tensor in tensor_list:
+            if tensor.numel() == 0:
+                # Skip broadcasting empty tensors.
+                continue
+            if tensor.is_cpu:
+                # use metadata_group for CPU tensors
+                torch.distributed.send(tensor, dst=dst, group=metadata_group)
+            else:
+                # use group for GPU tensors
+                torch.distributed.send(tensor, dst=dst, group=group)
+        return None
+
+    def recv_tensor_dict(
+            self, src: int) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+        """Recv the input tensor dictionary.
+        NOTE: `src` is the local rank of the source rank.
+        """
+        # Bypass the function if we are using only 1 GPU.
+        if not torch.distributed.is_initialized() or self.world_size == 1:
+            return None
+
+        group = self.device_group
+        metadata_group = self.cpu_group
+        assert src < self.world_size, f"Invalid src rank ({src})"
+        src = self.ranks[src]
+
+        recv_metadata_list = [None]
+        recv_object_list(recv_metadata_list, src=src, group=metadata_group)
+        assert recv_metadata_list[0] is not None
+        tensor_dict = {}
+        for key, value in recv_metadata_list[0]:
+            if isinstance(value, TensorMetadata):
+                tensor = torch.empty(value.size,
+                                     dtype=value.dtype,
+                                     device=value.device)
+                if tensor.numel() == 0:
+                    # Skip broadcasting empty tensors.
+                    tensor_dict[key] = tensor
+                    continue
+                if tensor.is_cpu:
+                    # use metadata_group for CPU tensors
+                    torch.distributed.recv(tensor,
+                                           src=src,
+                                           group=metadata_group)
+                else:
+                    # use group for GPU tensors
+                    torch.distributed.recv(tensor, src=src, group=group)
+                tensor_dict[key] = tensor
+            else:
+                tensor_dict[key] = value
+        return tensor_dict
+
     def barrier(self):
         """Barrier synchronization among the group.
         NOTE: don't use `device_group` here! `barrier` in NCCL is
@@ -441,6 +551,26 @@ class GroupCoordinator:
         device. Use the CPU group instead.
         """
         torch.distributed.barrier(group=self.cpu_group)
+
+    def send(self, tensor: torch.Tensor, dst: int) -> None:
+        """Sends a tensor to the destination rank in a non-blocking way"""
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            pynccl_comm.send(tensor)
+        else:
+            torch.distributed.isend(tensor, dst, self.device_group)
+
+    def recv(self, size: torch.Size, dtype: torch.dtype,
+             src: int) -> torch.Tensor:
+        """Receives a tensor from the src rank."""
+        tensor = torch.empty(size, dtype=dtype, device=self.device)
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            pynccl_comm.recv(tensor)
+        else:
+            req = torch.distributed.irecv(tensor, src, self.device_group)
+            req.wait()
+        return tensor
 
     def destroy(self):
         if self.device_group is not None:
@@ -682,6 +812,28 @@ def get_tensor_model_parallel_world_size():
 def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
+
+
+def get_pipeline_model_parallel_world_size():
+    """Return world size for the pipeline model parallel group."""
+    return get_pp_group().world_size
+
+
+def get_pipeline_model_parallel_rank():
+    """Return my rank for the pipeline model parallel group."""
+    return get_pp_group().rank_in_group
+
+
+def is_pipeline_model_parallel_first_rank():
+    """Return True if the rank is the first rank in the
+    pipeline model parallel group."""
+    return get_pp_group().rank_in_group == 0
+
+
+def is_pipeline_model_parallel_last_rank():
+    """Return True if the rank is the last rank in the
+    pipeline model parallel group."""
+    return get_pp_group().rank_in_group == get_pp_group().world_size - 1
 
 
 def destroy_model_parallel():

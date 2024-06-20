@@ -9,11 +9,13 @@ import ray
 import torch
 
 from vllm.distributed import (broadcast_tensor_dict,
+                              is_pipeline_model_parallel_first_rank,
+                              is_pipeline_model_parallel_last_rank,
+                              recv_tensor_dict, send_tensor_dict,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 
-from ..utils import (init_test_distributed_environment,
-                     multi_process_tensor_parallel)
+from ..utils import init_test_distributed_environment, multi_process_parallel
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -105,6 +107,46 @@ def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
         assert torch.allclose(recv_dict["f"], test_dict["f"])
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def send_recv_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
+                                      distributed_init_port: str):
+    del os.environ["CUDA_VISIBLE_DEVICES"]
+    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(device)
+    init_test_distributed_environment(tp_size, pp_size, rank,
+                                      distributed_init_port)
+
+    test_dict = {
+        # device tensor
+        "a": torch.arange(8, dtype=torch.float32, device="cuda"),
+        # CPU tensor
+        "b": torch.arange(16, dtype=torch.int8, device="cpu"),
+        "c": "test",
+        "d": [1, 2, 3],
+        "e": {
+            "a": 1,
+            "b": 2
+        },
+        # empty tensor
+        "f": torch.tensor([], dtype=torch.float32, device="cuda"),
+    }
+
+    if not is_pipeline_model_parallel_first_rank():
+        recv_dict = recv_tensor_dict()
+
+    if not is_pipeline_model_parallel_last_rank():
+        send_tensor_dict(test_dict)
+
+    if not is_pipeline_model_parallel_first_rank():
+        assert len(recv_dict) == len(test_dict)
+        assert torch.allclose(recv_dict["a"], test_dict["a"])
+        assert torch.allclose(recv_dict["b"], test_dict["b"])
+        assert recv_dict["c"] == test_dict["c"]
+        assert recv_dict["d"] == test_dict["d"]
+        assert recv_dict["e"] == test_dict["e"]
+        assert torch.allclose(recv_dict["f"], test_dict["f"])
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("tp_size", [2])
@@ -113,4 +155,12 @@ def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
     broadcast_tensor_dict_test_worker
 ])
 def test_multi_process_tensor_parallel(tp_size, test_target):
-    multi_process_tensor_parallel(tp_size, 1, test_target)
+    multi_process_parallel(tp_size, 1, test_target)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
+@pytest.mark.parametrize("pp_size", [2])
+@pytest.mark.parametrize("test_target", [send_recv_tensor_dict_test_worker])
+def test_multi_process_pipeline_parallel(pp_size, test_target):
+    multi_process_parallel(1, pp_size, test_target)
