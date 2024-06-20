@@ -1,7 +1,7 @@
 import os
-
+import pytest
 import ray
-
+import torch
 from vllm.utils import cuda_device_count_stateless
 
 
@@ -21,6 +21,10 @@ class _CUDADeviceCountStatelessTestActor:
 def test_cuda_device_count_stateless():
     """Test that cuda_device_count_stateless changes return value if
     CUDA_VISIBLE_DEVICES is changed."""
+
+    # skip this test if rocm does not support this yet
+    if torch.version.hip and not hasattr(torch.cuda, "_device_count_amdsmi"):
+        pytest.skip("no support to _device_count_amdsmi yet")
 
     actor = _CUDADeviceCountStatelessTestActor.options(  # type: ignore
         num_gpus=2).remote()

@@ -132,6 +132,19 @@ class LRUCache(Generic[T]):
 def is_hip() -> bool:
     return torch.version.hip is not None
 
+def get_hip_version() -> tuple:
+    # call this function for ROCm only
+    hip_version = str(torch.version.hip)
+    hip_version = hip_version.split("-")[0]    # ignore git sha
+    return tuple(int(x) for x in hip_version.split("."))
+
+def is_hip_version_less_than(version: tuple) -> bool:
+    # check whether hip version is less than the version
+    return get_hip_version() < version
+
+def is_hip_version_equals(version: tuple) -> bool:
+    # check whether hip version is equals to the version
+    return get_hip_version() == version
 
 @lru_cache(maxsize=None)
 def is_cpu() -> bool:
@@ -745,10 +758,15 @@ def _cuda_device_count_stateless(
 
     if not torch.cuda._is_compiled():
         return 0
-    # bypass _device_count_nvml() if rocm (not supported)
-    nvml_count = -1 if torch.version.hip else torch.cuda._device_count_nvml()
-    r = torch._C._cuda_getDeviceCount() if nvml_count < 0 else nvml_count
-    return r
+
+    # for rocm torch 2.4 or later, torch.cuda.device_count() calls
+    # _device_count_amdsmi, equivalent to _device_count_nvml()
+    if is_hip():
+        if hasattr(torch.cuda, "_device_count_amdsmi"):
+            return torch.cuda._device_count_amdsmi()
+        else:
+            return torch._C._cuda_getDeviceCount()
+    return torch.cuda._device_count_nvml()
 
 
 def cuda_device_count_stateless() -> int:
