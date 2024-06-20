@@ -2,7 +2,7 @@ import ctypes
 import json
 import os
 from itertools import product
-from typing import Dict, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -71,6 +71,7 @@ def consumer(batch_tgt: Sequence[int],
         if open_success:
             # modify the memory
             lib.cudaMemset(pointer, 2, 1024)
+            lib.cudaDeviceSynchronize()
             # use two queues to simulate barrier
             producer_queue.get()
             consumer_queue.put(0)
@@ -88,7 +89,7 @@ def consumer(batch_tgt: Sequence[int],
 def can_actually_p2p(
     batch_src: Sequence[int],
     batch_tgt: Sequence[int],
-):
+) -> Sequence[bool]:
     """
     Usually, checking if P2P access is enabled can be done by
     `torch.cuda.can_device_access_peer(src, tgt)`. However, sometimes
@@ -138,12 +139,17 @@ def can_actually_p2p(
     p_tgt.start()
     p_src.join()
     p_tgt.join()
-    result = []
+    result: List[bool] = []
     for src, tgt in zip(batch_src, batch_tgt):
         a = result_queue.get()
         b = result_queue.get()
-        assert a == b
-        result.append(a)
+        if a != b:
+            logger.warning(
+                "Two processes do not agree on the P2P access"
+                " status on %d -> %d, treat as disabled.", src, tgt)
+            result.append(False)
+        else:
+            result.append(a)
     return result
 
 
@@ -188,7 +194,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         # only the local master process (with local_rank == 0) can
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache in %s", path)
-        cache = {}
+        cache: Dict[str, bool] = {}
         ids = list(range(num_dev))
         # batch of all pairs of GPUs
         batch_src, batch_tgt = zip(*list(product(ids, ids)))

@@ -66,6 +66,10 @@ def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
     torch.ops._C.gelu_new(out, x)
 
 
+def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
+    torch.ops._C.gelu_quick(out, x)
+
+
 # page attention ops
 def paged_attention_v1(
     out: torch.Tensor,
@@ -377,7 +381,8 @@ def reshape_and_cache_flash(
                                                    kv_cache_dtype)
 
 
-def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
+def copy_blocks(key_caches: List[torch.Tensor],
+                value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
