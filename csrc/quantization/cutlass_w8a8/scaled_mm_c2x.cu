@@ -183,9 +183,6 @@ struct cutlass_2x_gemm {
       >::GemmKernel>;
   // clang-format on
 
-  static constexpr size_t kRequiredSharedMemSize =
-      sizeof(typename KernelType::SharedStorage);
-
   using Op = cutlass::gemm::device::GemmUniversalAdapter<KernelType>;
 };
 
@@ -262,12 +259,17 @@ void fallback_cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   // the FallbackGemm instead.
   static const int max_shared_mem_per_block_opt_in =
       get_cuda_max_shared_memory_per_block_opt_in(0);
-  if (Gemm::kRequiredSharedMemSize <= max_shared_mem_per_block_opt_in) {
+
+  size_t const gemm_shared_mem_size =
+      sizeof(typename Gemm::KernelType::SharedStorage);
+  size_t const fallback_gemm_shared_mem_size = 
+      sizeof(typename FallbackGemm::KernelType::SharedStorage);
+
+  if (gemm_shared_mem_size <= max_shared_mem_per_block_opt_in) {
     return cutlass_gemm_caller<Gemm>(out, a, b,
                                      std::forward<EpilogueArgs>(args)...);
   } else {
-    TORCH_CHECK(FallbackGemm::kRequiredSharedMemSize <=
-                max_shared_mem_per_block_opt_in);
+    TORCH_CHECK(fallback_gemm_shared_mem_size <= max_shared_mem_per_block_opt_in);
     return cutlass_gemm_caller<FallbackGemm>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   }
