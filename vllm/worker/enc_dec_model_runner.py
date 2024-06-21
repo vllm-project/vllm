@@ -129,7 +129,7 @@ class EncoderDecoderModelRunner(ModelRunner):
                 sliding_window_blocks * self.block_size
 
         for seq_group_metadata in seq_group_metadata_list:
-            computed_block_nums = None #seq_group_metadata.computed_block_nums
+            computed_block_nums = None  #seq_group_metadata.computed_block_nums
 
             is_prompt = seq_group_metadata.is_prompt
 
@@ -174,7 +174,8 @@ class EncoderDecoderModelRunner(ModelRunner):
             device=self.device,
         )
 
-        assert (not is_prompt) or max_query_len > 0, ("query_lens: {}".format(query_lens))
+        assert (not is_prompt) or max_query_len > 0, (
+            "query_lens: {}".format(query_lens))
 
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.int,

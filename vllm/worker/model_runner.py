@@ -254,37 +254,48 @@ class ModelRunner:
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
 
     def _prepare_seq_model_input(
-        self,
-        is_prompt: bool,
-        decode_only: bool,
-        num_prefills: int,
-        num_prefill_tokens: int,
-        num_decode_tokens: int,
-        block_tables: List[List[int]],
-        seq_lens: List[int],
-        slot_mapping: List[int],
-        context_lens: List[int],
-        query_lens: List[int],
-        input_tokens: List[int],
-        input_positions: List[int],
-        prefill_seq_lens: List[int],
-        decode_seq_lens: List[int],
-        seq_group_metadata: SequenceGroupMetadata,
-        seq_data: SequenceData,
-        computed_block_nums: Optional[List[int]],
-        original_block_table: Optional[List[int]],
-        paged_kv_indices: Optional[List[int]],
-        paged_kv_indptr: Optional[List[int]],
-        paged_kv_last_page_len: Optional[List[int]],
-        sliding_window_blocks: int = 0,
-        block_aligned_sliding_window: int = 0,
-        lora_index_mapping: List[int] = [],
-        lora_prompt_mapping: List[int] = [],
-        lora_requests: Set[LoRARequest] = set(),
-        multi_modal_kwargs_list: Dict[str,
-                                      List[torch.Tensor]] = defaultdict(list),
-        is_encoder_seq: bool = False
-    ) -> Tuple[bool, int, int, int]:
+            self,
+            is_prompt: bool,
+            decode_only: bool,
+            num_prefills: int,
+            num_prefill_tokens: int,
+            num_decode_tokens: int,
+            block_tables: List[List[int]],
+            seq_lens: List[int],
+            slot_mapping: List[int],
+            context_lens: List[int],
+            query_lens: List[int],
+            input_tokens: List[int],
+            input_positions: List[int],
+            prefill_seq_lens: List[int],
+            decode_seq_lens: List[int],
+            seq_group_metadata: SequenceGroupMetadata,
+            seq_data: SequenceData,
+            computed_block_nums: Optional[List[int]],
+            original_block_table: Optional[List[int]],
+            paged_kv_indices: Optional[List[int]],
+            paged_kv_indptr: Optional[List[int]],
+            paged_kv_last_page_len: Optional[List[int]],
+            sliding_window_blocks: int = 0,
+            block_aligned_sliding_window: int = 0,
+            lora_index_mapping: Optional[List[int]] = None,
+            lora_prompt_mapping: Optional[List[int]] = None,
+            lora_requests: Optional[Set[LoRARequest]] = None,
+            multi_modal_kwargs_list: Optional[Dict[str, List[torch.Tensor]]] \
+                                        = None,
+            is_encoder_seq: bool = False) -> Tuple[bool, int, int, int]:
+
+        if lora_index_mapping is None:
+            lora_index_mapping = []
+
+        if lora_prompt_mapping is None:
+            lora_prompt_mapping = []
+
+        if lora_requests is None:
+            lora_requests = set()
+
+        if multi_modal_kwargs_list is None:
+            multi_modal_kwargs_list = defaultdict(list)
 
         if is_prompt:
             context_len = seq_data.get_num_computed_tokens()
@@ -304,8 +315,8 @@ class ModelRunner:
             seq_len = seq_data.get_len()
         else:
             seq_len = min(seq_data.get_len(),
-                        context_len + seq_group_metadata.token_chunk_size)
-        
+                          context_len + seq_group_metadata.token_chunk_size)
+
         if is_prompt:
             tokens = seq_data.get_token_ids()[context_len:seq_len]
         else:
@@ -563,8 +574,8 @@ class ModelRunner:
                         "now.")
 
                 seq_data = seq_group_metadata.seq_data[seq_id]
-                block_table = None if seq_group_metadata.block_tables is None else \
-                                seq_group_metadata.block_tables[seq_id]
+                block_table = None if seq_group_metadata.block_tables is None \
+                                else seq_group_metadata.block_tables[seq_id]
                 decode_only, \
                 num_prefills, \
                 num_prefill_tokens, \
@@ -1198,13 +1209,17 @@ def _get_graph_batch_size(batch_size: int) -> int:
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
 
 
-def _is_block_tables_empty(block_tables: Union[None, Dict]):
+def _is_block_tables_empty(block_tables: Union[None, Dict, List]):
     """
     Check if block_tables is None or a dictionary with all None values.
     """
     if block_tables is None:
         return True
+    if isinstance(block_tables, List):
+        # A single block table passed in as a List
+        return False
     if isinstance(block_tables, dict) and all(
             value is None for value in block_tables.values()):
+        # Block tables dict where all block tables are None
         return True
     return False

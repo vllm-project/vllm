@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List
 
 import pytest
 import torch
@@ -46,13 +46,11 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
     # Force Attention wrapper backend
     override_backend_env_variable(monkeypatch, backend_name)
 
-    model_runner = _create_model_runner(
-        "facebook/bart-base",
-        max_num_batched_tokens=100000,
-        max_num_seqs=100000,
-        enable_chunked_prefill=False,
-        enforce_eager=enforce_eager
-    )
+    model_runner = _create_model_runner("facebook/bart-base",
+                                        max_num_batched_tokens=100000,
+                                        max_num_seqs=100000,
+                                        enable_chunked_prefill=False,
+                                        enforce_eager=enforce_eager)
 
     seq_lens: List[int] = []
     encoder_seq_lens: List[int] = []
@@ -169,13 +167,11 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
     # - Decoder
     assert len(input_tokens) == sum(seq_lens)
     assert len(input_positions) == sum(seq_lens)
-    torch.testing.assert_close(input_tokens, 
-                               input_positions)
+    torch.testing.assert_close(input_tokens, input_positions)
     # - Encoder
     assert len(encoder_input_tokens) == sum(encoder_seq_lens)
     assert len(encoder_input_tokens) == sum(encoder_seq_lens)
-    torch.testing.assert_close(encoder_input_tokens, 
-                               encoder_input_positions)
+    torch.testing.assert_close(encoder_input_tokens, encoder_input_positions)
 
     sampling_metadata = SamplingMetadata.prepare(
         seq_group_metadata_list,
@@ -196,6 +192,7 @@ def test_prepare_prompt(batch_size, backend_name, enforce_eager, monkeypatch):
                             dtype=actual.dtype)
     torch.testing.assert_close(actual, expected)
 
+
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
@@ -204,13 +201,11 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
     # Force Attention wrapper backend
     override_backend_env_variable(monkeypatch, backend_name)
 
-    model_runner = _create_model_runner(
-        "facebook/bart-base",
-        max_num_batched_tokens=100000,
-        max_num_seqs=100000,
-        enable_chunked_prefill=False,
-        enforce_eager=enforce_eager
-    )
+    model_runner = _create_model_runner("facebook/bart-base",
+                                        max_num_batched_tokens=100000,
+                                        max_num_seqs=100000,
+                                        enable_chunked_prefill=False,
+                                        enforce_eager=enforce_eager)
 
     seq_lens: List[int] = []
     encoder_seq_lens: List[int] = []
@@ -299,20 +294,22 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
         torch.tensor(seq_start_loc, dtype=torch.int32, device=device))
     assert torch.allclose(
         attn_metadata.context_lens_tensor,
-        torch.tensor([seq_len-1 for seq_len in seq_lens],
-                    dtype=torch.int,
-                    device=device))
+        torch.tensor([seq_len - 1 for seq_len in seq_lens],
+                     dtype=torch.int,
+                     device=device))
 
     # Verify block tables are correct for prompts
     # - Decoder self-attention
-    expected = torch.tensor([block_tables[0] for _ in range(len(seq_group_metadata_list))],
-                            dtype=torch.int32,
-                            device=model_runner.device)
+    expected = torch.tensor(
+        [block_tables[0] for _ in range(len(seq_group_metadata_list))],
+        dtype=torch.int32,
+        device=model_runner.device)
     assert torch.allclose(attn_metadata.block_tables, expected)
     # - Encoder/decoder cross-attention
-    expected = torch.tensor([cross_block_table for _ in range(len(seq_group_metadata_list))],
-                            dtype=torch.int32,
-                            device=model_runner.device)
+    expected = torch.tensor(
+        [cross_block_table for _ in range(len(seq_group_metadata_list))],
+        dtype=torch.int32,
+        device=model_runner.device)
     assert torch.allclose(attn_metadata.cross_block_tables, expected)
 
     # Cuda graph should not be used for prefill.
@@ -322,11 +319,11 @@ def test_prepare_decode(batch_size, backend_name, enforce_eager, monkeypatch):
     # - Decoder
     assert len(input_tokens) == len(seq_lens)
     assert len(input_positions) == len(seq_lens)
-    torch.testing.assert_close(input_tokens, 
-                               input_positions)
+    torch.testing.assert_close(input_tokens, input_positions)
     # - Encoder
     assert len(encoder_input_tokens) == 0
     assert len(encoder_input_positions) == 0
+
 
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
