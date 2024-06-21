@@ -231,7 +231,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     
     # The file storing the all fp8 gemm shapes.
     "VLLM_FP8_UNTUNED_FILE":
-    lambda: os.getenv("VLLM_FP8_UNTUNED_FILE", "/tmp/utuned_fp8.csv"),
+    lambda: os.getenv("VLLM_FP8_UNTUNED_FILE", "/tmp/untuned_fp8.csv"),
 
     # The file storing the tuned result for fp8 gemm.
     "VLLM_FP8_TUNED_FILE":
