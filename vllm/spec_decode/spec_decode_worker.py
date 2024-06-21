@@ -16,6 +16,7 @@ from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
+from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
 from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
                                    get_sampled_token_logprobs, nvtx_range,
@@ -110,8 +111,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
-            ranks = list(range(draft_tp)) if target_tp != draft_tp else None
-            proposer_worker = MultiStepWorker(ranks, **draft_worker_kwargs)
+            proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+            proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
+                proposer_worker, draft_tp, target_tp)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))

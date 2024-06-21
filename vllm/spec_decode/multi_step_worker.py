@@ -1,14 +1,9 @@
 import copy
 import weakref
-from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.distributed.parallel_state import (get_tp_group, get_world_group,
-                                             init_model_parallel_group,
-                                             init_world_group,
-                                             patch_tensor_parallel_group)
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
@@ -39,54 +34,16 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     requires more thought for MultiStepWorker support.
     """
 
-    def __init__(self, draft_ranks: Optional[List[int]] = None, **kwargs):
+    def __init__(self, **kwargs):
         """Create a MultiStepWorker.
-
-        Args:
-            draft_ranks (Optional[List[int]]): if this value is given, only some
-            of the GPU ranks in this value participate in draft generation
         """
         super().__init__(**kwargs)
-
-        self._draft_ranks = draft_ranks
-        self._is_dummy = False
-        self._tp_group = None
-
-        if draft_ranks is not None:
-            # whether the worker participates in draft generation or not
-            self._is_dummy = kwargs['rank'] not in draft_ranks
 
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
-    @contextmanager
-    def _patch_tensor_parallel_group(self):
-        """Temporarily patch the global tp group state with its own tp group
-        state. For consistency, it also updates the world group state.
-        Note that it has no effect when draft_ranks is None.
-        """
-        if self._draft_ranks is None:
-            logger.info("Do not patch")
-            yield
-        else:
-            logger.info("Do patch")
-            yield patch_tensor_parallel_group(self._tp_group)
-
     def init_device(self):
-        if self._is_dummy:
-            return
-
-        if self._draft_ranks is not None:
-            # creates tp process group containing only a subset of gpu ranks
-            local_rank = get_tp_group().local_rank
-            tp_backend = torch.distributed.get_backend(
-                get_tp_group().device_group)
-
-            self._tp_group = init_model_parallel_group([self._draft_ranks],
-                                                       local_rank, tp_backend)
-
-        with self._patch_tensor_parallel_group():
-            super().init_device()
+        super().init_device()
 
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]
@@ -96,33 +53,18 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         )
 
     def set_include_gpu_probs_tensor(self):
-        if self._is_dummy:
-            return
-
         # Need include_gpu_probs_tensor for multi_step_worker
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
 
-    def load_model(self):
-        if self._is_dummy:
-            return
-
-        with self._patch_tensor_parallel_group():
-            super().load_model()
+    def load_model(self) -> None:
+        super().load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
-        if self._is_dummy:
-            return -1, -1
-
-        with self._patch_tensor_parallel_group():
-            return super().determine_num_available_blocks()
+        return super().determine_num_available_blocks()
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
-        if self._is_dummy:
-            return
-
-        with self._patch_tensor_parallel_group():
-            super().initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        super().initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @torch.inference_mode()
     def sampler_output(
@@ -137,10 +79,6 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         For multi step worker, this indicator shall be True.
         """
-        # NOTE: here, neither _patch_tensor_parallel_group() call nor _is_dummy
-        # check, as it's always called after tp_group has already been
-        # overridden by get_spec_proposals()
-
         self._raise_if_unsupported(execute_model_req)
 
         # Shallow copy input data so modifications (such as appending tokens)
@@ -176,11 +114,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
-        if self._is_dummy:
-            return SpeculativeProposals(None, None, None)
-
-        with self._patch_tensor_parallel_group():
-            return self._proposer.get_spec_proposals(execute_model_req)
+        return self._proposer.get_spec_proposals(execute_model_req)
 
     @staticmethod
     def _append_new_tokens(
@@ -299,14 +233,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        if self._is_dummy:
-            return []
-
-        with self._patch_tensor_parallel_group():
-            return super().execute_model(execute_model_req)
+        return super().execute_model(execute_model_req)
 
     def get_cache_block_size_bytes(self) -> int:
-        if self._is_dummy:
-            return 0
-
         return super().get_cache_block_size_bytes()
