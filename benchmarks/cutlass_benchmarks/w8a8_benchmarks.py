@@ -11,6 +11,7 @@ from torch.utils.benchmark import Measurement as TMeasurement
 from weight_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
+from vllm.utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())[1:]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
@@ -120,9 +121,8 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
 
     # cutlass impl
     timers.append(
-        bench_fn(a, b, scale_a.to(device="cpu"), scale_b.to(device="cpu"),
-                 torch.bfloat16, label, sub_label, cutlass_impl,
-                 "cutlass_i8_i8_bf16_scaled_mm"))
+        bench_fn(a, b, scale_a, scale_b, torch.bfloat16, label, sub_label,
+                 cutlass_impl, "cutlass_i8_i8_bf16_scaled_mm"))
 
     return timers
 
@@ -294,7 +294,7 @@ if __name__ == '__main__':
             return torch.float8_e4m3fn
         raise ValueError("unsupported dtype")
 
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="""
 Benchmark Cutlass GEMM.
 
