@@ -1,4 +1,6 @@
 import multiprocessing
+import random
+import time
 
 import torch.distributed as dist
 
@@ -45,15 +47,25 @@ def worker_fn_wrapper(fn):
 def worker_fn():
     writer_rank = 2
     broadcaster = ShmRingBufferIO.create_from_process_group(
-        dist.group.WORLD, 1024, 1, writer_rank)
+        dist.group.WORLD, 1024, 2, writer_rank)
     if dist.get_rank() == writer_rank:
+        time.sleep(random.random())
         broadcaster.broadcast_object(0)
-        broadcaster.broadcast_object(1)
+        time.sleep(random.random())
+        broadcaster.broadcast_object({})
+        time.sleep(random.random())
+        broadcaster.broadcast_object([])
     else:
+        time.sleep(random.random())
         a = broadcaster.broadcast_object(None)
+        time.sleep(random.random())
         b = broadcaster.broadcast_object(None)
+        time.sleep(random.random())
+        c = broadcaster.broadcast_object(None)
         assert a == 0
-        assert b == 1
+        assert b == {}
+        assert c == []
+    dist.barrier()
 
 
 def test_shm_broadcast():
