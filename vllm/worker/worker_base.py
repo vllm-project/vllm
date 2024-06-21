@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (enable_trace_function_call_for_thread,
+from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
                         update_environment_variables)
 
 logger = init_logger(__name__)
@@ -125,6 +125,8 @@ class WorkerWrapperBase:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
             # suppress the warning in `update_environment_variables`
             del os.environ[key]
+            if is_hip():
+                os.environ.pop("HIP_VISIBLE_DEVICES", None)
         update_environment_variables(envs)
 
     def init_worker(self, *args, **kwargs):

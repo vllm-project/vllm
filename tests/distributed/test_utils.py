@@ -2,7 +2,8 @@ import os
 
 import ray
 
-from vllm.utils import cuda_device_count_stateless, is_hip
+from vllm.utils import (cuda_device_count_stateless,
+                        update_environment_variables)
 
 
 @ray.remote
@@ -12,11 +13,8 @@ class _CUDADeviceCountStatelessTestActor:
         return cuda_device_count_stateless()
 
     def set_cuda_visible_devices(self, cuda_visible_devices: str):
-        if is_hip():
-            os.environ["HIP_VISIBLE_DEVICES"] = cuda_visible_devices
-        # Also change CUDA_VISIBLE_DEVICES on ROCm so it
-        # matches HIP_VISIBLE_DEVICES
-        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+        update_environment_variables(
+            {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
 
     def get_cuda_visible_devices(self):
         return os.environ["CUDA_VISIBLE_DEVICES"]
