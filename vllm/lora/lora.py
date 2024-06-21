@@ -16,6 +16,7 @@ class LoRALayerWeights:
         lora_alpha: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
         embeddings_tensor: Optional[torch.Tensor] = None,
         scaling: Optional[float] = None,
     ) -> None:
@@ -24,6 +25,7 @@ class LoRALayerWeights:
         self.lora_alpha = lora_alpha
         self.lora_a = lora_a
         self.lora_b = lora_b
+        self.bias = bias
         self.embeddings_tensor = embeddings_tensor
 
         if scaling is None:
@@ -75,6 +77,11 @@ class LoRALayerWeights:
                              dtype=dtype,
                              device=device,
                              pin_memory=pin_memory)
+        bias = torch.zeros([output_dim],
+                             dtype=dtype,
+                             device=device,
+                             pin_memory=pin_memory)
+
         embeddings_tensor = torch.rand(
             10,
             embeddings_tensor_dim,
@@ -87,6 +94,7 @@ class LoRALayerWeights:
             lora_alpha=1,
             lora_a=lora_a,
             lora_b=lora_b,
+            bias=bias,
             embeddings_tensor=embeddings_tensor,
         )
 
@@ -101,6 +109,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         lora_alphas: List[Optional[int]],
         lora_a: List[Optional[torch.Tensor]],
         lora_b: List[Optional[torch.Tensor]],
+        bias: List[Optional[torch.Tensor]] = None,
         scaling: Optional[List[float]] = None,
     ) -> None:
         super().__init__(
@@ -109,7 +118,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             lora_alpha=0,
             lora_a=lora_a,
             lora_b=lora_b,
-            scaling=scaling,  # type: ignore
+            bias=bias,
+            scaling=scaling,
             embeddings_tensor=None,
         )
         self.lora_alphas = lora_alphas
@@ -140,10 +150,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             [lora.lora_alpha if lora is not None else None for lora in loras],
             [lora.lora_a if lora is not None else None for lora in loras],
             [lora.lora_b if lora is not None else None for lora in loras],
-            scaling=[
-                1 if lora is not None else None  # type: ignore
-                for lora in loras
-            ])
+            [lora.bias if lora is not None else None for lora in loras],
+            scaling=[1 if lora is not None else None for lora in loras])
         return obj
 
     def optimize(self) -> "PackedLoRALayerWeights":
