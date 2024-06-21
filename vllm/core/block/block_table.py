@@ -118,9 +118,7 @@ class BlockTable:
         self._blocks: BlockList = BlockList(_blocks)
 
         self._max_block_sliding_window = max_block_sliding_window
-        # Use helper method instead of directly calculating, as blocks
-        # may not be allocated.
-        self._num_full_slots = len(self._get_all_token_ids())
+        self._num_full_slots = self._get_num_token_ids()
 
     @staticmethod
     def get_num_required_blocks(token_ids: List[int], block_size: int) -> int:
@@ -365,10 +363,22 @@ class BlockTable:
 
         for block in self.blocks:
             cur_token_ids = block.token_ids
-            assert cur_token_ids is not None
-            token_ids.extend(cur_token_ids)
+            if cur_token_ids is not None:
+                token_ids.extend(cur_token_ids)
 
         return token_ids
+
+    def _get_num_token_ids(self) -> int:
+        if not self._is_allocated:
+            return 0
+
+        res = 0
+        for block in self.blocks:
+            cur_token_ids = block.token_ids
+            if cur_token_ids is not None:
+                res += len(cur_token_ids)
+
+        return res
 
     @property
     def _is_allocated(self) -> bool:

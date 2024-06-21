@@ -332,15 +332,21 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         forked_blocks: List[Block] = []
         prev_block = None
         for block in source_blocks:
-            refcount = self._refcounter.incr(block.block_id)
-            assert refcount != 1, "can't fork free'd block"
+            block_id = block.block_id
+            assert block_id is not None
 
-            forked_blocks.append(
-                self._block_pool.init_block(prev_block=prev_block,
-                                            token_ids=block.token_ids,
-                                            block_size=self._block_size,
-                                            physical_block_id=block.block_id))
+            refcount = self._refcounter.incr(block_id)
+            assert refcount != 1, "can't fork free'd block_id = {}".format(
+                block_id)
 
+            forked_block = self._block_pool.init_block(
+                prev_block=prev_block,
+                token_ids=block.token_ids,
+                block_size=self._block_size,
+                physical_block_id=None)
+            forked_block.block_id = block_id  # Share block_id
+
+            forked_blocks.append(forked_block)
             prev_block = forked_blocks[-1]
 
         return forked_blocks
@@ -680,6 +686,12 @@ class PrefixCachingBlock(Block):
         Args:
             token_ids (List[int]): The token IDs to be appended to the block.
         """
+        if token_ids is None:
+            return
+
+        if len(token_ids) == 0:
+            return
+
         assert self._allocator.is_appendable(
             self
         ), "Block with id = {} is not appendable for token_ids = {}".format(
@@ -690,7 +702,7 @@ class PrefixCachingBlock(Block):
         assert not self.computed
 
         # Ensure there are input tokens
-        assert token_ids
+        assert token_ids, "Got token_ids = {}".format(token_ids)
 
         # Add new tokens
         self._block.append_token_ids(token_ids)
@@ -789,4 +801,5 @@ class PrefixCachingBlock(Block):
 def assert_prefix_caching_block_or_none(block: Optional[Block]):
     if block is None:
         return
-    assert isinstance(block, PrefixCachingBlock)
+    assert isinstance(block,
+                      PrefixCachingBlock), "Got block = {}".format(block)

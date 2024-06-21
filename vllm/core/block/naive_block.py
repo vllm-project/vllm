@@ -223,11 +223,14 @@ class NaiveBlockAllocator(BlockAllocator):
             refcount = self._refcounter.incr(block.block_id)
             assert refcount != 1, "can't fork free'd block"
 
-            forked_blocks.append(
-                self._block_pool.init_block(prev_block=prev_block,
-                                            token_ids=block.token_ids,
-                                            block_size=self._block_size,
-                                            physical_block_id=block.block_id))
+            forked_block = self._block_pool.init_block(
+                prev_block=prev_block,
+                token_ids=block.token_ids,
+                block_size=self._block_size,
+                physical_block_id=None)
+            forked_block.block_id = block.block_id  # Share block_id
+
+            forked_blocks.append(forked_block)
             prev_block = forked_blocks[-1]
 
         return forked_blocks
