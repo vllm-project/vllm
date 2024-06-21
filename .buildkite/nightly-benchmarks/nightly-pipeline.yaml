@@ -5,6 +5,7 @@ steps:
     plugins:
     - kubernetes:
         podSpec:
+          priorityClassName: perf-benchmark
           containers:
           - image: nvcr.io/nvidia/tritonserver:24.04-trtllm-python-py3
             command:
@@ -36,6 +37,7 @@ steps:
     plugins:
     - kubernetes:
         podSpec:
+          priorityClassName: perf-benchmark
           containers:
           - image: vllm/vllm-openai:latest
             command:
@@ -67,6 +69,7 @@ steps:
     plugins:
     - kubernetes:
         podSpec:
+          priorityClassName: perf-benchmark
           containers:
           - image: ghcr.io/huggingface/text-generation-inference:2.0
             command:
@@ -98,6 +101,7 @@ steps:
     plugins:
     - kubernetes:
         podSpec:
+          priorityClassName: perf-benchmark
           containers:
           - image: openmmlab/lmdeploy:latest
             command:
