@@ -291,6 +291,7 @@ class QWenLMHeadModel(nn.Module):
                     continue
                 # Skip loading visual weights to support Qwen-VL models
                 # in cases with text-only inputs
+                # TODO: add support for Qwen-VL
                 if (name not in params_dict
                         and name.startswith("transformer.visual.")):
                     print_warning_once(
