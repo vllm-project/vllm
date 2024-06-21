@@ -4,12 +4,13 @@ USER root
 
 RUN apt-get update  -y     && apt-get install -y git wget vim numactl gcc-12 g++-12 protobuf-compiler libprotobuf-dev     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
-RUN micromamba install -y -n base -c https://ausgsa.ibm.com:7191/gsa/ausgsa/projects/o/open-ce/conda/Open-CE-r1.11/1.11.0/opence-p10/  -c defaults     python=3.10     pytorch-cpu     numba     llvmlite     httptools &&     micromamba clean --all --yes
+RUN micromamba install -y -n base -c rocketce  -c defaults     python=3.10     pytorch-cpu     numba     llvmlite     httptools &&     micromamba clean --all --yes
 
 COPY ./ /workspace/vllm
 
 WORKDIR /workspace/vllm
 
+# These packages will be in rocketce eventually
 RUN pip install -v -r requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
 
 RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install

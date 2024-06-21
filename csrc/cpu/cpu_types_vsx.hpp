@@ -401,10 +401,12 @@ template <> inline void storeFP32<c10::BFloat16>(float v, c10::BFloat16 *ptr) {
 #endif
 
 const static __vector unsigned char omask = { 0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29 };
+#ifndef _ARCH_PWR10
 const static __vector unsigned int bias = { 0x00007fff, 0x00007fff, 0x00007fff, 0x00007fff };
 const static __vector unsigned int nan  = { 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000 };
 const static __vector unsigned int sh16 = { 16, 16, 16, 16 };
 const static __vector unsigned int one  = { 1, 1, 1, 1 };
+#endif
 
 inline BF16Vec8::BF16Vec8(const FP32Vec8 &v) {
 #ifdef _ARCH_PWR10
