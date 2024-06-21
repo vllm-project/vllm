@@ -1151,7 +1151,10 @@ class BartEncoder(BartPreTrainedModel):
     """
 
     def __init__(self,
-                 config: BartConfig,
+                 config: BartConfig, 
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 lora_config: Optional[LoRAConfig] = None,
                  embed_tokens: Optional[nn.Embedding] = None):
         super().__init__(config)
 
@@ -1177,13 +1180,13 @@ class BartEncoder(BartPreTrainedModel):
         )
         self.layers = nn.ModuleList(
             [BartEncoderLayer(config) for _ in range(config.encoder_layers)])
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
-        self._use_sdpa = config._attn_implementation == "sdpa"
+        # self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        # self._use_sdpa = config._attn_implementation == "sdpa"
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
 
-        self.gradient_checkpointing = False
-        # Initialize weights and apply final processing
-        self.post_init()
+        # self.gradient_checkpointing = False
+        # # Initialize weights and apply final processing
+        # self.post_init()
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -1351,8 +1354,11 @@ class BartDecoder(BartPreTrainedModel):
     """
 
     def __init__(self,
-                 config: BartConfig,
-                 embed_tokens: Optional[nn.Embedding] = None):
+                 config: BartConfig, 
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 lora_config: Optional[LoRAConfig] = None,
+                 embed_tokens: Optional[nn.Embedding] = None,):
         super().__init__(config)
         self.dropout = config.dropout
         self.layerdrop = config.decoder_layerdrop
@@ -1375,14 +1381,14 @@ class BartDecoder(BartPreTrainedModel):
         )
         self.layers = nn.ModuleList(
             [BartDecoderLayer(config) for _ in range(config.decoder_layers)])
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
-        self._use_sdpa = config._attn_implementation == "sdpa"
+        # self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        # self._use_sdpa = config._attn_implementation == "sdpa"
 
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
 
-        self.gradient_checkpointing = False
-        # Initialize weights and apply final processing
-        self.post_init()
+        # self.gradient_checkpointing = False
+        # # Initialize weights and apply final processing
+        # self.post_init()
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -1651,17 +1657,53 @@ class BartModel(BartPreTrainedModel):
         "encoder.embed_tokens.weight", "decoder.embed_tokens.weight"
     ]
 
-    def __init__(self, config: BartConfig):
+    def __init__(self, 
+                 config: BartConfig, 
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 lora_config: Optional[LoRAConfig] = None):
         super().__init__(config)
 
-        padding_idx, vocab_size = config.pad_token_id, config.vocab_size
-        self.shared = nn.Embedding(vocab_size, config.d_model, padding_idx)
+        # padding_idx, vocab_size = config.pad_token_id, config.vocab_size
+        # self.shared = nn.Embedding(vocab_size, config.d_model, padding_idx)
 
-        self.encoder = BartEncoder(config, self.shared)
-        self.decoder = BartDecoder(config, self.shared)
+        # self.encoder = BartEncoder(config, self.shared)
+        # self.decoder = BartDecoder(config, self.shared)
 
-        # Initialize weights and apply final processing
-        self.post_init()
+        # # Initialize weights and apply final processing
+        # self.post_init()
+
+
+
+
+
+
+        self.padding_idx = config.pad_token_id
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size + lora_vocab
+        self.org_vocab_size = config.vocab_size
+
+        self.embed_tokens = VocabParallelEmbedding(
+            self.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+        )
+
+        self.encoder = BartEncoder(config, 
+                                   cache_config,
+                                   quant_config=quant_config)
+        self.decoder = BartDecoder(config, 
+                                   cache_config,
+                                   quant_config=quant_config)
+
+        # self.layers = nn.ModuleList([
+        #     MixtralDecoderLayer(config,
+        #                         cache_config,
+        #                         quant_config=quant_config)
+        #     for _ in range(config.num_hidden_layers)
+        # ])
+        #self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def _tie_weights(self):
         if self.config.tie_word_embeddings:
@@ -1683,93 +1725,85 @@ class BartModel(BartPreTrainedModel):
         return self.decoder
 
     def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        decoder_input_ids: Optional[torch.LongTensor] = None,
-        decoder_attention_mask: Optional[torch.LongTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        decoder_head_mask: Optional[torch.Tensor] = None,
-        cross_attn_head_mask: Optional[torch.Tensor] = None,
-        encoder_outputs: Optional[List[torch.FloatTensor]] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+        self, input_ids: torch.Tensor, positions: torch.Tensor,
+        encoder_input_ids: torch.Tensor, encoder_positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata
     ) -> Union[Tuple, Seq2SeqModelOutput]:
-        # different to other models, Bart automatically creates decoder_input_ids from
-        # input_ids if no decoder_input_ids are provided
-        if decoder_input_ids is None and decoder_inputs_embeds is None:
-            if input_ids is None:
-                raise ValueError(
-                    "If no `decoder_input_ids` or `decoder_inputs_embeds` are "
-                    "passed, `input_ids` cannot be `None`. Please pass either "
-                    "`input_ids` or `decoder_input_ids` or `decoder_inputs_embeds`."
-                )
+        
 
-            decoder_input_ids = shift_tokens_right(
-                input_ids, self.config.pad_token_id,
-                self.config.decoder_start_token_id)
+        assert False
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (output_hidden_states
-                                if output_hidden_states is not None else
-                                self.config.output_hidden_states)
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        # # different to other models, Bart automatically creates decoder_input_ids from
+        # # input_ids if no decoder_input_ids are provided
+        # if decoder_input_ids is None and decoder_inputs_embeds is None:
+        #     if input_ids is None:
+        #         raise ValueError(
+        #             "If no `decoder_input_ids` or `decoder_inputs_embeds` are "
+        #             "passed, `input_ids` cannot be `None`. Please pass either "
+        #             "`input_ids` or `decoder_input_ids` or `decoder_inputs_embeds`."
+        #         )
 
-        if encoder_outputs is None:
-            encoder_outputs = self.encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                head_mask=head_mask,
-                inputs_embeds=inputs_embeds,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-        # If the user passed a tuple for encoder_outputs, we wrap it in a BaseModelOutput when return_dict=True
-        elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=encoder_outputs[0],
-                hidden_states=encoder_outputs[1]
-                if len(encoder_outputs) > 1 else None,
-                attentions=encoder_outputs[2]
-                if len(encoder_outputs) > 2 else None,
-            )
+        #     decoder_input_ids = shift_tokens_right(
+        #         input_ids, self.config.pad_token_id,
+        #         self.config.decoder_start_token_id)
 
-        # decoder outputs consists of (dec_features, past_key_value, dec_hidden, dec_attn)
-        decoder_outputs = self.decoder(
-            input_ids=decoder_input_ids,
-            attention_mask=decoder_attention_mask,
-            encoder_hidden_states=encoder_outputs[0],
-            encoder_attention_mask=attention_mask,
-            head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            past_key_values=past_key_values,
-            inputs_embeds=decoder_inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        # output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        # output_hidden_states = (output_hidden_states
+        #                         if output_hidden_states is not None else
+        #                         self.config.output_hidden_states)
+        # use_cache = use_cache if use_cache is not None else self.config.use_cache
+        # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if not return_dict:
-            return decoder_outputs + encoder_outputs
+        # if encoder_outputs is None:
+        #     encoder_outputs = self.encoder(
+        #         input_ids=input_ids,
+        #         attention_mask=attention_mask,
+        #         head_mask=head_mask,
+        #         inputs_embeds=inputs_embeds,
+        #         output_attentions=output_attentions,
+        #         output_hidden_states=output_hidden_states,
+        #         return_dict=return_dict,
+        #     )
+        # # If the user passed a tuple for encoder_outputs, we wrap it in a BaseModelOutput when return_dict=True
+        # elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
+        #     encoder_outputs = BaseModelOutput(
+        #         last_hidden_state=encoder_outputs[0],
+        #         hidden_states=encoder_outputs[1]
+        #         if len(encoder_outputs) > 1 else None,
+        #         attentions=encoder_outputs[2]
+        #         if len(encoder_outputs) > 2 else None,
+        #     )
 
-        return Seq2SeqModelOutput(
-            last_hidden_state=decoder_outputs.last_hidden_state,
-            past_key_values=decoder_outputs.past_key_values,
-            decoder_hidden_states=decoder_outputs.hidden_states,
-            decoder_attentions=decoder_outputs.attentions,
-            cross_attentions=decoder_outputs.cross_attentions,
-            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
-            encoder_hidden_states=encoder_outputs.hidden_states,
-            encoder_attentions=encoder_outputs.attentions,
-        )
+        # # decoder outputs consists of (dec_features, past_key_value, dec_hidden, dec_attn)
+        # decoder_outputs = self.decoder(
+        #     input_ids=decoder_input_ids,
+        #     attention_mask=decoder_attention_mask,
+        #     encoder_hidden_states=encoder_outputs[0],
+        #     encoder_attention_mask=attention_mask,
+        #     head_mask=decoder_head_mask,
+        #     cross_attn_head_mask=cross_attn_head_mask,
+        #     past_key_values=past_key_values,
+        #     inputs_embeds=decoder_inputs_embeds,
+        #     use_cache=use_cache,
+        #     output_attentions=output_attentions,
+        #     output_hidden_states=output_hidden_states,
+        #     return_dict=return_dict,
+        # )
+
+        # if not return_dict:
+        #     return decoder_outputs + encoder_outputs
+
+        # return Seq2SeqModelOutput(
+        #     last_hidden_state=decoder_outputs.last_hidden_state,
+        #     past_key_values=decoder_outputs.past_key_values,
+        #     decoder_hidden_states=decoder_outputs.hidden_states,
+        #     decoder_attentions=decoder_outputs.attentions,
+        #     cross_attentions=decoder_outputs.cross_attentions,
+        #     encoder_last_hidden_state=encoder_outputs.last_hidden_state,
+        #     encoder_hidden_states=encoder_outputs.hidden_states,
+        #     encoder_attentions=encoder_outputs.attentions,
+        # )
 
 
 class BartForConditionalGeneration(BartPreTrainedModel):
@@ -1780,18 +1814,43 @@ class BartForConditionalGeneration(BartPreTrainedModel):
     ]
     _keys_to_ignore_on_load_missing = ["final_logits_bias"]
 
-    def __init__(self, config: BartConfig, cache_config: CacheConfig, quant_config: QuantizationConfig):
+    def __init__(self, 
+                 config: BartConfig, 
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 lora_config: Optional[LoRAConfig] = None):
         super().__init__(config)
-        self.model = BartModel(config)
-        self.register_buffer(
-            "final_logits_bias",
-            torch.zeros((1, self.model.shared.num_embeddings)))
-        self.lm_head = nn.Linear(config.d_model,
-                                 self.model.shared.num_embeddings,
-                                 bias=False)
+        # self.model = BartModel(config)
+        # self.register_buffer(
+        #     "final_logits_bias",
+        #     torch.zeros((1, self.model.shared.num_embeddings)))
+        # self.lm_head = nn.Linear(config.d_model,
+        #                          self.model.shared.num_embeddings,
+        #                          bias=False)
 
-        # Initialize weights and apply final processing
-        self.post_init()
+        # # Initialize weights and apply final processing
+        # self.post_init()
+
+        self.config = config
+        self.model = BartModel(config,
+                               cache_config,
+                               quant_config,
+                               lora_config=lora_config)
+        self.unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        self.lm_head = ParallelLMHead(
+            self.unpadded_vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE
+            # We need bigger padding if using lora for kernel
+            # compatibility
+            if not lora_config else lora_config.lora_vocab_padding_size,
+        )
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
+        self.sampler = Sampler()
 
     def get_encoder(self):
         return self.model.get_encoder()
@@ -1837,63 +1896,71 @@ class BartForConditionalGeneration(BartPreTrainedModel):
 
         Returns:
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        hidden_states = self.model(input_ids, 
+                                   positions, 
+                                   encoder_input_ids,
+                                   encoder_positions,
+                                   kv_caches,
+                                   attn_metadata)
+        return hidden_states
 
-        if labels is not None:
-            if use_cache:
-                logger.warning(
-                    "The `use_cache` argument is changed to `False` since `labels` is provided."
-                )
-            use_cache = False
-            if decoder_input_ids is None and decoder_inputs_embeds is None:
-                decoder_input_ids = shift_tokens_right(
-                    labels, self.config.pad_token_id,
-                    self.config.decoder_start_token_id)
+        # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.model(
-            input_ids,
-            attention_mask=attention_mask,
-            decoder_input_ids=decoder_input_ids,
-            encoder_outputs=encoder_outputs,
-            decoder_attention_mask=decoder_attention_mask,
-            head_mask=head_mask,
-            decoder_head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            decoder_inputs_embeds=decoder_inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        # if labels is not None:
+        #     if use_cache:
+        #         logger.warning(
+        #             "The `use_cache` argument is changed to `False` since `labels` is provided."
+        #         )
+        #     use_cache = False
+        #     if decoder_input_ids is None and decoder_inputs_embeds is None:
+        #         decoder_input_ids = shift_tokens_right(
+        #             labels, self.config.pad_token_id,
+        #             self.config.decoder_start_token_id)
 
-        lm_logits = self.lm_head(outputs[0])
-        lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
+        # outputs = self.model(
+        #     input_ids,
+        #     attention_mask=attention_mask,
+        #     decoder_input_ids=decoder_input_ids,
+        #     encoder_outputs=encoder_outputs,
+        #     decoder_attention_mask=decoder_attention_mask,
+        #     head_mask=head_mask,
+        #     decoder_head_mask=decoder_head_mask,
+        #     cross_attn_head_mask=cross_attn_head_mask,
+        #     past_key_values=past_key_values,
+        #     inputs_embeds=inputs_embeds,
+        #     decoder_inputs_embeds=decoder_inputs_embeds,
+        #     use_cache=use_cache,
+        #     output_attentions=output_attentions,
+        #     output_hidden_states=output_hidden_states,
+        #     return_dict=return_dict,
+        # )
 
-        masked_lm_loss = None
-        if labels is not None:
-            labels = labels.to(lm_logits.device)
-            loss_fct = CrossEntropyLoss()
-            masked_lm_loss = loss_fct(
-                lm_logits.view(-1, self.config.vocab_size), labels.view(-1))
+        # lm_logits = self.lm_head(outputs[0])
+        # lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
 
-        if not return_dict:
-            output = (lm_logits, ) + outputs[1:]
-            return ((masked_lm_loss, ) +
-                    output) if masked_lm_loss is not None else output
+        # masked_lm_loss = None
+        # if labels is not None:
+        #     labels = labels.to(lm_logits.device)
+        #     loss_fct = CrossEntropyLoss()
+        #     masked_lm_loss = loss_fct(
+        #         lm_logits.view(-1, self.config.vocab_size), labels.view(-1))
 
-        return Seq2SeqLMOutput(
-            loss=masked_lm_loss,
-            logits=lm_logits,
-            past_key_values=outputs.past_key_values,
-            decoder_hidden_states=outputs.decoder_hidden_states,
-            decoder_attentions=outputs.decoder_attentions,
-            cross_attentions=outputs.cross_attentions,
-            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
-            encoder_hidden_states=outputs.encoder_hidden_states,
-            encoder_attentions=outputs.encoder_attentions,
-        )
+        # if not return_dict:
+        #     output = (lm_logits, ) + outputs[1:]
+        #     return ((masked_lm_loss, ) +
+        #             output) if masked_lm_loss is not None else output
+
+        # return Seq2SeqLMOutput(
+        #     loss=masked_lm_loss,
+        #     logits=lm_logits,
+        #     past_key_values=outputs.past_key_values,
+        #     decoder_hidden_states=outputs.decoder_hidden_states,
+        #     decoder_attentions=outputs.decoder_attentions,
+        #     cross_attentions=outputs.cross_attentions,
+        #     encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+        #     encoder_hidden_states=outputs.encoder_hidden_states,
+        #     encoder_attentions=outputs.encoder_attentions,
+        # )
 
     def prepare_inputs_for_generation(
         self,

@@ -426,6 +426,8 @@ class EncoderDecoderModelRunner(ModelRunner):
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
                 multi_modal_data=dummy_multi_modal_data,
+                encoder_seq_data=seq_data,
+                cross_block_table=None
             )
             seqs.append(seq)
 
