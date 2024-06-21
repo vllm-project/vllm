@@ -14,14 +14,12 @@ class _CUDADeviceCountStatelessTestActor:
     def set_cuda_visible_devices(self, cuda_visible_devices: str):
         if is_hip():
             os.environ["HIP_VISIBLE_DEVICES"] = cuda_visible_devices
-        else:
-            os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+        # Also change CUDA_VISIBLE_DEVICES on ROCm so it
+        # matches HIP_VISIBLE_DEVICES
+        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
 
     def get_cuda_visible_devices(self):
-        if is_hip():
-            return os.environ["HIP_VISIBLE_DEVICES"]
-        else:
-            return os.environ["CUDA_VISIBLE_DEVICES"]
+        return os.environ["CUDA_VISIBLE_DEVICES"]
 
 
 def test_cuda_device_count_stateless():

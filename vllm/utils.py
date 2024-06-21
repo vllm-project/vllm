@@ -796,9 +796,7 @@ def cuda_device_count_stateless() -> int:
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
-    visible_devices = envs.HIP_VISIBLE_DEVICES if (
-        torch.version.hip) else envs.CUDA_VISIBLE_DEVICES
-    return _cuda_device_count_stateless(visible_devices)
+    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
