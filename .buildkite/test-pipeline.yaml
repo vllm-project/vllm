@@ -28,9 +28,11 @@ steps:
 
 - label: Distributed Comm Ops Test
   #mirror_hardwares: [amd]
-  command: pytest -v -s distributed/test_comm_ops.py
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  commands:
+  - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s distributed/test_shm_broadcast.py
 
 - label: Distributed Tests (2 GPUs)
   mirror_hardwares: [amd]
