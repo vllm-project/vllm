@@ -5,6 +5,7 @@ if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: Optional[int] = None
     VLLM_USE_MODELSCOPE: bool = False
+    VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_INSTANCE_ID: Optional[str] = None
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
@@ -113,6 +114,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # instance should have the same instance id.
     "VLLM_INSTANCE_ID":
     lambda: os.environ.get("VLLM_INSTANCE_ID", None),
+
+    # Interval in seconds to log a warning message when the ring buffer is full
+    "VLLM_RINGBUFFER_WARNING_INTERVAL":
+    lambda: int(os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")),
 
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.

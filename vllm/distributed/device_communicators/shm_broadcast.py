@@ -9,7 +9,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.envs import environment_variables
 from vllm.logger import init_logger
+
+VLLM_RINGBUFFER_WARNING_INTERVAL = environment_variables.VLLM_RINGBUFFER_WARNING_INTERVAL  # noqa
 
 logger = init_logger(__name__)
 
@@ -111,8 +114,6 @@ class ShmRingBuffer:
 
 
 class ShmRingBufferIO:
-    # seconds to wait before warning about a potential blocking call
-    WARNING_INTERVAL = 60
 
     def __init__(self, buffer: ShmRingBuffer, reader_rank: int):
         self.buffer = buffer
@@ -143,10 +144,10 @@ class ShmRingBufferIO:
                     if self.current_idx == start_index:
                         # no empty block found
                         if time.time(
-                        ) - start_time > self.WARNING_INTERVAL * n_warning:
+                        ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
                             logger.warning(
                                 "No available block found in %s second. ",
-                                self.WARNING_INTERVAL)
+                                VLLM_RINGBUFFER_WARNING_INTERVAL)
                             n_warning += 1
                         # wait for a while (0.1 us)
                         time.sleep(1e-7)
@@ -189,10 +190,10 @@ class ShmRingBufferIO:
                     if self.current_idx == start_index:
                         # no block found
                         if time.time(
-                        ) - start_time > self.WARNING_INTERVAL * n_warning:
+                        ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
                             logger.warning(
                                 "No available block found in %s second. ",
-                                self.WARNING_INTERVAL)
+                                VLLM_RINGBUFFER_WARNING_INTERVAL)
                             n_warning += 1
                         # wait for a while (0.1 us)
                         time.sleep(1e-7)
