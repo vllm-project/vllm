@@ -9,10 +9,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from vllm.envs import environment_variables
+import vllm.envs as envs
 from vllm.logger import init_logger
 
-VLLM_RINGBUFFER_WARNING_INTERVAL = environment_variables.VLLM_RINGBUFFER_WARNING_INTERVAL  # noqa
+VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
 logger = init_logger(__name__)
 
