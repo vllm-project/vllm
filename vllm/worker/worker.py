@@ -289,7 +289,7 @@ class Worker(LocalOrDistributedWorkerBase):
         return self._model_runner.remove_lora(lora_id)
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.model_runner.pin_lora(lora_id)
+        return self._model_runner.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self._model_runner.list_loras()
