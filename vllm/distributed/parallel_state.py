@@ -166,9 +166,17 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.shm_broadcast import (
             ShmRingBufferIO)
         self.shm_broadcaster: Optional[ShmRingBufferIO] = None
-        if self.world_size > 1 and is_in_the_same_node(self.cpu_group):
+        same_node = is_in_the_same_node(self.cpu_group)
+        if self.world_size > 1 and same_node:
             self.shm_broadcaster = ShmRingBufferIO.create_from_process_group(
                 self.cpu_group, 1 << 20, 6)
+
+        from vllm.distributed.device_communicators.msg_queue import (
+            PublishSubscribeMsgQueue)
+        self.msg_queue: Optional[PublishSubscribeMsgQueue] = None
+        if self.world_size > 1 and not same_node:
+            self.msg_queue = PublishSubscribeMsgQueue.create_from_process_group(
+                self.cpu_group)
 
     @property
     def first_rank(self):
@@ -341,9 +349,11 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
             return obj
-        if self.shm_broadcaster is not None:
-            assert src == 0, "Shared memory broadcaster only supports src=0"
-            return self.shm_broadcaster.broadcast_object(obj)
+        if src == 0:
+            if self.shm_broadcaster is not None:
+                return self.shm_broadcaster.broadcast_object(obj)
+            if self.msg_queue is not None:
+                return self.msg_queue.broadcast_object(obj)
         if self.rank_in_group == src:
             torch.distributed.broadcast_object_list([obj],
                                                     src=self.ranks[src],
