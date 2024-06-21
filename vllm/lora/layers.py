@@ -107,7 +107,8 @@ def _apply_lora_packed_nslice(
     indices: torch.Tensor,
     output: torch.Tensor,
     output_slices: Tuple[int, ...],
-    bias_stacked: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+    bias_stacked: Optional[Tuple[torch.Tensor, torch.Tensor,
+                                 torch.Tensor]] = None,
 ):
     """Applies lora to each input.
 
@@ -146,7 +147,8 @@ def _apply_lora_packed_nslice(
             if bias is not None:
                 bias = bias.view(-1, bias.shape[-1])
                 bias = bias[indices]
-                output[:, offset_left: offset_left + output_slices[slice_idx]] += bias
+                output[:, offset_left:
+                       offset_left + output_slices[slice_idx]] += bias
 
         offset_left += output_slices[slice_idx]
     return output.view_as(org_output)
@@ -649,7 +651,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
-            bias = self.slice_bias(bias)
+            if bias is not None:
+                bias = self.slice_bias(bias)
 
         if lora_a[0] is not None:
             self.lora_a_stacked[0][
@@ -759,11 +762,13 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                 k_offset = self.q_proj_total_size
                 bias_k = bias[k_offset + self.kv_proj_shard_size *
                                   self.kv_shard_id:k_offset +
-                                  self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+                                  self.kv_proj_shard_size *
+                                    (self.kv_shard_id + 1)]
                 v_offset = k_offset + self.kv_proj_total_size
                 bias_v = bias[v_offset + self.kv_proj_shard_size *
                                   self.kv_shard_id:v_offset +
-                                  self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+                                  self.kv_proj_shard_size *
+                                    (self.kv_shard_id + 1)]
                 bias = torch.cat([bias_q, bias_k, bias_v], dim=1)
 
 
@@ -970,7 +975,8 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
-            bias = self.slice_bias(bias)
+            if bias is not None:
+                bias = self.slice_bias(bias)
 
         if lora_b[0] is not None:
             lora_b_q = lora_b[0]
@@ -1487,6 +1493,7 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor] = None,
     ):
         ...
 

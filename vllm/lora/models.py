@@ -219,7 +219,8 @@ class LoRAModel:
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
-            module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(tensor_name)
+            module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
+                tensor_name)
             if module_name not in loras:
                 lora_embeddings_tensor = None
                 if embeddings:
