@@ -63,6 +63,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block_ids: Optional[Iterable[int]] = None,
         eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
     ):
+        if block_ids is None:
+            block_ids = range(num_blocks)
+
         self._block_size = block_size
 
         # A mapping of prefix hash to block index. All blocks which have a
@@ -71,7 +74,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # Used to track status of each physical block id
         self._block_tracker = {}
-        for block_id in range(num_blocks):
+        for block_id in block_ids:
             self._block_tracker[block_id] = BlockTracker()
 
         # Pre-allocate "num_blocks * extra_factor" block objects.
@@ -422,18 +425,19 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # Store block data
         prev_block = block.prev_block
-        token_ids = block.token_ids
+        # Duplicate token_ids here, since we free the block next
+        token_ids = block.token_ids[:] if block.token_ids is not None else None
 
         # Release the hashless block
         self._free_hashless_block(block)
 
         # Get a new (promoted) block that will hold old block's data
         # and point to the cached block id
-        cached_block = self._block_pool.init_block(
-            prev_block=prev_block,
-            token_ids=token_ids,
-            block_size=self._block_size,
-            physical_block_id=cached_block_id)
+        cached_block = self._block_pool.init_block(prev_block=prev_block,
+                                                   token_ids=token_ids,
+                                                   block_size=self._block_size,
+                                                   physical_block_id=None)
+        cached_block.block_id = cached_block_id
 
         # Increment refcount of the cached block and possibly restore
         # it from the evictor

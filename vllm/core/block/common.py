@@ -144,8 +144,9 @@ class CopyOnWriteTracker:
 
         # Get data from old block
         prev_block = block.prev_block
-        token_ids = block.token_ids
         old_block_id = block.block_id
+        # Duplicate token_ids here, since we free the block next
+        token_ids = block.token_ids[:] if block.token_ids is not None else None
 
         # Mark the block as free and decrement its refcount
         self._allocator.free(block)

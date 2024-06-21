@@ -456,7 +456,10 @@ class NaiveBlock(Block):
             # simple assignment is faster than extend()
             self._token_ids = token_ids
         else:
-            assert len(token_ids) <= self.num_empty_slots
+            assert len(
+                token_ids
+            ) <= self.num_empty_slots, "token_ids = {}, num_empty_slots = {}".format(  # noqa: E501
+                token_ids, self.num_empty_slots)
             self._token_ids.extend(token_ids)
 
     @property
