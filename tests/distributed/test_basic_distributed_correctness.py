@@ -14,9 +14,10 @@ TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
 """
 import os
 
-from vllm.utils import is_hip, is_hip_version_less_than
 import pytest
 import torch
+
+from vllm.utils import is_hip, is_hip_version_less_than
 
 MODELS = [
     os.environ["TEST_DIST_MODEL"],

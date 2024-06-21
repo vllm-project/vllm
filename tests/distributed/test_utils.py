@@ -1,7 +1,9 @@
 import os
+
 import pytest
 import ray
 import torch
+
 from vllm.utils import cuda_device_count_stateless
 
 
