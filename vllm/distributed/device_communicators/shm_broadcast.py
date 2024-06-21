@@ -163,11 +163,15 @@ class ShmRingBufferIO:
                     yield buf
 
                 # caller has written to the buffer
-                # mark the block as written
-                metadata_buffer[0] = 1
+                # NOTE: order is important here
+                # first set the read flags to 0
+                # then set the written flag to 1
+                # otherwise, the readers may think they already read the block
                 for i in range(1, self.buffer.n_reader + 1):
                     # set read flag to 0, meaning it is not read yet
                     metadata_buffer[i] = 0
+                # mark the block as written
+                metadata_buffer[0] = 1
                 break
 
     @contextmanager
