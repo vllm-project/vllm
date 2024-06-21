@@ -376,7 +376,6 @@ class TestPrefixCachingBlockAllocator:
 
         # Create token ids that will exhaust all blocks.
         token_ids = list(range(num_blocks_to_consume * block_size))
-        blocks = list(range(num_blocks_to_consume))
 
         first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
             block_size=block_size,
