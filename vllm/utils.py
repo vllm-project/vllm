@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import datetime
 import enum
@@ -775,3 +776,21 @@ def run_once(f):
 
     wrapper.has_run = False  # type: ignore[attr-defined]
     return wrapper
+
+
+class FlexibleArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that allows both underscore and dash in names."""
+
+    def parse_args(self, args=None, namespace=None):
+        if args is None:
+            args = sys.argv[1:]
+
+        # Convert underscores to dashes and vice versa in argument names
+        processed_args = []
+        for arg in args:
+            if arg.startswith('--'):
+                processed_args.append('--' + arg[len('--'):].replace('_', '-'))
+            else:
+                processed_args.append(arg)
+
+        return super().parse_args(processed_args, namespace)
