@@ -13,13 +13,15 @@ logger = init_logger(__name__)
 
 if is_cpu():
     logger.warning(
-        "punica LoRA kernels on CPU will be fallback to Torch native kernels, "
-        "which will cause non-optimized performance.")
+        "The CPU backend does not support custom kernels for LoRA. "
+        "Falling back to unoptimized PyTorch-native implementation, "
+        "which may lead to performance drop.")
 elif torch.cuda.get_device_capability() < (8, 0):
     logger.warning(
         "punica LoRA kernels require compute capability >= 8.0, "
-        "but you are running on device with compute capability < 8.0, this "
-        "will fallback to Torch native kernels with non-optimized performance."
+        "but you are running on device with compute capability < 8.0. "
+        "Falling back to unoptimized PyTorch-native implementation, "
+        "which may lead to performance drop."
     )
 
 
