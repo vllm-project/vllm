@@ -24,7 +24,7 @@ class BlockPool:
         self._create_block = create_block
         self._allocator = allocator
         self._pool_size = pool_size
-        assert self._pool_size > 0
+        assert self._pool_size >= 0
 
         self._free_ids: Deque[int] = deque(range(self._pool_size))
         self._pool = []
