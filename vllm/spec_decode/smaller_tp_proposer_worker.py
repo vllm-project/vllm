@@ -1,4 +1,4 @@
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -24,6 +24,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
     Participating workers use a smaller tp group by patching vLLM's tensor
     parallel group temporarily during forward passes of draft models.
     """
+
     @classmethod
     def maybe_wrap_worker(cls, worker, draft_tensor_parallel_size: int,
                           target_tensor_parallel_size: int):
@@ -38,8 +39,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         logger.info("Wrapping {%s} in {%s}", type(worker), cls)
         return cls(worker, draft_ranks)
 
-    def __init__(self, worker: MultiStepWorker,
-                 draft_ranks: List[int]):
+    def __init__(self, worker: MultiStepWorker, draft_ranks: List[int]):
         """Create a SmallerTpProposerWorker.
 
         Args:
@@ -71,7 +71,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         local_rank = get_tp_group().local_rank
         tp_backend = torch.distributed.get_backend(get_tp_group().device_group)
         self._tp_group = init_model_parallel_group([self._draft_ranks],
-                                                    local_rank, tp_backend)
+                                                   local_rank, tp_backend)
 
         with self._patch_tensor_parallel_group():
             self._worker.init_device()
