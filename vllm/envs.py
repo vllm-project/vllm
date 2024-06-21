@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_XLA_CACHE_PATH: str = "~/.vllm/xla_cache/"
     VLLM_USE_RAY_COMPILED_DAG: bool = False
-    VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
+    VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
@@ -212,7 +212,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
-    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
+    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "fork"),
 
     # Timeout for fetching images when serving multimodal models
     # Default is 5 seconds
