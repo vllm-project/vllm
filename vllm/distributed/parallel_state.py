@@ -687,13 +687,11 @@ TP_STATE_PATCHED = False
 @contextmanager
 def patch_tensor_parallel_group(tp_group: GroupCoordinator):
     """Patch the tp group temporarily until this function ends.
-    It requires the world group to be patched together to keep the integrity.
 
     This method is for draft workers of speculative decoding to run draft model
     with different tp degree from that of target model workers.
 
     Args:
-        world_group (GroupCoordinator): the world group coordinator
         tp_group (GroupCoordinator): the tp group coordinator
     """
     global TP_STATE_PATCHED
@@ -703,13 +701,11 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
     old_tp_group = get_tp_group()
     global _TP
     _TP = tp_group
-    logger.info(f"Patch tp_group. {old_tp_group.world_size} > {tp_group.world_size}")
     try:
         yield
     finally:
         # restore the original state
         TP_STATE_PATCHED = False
-        logger.info(f"Restore tp_group. {tp_group.world_size} > {old_tp_group.world_size}")
         _TP = old_tp_group
 
 
