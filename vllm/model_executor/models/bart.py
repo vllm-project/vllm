@@ -1299,86 +1299,131 @@ class BartForConditionalGeneration(nn.Module):
                 for past_state in layer_past[:2]) + layer_past[2:], )
         return reordered_past
 
+    def _rename_key(self, key: str):
+        prefix = f"{self.base_model_prefix}."
+        key = key[len(prefix):] if key.startswith(prefix) else key
+
+        for src, dst in self.params_mapping.items():
+            key = key.replace(src, dst)
+
+        return key
+
+
+    def _rename_stacked_param(
+        self,
+        name: str,
+    ) -> Tuple[str, Optional[str]]:
+        for key, mapping in self.stacked_params_mapping.items():
+            if key in name:
+                name = name.replace(key, mapping["param_name"])
+                return name, mapping["shard_id"]
+        return name, None
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        return
 
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
+        params_dict = dict(self.model.named_parameters())
 
-        expert_params_mapping = [
-            # These are the weight scales for the experts
-            # (param_name, weight_name, expert_id)
-            ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
-             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
-            for expert_id in range(self.config.num_local_experts)
-            for weight_name in ["w1", "w2", "w3"]
-        ] + [
-            # These are the weights for the experts
-            # (param_name, weight_name, expert_id)
-            ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
-             f"experts.{expert_id}.{weight_name}.weight", expert_id)
-            for expert_id in range(self.config.num_local_experts)
-            for weight_name in ["w1", "w2", "w3"]
-        ] + [
-            # These are the activation scales for the experts
-            # (param_name, weight_name, expert_id)
-            ("a13_scale" if weight_name in ["w1", "w3"] else "a2_scale",
-             f"experts.{expert_id}.{weight_name}.input_scale", expert_id)
-            for expert_id in range(self.config.num_local_experts)
-            for weight_name in ["w1", "w2", "w3"]
-        ]
-
-        params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
+            name = self._rename_key(name)
+            name, shard_id = self._rename_stacked_param(name)
+
+            # Skip the specific downstream task weight.
+            if name.startswith('cls.'):
+                continue
+            # use Pooler instead.
+            if name.startswith('pooler.'):
+                continue
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
                 continue
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            if shard_id:
                 weight_loader(param, loaded_weight, shard_id)
-                break
             else:
-                for param_name, weight_name, expert_id in expert_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param,
-                                  loaded_weight,
-                                  weight_name,
-                                  expert_id=expert_id)
-                    break
-                else:
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    if name.endswith("kv_scale"):
-                        remapped_kv_scale_name = name.replace(
-                            ".kv_scale", ".attn.kv_scale")
-                        if remapped_kv_scale_name not in params_dict:
-                            print_warning_once(
-                                "Found kv scale in the checkpoint "
-                                f"(e.g. {name}), but not found the expected "
-                                f"name in the model "
-                                f"(e.g. {remapped_kv_scale_name}). "
-                                "kv-scale is not loaded.")
-                            continue
-                        else:
-                            name = remapped_kv_scale_name
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
+                weight_loader(param, loaded_weight)
+
+    # def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+
+    #     stacked_params_mapping = [
+    #         # (param_name, shard_name, shard_id)
+    #         ("qkv_proj", "q_proj", "q"),
+    #         ("qkv_proj", "k_proj", "k"),
+    #         ("qkv_proj", "v_proj", "v"),
+    #     ]
+
+    #     expert_params_mapping = [
+    #         # These are the weight scales for the experts
+    #         # (param_name, weight_name, expert_id)
+    #         ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
+    #          f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
+    #         for expert_id in range(self.config.num_local_experts)
+    #         for weight_name in ["w1", "w2", "w3"]
+    #     ] + [
+    #         # These are the weights for the experts
+    #         # (param_name, weight_name, expert_id)
+    #         ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
+    #          f"experts.{expert_id}.{weight_name}.weight", expert_id)
+    #         for expert_id in range(self.config.num_local_experts)
+    #         for weight_name in ["w1", "w2", "w3"]
+    #     ] + [
+    #         # These are the activation scales for the experts
+    #         # (param_name, weight_name, expert_id)
+    #         ("a13_scale" if weight_name in ["w1", "w3"] else "a2_scale",
+    #          f"experts.{expert_id}.{weight_name}.input_scale", expert_id)
+    #         for expert_id in range(self.config.num_local_experts)
+    #         for weight_name in ["w1", "w2", "w3"]
+    #     ]
+
+    #     params_dict = dict(self.named_parameters())
+    #     for name, loaded_weight in weights:
+    #         if "rotary_emb.inv_freq" in name:
+    #             continue
+
+    #         for (param_name, weight_name, shard_id) in stacked_params_mapping:
+    #             if weight_name not in name:
+    #                 continue
+    #             name = name.replace(weight_name, param_name)
+    #             # Skip loading extra bias for GPTQ models.
+    #             if name.endswith(".bias") and name not in params_dict:
+    #                 continue
+    #             param = params_dict[name]
+    #             weight_loader = param.weight_loader
+    #             weight_loader(param, loaded_weight, shard_id)
+    #             break
+    #         else:
+    #             for param_name, weight_name, expert_id in expert_params_mapping:
+    #                 if weight_name not in name:
+    #                     continue
+    #                 name = name.replace(weight_name, param_name)
+    #                 param = params_dict[name]
+    #                 weight_loader = param.weight_loader
+    #                 weight_loader(param,
+    #                               loaded_weight,
+    #                               weight_name,
+    #                               expert_id=expert_id)
+    #                 break
+    #             else:
+    #                 # Skip loading extra bias for GPTQ models.
+    #                 if name.endswith(".bias") and name not in params_dict:
+    #                     continue
+    #                 # Remapping the name of FP8 kv-scale.
+    #                 if name.endswith("kv_scale"):
+    #                     remapped_kv_scale_name = name.replace(
+    #                         ".kv_scale", ".attn.kv_scale")
+    #                     if remapped_kv_scale_name not in params_dict:
+    #                         print_warning_once(
+    #                             "Found kv scale in the checkpoint "
+    #                             f"(e.g. {name}), but not found the expected "
+    #                             f"name in the model "
+    #                             f"(e.g. {remapped_kv_scale_name}). "
+    #                             "kv-scale is not loaded.")
+    #                         continue
+    #                     else:
+    #                         name = remapped_kv_scale_name
+    #                 param = params_dict[name]
+    #                 weight_loader = getattr(param, "weight_loader",
+    #                                         default_weight_loader)
+    #                 weight_loader(param, loaded_weight)
