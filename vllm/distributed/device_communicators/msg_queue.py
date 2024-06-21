@@ -2,16 +2,7 @@ import pickle
 
 from torch import distributed as dist
 from torch.distributed import ProcessGroup
-from zmq import (
-    PUB,  # type: ignore
-    RCVHWM,  # type: ignore
-    REP,  # type: ignore
-    REQ,  # type: ignore
-    SNDHWM,  # type: ignore
-    SUB,  # type: ignore
-    SUBSCRIBE,  # type: ignore
-    Context,
-)  # type: ignore
+from zmq import PUB, REP, REQ, SUB, SUBSCRIBE, Context  # type: ignore
 
 from vllm.utils import get_ip, get_open_port
 
@@ -24,7 +15,6 @@ class Publisher:
         self.socket = context.socket(PUB)
         self.port = get_open_port()
         self.socket.bind(f"tcp://*:{self.port}")
-        self.socket.setsockopt(SNDHWM, 1000)
 
         self.sync_socket = context.socket(REP)
         self.sync_port = get_open_port()
@@ -58,7 +48,6 @@ class Subscriber:
         context = Context()
         self.socket = context.socket(SUB)
         self.socket.setsockopt_string(SUBSCRIBE, "")
-        self.socket.setsockopt(RCVHWM, 1000)
         self.socket.connect(f"tcp://{ip}:{port}")
 
         self.sync_socket = context.socket(REQ)
