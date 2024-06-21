@@ -24,8 +24,8 @@ class BlockTracker:
 
     def __init__(self):
         self.active: bool = False
-        self.last_access: Optional[float] = None
-        self.computed: Optional[bool] = None
+        self.last_access: float = _DEFAULT_LAST_ACCESSED_TIME
+        self.computed: bool = False
 
     def enable(self):
         assert not self.active
@@ -36,8 +36,8 @@ class BlockTracker:
     def disable(self):
         assert self.active
         self.active = False
-        self.last_access = None
-        self.computed = None
+        self.last_access = _DEFAULT_LAST_ACCESSED_TIME
+        self.computed = False
 
 
 class PrefixCachingBlockAllocator(BlockAllocator):
