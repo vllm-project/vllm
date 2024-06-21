@@ -100,6 +100,7 @@ Documentation
    :maxdepth: 1
    :caption: Quantization
 
+   quantization/supported_hardware
    quantization/auto_awq
    quantization/fp8
    quantization/fp8_e5m2_kvcache
