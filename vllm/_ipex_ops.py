@@ -43,6 +43,9 @@ class ipex_ops:
     def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
         out.copy_(torch.nn.functional.gelu(x))
 
+    # TODO add implementation of gelu_quick here
+    # def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
+
     def paged_attention_v1(
         out: torch.Tensor,
         query: torch.Tensor,

@@ -155,6 +155,9 @@ class QuickGELU(CustomOp):
         ops.gelu_quick(out, x)
         return out
 
+    # TODO implement forward_xpu for QuickGELU
+    # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+
 
 class ScaledActivation(nn.Module):
     """An activation function with post-scale parameters.
