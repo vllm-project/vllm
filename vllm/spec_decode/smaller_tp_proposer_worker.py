@@ -113,6 +113,14 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         with self._patch_tensor_parallel_group():
             self._worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
+    def sampler_output(
+        self,
+        execute_model_req: ExecuteModelRequest,
+        sample_len: int,
+    ) -> Tuple[List[SamplerOutput], bool]:
+        # Do not check _is_dummy, as it's always called by get_spec_proposals
+        return self._worker.sampler_output(execute_model_req, sample_len)
+
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
@@ -126,7 +134,6 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         with self._patch_tensor_parallel_group():
             return self._worker.get_spec_proposals(execute_model_req)
 
-    @torch.inference_mode()
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
@@ -151,3 +158,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
     def list_loras(self) -> Set[int]:
         return self._worker.list_loras()
+
+    @property
+    def vocab_size(self) -> int:
+        return self._worker.vocab_size
