@@ -86,6 +86,7 @@ class ModelRunner:
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        return_hidden_states: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -96,6 +97,7 @@ class ModelRunner:
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.vision_language_config = vision_language_config
+        self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -116,15 +118,17 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
+            num_attn_heads,
             self.model_config.get_head_size(),
             self.model_config.get_num_kv_heads(self.parallel_config),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
-        )
+        ) if num_attn_heads else None
 
         # Create processor for multi-modal data
         if self.vision_language_config is not None:
@@ -762,10 +766,18 @@ class ModelRunner:
             return None
 
         # Sample the next token.
-        output = self.model.sample(
+        output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
+
+        if self.return_hidden_states:
+            # we only need to pass hidden states of most recent token
+            assert seq_group_metadata_list is not None
+            if seq_group_metadata_list[0].is_prompt:
+                hidden_states = hidden_states.index_select(
+                    0, sampling_metadata.selected_token_indices)
+            output.hidden_states = hidden_states
 
         return output
 

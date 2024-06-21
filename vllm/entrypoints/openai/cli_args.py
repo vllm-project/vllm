@@ -10,6 +10,7 @@ import ssl
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.openai.serving_engine import LoRAModulePath
+from vllm.utils import FlexibleArgumentParser
 
 
 class LoRAParserAction(argparse.Action):
@@ -23,7 +24,7 @@ class LoRAParserAction(argparse.Action):
 
 
 def make_arg_parser():
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser.add_argument("--host",
                         type=nullable_str,
