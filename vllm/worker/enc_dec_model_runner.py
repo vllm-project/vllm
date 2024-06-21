@@ -427,8 +427,7 @@ class EncoderDecoderModelRunner(ModelRunner):
                 if dummy_lora_requests_per_seq else None,
                 multi_modal_data=dummy_multi_modal_data,
                 encoder_seq_data=seq_data,
-                cross_block_table=None
-            )
+                cross_block_table=None)
             seqs.append(seq)
 
         # Run the model with the dummy inputs.

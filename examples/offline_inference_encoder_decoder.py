@@ -16,7 +16,7 @@ decoder_prompts = [
     "",
 ]
 # - Unified prompts
-prompts = [enc_dec for enc_dec in zip(encoder_prompts,decoder_prompts)]
+prompts = [enc_dec for enc_dec in zip(encoder_prompts, decoder_prompts)]
 
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)

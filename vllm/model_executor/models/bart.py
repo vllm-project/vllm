@@ -1151,7 +1151,7 @@ class BartEncoder(BartPreTrainedModel):
     """
 
     def __init__(self,
-                 config: BartConfig, 
+                 config: BartConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  lora_config: Optional[LoRAConfig] = None,
@@ -1353,12 +1353,14 @@ class BartDecoder(BartPreTrainedModel):
         embed_tokens (nn.Embedding): output embedding
     """
 
-    def __init__(self,
-                 config: BartConfig, 
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 lora_config: Optional[LoRAConfig] = None,
-                 embed_tokens: Optional[nn.Embedding] = None,):
+    def __init__(
+        self,
+        config: BartConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
+        embed_tokens: Optional[nn.Embedding] = None,
+    ):
         super().__init__(config)
         self.dropout = config.dropout
         self.layerdrop = config.decoder_layerdrop
@@ -1657,8 +1659,8 @@ class BartModel(BartPreTrainedModel):
         "encoder.embed_tokens.weight", "decoder.embed_tokens.weight"
     ]
 
-    def __init__(self, 
-                 config: BartConfig, 
+    def __init__(self,
+                 config: BartConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  lora_config: Optional[LoRAConfig] = None):
@@ -1673,11 +1675,6 @@ class BartModel(BartPreTrainedModel):
         # # Initialize weights and apply final processing
         # self.post_init()
 
-
-
-
-
-
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
@@ -1690,10 +1687,10 @@ class BartModel(BartPreTrainedModel):
             org_num_embeddings=config.vocab_size,
         )
 
-        self.encoder = BartEncoder(config, 
+        self.encoder = BartEncoder(config,
                                    cache_config,
                                    quant_config=quant_config)
-        self.decoder = BartDecoder(config, 
+        self.decoder = BartDecoder(config,
                                    cache_config,
                                    quant_config=quant_config)
 
@@ -1725,12 +1722,10 @@ class BartModel(BartPreTrainedModel):
         return self.decoder
 
     def forward(
-        self, input_ids: torch.Tensor, positions: torch.Tensor,
-        encoder_input_ids: torch.Tensor, encoder_positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata
+            self, input_ids: torch.Tensor, positions: torch.Tensor,
+            encoder_input_ids: torch.Tensor, encoder_positions: torch.Tensor,
+            kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata
     ) -> Union[Tuple, Seq2SeqModelOutput]:
-        
 
         assert False
 
@@ -1814,8 +1809,8 @@ class BartForConditionalGeneration(BartPreTrainedModel):
     ]
     _keys_to_ignore_on_load_missing = ["final_logits_bias"]
 
-    def __init__(self, 
-                 config: BartConfig, 
+    def __init__(self,
+                 config: BartConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  lora_config: Optional[LoRAConfig] = None):
@@ -1896,12 +1891,8 @@ class BartForConditionalGeneration(BartPreTrainedModel):
 
         Returns:
         """
-        hidden_states = self.model(input_ids, 
-                                   positions, 
-                                   encoder_input_ids,
-                                   encoder_positions,
-                                   kv_caches,
-                                   attn_metadata)
+        hidden_states = self.model(input_ids, positions, encoder_input_ids,
+                                   encoder_positions, kv_caches, attn_metadata)
         return hidden_states
 
         # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
