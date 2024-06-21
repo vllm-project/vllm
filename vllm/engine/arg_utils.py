@@ -33,6 +33,7 @@ class EngineArgs:
     load_format: str = 'auto'
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
+    sparse_kv_cache_type: str = 'auto'
     quantization_param_path: Optional[str] = None
     seed: int = 0
     max_model_len: Optional[int] = None
@@ -270,6 +271,12 @@ class EngineArgs:
             'FP8_E5M2 (without scaling) is only supported on cuda version'
             'greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
             'supported for common inference criteria.')
+        parser.add_argument('--sparse-kv-cache-type',
+                            type=str,
+                            choices=['auto', 'h2o'],
+                            default=EngineArgs.sparse_kv_cache_type,
+                            help='Sparse kv cache storage type. If "auto", '
+                            'will not use any sparse kv cache.')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=EngineArgs.max_model_len,
@@ -666,7 +673,8 @@ class EngineArgs:
             cache_dtype=self.kv_cache_dtype,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
-            enable_prefix_caching=self.enable_prefix_caching)
+            enable_prefix_caching=self.enable_prefix_caching,
+            sparse_cache_type=self.sparse_kv_cache_type)
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,

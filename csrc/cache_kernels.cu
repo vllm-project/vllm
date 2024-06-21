@@ -315,6 +315,162 @@ void reshape_and_cache_flash(
 
 namespace vllm {
 
+// Grid: (num_layers, num_seqs, block_size * num_blocks)
+template <typename scalar_t>
+__global__ void sparse_cache_copy_kernel(
+    int64_t* key_cache_ptrs, int64_t* value_cache_ptrs,
+    const int64_t* __restrict__ block_mapping_src,
+    const int64_t* __restrict__ block_mapping_dst,
+    const int64_t* __restrict__ selection_index_src,
+    const int64_t* __restrict__ selection_index_dst, const int num_heads,
+    const int head_size, const int x) {
+  const int layer_idx = blockIdx.x;
+  const int seq_idx = blockIdx.y;
+  const int selected_pairs_idx = blockIdx.z;
+
+  const int num_layers = gridDim.x;
+  const int num_seqs = gridDim.y;
+  const int block_size_times_num = gridDim.z;
+  const int block_size = 16;
+
+  const int num_selected_index = layer_idx * num_seqs * block_size_times_num +
+                                 seq_idx * block_size_times_num +
+                                 selected_pairs_idx;
+
+  const int64_t src_token_idx = selection_index_src[num_selected_index];
+  const int64_t tgt_token_idx = selection_index_dst[num_selected_index];
+  if (src_token_idx < 0 ||
+      src_token_idx > num_layers * num_seqs * block_size_times_num) {
+    return;
+  }
+
+  scalar_t* key_cache = reinterpret_cast<scalar_t*>(key_cache_ptrs[layer_idx]);
+  scalar_t* value_cache =
+      reinterpret_cast<scalar_t*>(value_cache_ptrs[layer_idx]);
+
+  for (int i = threadIdx.x; i < num_heads * head_size; i += blockDim.x) {
+    const int64_t src_token_layer_idx =
+        src_token_idx % (num_seqs * block_size_times_num);
+    const int64_t tgt_token_layer_idx =
+        tgt_token_idx % (num_seqs * block_size_times_num);
+
+    const int64_t block_idx =
+        block_mapping_src[src_token_layer_idx / block_size];
+    const int64_t block_offset = src_token_layer_idx % block_size;
+
+    const int64_t tgt_block_idx =
+        block_mapping_dst[tgt_token_layer_idx / block_size];
+    const int64_t tgt_block_offset = tgt_token_layer_idx % block_size;
+
+    if (block_idx == -1 || tgt_block_idx == -1) {
+      continue;
+    }
+
+    const int head_idx = i / head_size;
+    const int head_offset = i % head_size;
+    const int x_idx = head_offset / x;
+    const int x_offset = head_offset % x;
+
+    const int64_t src_key_idx =
+        block_idx * num_heads * (head_size / x) * block_size * x +
+        head_idx * (head_size / x) * block_size * x + x_idx * block_size * x +
+        block_offset * x + x_offset;
+    const int64_t src_value_idx =
+        block_idx * num_heads * head_size * block_size +
+        head_idx * head_size * block_size + head_offset * block_size +
+        block_offset;
+    scalar_t tgt_key = key_cache[src_key_idx];
+    scalar_t tgt_value = value_cache[src_value_idx];
+
+    const int64_t tgt_key_idx =
+        tgt_block_idx * num_heads * (head_size / x) * block_size * x +
+        head_idx * (head_size / x) * block_size * x + x_idx * block_size * x +
+        tgt_block_offset * x + x_offset;
+    const int64_t tgt_value_idx =
+        tgt_block_idx * num_heads * head_size * block_size +
+        head_idx * head_size * block_size + head_offset * block_size +
+        tgt_block_offset;
+    key_cache[tgt_key_idx] = tgt_key;
+    value_cache[tgt_value_idx] = tgt_value;
+  }
+}
+
+}  // namespace vllm
+
+void sparse_cache_copy(std::vector<torch::Tensor> const& key_caches,
+                       std::vector<torch::Tensor> const& value_caches,
+                       const torch::Tensor& block_mapping_src_tensor,
+                       const torch::Tensor& block_mapping_dst_tensor,
+                       const torch::Tensor& selection_index_src_tensor,
+                       const torch::Tensor& selection_index_dst_tensor,
+                       const int64_t num_heads, const int64_t head_size,
+                       const int64_t block_size) {
+  const int num_seqs = block_mapping_src_tensor.size(0);
+  const int total_num_blocks = block_mapping_src_tensor.size(1);
+
+  const int num_layers = key_caches.size();
+  const int x = 8;
+
+  TORCH_CHECK(num_layers == value_caches.size());
+  TORCH_CHECK(selection_index_src_tensor.size(0) ==
+              num_layers * block_size * num_seqs * total_num_blocks);
+  if (num_layers == 0) {
+    return;
+  }
+  torch::Device cache_device = key_caches[0].device();
+  TORCH_CHECK(cache_device.is_cuda());
+
+  // Create data structures for the kernel.
+  int64_t key_cache_ptrs[num_layers];
+  int64_t value_cache_ptrs[num_layers];
+  for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+    key_cache_ptrs[layer_idx] =
+        reinterpret_cast<int64_t>(key_caches[layer_idx].data_ptr());
+    value_cache_ptrs[layer_idx] =
+        reinterpret_cast<int64_t>(value_caches[layer_idx].data_ptr());
+  }
+
+  torch::Tensor flat_block_mapping_src_tensor =
+      torch::flatten(block_mapping_src_tensor);
+  torch::Tensor flat_block_mapping_dst_tensor =
+      torch::flatten(block_mapping_dst_tensor);
+
+  // Move the data structures to the GPU.
+  torch::Tensor key_cache_ptrs_tensor =
+      torch::from_blob(key_cache_ptrs, {num_layers}, torch::kInt64)
+          .to(cache_device);
+  torch::Tensor value_cache_ptrs_tensor =
+      torch::from_blob(value_cache_ptrs, {num_layers}, torch::kInt64)
+          .to(cache_device);
+  torch::Tensor block_mapping_src_tensor_cuda =
+      flat_block_mapping_src_tensor.clone().to(cache_device);
+  torch::Tensor block_mapping_dst_tensor_cuda =
+      flat_block_mapping_dst_tensor.clone().to(cache_device);
+  torch::Tensor selection_index_src_tensor_cuda =
+      selection_index_src_tensor.clone().to(cache_device);
+  torch::Tensor selection_index_dst_tensor_cuda =
+      selection_index_dst_tensor.clone().to(cache_device);
+
+  // Launch the kernel.
+  dim3 grid(num_layers, num_seqs, block_size * total_num_blocks);
+  dim3 block(std::min(num_heads * head_size, int64_t(64)));
+  const at::cuda::OptionalCUDAGuard device_guard(cache_device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
+      key_caches[0].scalar_type(), "sparse_cache_copy_kernel", ([&] {
+        vllm::sparse_cache_copy_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            key_cache_ptrs_tensor.data_ptr<int64_t>(),
+            value_cache_ptrs_tensor.data_ptr<int64_t>(),
+            block_mapping_src_tensor_cuda.data_ptr<int64_t>(),
+            block_mapping_dst_tensor_cuda.data_ptr<int64_t>(),
+            selection_index_src_tensor_cuda.data_ptr<int64_t>(),
+            selection_index_dst_tensor_cuda.data_ptr<int64_t>(), num_heads,
+            head_size, x);
+      }));
+}
+
+namespace vllm {
+
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
                                    Tout* __restrict__ dst_cache,

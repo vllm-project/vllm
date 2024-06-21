@@ -169,7 +169,7 @@ class LLMEngine:
             "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
             "disable_custom_all_reduce=%s, quantization=%s, "
-            "enforce_eager=%s, kv_cache_dtype=%s, "
+            "enforce_eager=%s, kv_cache_dtype=%s, sparse_cache_type=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s)",
@@ -193,6 +193,7 @@ class LLMEngine:
             model_config.quantization,
             model_config.enforce_eager,
             cache_config.cache_dtype,
+            cache_config.sparse_cache_type,
             model_config.quantization_param_path,
             device_config.device,
             decoding_config,
@@ -265,6 +266,8 @@ class LLMEngine:
                     model_config.quantization,
                     "kv_cache_dtype":
                     cache_config.cache_dtype,
+                    "sparse_cache_type":
+                    cache_config.sparse_cache_type,
 
                     # Feature flags
                     "enable_lora":
@@ -800,6 +803,7 @@ class LLMEngine:
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
                 blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
+                blocks_to_sparse_copy=scheduler_outputs.blocks_to_sparse_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
             )

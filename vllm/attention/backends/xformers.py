@@ -56,6 +56,19 @@ class XFormersBackend(AttentionBackend):
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
+    @staticmethod
+    def sparse_cache_copy(
+        kv_caches: List[torch.Tensor],
+        src_to_dists: torch.Tensor,
+        sparse_condition: torch.Tensor,
+        num_heads: int,
+        head_size: int,
+        block_size: int,
+    ) -> None:
+        PagedAttention.sparse_cache_copy(kv_caches, src_to_dists,
+                                         sparse_condition, num_heads,
+                                         head_size, block_size)
+
 
 @dataclass
 class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
@@ -145,6 +158,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
+            sparse_cache_type='',
+            sparse_interval=None,
+            sparse_percentage=None,
+            sparse_condition=None,
         )
         return self._cached_prefill_metadata
 
@@ -173,6 +190,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
+            sparse_cache_type='',
+            sparse_interval=None,
+            sparse_percentage=None,
+            sparse_condition=None,
         )
         return self._cached_decode_metadata
 
@@ -243,6 +264,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: "XFormersMetadata",
         kv_scale: float = 1.0,
+        sparse_condition: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -332,6 +354,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.scale,
                 self.alibi_slopes,
                 kv_scale,
+                sparse_cache_type=attn_metadata.sparse_cache_type,
+                sparse_condition=sparse_condition,
             )
 
         # Reshape the output tensor.

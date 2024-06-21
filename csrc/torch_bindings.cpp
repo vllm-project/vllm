@@ -30,7 +30,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    str kv_cache_dtype, float kv_scale, int tp_rank,"
       "    int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
+      "    int blocksparse_head_sliding_step, str sparse_cache_type,"
+      "    Tensor attention_scores) -> ()");
   ops.impl("paged_attention_v1", torch::kCUDA, &paged_attention_v1);
 
   // PagedAttention V2.
@@ -44,7 +45,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    str kv_cache_dtype, float kv_scale, int tp_rank,"
       "    int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
+      "    int blocksparse_head_sliding_step, str sparse_cache_type,"
+      "    Tensor attention_scores) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
 
   // Activation ops
@@ -231,6 +233,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        str kv_cache_dtype) -> ()");
   cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
                  &reshape_and_cache_flash);
+
+  // Sparse copy KV cache items.
+  cache_ops.def(
+      "sparse_cache_copy(Tensor[]! key_caches, Tensor[]! value_caches,"
+      "Tensor block_mapping_src_tensor, Tensor block_mapping_dst_tensor,"
+      "Tensor selection_index_src_tensor, Tensor selection_index_dst_tensor,"
+      "int num_heads, int head_size, int block_size) -> ()");
+  cache_ops.impl("sparse_cache_copy", torch::kCUDA, &sparse_cache_copy);
 
   // Convert the key and value cache to fp8 data type.
   cache_ops.def(

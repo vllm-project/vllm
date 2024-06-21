@@ -17,6 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only OPT model compatible with HuggingFace weights."""
+import math
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -99,10 +100,12 @@ class OPTAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        sparse_condition: Optional[torch.Tensor],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
+                                sparse_condition)
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -153,6 +156,7 @@ class OPTDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        sparse_condition: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
@@ -161,7 +165,8 @@ class OPTDecoderLayer(nn.Module):
             hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(hidden_states=hidden_states,
                                        kv_cache=kv_cache,
-                                       attn_metadata=attn_metadata)
+                                       attn_metadata=attn_metadata,
+                                       sparse_condition=sparse_condition)
         hidden_states = residual + hidden_states
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
@@ -237,6 +242,8 @@ class OPTDecoder(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
 
+        self.n_times = -2  # for sparse KV cache
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -250,10 +257,78 @@ class OPTDecoder(nn.Module):
             inputs_embeds, _ = self.project_in(inputs_embeds)
         hidden_states = inputs_embeds + pos_embeds
 
+        block_dimensions = 0
+        sparse_condition = attn_metadata.sparse_condition
+
+        if sparse_condition is not None:
+            block_dimensions = sparse_condition.size(2)
+        seq_size = 0
+        if attn_metadata:
+            seq_size = (attn_metadata.num_decode_tokens +
+                        attn_metadata.num_prefills)
+
+        head_size = self.config.num_attention_heads
+        if sparse_condition is not None:
+            sparse_condition.zero_()
+
+        def find_increasing_subsequences_lengths(tensor: torch.Tensor):
+            lengths = []
+            start_index = 0
+            for i in range(1, len(tensor)):
+                if tensor[i] == 0:
+                    lengths.append(i - start_index)
+                    start_index = i
+            lengths.append(len(tensor) - start_index)
+            return lengths
+
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
+            layer_sparse_condition = torch.zeros(seq_size * block_dimensions *
+                                                 head_size,
+                                                 dtype=torch.float32)
+            hidden_states = layer(hidden_states, kv_caches[i], attn_metadata,
+                                  layer_sparse_condition)
+            if (attn_metadata.sparse_cache_type != ''
+                    and attn_metadata.sparse_cache_type != 'auto'
+                    and attn_metadata.sparse_interval is not None
+                    and attn_metadata.sparse_percentage is not None):
+                assert attn_metadata.sparse_interval != 0
+                layer_sparse_condition_2d = layer_sparse_condition.view(
+                    seq_size, block_dimensions, head_size).mean(dim=2)
+                for j in range(seq_size):
+                    num_to_select = math.ceil(block_dimensions *
+                                              attn_metadata.sparse_percentage)
+                    n_times = self.n_times
+                    if n_times >= 0:
+                        times = n_times // attn_metadata.sparse_interval
+                        temp = positions[
+                            j] + 1 - n_times  # after inserting one token
+                        temp = math.floor(temp *
+                                          attn_metadata.sparse_percentage)
+                        for _ in range(times):
+                            temp += attn_metadata.sparse_interval
+                            temp = (math.floor(
+                                temp * attn_metadata.sparse_percentage))
+                        num_to_select = (
+                            temp + n_times % attn_metadata.sparse_interval)
+                    if num_to_select <= 0 or layer_sparse_condition_2d[j].size(
+                            0) == 0:
+                        continue
+                    _, top_indices = torch.topk(
+                        torch.abs(layer_sparse_condition_2d[j][1:]),
+                        num_to_select - 1)  # absolute value
+                    is_all_zero = torch.all(layer_sparse_condition_2d[j] == 0)
+                    if is_all_zero:  # prefill case
+                        temp_length = find_increasing_subsequences_lengths(
+                            positions)
+                        num_to_select = temp_length[j]
+                        top_indices = [i for i in range(num_to_select)]
+                    for k in range(block_dimensions):
+                        # starting token
+                        if k == 0 or k in top_indices:
+                            sparse_condition[i, j, k] = 1
 
+        self.n_times += 1
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
         if self.project_out is not None:

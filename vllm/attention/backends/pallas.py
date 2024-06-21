@@ -127,6 +127,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         kv_cache: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
         attn_metadata: PallasMetadata,
         kv_scale: float = 1.0,
+        sparse_condition: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
 

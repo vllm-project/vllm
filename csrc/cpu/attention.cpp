@@ -426,7 +426,8 @@ void paged_attention_v1(
     const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step) {
+    const int64_t blocksparse_head_sliding_step,
+    const std::string& sparse_cache_type, torch::Tensor& attention_scores) {
   TORCH_CHECK(kv_scale == 1.0f);
   TORCH_CHECK(blocksparse_vert_stride <= 1,
               "CPU backend does not support blocksparse attention yet.");
@@ -745,7 +746,8 @@ void paged_attention_v2(
     const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step) {
+    const int64_t blocksparse_head_sliding_step,
+    const std::string& sparse_cache_type, torch::Tensor& attention_scores) {
   TORCH_CHECK(kv_scale == 1.0f);
   TORCH_CHECK(blocksparse_vert_stride <= 1,
               "CPU backend does not support blocksparse attention yet.");

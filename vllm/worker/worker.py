@@ -83,12 +83,15 @@ class Worker(WorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
+            sparse_cache_type=self.cache_config.sparse_cache_type,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: CacheEngine
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[torch.tensor]] = None
+        # Uninitialized sparse condition.
+        self.sparse_condition = [None]
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -221,6 +224,8 @@ class Worker(WorkerBase):
         blocks_to_swap_in: torch.Tensor,
         blocks_to_swap_out: torch.Tensor,
         blocks_to_copy: torch.Tensor,
+        blocks_to_sparse_copy: torch.Tensor,
+        sparse_condition: torch.Tensor,
     ) -> None:
         # Issue cache operations.
         if blocks_to_swap_in.numel() > 0:
@@ -229,6 +234,10 @@ class Worker(WorkerBase):
             self.cache_engine.swap_out(blocks_to_swap_out)
         if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
+        if (self.cache_config.sparse_cache_type == 'h2o'
+                and blocks_to_sparse_copy.numel() > 0):
+            self.cache_engine.sparse_cache_copy(blocks_to_sparse_copy,
+                                                sparse_condition)
 
     @torch.inference_mode()
     def execute_model(
@@ -264,22 +273,42 @@ class Worker(WorkerBase):
         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                       device=self.device,
                                       dtype=torch.int64).view(-1, 2)
+        padded_data = []
+        if len(execute_model_req.blocks_to_sparse_copy) > 0:
+            fill_value = -1
+            max_len_inner = max(
+                len(inner_list)
+                for sublist in execute_model_req.blocks_to_sparse_copy
+                for inner_list in sublist)
+            for sublist in execute_model_req.blocks_to_sparse_copy:
+                padded_sublist = []
+                for inner_list in sublist:
+                    padded_inner_list = inner_list + [fill_value] * (
+                        max_len_inner - len(inner_list))
+                    padded_sublist.append(padded_inner_list)
+                padded_data.append(padded_sublist)
+        blocks_to_sparse_copy = torch.tensor(padded_data)
+
         data: Dict[str, Any] = {
             "num_seq_groups": num_seq_groups,
             "blocks_to_swap_in": blocks_to_swap_in,
             "blocks_to_swap_out": blocks_to_swap_out,
             "blocks_to_copy": blocks_to_copy,
+            "blocks_to_sparse_copy": blocks_to_sparse_copy,
         }
         broadcast_tensor_dict(data, src=0)
 
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy,
+                        blocks_to_sparse_copy, self.sparse_condition[0])
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
+        output = self.model_runner.execute_model(
+            seq_group_metadata_list,
+            self.gpu_cache,
+            sparse_condition=self.sparse_condition)
 
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.
@@ -309,7 +338,9 @@ class Worker(WorkerBase):
         blocks_to_swap_in = data.get("blocks_to_swap_in")
         blocks_to_swap_out = data.get("blocks_to_swap_out")
         blocks_to_copy = data.get("blocks_to_copy")
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+        blocks_to_sparse_copy = data.get("blocks_to_sparse_copy")
+        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy,
+                        blocks_to_sparse_copy, self.sparse_condition[0])
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:

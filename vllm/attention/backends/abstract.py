@@ -51,6 +51,18 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
+    @staticmethod
+    @abstractmethod
+    def sparse_cache_copy(
+        kv_caches: List[torch.Tensor],
+        src_to_dists: torch.Tensor,
+        sparse_condition: torch.Tensor,
+        num_heads: int,
+        head_size: int,
+        block_size: int,
+    ) -> None:
+        raise NotImplementedError
+
 
 @dataclass
 class AttentionMetadata:
@@ -67,6 +79,11 @@ class AttentionMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
+    # The kv cache sparse type.
+    sparse_cache_type: str
+    sparse_interval: Optional[int]
+    sparse_percentage: Optional[float]
+    sparse_condition: Optional[torch.Tensor]
 
     @property
     @abstractmethod
@@ -124,5 +141,6 @@ class AttentionImpl(ABC, Generic[T]):
         kv_cache: torch.Tensor,
         attn_metadata: T,
         kv_scale: float = 1.0,
+        sparse_condition: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError

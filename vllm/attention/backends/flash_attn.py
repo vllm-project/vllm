@@ -152,6 +152,10 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
+            sparse_cache_type='',
+            sparse_interval=None,
+            sparse_percentage=None,
+            sparse_condition=None,
         )
         return self._cached_prefill_metadata
 
@@ -180,6 +184,10 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
+            sparse_cache_type='',
+            sparse_interval=None,
+            sparse_percentage=None,
+            sparse_condition=None,
         )
         return self._cached_decode_metadata
 
@@ -257,6 +265,7 @@ class FlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         kv_scale: float = 1.0,
+        sparse_condition: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 

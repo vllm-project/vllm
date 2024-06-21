@@ -364,7 +364,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         last_block: PhysicalTokenBlock,
     ) -> PhysicalTokenBlock:
         assert self.enable_caching
-
         # Compute a new hash for the block so that it can be shared by other
         # Sequences
         new_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
@@ -401,7 +400,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     ) -> PhysicalTokenBlock:
         # Called before a new block is appended.
         # This is in charge of allocating a new physical block (to be appended).
-
         # None if the last block is not full. Otherwise, we set it to the
         # content hash.
         if not self.enable_caching:
@@ -423,6 +421,33 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             assert new_block.ref_count == 1
         return new_block
 
+    def create_new_slots(
+            self, seq: Sequence,
+            percentage: float) -> Tuple[List[List[int]], List[int]]:
+        # Called when sparse KV cache is applied to generate new blocks.
+        ret: List[List[int]] = []
+        block_table = self.block_tables[seq.seq_id].copy()
+        for block in block_table:
+            if not ret:
+                ret.append([])
+            ret[0].append(block.block_number)
+        new_block_number = math.ceil(len(block_table) * percentage)
+        if len(ret) == 1:
+            ret.append([])
+        new_block_table: BlockTable = []
+        for i in range(new_block_number):
+            assert len(ret) == 2
+            if (self.block_sliding_window
+                    and len(block_table) >= self.block_sliding_window):
+                block_table.append(block_table[len(block_table) %
+                                               self.block_sliding_window])
+            else:
+                new_block = self.gpu_allocator.allocate()
+                new_block_table.append(new_block)
+                ret[1].append(new_block.block_number)
+        self.block_tables[seq.seq_id] = new_block_table.copy()
+        return (ret, block_table)
+
     def append_slots(
         self,
         seq: Sequence,
@@ -431,11 +456,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
+        block_size = 0
+        if logical_blocks:
+            block_size = logical_blocks[0].block_size
         # If we need to allocate a new physical block
-        if len(block_table) < len(logical_blocks):
+        if seq.data.last_token_block_offset == block_size - 1:
             # Currently this code only supports adding one physical block
-            assert len(block_table) == len(logical_blocks) - 1
-
             if (self.block_sliding_window
                     and len(block_table) >= self.block_sliding_window):
                 # reuse a block
@@ -497,6 +523,18 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if seq_group.is_encoder_decoder():
             blocks.update(self.cross_block_tables[request_id])
         return list(blocks)
+
+    def can_append_slots_sparse_cache(self,
+                                      seq_group: SequenceGroup,
+                                      percentage: float,
+                                      num_lookahead_slots: int = 0) -> bool:
+        assert (num_lookahead_slots == 0
+                ), "lookahead allocation not supported in BlockSpaceManagerV1"
+        new_physical_block_number = len(
+            self._get_physical_blocks(seq_group)) * percentage
+        num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
+        num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
+        return num_seqs + new_physical_block_number <= num_free_gpu_blocks
 
     def can_swap_in(self,
                     seq_group: SequenceGroup,

@@ -96,6 +96,8 @@ class PagedAttention:
         blocksparse_vert_stride: int = 0,
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
+        sparse_cache_type: str = 'auto',
+        sparse_condition: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
@@ -141,6 +143,8 @@ class PagedAttention:
                 blocksparse_vert_stride,
                 blocksparse_block_size,
                 blocksparse_head_sliding_step,
+                sparse_cache_type,
+                sparse_condition,
             )
         else:
             # Run PagedAttention V2.
@@ -178,6 +182,8 @@ class PagedAttention:
                 blocksparse_vert_stride,
                 blocksparse_block_size,
                 blocksparse_head_sliding_step,
+                sparse_cache_type,
+                sparse_condition,
             )
         return output
 
@@ -237,3 +243,44 @@ class PagedAttention:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
+
+    @staticmethod
+    def sparse_cache_copy(
+        kv_caches: List[torch.Tensor],
+        src_to_dists: torch.Tensor,
+        sparse_condition: torch.Tensor,
+        num_heads: int,
+        head_size: int,
+        block_size: int,
+    ) -> None:
+        key_caches = [kv_cache[0] for kv_cache in kv_caches]
+        value_caches = [kv_cache[1] for kv_cache in kv_caches]
+        num_seq = sparse_condition.size(1)
+        num_blocks = src_to_dists.size(2)
+        selection_index_src_tensor = torch.full(
+            (len(key_caches), src_to_dists.size(0), block_size * num_blocks),
+            -1,
+            dtype=torch.int64)
+        selection_index_dst_tensor = torch.full(
+            (len(key_caches), src_to_dists.size(0), block_size * num_blocks),
+            -1,
+            dtype=torch.int64)
+        for i, row in enumerate(sparse_condition):
+            for j, value in enumerate(row):
+                count = 0
+                for k, num in enumerate(value):
+                    if num == 1:
+                        selection_index_src_tensor[i, j, k] = (
+                            k + i * num_seq * block_size * num_blocks +
+                            j * block_size * num_blocks)
+                        selection_index_dst_tensor[i, j, k] = (
+                            count + i * num_seq * block_size * num_blocks +
+                            j * block_size * num_blocks)
+                        count += 1
+        src_flatten = selection_index_src_tensor.flatten()
+        dst_flatten = selection_index_dst_tensor.flatten()
+        block_mapping_src = src_to_dists[:, 0].to(torch.int64)
+        block_mapping_dst = src_to_dists[:, 1].to(torch.int64)
+        ops.sparse_cache_copy(key_caches, value_caches, block_mapping_src,
+                              block_mapping_dst, src_flatten, dst_flatten,
+                              num_heads, head_size, block_size)

@@ -95,6 +95,13 @@ class CacheEngine:
     def copy(self, src_to_dsts: torch.Tensor) -> None:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
 
+    def sparse_cache_copy(self, src_to_dsts: torch.Tensor,
+                          sparse_condition: torch.Tensor) -> None:
+        self.attn_backend.sparse_cache_copy(self.gpu_cache, src_to_dsts,
+                                            sparse_condition,
+                                            self.num_kv_heads, self.head_size,
+                                            self.block_size)
+
     @staticmethod
     def get_cache_block_size(
         cache_config: CacheConfig,

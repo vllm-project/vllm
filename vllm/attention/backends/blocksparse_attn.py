@@ -212,6 +212,10 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
+            sparse_cache_type='',
+            sparse_interval=None,
+            sparse_percentage=None,
+            sparse_condition=None,
         )
         return self._cached_prefill_metadata
 
@@ -240,6 +244,10 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
+            sparse_cache_type='',
+            sparse_interval=None,
+            sparse_percentage=None,
+            sparse_condition=None,
         )
         return self._cached_decode_metadata
 
@@ -328,6 +336,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: BlocksparseFlashAttentionMetadata,
         kv_scale: float = 1.0,
+        sparse_condition: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 

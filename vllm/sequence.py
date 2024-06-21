@@ -130,6 +130,8 @@ class SequenceData:
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
 
+        self.last_token_block_offset = 0
+
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
@@ -444,6 +446,9 @@ class SequenceGroup:
         self.pooling_params = pooling_params
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
+        # after generating first token and second token,
+        # we start to do sparse KV cache
+        self.n_times = -2
 
     @property
     def prompt(self) -> Optional[str]:
@@ -643,6 +648,7 @@ class SequenceGroupMetadata:
         multi_modal_data: Optional["MultiModalData"] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
+        n_times: Optional[int] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -670,6 +676,7 @@ class SequenceGroupMetadata:
                 self._token_chunk_size = list(seq_data.values())[0].get_len()
             else:
                 self._token_chunk_size = 1
+        self.n_times = n_times
 
     @property
     def lora_int_id(self) -> int:
@@ -853,6 +860,8 @@ class ExecuteModelRequest:
     blocks_to_swap_out: List[Tuple[int, int]] = field(default_factory=list)
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
+    # Blocks to sparse copy. Source to dest block.
+    blocks_to_sparse_copy: List[List[List[int]]] = field(default_factory=list)
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int = 0
     # The number of requests in the running queue.
@@ -867,6 +876,7 @@ class ExecuteModelRequest:
             blocks_to_swap_in=self.blocks_to_swap_in.copy(),
             blocks_to_swap_out=self.blocks_to_swap_out.copy(),
             blocks_to_copy=self.blocks_to_copy.copy(),
+            blocks_to_sparse_copy=self.blocks_to_sparse_copy.copy(),
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
         )

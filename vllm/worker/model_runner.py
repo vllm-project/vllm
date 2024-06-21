@@ -1,4 +1,5 @@
 import gc
+import math
 import time
 import warnings
 from collections import defaultdict
@@ -86,6 +87,7 @@ class ModelRunner:
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        sparse_cache_type: Optional[str] = "auto",
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -101,6 +103,7 @@ class ModelRunner:
         self.pin_memory = is_pin_memory_available()
 
         self.kv_cache_dtype = kv_cache_dtype
+        self.sparse_cache_type = sparse_cache_type
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
@@ -483,15 +486,38 @@ class ModelRunner:
                     # to save memory.
                     start_idx = max(0, query_len - self.sliding_window)
 
+                temp_seq_lens = []
                 for i in range(context_len, seq_len):
                     if i < start_idx:
                         slot_mapping.append(_PAD_SLOT_ID)
                         continue
 
-                    block_number = block_table[i // self.block_size]
-                    block_offset = i % self.block_size
+                    n_times = seq_group_metadata.n_times
+                    kv_cache_pos = i
+                    if (self.cache_config.sparse_cache_type == "h2o"
+                            and n_times >= 0):
+                        step = self.cache_config.sparse_interval
+                        percentage = self.cache_config.sparse_percentage
+                        times = n_times // step
+                        temp = i - n_times
+                        temp = math.floor(temp * percentage)
+                        for i in range(times):
+                            temp += step
+                            temp = math.floor(temp * percentage)
+                        kv_cache_pos = temp + n_times % step
+                        seq_lens.pop()
+                        temp_seq_lens.append(
+                            kv_cache_pos % self.block_size + 1 +
+                            (len(block_table) - 1) *
+                            self.block_size)  # Update seq_lens item
+
+                    block_number = block_table[kv_cache_pos // self.block_size]
+                    block_offset = kv_cache_pos % self.block_size
+                    seq_data.last_token_block_offset = block_offset
+
                     slot = block_number * self.block_size + block_offset
                     slot_mapping.append(slot)
+                seq_lens.extend(temp_seq_lens)
 
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
@@ -595,7 +621,12 @@ class ModelRunner:
                 head_dim=self.model_config.get_head_size(),
                 page_size=16,
                 seq_start_loc=seq_start_loc,
-                data_type=kv_cache_dtype)
+                data_type=kv_cache_dtype,
+                sparse_cache_type=self.sparse_cache_type,
+                sparse_interval=None,
+                sparse_percentage=None,
+                sparse_condition=None,
+            )
         else:
             context_lens_tensor = torch.tensor(context_lens,
                                                dtype=torch.int,
@@ -627,6 +658,10 @@ class ModelRunner:
                 context_lens_tensor=context_lens_tensor,
                 block_tables=block_tables,
                 use_cuda_graph=use_captured_graph,
+                sparse_cache_type=self.sparse_cache_type,
+                sparse_interval=None,
+                sparse_percentage=None,
+                sparse_condition=None,
             )
 
         if self.lora_config:
@@ -729,10 +764,32 @@ class ModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
+        sparse_condition: Optional[List[torch.Tensor]] = None,
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_kwargs
          ) = self.prepare_input_tensors(seq_group_metadata_list)
+
+        if sparse_condition is not None:
+            num_blocks = 0
+            num_seqs = 0
+            if attn_metadata and attn_metadata.prefill_metadata:
+                num_blocks = max(
+                    len(block_table) for block_table in
+                    attn_metadata.prefill_metadata.block_tables)
+
+            if attn_metadata and attn_metadata.decode_metadata:
+                num_blocks = max(
+                    len(block_table) for block_table in
+                    attn_metadata.decode_metadata.block_tables)
+
+            if attn_metadata:
+                num_seqs = (attn_metadata.num_decode_tokens +
+                            attn_metadata.num_prefill_tokens)
+
+            sparse_condition[0] = torch.zeros(
+                (len(kv_caches), num_seqs, self.block_size * num_blocks),
+                dtype=torch.int64)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -745,6 +802,15 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
+
+        if (self.cache_config.sparse_cache_type != 'auto'
+                and sparse_condition is not None):
+            attn_metadata.sparse_cache_type = (
+                self.cache_config.sparse_cache_type)
+            attn_metadata.sparse_interval = self.cache_config.sparse_interval
+            attn_metadata.sparse_percentage = (
+                self.cache_config.sparse_percentage)
+            attn_metadata.sparse_condition = sparse_condition[0]
 
         hidden_states = model_executable(
             input_ids=input_tokens,
@@ -936,6 +1002,10 @@ class ModelRunner:
                     context_lens_tensor=None,
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
+                    sparse_cache_type=self.sparse_cache_type,
+                    sparse_interval=None,
+                    sparse_percentage=None,
+                    sparse_condition=None,
                 )
 
                 if self.lora_config:

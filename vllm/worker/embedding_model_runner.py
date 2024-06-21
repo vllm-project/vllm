@@ -32,6 +32,7 @@ class EmbeddingModelRunner(ModelRunner):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        sparse_cache_type: Optional[str] = "auto",
     ):
         super().__init__(model_config,
                          parallel_config,
@@ -42,7 +43,8 @@ class EmbeddingModelRunner(ModelRunner):
                          lora_config=lora_config,
                          kv_cache_dtype=kv_cache_dtype,
                          is_driver_worker=is_driver_worker,
-                         vision_language_config=vision_language_config)
+                         vision_language_config=vision_language_config,
+                         sparse_cache_type=sparse_cache_type)
 
     @torch.inference_mode()
     def execute_model(

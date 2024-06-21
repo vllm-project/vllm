@@ -56,6 +56,12 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
+    def can_append_slots_sparse_cache(self, seq_group: SequenceGroup,
+                                      percentage: float,
+                                      num_lookahead_slots: int) -> bool:
+        pass
+
+    @abstractmethod
     def append_slots(
         self,
         seq: Sequence,

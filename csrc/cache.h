@@ -27,6 +27,15 @@ void reshape_and_cache_flash(torch::Tensor& key, torch::Tensor& value,
                              torch::Tensor& slot_mapping,
                              const std::string& kv_cache_dtype);
 
+void sparse_cache_copy(std::vector<torch::Tensor> const& key_caches,
+                       std::vector<torch::Tensor> const& value_caches,
+                       const torch::Tensor& block_mapping_src_tensor,
+                       const torch::Tensor& block_mapping_dst_tensor,
+                       const torch::Tensor& selection_index_src_tensor,
+                       const torch::Tensor& selection_index_dst_tensor,
+                       const int64_t num_heads, const int64_t head_size,
+                       const int64_t block_size);
+
 // Just for unittest
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
                  const double scale, const std::string& kv_cache_dtype);
