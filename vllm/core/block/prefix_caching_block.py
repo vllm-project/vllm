@@ -292,6 +292,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # Immutable
             assert block.content_hash is not None
             self._decr_refcount_cached_block(block)
+            block.block_id = None
             self._block_pool.free_block(block)
         else:
             # Mutable

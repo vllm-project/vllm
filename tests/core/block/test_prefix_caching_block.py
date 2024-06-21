@@ -30,7 +30,7 @@ class TestPrefixCachingBlock:
             prev_block=None,
             token_ids=token_ids,
             block_size=block_size,
-            prefix_caching_allocator=mock_allocator)
+            allocator=mock_allocator)
 
         if is_curr_block_full:
             # Expect hash since block is full.
@@ -71,7 +71,7 @@ class TestPrefixCachingBlock:
             prev_block=previous_block,
             token_ids=token_ids,
             block_size=block_size,
-            prefix_caching_allocator=mock_allocator,
+            allocator=mock_allocator,
         )
 
         if is_curr_block_full and prev_block_has_hash:
@@ -138,7 +138,7 @@ class TestPrefixCachingBlock:
                 prev_block=prev_block,
                 token_ids=[],
                 block_size=block_size,
-                prefix_caching_allocator=allocator,
+                allocator=allocator,
             )
 
             tokens_to_append = token_ids[block_number *
@@ -384,10 +384,7 @@ class TestPrefixCachingBlockAllocator:
             token_ids=token_ids,
             allocator=allocator,
         )
-
-        # mark all blocks in first chain as computed
-        allocator.mark_blocks_as_computed(blocks)
-
+ 
         # After zero_point, second_chain's token_ids would be set -1, which
         # make it different from here comparing with first_chain
         zero_point = random.randint(1, len(token_ids) - 1)
@@ -434,6 +431,11 @@ class TestPrefixCachingBlockAllocator:
         block_id = m.block_id
         for i in range(block_size):
             m.append_token_ids([i])
+
+        # The promotion must succeed here
+        m = allocator.promote_to_immutable_block(m)
+        assert m is not None
+
         # After block get promoted to immutable from mutable, if there is
         # already same content hash block, then it shall be released into
         # hashless_allocator
