@@ -27,8 +27,11 @@ class Fp8FnuzConfig(QuantizationConfig):
         self.quant_layers = config["quant_layers"]
         self.scaling_factors = config["scaling_factors"]
         # Get the output type for fp8 gemm
+        # @TODO: Derive this from weights. Support either full scale or reduced scale
         if env.VLLM_FP8_GEMM_OUTPUT_TYPE == "float16":
             self.out_dtype = torch.float16
+        elif env.VLLM_FP8_GEMM_OUTPUT_TYPE == "bfloat16":
+            self.out_dtype = torch.bfloat16
         elif env.VLLM_FP8_GEMM_OUTPUT_TYPE == "float8_e4m3fnuz":
             self.out_dtype = torch.float8_e4m3fnuz
         else:
@@ -59,7 +62,7 @@ class Fp8FnuzConfig(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.half, torch.uint8, torch.float8_e4m3fnuz]
+        return [torch.half, torch.bfloat16, torch.float8_e4m3fnuz]
 
     @classmethod
     # Need to figure it out
@@ -220,18 +223,17 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
         n = x.shape[0]
         k = x.shape[1]
         
-        solidx = self._config._tuned.get((m, n, k))
-        
-        if is_hip() and bias is None and solidx is not None:
+        solidx = self._config._tuned.get((m, n, k), 0)
+        if is_hip() and bias is None and solidx != 0:
             res = ops.fp8_mm(x_quant,
                        weight.t(),
                        self._config.out_dtype,
                        asf, wsf, osf,
                        int(solidx))
             if osf is not None:
-                res16 = torch.empty_like(res, dtype=torch.float16)
-                ops.convert_fp8(res16, res, 1/osf)
-                res = res16
+                res_upscaled = torch.empty_like(res, dtype=x.dtype)
+                ops.convert_fp8(res_upscaled, res, 1/osf)
+                res = res_upscaled
         else:
             _save_shapes(m, n, k)
             res, _ = torch._scaled_mm(x_quant,

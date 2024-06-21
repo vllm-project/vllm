@@ -53,11 +53,15 @@ void fp8_mm(torch::Tensor& a,
     TORCH_CHECK(a_sizes[1] == b_sizes[0], "a dim 1 must match b dim 0.");
 
     auto out_dtype = result.dtype();
-    TORCH_CHECK(out_dtype == torch::kFloat8_e4m3fnuz || out_dtype == torch::kFloat16,
-        "Only float16 and float8e4m3fnuz are supported as the output dtype.");
+    TORCH_CHECK(out_dtype == torch::kFloat8_e4m3fnuz || out_dtype == torch::kFloat16
+        || out_dtype == torch::kBFloat16,
+        "Only float16, bfloat16 or float8e4m3fnuz are supported as the output dtype.");
     hipblasDatatype_t hipblas_out_type;
     if (out_dtype == torch::kFloat8_e4m3fnuz) {
         hipblas_out_type = HIP_R_8F_E4M3_FNUZ;
+    }
+    else if (out_dtype == torch::kBFloat16) {
+        hipblas_out_type = HIP_R_16BF;
     }
     else {
         hipblas_out_type = HIP_R_16F;
