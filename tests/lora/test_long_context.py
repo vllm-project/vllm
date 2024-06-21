@@ -1,4 +1,5 @@
 import ast
+import gc
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -110,7 +111,8 @@ def lora_llm(long_context_infos):
         context_len_to_scaling_factor[info["context_length"]]
         for info in long_context_infos.values()
     ]
-
+    #clear memory from previous run
+    gc.collect()
     llm = vllm.LLM(
         "meta-llama/Llama-2-13b-chat-hf",
         enable_lora=True,
