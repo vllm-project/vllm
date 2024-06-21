@@ -21,7 +21,7 @@ docker exec cpu-test-avx2 bash -c "python3 examples/offline_inference.py"
 
 # Run basic model test
 docker exec cpu-test bash -c "cd tests;
-  pip install pytest Pillow protobuf
+  pip install pytest Pillow protobuf torchvision
   bash ../.buildkite/download-images.sh
   cd ../
   pytest -v -s tests/models --ignore=tests/models/test_embedding.py --ignore=tests/models/test_registry.py"
