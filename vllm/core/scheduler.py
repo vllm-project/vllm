@@ -961,12 +961,16 @@ class Scheduler:
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
             # Encoder associated with SequenceGroup
-            encoder_seq_data: SequenceData = seq_group.get_encoder_seq().data if seq_group.is_encoder_decoder() else \
-                                                None
+            encoder_seq_data: SequenceData = \
+                seq_group.get_encoder_seq().data \
+                    if seq_group.is_encoder_decoder() else \
+                        None
             # Block table for cross-attention
             # Also managed at SequenceGroup level
-            cross_block_table: List[int] = self.block_manager.get_cross_block_table(seq_group) if seq_group.is_encoder_decoder() else \
-                                            None
+            cross_block_table: List[int] = \
+                self.block_manager.get_cross_block_table(seq_group) \
+                    if seq_group.is_encoder_decoder() else \
+                        None
 
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id

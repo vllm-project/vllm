@@ -24,9 +24,9 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available, make_tensor_with_pad,
-                        is_encoder_decoder_model_config)
+from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype,
+                        is_encoder_decoder_model_config, is_hip,
+                        is_pin_memory_available, make_tensor_with_pad)
 
 logger = init_logger(__name__)
 

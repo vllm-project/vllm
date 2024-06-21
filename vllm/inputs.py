@@ -1,5 +1,5 @@
-from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
-                    TypedDict, Union, cast, overload, Tuple)
+from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence, Tuple,
+                    TypedDict, Union, cast, overload)
 
 from typing_extensions import NotRequired
 

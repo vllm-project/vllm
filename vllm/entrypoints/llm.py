@@ -6,10 +6,10 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.inputs import (PromptInputs, PromptStrictInputs, TextPrompt,
+from vllm.inputs import (PromptInputs, PromptStrictInputs,
+                         PromptStrictInputsOptions, TextPrompt,
                          TextTokensPrompt, TokensPrompt,
-                         PromptStrictInputsOptions, parse_and_batch_prompt,
-                         EncoderDecoderStringPrompts)
+                         parse_and_batch_prompt)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput

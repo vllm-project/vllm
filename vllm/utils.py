@@ -873,6 +873,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return super().parse_args(processed_args, namespace)
 
+
 def is_encoder_decoder_model_config(model_config) -> bool:
     '''
     Extract the HF encoder/decoder model flag from the ModelConfig instance.
@@ -883,6 +884,7 @@ def is_encoder_decoder_model_config(model_config) -> bool:
                 getattr(model_config.hf_config,
                         "is_encoder_decoder",
                         False)
+
 
 def is_embedding_model_config(model_config) -> bool:
     '''
