@@ -47,7 +47,6 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         self._draft_ranks = draft_ranks
         self._is_dummy = False
-        self._world_group = None
         self._tp_group = None
 
         if draft_ranks is not None:
@@ -66,8 +65,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         if self._draft_ranks is None:
             yield
         else:
-            return patch_tensor_parallel_group(self._world_group,
-                                               self._tp_group)
+            return patch_tensor_parallel_group(self._tp_group)
 
     def init_device(self):
         if self._is_dummy:
@@ -75,14 +73,10 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         if self._draft_ranks is not None:
             # creates tp process group containing only a subset of gpu ranks
-            local_rank = get_world_group().local_rank
-            world_backend = torch.distributed.get_backend(
-                get_world_group().device_group)
+            local_rank = get_tp_group().local_rank
             tp_backend = torch.distributed.get_backend(
                 get_tp_group().device_group)
 
-            self._world_group = init_world_group(self._draft_ranks, local_rank,
-                                                 world_backend)
             self._tp_group = init_model_parallel_group([self._draft_ranks],
                                                        local_rank, tp_backend)
 

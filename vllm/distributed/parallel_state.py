@@ -574,14 +574,9 @@ def init_distributed_environment(
     global _WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        if world_size != -1:
-            assert world_size == len(ranks), (
-                f"given world_size ({world_size}) does not match with"
-                f"world_size of torch ({len(ranks)})")
-
         _WORLD = init_world_group(ranks, local_rank, backend)
     else:
-        assert _WORLD.world_size == world_size, (
+        assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
 
 
@@ -690,8 +685,7 @@ TP_STATE_PATCHED = False
 
 
 @contextmanager
-def patch_tensor_parallel_group(world_group: GroupCoordinator,
-                                tp_group: GroupCoordinator):
+def patch_tensor_parallel_group(tp_group: GroupCoordinator):
     """Patch the tp group temporarily until this function ends.
     It requires the world group to be patched together to keep the integrity.
 
@@ -706,17 +700,14 @@ def patch_tensor_parallel_group(world_group: GroupCoordinator,
     assert not TP_STATE_PATCHED, "Should not call when it's already patched"
 
     TP_STATE_PATCHED = True
-    old_world_group = get_world_group()
     old_tp_group = get_tp_group()
-    global _WORLD, _TP
-    _WORLD = world_group
+    global _TP
     _TP = tp_group
     try:
         yield
     finally:
         # restore the original state
         TP_STATE_PATCHED = False
-        _WORLD = old_world_group
         _TP = old_tp_group
 
 
