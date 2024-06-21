@@ -11,22 +11,8 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import (make_tensor_with_pad, maybe_make_int_tensor,
-                        maybe_make_long_tensor, maybe_max)
-
-# String name of register which may be set in order to
-# force auto-selection of attention backend by Attention
-# wrapper
-STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
-
-# Possible string values of STR_BACKEND_ENV_VAR
-# register, corresponding to possible backends
-STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
-STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
-STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
-STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
-STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
-STR_INVALID_VAL: str = "INVALID"
-
+                        maybe_make_long_tensor, maybe_max,
+                        STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL)
 
 class QKVInputs(NamedTuple):
     '''

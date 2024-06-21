@@ -16,7 +16,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.utils import (STR_ENCDECMR_CUDAGRAPH_UNSUPPORTED,
+from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
                         STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
                         make_tensor_with_pad)
 from vllm.worker.model_runner import LORA_WARMUP_RANK, ModelInput, ModelRunner
@@ -439,4 +439,4 @@ class EncoderDecoderModelRunner(ModelRunner):
 
     @torch.inference_mode()
     def capture_model(self, _: List[torch.Tensor]) -> None:
-        raise NotImplementedError(STR_ENCDECMR_CUDAGRAPH_UNSUPPORTED)
+        raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_CUDAGRAPH)
