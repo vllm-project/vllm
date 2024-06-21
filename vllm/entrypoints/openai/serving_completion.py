@@ -267,7 +267,9 @@ class OpenAIServingCompletion(OpenAIServing):
                     previous_num_tokens[i] = len(output.token_ids)
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
-                    if (request.stream_options.continuous_usage_stats or (output.finish_reason is not None)):
+                    if (request.stream_options
+                            and request.stream_options.continuous_usage_stats
+                            or (output.finish_reason is not None)):
                         prompt_tokens = len(res.prompt_token_ids)
                         completion_tokens = len(output.token_ids)
                         current_usage = UsageInfo(
@@ -291,7 +293,8 @@ class OpenAIServingCompletion(OpenAIServing):
                                 stop_reason=stop_reason,
                             )
                         ])
-                    if (request.stream_options and request.stream_options.include_usage):
+                    if (request.stream_options
+                            and request.stream_options.include_usage):
                         if request.stream_options.continuous_usage_stats:
                             chunk.usage = current_usage
                         else:
