@@ -58,36 +58,32 @@ def test_correctness(
     )
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
-    normal_model = vllm_runner(
+    with vllm_runner(
         model,
         max_model_len=max_model_len,
         dtype=dtype,
         enforce_eager=True
-    )
-
-    # bypass context length cap for normal generation
-    # to compare w/ attention sinks, which generates past context length
-    monkeypatch.setattr(
-        normal_model.model.llm_engine.output_processor.stop_checker,
-        "use_attention_sinks",
-        True
-    )
-    
-    normal_outputs = normal_model.generate_w_cum_logprobs(prompts, params)
-    monkeypatch.undo() # undo setattr so that cleanup runs correctly
-    del normal_model
+    ) as normal_model:
+        # bypass context length cap for normal generation
+        # to compare w/ attention sinks, which generates past context length
+        monkeypatch.setattr(
+            normal_model.model.llm_engine.output_processor.stop_checker,
+            "use_attention_sinks",
+            True
+        )
+        normal_outputs = normal_model.generate_w_cum_logprobs(prompts, params)
+        monkeypatch.undo() # undo setattr so that cleanup runs correctly
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
-    sink_model = vllm_runner(
+    with vllm_runner(
         model,
         max_model_len=max_model_len,
         dtype=dtype,
         enforce_eager=True,
         use_attention_sinks=True
-    )
-
-    sink_outputs = sink_model.generate_w_cum_logprobs(prompts, params)
-    del sink_model
+    ) as sink_model:
+        sink_outputs = sink_model.generate_w_cum_logprobs(prompts, params)
+    
     get_attn_backend.cache_clear()
 
     if test_retrieval:
