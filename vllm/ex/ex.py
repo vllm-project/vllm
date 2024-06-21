@@ -71,13 +71,26 @@ def partition_graph(
     return part_gm, parts
 
 
+def node_in_module(n: torch.fx.Node, m: torch.fx.GraphModule) -> bool:
+    # Note: this doesn't work: return n.graph.owning_module == m
+    # Names should be unique, so this is ok
+    return n.name in [nn.name for nn in m.graph.nodes]
+
+
+def module_in_partitions(parts: List[Partition],
+                         m: torch.fx.GraphModule) -> bool:
+    for p in parts:
+        if node_in_module(next(iter(p.nodes)), m):
+            return True
+    return False
+
 ###############################################################################
 #
 # Inliner
 #
 ###############################################################################
 """
-Inline all submodules in 'mod' by running the tracer on them.
+Inline all submodules in 'mod' by running the dynamo tracer on them.
 TBD
 """
 def inline_submodules(mod: torch.fx.GraphModule) -> torch.fx.GraphModule:
@@ -101,7 +114,7 @@ def optimize(
     mod = rewrite_quantized_gemms(mod, example_inputs)
     mod = move_quantization(mod, example_inputs)
     mod = pointwise_fusion(cc, fgen, mod, example_inputs)
-    # TODO: should we re-trace here to inline?  or will inductor handle it?
+    # TODO: should we re-trace here to inline?
     # mod = inline_submodules(mod)
     return mod
 
@@ -134,19 +147,6 @@ def backend_compile(gm: torch.fx.GraphModule,
     return gm.forward
 
 
-def node_in_module(n: torch.fx.Node, m: torch.fx.GraphModule) -> bool:
-    # Note: this doesn't work: return n.graph.owning_module == m
-    # Names should be unique, so this is ok
-    return n.name in [nn.name for nn in m.graph.nodes]
-
-
-def module_in_partitions(parts: List[Partition],
-                         m: torch.fx.GraphModule) -> bool:
-    for p in parts:
-        if node_in_module(next(iter(p.nodes)), m):
-            return True
-    return False
-
 #torch._dynamo.config.accumulated_cache_size_limit = 128
 
 graph_counter = 0
@@ -176,20 +176,15 @@ class backend_class:
 
         tag_side_effects(gm.graph)
 
+        # Not strictly necessary
         gm.graph.eliminate_dead_code()
 
         # TODO: store these in the root module state dictionary so that code for
         # all sub-modules is shared?  Or should these be globals?
         fgen = FusedOpGenerator()
 
+        # Annotate all nodes with types and shapes.
         ShapeProp(gm).propagate(*example_inputs)
-
-        # Get the current FakeTensorMode (there should be one since we are in
-        # a backend).
-        fake_mode = torch._guards.detect_fake_mode()
-
-        # There should be an existing fake_mode but double check.
-        assert fake_mode is not None
 
         gm = optimize(backend_class.cc, fgen, gm, example_inputs)
 

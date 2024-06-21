@@ -11,8 +11,6 @@ import torch
 import torch.utils.cpp_extension
 import types
 
-import pprint
-
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -121,7 +119,7 @@ def extract_node_type(n: torch.fx.Node):
     else:
         return None
 
-
+# Find class for method called by node.
 def call_method_class(node: torch.fx.Node):  # -> Type:
     assert node.op == 'call_method'
     ex_val = node.args[0].meta.get('example_value')
@@ -455,7 +453,6 @@ class FlowGraph:
 
         print(f"topo'd graph\n {graph_print_tabular(new_g)}")
 
-
     def visit(self, fn: Callable):
         q = self.inputs
         visited = set()
@@ -498,8 +495,6 @@ class SubGraph:
         inputs = []
         outputs = []
 
-        # Note: this will include Node kwargs
-        #all_input_nodes, all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
         all_input_nodes, all_node_users = self.all_input_nodes, self.all_node_users
 
         for n in self.nodes:
@@ -521,8 +516,6 @@ class SubGraph:
         in_degree = dict()
         worklist: collections.deque = collections.deque()
 
-        #all_input_nodes, all_node_users = gather_all_input_nodes(self.module.graph.nodes, False)
-        #all_input_nodes, all_node_users = self.all_input_nodes, self.all_node_users
         all_input_nodes, all_node_users = self.all_renamed_input_nodes, self.all_renamed_node_users
 
         for n in self.nodes:
@@ -712,6 +705,8 @@ def add_uses_for_mutable_inputs(g: torch.fx.Graph):
                                 uses[nth_arg].add(n)
 
 
+# Find all in-place functions in the graph and tag them as "impure" so
+# fx eliminate_dead_code() and other utilities will not delete them.
 def tag_side_effects(g: torch.fx.Graph):
     for n in g.nodes:
         if n.op != 'call_function':

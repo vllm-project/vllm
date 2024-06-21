@@ -1,24 +1,10 @@
-import copy
 import torch
-import unittest.mock
 
-from .utils import ModuleInputGenerator, graph_print_tabular, is_call, call_method_class, node_function_target
-
-from torch._dynamo import register_backend, lookup_backend
-from torch.fx.passes.operator_support import create_op_support
-from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner, Partition
-from torch.fx.passes.tools_common import get_node_target
-from torch.fx.passes.shape_prop import ShapeProp
-from torch.fx.subgraph_rewriter import replace_pattern, replace_pattern_with_filters
-from torch.fx import subgraph_rewriter #symbolic_trace
-from torch.fx.passes.utils.matcher_utils import SubgraphMatcher, InternalMatch
-from torch.fx.passes.utils.matcher_with_name_node_map_utils import SubgraphMatcherWithNameNodeMap
-from torch._subclasses.fake_tensor import FakeTensorMode, FakeTensor
+from .utils import graph_print_tabular, is_call, call_method_class, node_function_target
 
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set, Type, Union
 
 from vllm.logger import init_logger
-from vllm import _custom_ops as custom_ops
 
 import traceback
 

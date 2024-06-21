@@ -35,10 +35,13 @@ class CodeCache:
                          generator: Callable) -> Optional[Callable]:
         if self.disable or not mangled_name in self.cache:
             try:
+                logger.debug(f"generating code for {mangled_name}")
                 self.cache[mangled_name] = generator()
             except Exception as ex:
                 self.cache[mangled_name] = None
                 raise ex
+        else:
+            logger.debug(f"cache hit for {mangled_name}")
         return self.cache[mangled_name]
 
     """

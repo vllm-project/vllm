@@ -4,9 +4,6 @@ import unittest.mock
 
 from .utils import ModuleInputGenerator, graph_print_tabular, is_call, call_method_class
 
-from torch._dynamo import register_backend, lookup_backend
-from torch.fx.passes.operator_support import create_op_support
-from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner, Partition
 from torch.fx.passes.tools_common import get_node_target
 from torch.fx.passes.shape_prop import ShapeProp
 from torch.fx.subgraph_rewriter import replace_pattern, replace_pattern_with_filters

@@ -186,6 +186,8 @@ class FusedOpGenerator:
 
         return call_str
 
+    # Find last use sites of all Tensor values so they can be cleaned up as
+    # early as possible.
     def last_uses(
         self, nodes: List[torch.fx.Node]
     ) -> Dict[torch.fx.Node, List[torch.fx.Node]]:
@@ -208,6 +210,7 @@ class FusedOpGenerator:
 
         return user_to_last_uses
 
+    # Generate code to delete any Tensors that are no longer needed.
     def delete_unused_values(self, user_to_last_uses,
                              user: torch.fx.Node,
                              outputs: List[torch.fx.Node]) -> str:
@@ -230,7 +233,7 @@ class FusedOpGenerator:
                 n.name, '_') + " = torch::Tensor();"
         return to_delete_str
 
-
+    # Get the schema or C++ type for a fused op argument.
     def arg_schema_type(self, n: torch.fx.Node, add_prefix: bool = False) -> str:
         if n.type is not None:
             ty = n.type.__name__
@@ -246,14 +249,14 @@ class FusedOpGenerator:
 
     # Generate naive C++/CUDA code for a stack of fused ops.
     #
-    # TODO:
+    # TODO
     # - handle kwargs
     #
     # See https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit?pli=1#heading=h.rmcmku6fe6ug
     #
-    # Note: node.meta['tensor_meta'] will have shape and dtype fields
-    #
-    # TODO: can this be called from multiple threads/workers?????????
+    # Notes:
+    # - node.meta['tensor_meta'] will have shape and dtype fields
+    # - Can be called from multiple threads/workers.
     #
     def make_fused_op(
         self, inputs: List[torch.fx.Node], outputs: List[torch.fx.Node],
@@ -278,6 +281,7 @@ class FusedOpGenerator:
         arg_types = [f"{self.arg_schema_type(inp, True)}" for inp in inputs]
         logger.debug(f"fused op argument types: {arg_types}")
         for i, n in enumerate(inputs):
+            # Don't use const refs here so inputs can be deleted when no longer needed.
             #cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]} const& {n}"
             cxx_arg_sig = cxx_arg_sig + sep + f"{arg_types[i]}& {n}"
             sep = ", "
@@ -292,7 +296,9 @@ class FusedOpGenerator:
         else:
             self.fused_op.append(f'std::tuple<{", ".join(["torch::Tensor" for output in outputs])}> {op}({cxx_arg_sig})')
         self.fused_op.append('{')
-        #self.fused_op.append('  pybind11::gil_scoped_acquire gil_lock;')  # try to get rid of pybind dependency
+
+        # pybind only needed for non-simple slices.
+        #self.fused_op.append('  pybind11::gil_scoped_acquire gil_lock;')
 
         # TODO: this debug logging/print is a hack, remove it later.
         #if _default_handler.level == logging.DEBUG:
@@ -342,6 +348,7 @@ class FusedOpGenerator:
 
                     dtype = n.kwargs.get('dtype')
                     device = n.kwargs.get('device')
+                    # TBD layout + mem_format
                     #layout = n.kwargs.get('layout')
                     #mem_format = n.kwargs.get('memory_format')
 
@@ -378,6 +385,7 @@ class FusedOpGenerator:
         self.fused_op.append(
             f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, CUDA, m) {oc} m.impl("{op}", &{op}); {cc}'
         )
+
         # For now, generate the meta function via 'generate_meta_function' even though this version is probably
         # more robust.
         #self.fused_op.append(f'TORCH_LIBRARY_IMPL_EXPAND(fused_ops{self.N}, Meta, m) {oc} m.impl("{op}", &{op}); {cc}')
@@ -399,7 +407,6 @@ class FusedOpGenerator:
         sep = f"("
         arg_sig = ""
         for i, n in enumerate(inputs):
-            # TODO: the Tensor default here is sketchy
             arg_type = self.mangle(self.arg_schema_type(n), '::')
             arg_name = self.mangle(n.name, '_')
             arg_sig = arg_sig + sep + f"{arg_type} {arg_name}"
@@ -413,7 +420,6 @@ class FusedOpGenerator:
         sep = "(" if len(outputs) != 1 else ""
 
         for i, n in enumerate(outputs):
-            # TODO: the Tensor default here is sketchy
             arg_type = self.mangle(self.arg_schema_type(n), '::')
             arg_sig = arg_sig + sep + arg_type
             sep = ", "
@@ -471,7 +477,7 @@ class FusedOpGenerator:
                     prefix=self.filename,
                     suffix=".cpp",
                     mode='w',
-                    delete=False,  # TODO: True
+                    delete=False,  # TODO: True to delete tmp files
             ) as out:
                 logger.info(f"generating code to: {out.name}")
                 for l in self.fused_op:
