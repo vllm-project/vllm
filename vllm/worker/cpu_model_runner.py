@@ -61,6 +61,7 @@ class CPUModelRunner:
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
+            "cpu",
         )
 
         # Lazy initialization.
@@ -344,3 +345,7 @@ class CPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
         return output
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()

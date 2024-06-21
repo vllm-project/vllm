@@ -91,6 +91,7 @@ class EngineArgs:
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
+    cpu_draft_worker: Optional[bool] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -520,6 +521,11 @@ class EngineArgs:
             help='Min size of window for ngram prompt lookup in speculative '
             'decoding.')
 
+        parser.add_argument('--cpu_draft_worker',
+                            type=bool,
+                            default=EngineArgs.cpu_draft_worker,
+                            help='Run draft model on CPU.')
+
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
                             default=EngineArgs.model_loader_extra_config,
@@ -598,6 +604,7 @@ class EngineArgs:
             use_v2_block_manager=self.use_v2_block_manager,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
+            cpu_draft_worker=self.cpu_draft_worker,
         )
 
         scheduler_config = SchedulerConfig(

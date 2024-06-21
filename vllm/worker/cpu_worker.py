@@ -7,7 +7,7 @@ import torch.distributed
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         SpeculativeConfig, VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -61,6 +61,7 @@ class CPUCacheEngine:
             self.model_config.dtype,
             cache_config.cache_dtype,
             self.block_size,
+            "cpu",
         )
 
         # Initialize the cache.
@@ -133,6 +134,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
+        speculative_config: Optional[SpeculativeConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -146,6 +148,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.vision_language_config = vision_language_config
+        self.speculative_config = speculative_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -171,12 +174,21 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.cpu_cache: List[torch.Tensor]
 
     def init_device(self) -> None:
+        self.device = torch.device("cpu")
         self.init_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
         self.model_runner.load_model()
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_runner.vocab_size
+
+    @property
+    def max_model_len(self) -> int:
+        return self.model_config.max_model_len
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of blocks available for the KV cache.
@@ -202,8 +214,11 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         num_cpu_blocks = 0
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(
+        self,
+        num_gpu_blocks: int,
+        num_cpu_blocks: int,
+    ) -> None:
         """Initialize the KV cache. Currently, swappable CPU memory is not
         supported.
 

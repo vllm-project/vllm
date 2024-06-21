@@ -163,9 +163,8 @@ class UsageMessage:
         ])
 
         # vLLM information
-        import vllm  # delayed import to prevent circular import
         self.context = usage_context.value
-        self.vllm_version = vllm.__version__
+        #self.vllm_version = vllm.__version__
         self.model_architecture = model_architecture
 
         # Metadata

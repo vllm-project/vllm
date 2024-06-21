@@ -6,7 +6,6 @@ from typing import Type, TypeVar, Union
 
 from transformers import GenerationConfig, PreTrainedTokenizer
 
-import vllm
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig,
@@ -169,7 +168,7 @@ class LLMEngine:
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, seed=%d, served_model_name=%s)",
-            vllm.__version__,
+            #vllm.__version__,
             model_config.model,
             speculative_config,
             model_config.tokenizer,
@@ -308,8 +307,14 @@ class LLMEngine:
         The workers will determine the number of blocks in both the GPU cache
         and the swap CPU cache.
         """
-        num_gpu_blocks, num_cpu_blocks = (
-            self.model_executor.determine_num_available_blocks())
+
+        num_blocks = self.model_executor.determine_num_available_blocks()
+
+        num_gpu_blocks, num_cpu_blocks = num_blocks[0], num_blocks[1]
+        draft_num_gpu_blocks, draft_num_cpu_blocks = None, None
+        if len(num_blocks) == 4:
+            draft_num_gpu_blocks, draft_num_cpu_blocks = num_blocks[
+                2], num_blocks[3]
 
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
@@ -322,7 +327,15 @@ class LLMEngine:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        # Spec decode executor takes more parameters.
+        if draft_num_gpu_blocks or draft_num_cpu_blocks:
+            self.model_executor.initialize_cache(num_gpu_blocks,
+                                                 num_cpu_blocks,
+                                                 draft_num_gpu_blocks,
+                                                 draft_num_cpu_blocks)
+        else:
+            self.model_executor.initialize_cache(num_gpu_blocks,
+                                                 num_cpu_blocks)
 
     @classmethod
     def from_engine_args(

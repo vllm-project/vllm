@@ -97,6 +97,8 @@ class RejectionSampler(nn.Module):
                 was rejected.
             shape = [batch_size, num_speculative_tokens + num_bonus_tokens]
         """
+        draft_probs = draft_probs.to(target_probs.device)
+        draft_token_ids = draft_token_ids.to(target_probs.device)
         # Only perform shape/dtype/device checking in strict mode, as it adds
         # overhead.
         if self._strict_mode:
