@@ -254,7 +254,7 @@ template <typename Gemm, typename FallbackGemm, typename... EpilogueArgs>
 void fallback_cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
                                   torch::Tensor const& b,
                                   EpilogueArgs&&... args) {
-  // In some cases, the GPU isn't able to accomodate the
+  // In some cases, the GPU isn't able to accommodate the
   // shared memory requirements of the Gemm. In such cases, use
   // the FallbackGemm instead.
   static const int max_shared_mem_per_block_opt_in =
