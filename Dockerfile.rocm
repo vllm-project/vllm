@@ -49,6 +49,9 @@ ARG APP_MOUNT=/vllm-workspace
 WORKDIR ${APP_MOUNT}
 
 RUN pip install --upgrade pip
+# Remove sccache so it doesn't interfere with ccache
+# TODO: implement sccache support across components
+RUN apt-get purge -y sccache; pip uninstall -y sccache && rm -rf "$(which sccache)"
 # Install torch == 2.4.0 on ROCm
 RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-5.7"*) \
