@@ -23,8 +23,10 @@ class ShmRingBuffer:
                  name: Optional[str] = None):
         """
         A shared memory ring buffer implementation for broadcast communication.
-        It is optimized for the case where there is one writer and multiple
-         readers. In this case, we don't need to synchronize the access to
+        Essentially, it is a queue where only one will `enqueue` and multiple
+        will `dequeue`. The max size of each item, together with the max number
+        of items that can be stored in the buffer are known in advance.
+        In this case, we don't need to synchronize the access to
          the buffer.
         
         Buffer memory layout:
@@ -36,6 +38,12 @@ class ShmRingBuffer:
         | chunk0 | chunk1 | ... | chunk | metadata0 | metadata1 | ... | metadata |
         +-------------------------------+----------------------------------------+
         | max_chunks x max_chunk_bytes  | max_chunks x (1 + n_reader) bytes      |
+
+        metadata memory layout: each byte is a flag, the first byte is the written
+        flag, and the rest are reader flags. The flags are set to 0 by default.
+        +--------------+--------------+--------------+-----+--------------+
+        | written_flag | reader0_flag | reader1_flag | ... | readerN_flag |
+        +--------------+--------------+--------------+-----+--------------+
 
         During creation, `name` is None and the buffer is created. We can pass the
         created object to other processes by pickling it. The other processes will
