@@ -4,7 +4,8 @@ import time
 
 import torch.distributed as dist
 
-from vllm.distributed.device_communicators.msg_queue import PublishSubscribeMsgQueue
+from vllm.distributed.device_communicators.msg_queue import (
+    Publisher, PublishSubscribeMsgQueue)
 from vllm.utils import update_environment_variables
 
 
@@ -67,5 +68,42 @@ def worker_fn():
     dist.barrier()
 
 
-def test_shm_broadcast():
+def test_mq_broadcast():
     distributed_run(worker_fn, 4)
+
+
+def subscriber(n_reader, reader_rank, handle):
+    queue = PublishSubscribeMsgQueue(n_reader, reader_rank, handle)
+    queue.wait_for_ready()
+    time.sleep(random.random())
+    a = queue.broadcast_object(None)
+    time.sleep(random.random())
+    b = queue.broadcast_object(None)
+    time.sleep(random.random())
+    c = queue.broadcast_object(None)
+    assert a == 0
+    assert b == {}
+    assert c == []
+
+
+def test_simple_multiprocessing():
+    n_reader = 3
+    publisher = Publisher(n_reader)
+    handle = publisher.handle
+    queue = PublishSubscribeMsgQueue(n_reader, -1, publisher)
+    context = multiprocessing.get_context("spawn")
+    ps = []
+    for i in range(n_reader):
+        p = context.Process(target=subscriber, args=(n_reader, i, handle))
+        p.start()
+        ps.append(p)
+    queue.wait_for_ready()
+    time.sleep(random.random())
+    queue.broadcast_object(0)
+    time.sleep(random.random())
+    queue.broadcast_object({})
+    time.sleep(random.random())
+    queue.broadcast_object([])
+    for p in ps:
+        p.join()
+        assert p.exitcode == 0

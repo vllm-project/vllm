@@ -1,8 +1,11 @@
-from zmq import Context, PUB, SUB, REQ, REP, SNDHWM, RCVHWM, SUBSCRIBE  # type: ignore
-from vllm.utils import get_open_port, get_ip
 import pickle
+
 from torch import distributed as dist
 from torch.distributed import ProcessGroup
+from zmq import (PUB, RCVHWM, REP, REQ, SNDHWM, SUB, SUBSCRIBE,  # type: ignore
+                 Context)
+
+from vllm.utils import get_ip, get_open_port
 
 
 class Publisher:
