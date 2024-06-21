@@ -61,9 +61,9 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     def _patch_tensor_parallel_group(self):
         """Temporarily patch the global tp group state with its own tp group
         state. For consistency, it also updates the world group state.
-        Note that it has no effect when its tp group has not been initialized.
+        Note that it has no effect when draft_ranks is None.
         """
-        if self._tp_group is None:
+        if self._draft_ranks is None:
             yield
         else:
             return patch_tensor_parallel_group(self._world_group, self._tp_group)

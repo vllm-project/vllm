@@ -695,32 +695,27 @@ def patch_tensor_parallel_group(world_group: GroupCoordinator,
                                 tp_group: GroupCoordinator):
     """Patch the tp group temporarily until this function ends.
     It requires the world group to be patched together to keep the integrity.
-    If either world_group or tp_group is None, nothing happens.
-
-    Also it does not allow additional patch during patching, otherwise the
-    original state, which should be restored, will be lost.
 
     Args:
-        world_group (Optional[GroupCoordinator]): the world group coordinator
-        tp_group (Optional[GroupCoordinator]): the tp group coordinator
+        world_group (GroupCoordinator): the world group coordinator
+        tp_group (GroupCoordinator): the tp group coordinator
     """
     global TP_STATE_PATCHED
     assert not TP_STATE_PATCHED, "Should not call when it's already patched"
-    if not TP_STATE_PATCHED:
-        TP_STATE_PATCHED = True
-        old_world_group = get_world_group()
-        old_tp_group = get_tp_group()
-        global _WORLD, _TP
-        _WORLD = world_group
-        _TP = tp_group
+
+    TP_STATE_PATCHED = True
+    old_world_group = get_world_group()
+    old_tp_group = get_tp_group()
+    global _WORLD, _TP
+    _WORLD = world_group
+    _TP = tp_group
     try:
         yield
     finally:
         # restore the original state
-        if TP_STATE_PATCHED:
-            TP_STATE_PATCHED = False
-            _WORLD = old_world_group
-            _TP = old_tp_group
+        TP_STATE_PATCHED = False
+        _WORLD = old_world_group
+        _TP = old_tp_group
 
 
 def get_tensor_model_parallel_world_size():
