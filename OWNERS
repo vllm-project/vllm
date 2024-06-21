@@ -1,20 +1,17 @@
 approvers:
-  - danielezonca
   - dtrifiro
   - heyselbi
-  - israel-hdez
-  - Jooho
   - rpancham
-  - spolti
+  - RH-steve-grubb
   - terrytangyuan
   - vaibhavjainwiz
-  - VedantMahabaleshwarkar
   - Xaenalt
   - z103cb
 reviewers:
   - dtrifiro
   - heyselbi
   - rpancham
+  - RH-steve-grubb
   - terrytangyuan
   - vaibhavjainwiz
   - Xaenalt
