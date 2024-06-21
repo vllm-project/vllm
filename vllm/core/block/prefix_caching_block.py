@@ -62,6 +62,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block_ids: Optional[Iterable[int]] = None,
         eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
     ):
+        self._block_size = block_size
+
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash will be in this dict, even if they have refcount 0.
         self._cached_blocks: Dict[PrefixHash, BlockId] = {}
@@ -75,8 +77,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # The "* extra_factor" is a buffer to allow more block objects
         # than physical blocks
         extra_factor = 4
-        self._block_pool = BlockPool(self._create_block, self,
-                                     num_blocks * extra_factor)
+        self._block_pool = BlockPool(self._block_size, self._create_block,
+                                     self, num_blocks * extra_factor)
 
         # An allocator for blocks that do not have prefix hashes.
         self._hashless_allocator = NaiveBlockAllocator(
@@ -86,8 +88,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block_ids=block_ids,
             block_pool=self._block_pool,
         )
-
-        self._block_size = block_size
 
         # Evitor used to maintain how we want to handle those computed blocks
         # if we find memory pressure is high.
@@ -677,10 +677,6 @@ class PrefixCachingBlock(Block):
     @computed.setter
     def computed(self, value) -> None:
         self._computed = value
-
-    @property
-    def allocator(self) -> BlockAllocator:
-        return self._allocator
 
     @property
     def last_accessed(self) -> float:

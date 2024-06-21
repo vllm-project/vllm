@@ -62,11 +62,6 @@ class Block(ABC):
 
     @property
     @abstractmethod
-    def allocator(self) -> "BlockAllocator":
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
     def last_accessed(self) -> float:
         raise NotImplementedError
 

@@ -19,8 +19,9 @@ Refcount = int
 # prefix caching and more complicated sharing of physical blocks.
 class BlockPool:
 
-    def __init__(self, create_block: Block.Factory, allocator: BlockAllocator,
-                 pool_size: int):
+    def __init__(self, block_size: int, create_block: Block.Factory,
+                 allocator: BlockAllocator, pool_size: int):
+        self._block_size = block_size
         self._create_block = create_block
         self._allocator = allocator
         self._pool_size = pool_size
@@ -32,7 +33,7 @@ class BlockPool:
             self._pool.append(
                 self._create_block(prev_block=None,
                                    token_ids=None,
-                                   block_size=0,
+                                   block_size=self._block_size,
                                    allocator=self._allocator,
                                    block_id=None))
 
@@ -47,7 +48,7 @@ class BlockPool:
             self._pool.append(
                 self._create_block(prev_block=None,
                                    token_ids=None,
-                                   block_size=0,
+                                   block_size=self._block_size,
                                    allocator=self._allocator,
                                    block_id=None))
 
@@ -65,7 +66,7 @@ class BlockPool:
             prev_block=prev_block,
             token_ids=token_ids,
             block_size=block_size,
-            allocator=block.allocator,  # Was init before
+            allocator=block._allocator,  # type: ignore[attr-defined] 
             block_id=physical_block_id)
         block.pool_id = pool_id  # type: ignore[attr-defined]
         return block
@@ -120,7 +121,7 @@ class NaiveBlockAllocator(BlockAllocator):
             # Pre-allocate "num_blocks * extra_factor" block objects.
             # The "* extra_factor" is a buffer to allow more block objects
             # than physical blocks
-            self._block_pool = BlockPool(create_block, self,
+            self._block_pool = BlockPool(self._block_size, create_block, self,
                                          num_blocks * extra_factor)
         else:
             # In this case, the block pool is provided by the caller,
@@ -245,7 +246,7 @@ class NaiveBlockAllocator(BlockAllocator):
         self._refcounter.incr(block_id)
         return block_id
 
-    def _allocate_new_block_ids(self, num_blocks) -> List[BlockId]:
+    def _allocate_new_block_ids(self, num_blocks: int) -> List[BlockId]:
         block_ids = []
         for i in range(num_blocks):
             block_ids.append(self._allocate_new_block_id())
@@ -469,10 +470,6 @@ class NaiveBlock(Block):
     @computed.setter
     def computed(self, value) -> None:
         raise NotImplementedError
-
-    @property
-    def allocator(self) -> BlockAllocator:
-        return self._allocator
 
     @property
     def last_accessed(self) -> float:

@@ -145,7 +145,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
         Returns:
             List[Block]: The newly allocated list of immutable blocks 
-                containing the providedblock token IDs.
+                containing the provided block token IDs.
         """
         return self._allocators[device].allocate_immutable_blocks(
             prev_block, block_token_ids)
@@ -397,10 +397,6 @@ class NullBlock(Block):
     @computed.setter
     def computed(self, value):
         self._proxy.computed = value
-
-    @property
-    def allocator(self):
-        return self._proxy.allocator
 
     @property
     def last_accessed(self) -> float:
