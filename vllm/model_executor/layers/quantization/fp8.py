@@ -9,6 +9,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N, GPTQMarlinState,
+    marlin_permute_scales)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import print_warning_once
 
@@ -51,7 +54,7 @@ class Fp8Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        return 80
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -100,6 +103,10 @@ class Fp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
+
+        capability = torch.cuda.get_device_capability()
+        capability = capability[0] * 10 + capability[1]
+        self.use_marlin = capability < 89
 
     def _create_scale_param(
         self,
@@ -167,6 +174,11 @@ class Fp8LinearMethod(LinearMethodBase):
                     layer=layer,
                     output_partition_sizes=output_partition_sizes,
                     **extra_weight_attrs)
+
+        # For GPUs without FP8 hardware support, we use Marlin for fast
+        # fused dequantization
+        if self.use_marlin:
+            layer.marlin_state = GPTQMarlinState.REPACK
 
     def scales_shard_indexer(
             self, param: torch.Tensor, loaded_weight: torch.Tensor,
@@ -242,39 +254,162 @@ class Fp8LinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        # ops.scaled_fp8_quant supports both dynamic and static quant.
-        #   If dynamic, layer.input_scale is None and x_scale computed from x.
-        #   If static, layer.input_scale is scalar and x_scale is input_scale.
+        if self.use_marlin:
+            reshaped_x = x.reshape(-1, x.shape[-1])
 
-        if bias is None and self.cutlass_fp8_supported:
-            qinput, x_scale = ops.scaled_fp8_quant(x, layer.input_scale)
+            size_m = reshaped_x.shape[0]
+            part_size_n = layer.output_size_per_partition
+            part_size_k = layer.input_size_per_partition
 
-            # Fused GEMM_DQ
-            output = ops.cutlass_scaled_mm(
-                qinput,
+            out_shape = x.shape[:-1] + (part_size_n, )
+
+            if layer.marlin_state == GPTQMarlinState.REPACK:
+                print("REPACK")
+                layer.marlin_state = GPTQMarlinState.READY
+
+                # Newly generated tensors need to replace existing tensors that
+                # are already registered as parameters by vLLM
+                def replace_tensor(name, new_t):
+                    # It is important to use resize_() here since it ensures
+                    # the same buffer is reused
+                    getattr(layer, name).resize_(new_t.shape)
+                    getattr(layer, name).copy_(new_t)
+                    del new_t
+
+                device = layer.weight.device
+
+                # NO ACT ORDER
+                # Reset g_idx related tensors
+                layer.g_idx = Parameter(
+                    torch.empty(0, dtype=torch.int, device=device),
+                    requires_grad=False,
+                )
+                layer.g_idx_sort_indices = Parameter(
+                    torch.empty(0, dtype=torch.int, device=device),
+                    requires_grad=False,
+                )
+
+                # FP8 is always 8 bits
+                weight_bits = 8
+
+                # WEIGHTS
+                # Repack weights to gptq format (packed int32 elements)
+                original_fp8_weights = layer.weight
+                original_weight_shape = original_fp8_weights.shape
+                # View the tensor as uint8 to access the raw bits
+                tensor_uint8 = original_fp8_weights.view(torch.uint8)
+                # Reshape to group every four elements together, with padding
+                num_elements = tensor_uint8.numel()
+                padded_size = (num_elements + 3) // 4 * 4
+                # Pad the tensor to ensure it is a multiple of 4
+                tensor_padded = torch.nn.functional.pad(
+                    tensor_uint8, (0, padded_size - num_elements))
+                # Reshape the padded tensor to (N, 4)
+                tensor_reshaped = tensor_padded.view(-1, 4)
+                # Pack the 4 uint8 values into 1 int32
+                tensor_packed = (
+                    tensor_reshaped[:, 0].to(torch.int32) & 0xFF
+                ) | ((tensor_reshaped[:, 1].to(torch.int32) & 0xFF) << 8) | (
+                    (tensor_reshaped[:, 2].to(torch.int32) & 0xFF) << 16) | (
+                        (tensor_reshaped[:, 3].to(torch.int32) & 0xFF) << 24)
+                # Reshape the packed tensor back to the desired shape
+                tensor_packed = tensor_packed.view(original_weight_shape[0],
+                                                   -1)
+
+                # Repack weights to marlin format
+                marlin_qweight = ops.gptq_marlin_repack(
+                    tensor_packed,
+                    layer.g_idx_sort_indices,
+                    part_size_k,
+                    part_size_n,
+                    weight_bits,
+                )
+                replace_tensor("weight", marlin_qweight)
+
+                # WEIGHT SCALES
+                # Currently Marlin doesn't support per-tensor scales, so we
+                # expand it to channelwise
+                scales_size_k = part_size_k
+                scales_size_n = part_size_n
+                scales = layer.weight_scale.repeat(1, scales_size_n)
+                # Permute scales
+                group_size = -1
+                marlin_scales = marlin_permute_scales(
+                    scales,
+                    scales_size_k,
+                    scales_size_n,
+                    group_size,
+                    weight_bits,
+                )
+                replace_tensor("weight_scale", marlin_scales)
+
+                # Allocate marlin workspace
+                max_workspace_size = (part_size_n // GPTQ_MARLIN_MIN_THREAD_N
+                                      ) * GPTQ_MARLIN_MAX_PARALLEL
+                workspace = torch.zeros(max_workspace_size,
+                                        dtype=torch.int,
+                                        requires_grad=False)
+
+                layer.workspace = workspace
+                # K is always full due to full alignment with
+                # group-size and shard of scales/zp
+                layer.is_k_full = True
+
+            print("MARLIN FP8")
+            output = ops.fp8_marlin_gemm(
+                reshaped_x,
                 layer.weight,
-                out_dtype=x.dtype,
-                scale_a=x_scale,
-                scale_b=layer.weight_scale,
+                layer.scales,
+                layer.g_idx,
+                layer.g_idx_sort_indices,
+                layer.workspace,
+                weight_bits,
+                size_m,
+                part_size_n,
+                part_size_k,
+                layer.is_k_full,
             )
+
+            if bias is not None:
+                output.add_(bias)  # In-place add
+
+            return output.reshape(out_shape)
 
         else:
-            qinput, x_scale = ops.scaled_fp8_quant(x,
-                                                   layer.input_scale,
-                                                   batch_dim_padding=17)
 
-            # Fused GEMM_DQ -- note we padded the input above because
-            # torch._scaled_mm is more performant for matrices with
-            # batch dimension > 16. Note that this could change
-            # in the future.
-            output, _ = torch._scaled_mm(
-                qinput,
-                layer.weight,
-                out_dtype=x.dtype,
-                scale_a=x_scale,
-                scale_b=layer.weight_scale,
-                bias=bias,
-            )
+            # ops.scaled_fp8_quant supports both dynamic and static quant.
+            # If dynamic, layer.input_scale is None and x_scale computed from x
+            # If static, layer.input_scale is scalar and x_scale is input_scale
+
+            if bias is None and self.cutlass_fp8_supported:
+                qinput, x_scale = ops.scaled_fp8_quant(x, layer.input_scale)
+
+                # Fused GEMM_DQ
+                output = ops.cutlass_scaled_mm(
+                    qinput,
+                    layer.weight,
+                    out_dtype=x.dtype,
+                    scale_a=x_scale,
+                    scale_b=layer.weight_scale,
+                )
+
+            else:
+                qinput, x_scale = ops.scaled_fp8_quant(x,
+                                                       layer.input_scale,
+                                                       batch_dim_padding=17)
+
+                # Fused GEMM_DQ -- note we padded the input above because
+                # torch._scaled_mm is more performant for matrices with
+                # batch dimension > 16. Note that this could change
+                # in the future.
+                output, _ = torch._scaled_mm(
+                    qinput,
+                    layer.weight,
+                    out_dtype=x.dtype,
+                    scale_a=x_scale,
+                    scale_b=layer.weight_scale,
+                    bias=bias,
+                )
 
         return torch.narrow(output, 0, 0, x.shape[0])
 
