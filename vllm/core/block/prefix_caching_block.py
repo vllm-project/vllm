@@ -20,23 +20,23 @@ _DEFAULT_LAST_ACCESSED_TIME = -1
 
 
 class BlockTracker:
-    __slots__ = ("active", "last_access", "computed")
+    __slots__ = ("active", "last_accessed", "computed")
 
     def __init__(self):
         self.active: bool = False
-        self.last_access: float = _DEFAULT_LAST_ACCESSED_TIME
+        self.last_accessed: float = _DEFAULT_LAST_ACCESSED_TIME
         self.computed: bool = False
 
     def enable(self):
         assert not self.active
         self.active = True
-        self.last_access = _DEFAULT_LAST_ACCESSED_TIME
+        self.last_accessed = _DEFAULT_LAST_ACCESSED_TIME
         self.computed = False
 
     def disable(self):
         assert self.active
         self.active = False
-        self.last_access = _DEFAULT_LAST_ACCESSED_TIME
+        self.last_accessed = _DEFAULT_LAST_ACCESSED_TIME
         self.computed = False
 
 
@@ -173,7 +173,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # without yet setting its state to computed
         # (It will be in computed state after it is freed)
         new_block = self.promote_to_immutable_block(block)
-        assert new_block == block # Ensure was only cached
+        assert new_block == block  # Ensure was only cached
 
         return block
 
@@ -277,13 +277,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert block.content_hash in self._cached_blocks
         assert block_id is not None
 
-        # Stop tracking the block
-        self._untrack_block_id(block_id)
-
         # Add the cached block to the evictor
         # (This keeps the cached block around so it can be reused)
         self.evictor.add(block_id, block.content_hash, block.num_token_ids,
-                         block.last_accessed)
+                         self._block_tracker[block_id].last_accessed)
+
+        # Stop tracking the block
+        self._untrack_block_id(block_id)
 
     def free(self, block: Block) -> None:
         """Decrement the refcount of the block. If the decremented refcount is
@@ -476,7 +476,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         for block_id in block_ids:
             if self._block_tracker[block_id].active:
-                self._block_tracker[block_id].last_access = now
+                self._block_tracker[block_id].last_accessed = now
             elif block_id in self.evictor:
                 self.evictor.update(block_id, now)
             else:
