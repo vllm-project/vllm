@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import copy
 import weakref
 from typing import Dict, List, Optional, Tuple
@@ -56,12 +57,16 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
+    @contextmanager
     def _patch_tensor_parallel_group(self):
         """Temporarily patch the global tp group state with its own tp group
         state. For consistency, it also updates the world group state.
         Note that it has no effect when its tp group has not been initialized.
         """
-        return patch_tensor_parallel_group(self._world_group, self._tp_group)
+        if self._tp_group is None:
+            yield
+        else:
+            return patch_tensor_parallel_group(self._world_group, self._tp_group)
 
     def init_device(self):
         if self._is_dummy:

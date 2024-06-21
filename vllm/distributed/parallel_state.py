@@ -690,9 +690,9 @@ def model_parallel_is_initialized():
 TP_STATE_PATCHED = False
 
 
-@contextlib.contextmanager
-def patch_tensor_parallel_group(world_group: Optional[GroupCoordinator],
-                                tp_group: Optional[GroupCoordinator]):
+@contextmanager
+def patch_tensor_parallel_group(world_group: GroupCoordinator,
+                                tp_group: GroupCoordinator):
     """Patch the tp group temporarily until this function ends.
     It requires the world group to be patched together to keep the integrity.
     If either world_group or tp_group is None, nothing happens.
@@ -705,8 +705,8 @@ def patch_tensor_parallel_group(world_group: Optional[GroupCoordinator],
         tp_group (Optional[GroupCoordinator]): the tp group coordinator
     """
     global TP_STATE_PATCHED
-    if (not TP_STATE_PATCHED and world_group is not None
-            and tp_group is not None):
+    assert not TP_STATE_PATCHED, "Should not call when it's already patched"
+    if not TP_STATE_PATCHED:
         TP_STATE_PATCHED = True
         old_world_group = get_world_group()
         old_tp_group = get_tp_group()
