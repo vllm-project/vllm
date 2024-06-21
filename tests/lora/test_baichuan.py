@@ -64,7 +64,8 @@ def test_baichuan_lora(baichuan_lora_files):
 
 
 @pytest.mark.skip("Requires multiple GPUs")
-def test_baichuan_tensor_parallel_equality(baichuan_lora_files):
+@pytest.mark.parametrize("fully_sharded", [True, False])
+def test_baichuan_tensor_parallel_equality(baichuan_lora_files, fully_sharded):
     # Cannot use as it will initialize torch.cuda too early...
     # if torch.cuda.device_count() < 4:
     #     pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
@@ -75,7 +76,8 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files):
                        max_loras=4,
                        max_lora_rank=64,
                        tensor_parallel_size=1,
-                       trust_remote_code=True)
+                       trust_remote_code=True,
+                       fully_sharded_loras=fully_sharded)
     output_tp1 = do_sample(llm_tp1, baichuan_lora_files, lora_id=1)
 
     del llm_tp1
@@ -87,7 +89,8 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files):
                        max_loras=4,
                        max_lora_rank=64,
                        tensor_parallel_size=2,
-                       trust_remote_code=True)
+                       trust_remote_code=True,
+                       fully_sharded_loras=fully_sharded)
     output_tp2 = do_sample(llm_tp2, baichuan_lora_files, lora_id=2)
 
     del llm_tp2
@@ -101,7 +104,8 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files):
                        max_loras=4,
                        max_lora_rank=64,
                        tensor_parallel_size=4,
-                       trust_remote_code=True)
+                       trust_remote_code=True,
+                       fully_sharded_loras=fully_sharded)
     output_tp4 = do_sample(llm_tp4, baichuan_lora_files, lora_id=2)
 
     del llm_tp4
