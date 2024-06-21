@@ -229,8 +229,8 @@ def test_cutlass_int8_azp():
     n = 1024
     k = 256
 
-    scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
-    scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
+    scale_a = torch.randn((m, 1), device="cuda", dtype=torch.float32) / 10
+    scale_b = torch.randn((1, n), device="cuda", dtype=torch.float32) / 10
 
     aq_i8 = rand_int8((m, k))
     bq_i8 = rand_int8((n, k)).t()
@@ -238,7 +238,7 @@ def test_cutlass_int8_azp():
     aq_f32 = aq_i8.to(dtype=torch.float32)
     bq_f32 = bq_i8.to(dtype=torch.float32)
 
-    azp_a = torch.rand((1, ), device="cuda", dtype=torch.float32) + 2.0
+    azp_a = torch.rand((1,), device="cuda", dtype=torch.float32) + 2.0
     a_dq = scale_a * aq_f32 + azp_a
     b_dq = scale_b * bq_f32
 
@@ -248,7 +248,7 @@ def test_cutlass_int8_azp():
     J = torch.ones((1, k), device="cuda", dtype=torch.float32)
     azp_bias = azp_a * scale_b * (J @ bq_f32).to(dtype=torch.float32)
     assert azp_bias.shape == (1, n)
-    assert azp_bias[0, :].shape == (n, )
+    assert azp_bias[0, :].shape == (n,)
 
     # baseline_q_no_azp = ops.cutlass_scaled_mm(
     #     aq_i8, bq_i8, scale_a, scale_b,
@@ -262,6 +262,7 @@ def test_cutlass_int8_azp():
                                 bias=azp_bias[0, :])
     assert torch.allclose(out, baseline_dq, rtol=1e-2, atol=1e0)
     # assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
+
 
 # Test working with a subset of A and B
 def test_cutlass_subset():
