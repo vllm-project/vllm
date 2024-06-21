@@ -1,8 +1,8 @@
 Dockerfile
 ====================
 
-See `here <https://github.com/vllm-project/vllm/blob/main/Dockerfile>`_ for the main Dockerfile to construct 
-the image for running an OpenAI compatible server with vLLM. More information about deploying with Docker can be found `here <https://docs.vllm.ai/en/stable/serving/deploying_with_docker.html>`_.
+See `here <https://github.com/vllm-project/vllm/blob/main/Dockerfile>`__ for the main Dockerfile to construct 
+the image for running an OpenAI compatible server with vLLM. More information about deploying with Docker can be found `here <https://docs.vllm.ai/en/stable/serving/deploying_with_docker.html>`__.
 
 Below is a visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:
 
