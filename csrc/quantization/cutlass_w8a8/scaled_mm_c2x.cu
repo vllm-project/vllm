@@ -367,7 +367,7 @@ void cutlass_gemm_sm80_dispatch(torch::Tensor& out, torch::Tensor const& a,
   // sm80_config_M16 has the least shared-memory requirement. However,
   // based on some profiling, we select sm80_config_M32 as a better alternative
   // performance wise.
-  using FallbackGemm = 
+  using FallbackGemm =
       typename sm80_config_M32<InType, OutType, Epilogue>::Cutlass2xGemm;
 
   uint32_t const m = a.size(0);
@@ -394,8 +394,7 @@ void cutlass_gemm_sm80_dispatch(torch::Tensor& out, torch::Tensor const& a,
                                           FallbackGemm>(
           out, a, b, std::forward<EpilogueArgs>(args)...);
     } else {
-      return fallback_cutlass_gemm_caller<Cutlass2xGemmM128BigN,
-                                          FallbackGemm>(
+      return fallback_cutlass_gemm_caller<Cutlass2xGemmM128BigN, FallbackGemm>(
           out, a, b, std::forward<EpilogueArgs>(args)...);
     }
   } else {
