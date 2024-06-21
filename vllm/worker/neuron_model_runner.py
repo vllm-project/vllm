@@ -1,4 +1,5 @@
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -10,10 +11,25 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.worker.model_input import ModelInputForNeuron
+from vllm.worker.model_input import ModelInput
 from vllm.worker.model_runner_base import ModelRunnerBase
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class ModelInputForNeuron(ModelInput):
+    """
+    Used by the NeuronModelRunner.
+    """
+    input_tokens: Optional[torch.Tensor] = None
+    input_positions: Optional[torch.Tensor] = None
+    input_block_ids: Optional[torch.Tensor] = None
+    sampling_metadata: Optional["SamplingMetadata"] = None
+
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
+        raise NotImplementedError("ModelInputForNeuron cannot be broadcast.")
 
 
 class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):

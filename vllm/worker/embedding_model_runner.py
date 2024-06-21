@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -9,10 +10,17 @@ from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
-from vllm.worker.model_input import ModelInputForGPUWithPoolingMetadata
-from vllm.worker.model_runner import GPUModelRunnerBase
+from vllm.worker.model_runner import GPUModelRunnerBase, ModelInputForGPU
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
+    """
+    Used by the EmbeddingModelRunner.
+    """
+    pooling_metadata: Optional["PoolingMetadata"] = None
 
 
 class EmbeddingModelRunner(

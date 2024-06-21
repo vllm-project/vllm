@@ -1,4 +1,5 @@
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -13,7 +14,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import CudaMemoryProfiler, make_tensor_with_pad
-from vllm.worker.model_input import ModelInputForXPU
+from vllm.worker.model_input import ModelInput
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import ModelRunnerBase
 
@@ -24,6 +25,34 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
+
+
+@dataclass(frozen=True)
+class ModelInputForXPU(ModelInput):
+    """
+    Used by the NeuronModelRunner.
+    """
+    input_tokens: Optional[torch.Tensor] = None
+    input_positions: Optional[torch.Tensor] = None
+    attn_metadata: Optional["AttentionMetadata"] = None
+    sampling_metadata: Optional["SamplingMetadata"] = None
+    multi_modal_input: Optional[Dict[str, torch.Tensor]] = None
+
+    @classmethod
+    def _get_init_kwargs(  # type: ignore
+            cls, **kwargs) -> Dict[str, Any]:
+        kwargs = cls._init_attn_metadata_from_kwargs(**kwargs)
+        kwargs = cls._init_sampling_metadata_from_kwargs(**kwargs)
+        return super()._get_init_kwargs(**kwargs)
+
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
+        tensor_dict = super().as_broadcastable_tensor_dict()
+        self._add_attn_metadata_broadcastable_dict(tensor_dict,
+                                                   self.attn_metadata)
+        self._add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                       self.sampling_metadata)
+        return tensor_dict
 
 
 class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):

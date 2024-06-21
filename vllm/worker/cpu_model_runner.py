@@ -1,5 +1,6 @@
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -14,12 +15,48 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
-from vllm.worker.model_input import CPUModelInput
+from vllm.worker.model_input import ModelInput
 from vllm.worker.model_runner_base import ModelRunnerBase
 
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
+
+
+@dataclass(frozen=True)
+class CPUModelInput(ModelInput):
+    """
+    Used by the CPUModelRunner.
+    """
+    input_tokens: Optional[torch.Tensor] = None
+    input_positions: Optional[torch.Tensor] = None
+    attn_metadata: Optional["AttentionMetadata"] = None
+    sampling_metadata: Optional["SamplingMetadata"] = None
+    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+
+    @property
+    def broadcastable_fields(self) -> Tuple[str, ...]:
+        return (
+            "input_tokens",
+            "input_positions",
+            "multi_modal_kwargs",
+        )
+
+    @classmethod
+    def _get_init_kwargs(  # type: ignore
+            cls, **kwargs) -> Dict[str, Any]:
+        kwargs = cls._init_attn_metadata_from_kwargs(**kwargs)
+        kwargs = cls._init_sampling_metadata_from_kwargs(**kwargs)
+        return super()._get_init_kwargs(**kwargs)
+
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
+        tensor_dict = super().as_broadcastable_tensor_dict()
+        self._add_attn_metadata_broadcastable_dict(tensor_dict,
+                                                   self.attn_metadata)
+        self._add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                       self.sampling_metadata)
+        return tensor_dict
 
 
 class CPUModelRunner(ModelRunnerBase[CPUModelInput]):

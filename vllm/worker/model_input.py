@@ -1,73 +1,15 @@
 """Worker-local model inputs. These define the inputs to different model
 runners."""
 import dataclasses
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
-                    TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Dict, Optional, Tuple, Type, TypeVar,
+                    Union)
 
 import torch
-
-from vllm.lora.request import LoRARequest
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
     from vllm.attention.backends.abstract import AttentionBackend
-    from vllm.lora.layers import LoRAMapping
     from vllm.model_executor import SamplingMetadata
-    from vllm.model_executor.pooling_metadata import PoolingMetadata
-
-
-def _init_attn_metadata_from_kwargs(
-        attn_backend: Optional["AttentionBackend"] = None,
-        attn_metadata: Optional["AttentionMetadata"] = None,
-        **kwargs) -> Dict[str, Any]:
-    if attn_metadata is None and attn_backend is not None:
-        # Extract the fields used to create AttentionMetadata.
-        valid_attn_kwargs = {}
-        for field in dataclasses.fields(attn_backend.get_metadata_cls()):
-            val = kwargs.pop(field.name, None)
-            if val is not None:
-                valid_attn_kwargs[field.name] = val
-
-        attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
-    if attn_metadata is not None:
-        kwargs["attn_metadata"] = attn_metadata
-    return kwargs
-
-
-def _add_attn_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Union[int, torch.Tensor]],
-        attn_metadata: Optional["AttentionMetadata"]) -> None:
-    if attn_metadata is not None:
-        tensor_dict.update(attn_metadata.asdict_zerocopy())
-
-
-def _init_sampling_metadata_from_kwargs(  # type: ignore
-        selected_token_indices: Optional[torch.Tensor] = None,
-        sampling_metadata: Optional["SamplingMetadata"] = None,
-        **kwargs) -> Dict[str, Any]:
-    if sampling_metadata is None and selected_token_indices is not None:
-        from vllm.model_executor import SamplingMetadata
-
-        # An empty SamplingMetadata to signal that the worker should skip
-        # sampling.
-        sampling_metadata = SamplingMetadata(
-            seq_groups=None,
-            selected_token_indices=selected_token_indices,
-            categorized_sample_indices=None,
-            num_prompts=0,
-        )
-    if sampling_metadata is not None:
-        kwargs["sampling_metadata"] = sampling_metadata
-    return kwargs
-
-
-def _add_sampling_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Union[int, torch.Tensor]],
-        sampling_metadata: Optional["SamplingMetadata"]) -> None:
-    if sampling_metadata is not None:
-        tensor_dict["selected_token_indices"] = (
-            sampling_metadata.selected_token_indices)
-
 
 T = TypeVar('T', bound="ModelInput")
 
@@ -79,8 +21,8 @@ class ModelInput:
     of converting from the global ExecuteModelRequest produced by the LLM
     engine to the worker-local ModelInput objects.
 
-    Model runners should inherit from this class and add their required fields.
-    For distributed executors, any fields that should be sent during a
+    Model runners should define a ModelInput subclass and add their required
+    fields. For distributed executors, any fields that should be sent during a
     broadcast op should also be added to the broadcastable_fields. During
     execution, these fields will be extracted from the source copy and
     broadcasted to all workers using broadcast_tensor_dict.
@@ -147,148 +89,71 @@ class ModelInput:
 
         return tensor_dict
 
+    @staticmethod
+    def _add_attn_metadata_broadcastable_dict(
+            tensor_dict: Dict[str, Union[int, torch.Tensor]],
+            attn_metadata: Optional["AttentionMetadata"]) -> None:
+        """
+        Helper method to update tensor_dict with broadcastable
+        AttentionMetadata fields.
+        """
+        if attn_metadata is not None:
+            tensor_dict.update(attn_metadata.asdict_zerocopy())
 
-@dataclasses.dataclass(frozen=True)
-class CPUModelInput(ModelInput):
-    """
-    Used by the CPUModelRunner.
-    """
-    input_tokens: Optional[torch.Tensor] = None
-    input_positions: Optional[torch.Tensor] = None
-    attn_metadata: Optional["AttentionMetadata"] = None
-    sampling_metadata: Optional["SamplingMetadata"] = None
-    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+    @staticmethod
+    def _init_attn_metadata_from_kwargs(
+            attn_backend: Optional["AttentionBackend"] = None,
+            attn_metadata: Optional["AttentionMetadata"] = None,
+            **kwargs) -> Dict[str, Any]:
+        """
+        Helper method to initialize AttentionMetadata based on an
+        AttentionBackend and broadcastable AttentionMetadata fields.
+        """
+        if attn_metadata is None and attn_backend is not None:
+            # Extract the fields used to create AttentionMetadata.
+            valid_attn_kwargs = {}
+            for field in dataclasses.fields(attn_backend.get_metadata_cls()):
+                val = kwargs.pop(field.name, None)
+                if val is not None:
+                    valid_attn_kwargs[field.name] = val
 
-    @property
-    def broadcastable_fields(self) -> Tuple[str, ...]:
-        return (
-            "input_tokens",
-            "input_positions",
-            "multi_modal_kwargs",
-        )
+            attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
+        if attn_metadata is not None:
+            kwargs["attn_metadata"] = attn_metadata
+        return kwargs
 
-    @classmethod
-    def _get_init_kwargs(  # type: ignore
-            cls, **kwargs) -> Dict[str, Any]:
-        kwargs = _init_attn_metadata_from_kwargs(**kwargs)
-        kwargs = _init_sampling_metadata_from_kwargs(**kwargs)
-        return super()._get_init_kwargs(**kwargs)
+    @staticmethod
+    def _init_sampling_metadata_from_kwargs(  # type: ignore
+            selected_token_indices: Optional[torch.Tensor] = None,
+            sampling_metadata: Optional["SamplingMetadata"] = None,
+            **kwargs) -> Dict[str, Any]:
+        """
+        Helper method to initialize SamplingMetadata based on broadcastable
+        SamplingMetadata fields.
+        """
+        if sampling_metadata is None and selected_token_indices is not None:
+            from vllm.model_executor import SamplingMetadata
 
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
-        tensor_dict = super().as_broadcastable_tensor_dict()
-        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
-        _add_sampling_metadata_broadcastable_dict(tensor_dict,
-                                                  self.sampling_metadata)
-        return tensor_dict
+            # An empty SamplingMetadata to signal that the worker should skip
+            # sampling.
+            sampling_metadata = SamplingMetadata(
+                seq_groups=None,
+                selected_token_indices=selected_token_indices,
+                categorized_sample_indices=None,
+                num_prompts=0,
+            )
+        if sampling_metadata is not None:
+            kwargs["sampling_metadata"] = sampling_metadata
+        return kwargs
 
-
-@dataclasses.dataclass(frozen=True)
-class ModelInputForGPU(ModelInput):
-    """
-    This base class contains metadata needed for the base model forward pass
-    but not metadata for possible additional steps, e.g., sampling. Model
-    runners that run additional steps should subclass this method to add
-    additional fields.
-    """
-    input_tokens: Optional[torch.Tensor] = None
-    input_positions: Optional[torch.Tensor] = None
-    seq_lens: Optional[List[int]] = None
-    query_lens: Optional[List[int]] = None
-    lora_mapping: Optional["LoRAMapping"] = None
-    lora_requests: Optional[Set[LoRARequest]] = None
-    attn_metadata: Optional["AttentionMetadata"] = None
-    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
-
-    @property
-    def broadcastable_fields(self) -> Tuple[str, ...]:
-        return (
-            "input_tokens",
-            "input_positions",
-            "lora_requests",
-            "lora_mapping",
-            "multi_modal_kwargs",
-        )
-
-    @classmethod
-    def _get_init_kwargs(  # type: ignore
-            cls, **kwargs) -> Dict[str, Any]:
-        kwargs = _init_attn_metadata_from_kwargs(**kwargs)
-        return super()._get_init_kwargs(**kwargs)
-
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
-        tensor_dict = super().as_broadcastable_tensor_dict()
-        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
-        return tensor_dict
-
-
-@dataclasses.dataclass(frozen=True)
-class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
-    """
-    Used by the EmbeddingModelRunner.
-    """
-    pooling_metadata: Optional["PoolingMetadata"] = None
-
-
-@dataclasses.dataclass(frozen=True)
-class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
-    """
-    Used by the ModelRunner.
-    """
-    sampling_metadata: Optional["SamplingMetadata"] = None
-
-    @classmethod
-    def _get_init_kwargs(  # type: ignore
-            cls, **kwargs) -> Dict[str, Any]:
-        kwargs = _init_sampling_metadata_from_kwargs(**kwargs)
-        return super()._get_init_kwargs(**kwargs)
-
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
-        tensor_dict = super().as_broadcastable_tensor_dict()
-        _add_sampling_metadata_broadcastable_dict(tensor_dict,
-                                                  self.sampling_metadata)
-        return tensor_dict
-
-
-@dataclasses.dataclass(frozen=True)
-class ModelInputForNeuron(ModelInput):
-    """
-    Used by the NeuronModelRunner.
-    """
-    input_tokens: Optional[torch.Tensor] = None
-    input_positions: Optional[torch.Tensor] = None
-    input_block_ids: Optional[torch.Tensor] = None
-    sampling_metadata: Optional["SamplingMetadata"] = None
-
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
-        raise NotImplementedError("ModelInputForNeuron cannot be broadcast.")
-
-
-@dataclasses.dataclass(frozen=True)
-class ModelInputForXPU(ModelInput):
-    """
-    Used by the NeuronModelRunner.
-    """
-    input_tokens: Optional[torch.Tensor] = None
-    input_positions: Optional[torch.Tensor] = None
-    attn_metadata: Optional["AttentionMetadata"] = None
-    sampling_metadata: Optional["SamplingMetadata"] = None
-    multi_modal_input: Optional[Dict[str, torch.Tensor]] = None
-
-    @classmethod
-    def _get_init_kwargs(  # type: ignore
-            cls, **kwargs) -> Dict[str, Any]:
-        kwargs = _init_attn_metadata_from_kwargs(**kwargs)
-        kwargs = _init_sampling_metadata_from_kwargs(**kwargs)
-        return super()._get_init_kwargs(**kwargs)
-
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
-        tensor_dict = super().as_broadcastable_tensor_dict()
-        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
-        _add_sampling_metadata_broadcastable_dict(tensor_dict,
-                                                  self.sampling_metadata)
-        return tensor_dict
+    @staticmethod
+    def _add_sampling_metadata_broadcastable_dict(
+            tensor_dict: Dict[str, Union[int, torch.Tensor]],
+            sampling_metadata: Optional["SamplingMetadata"]) -> None:
+        """
+        Helper method to update tensor_dict with broadcastable
+        SamplingMetadata fields.
+        """
+        if sampling_metadata is not None:
+            tensor_dict["selected_token_indices"] = (
+                sampling_metadata.selected_token_indices)
