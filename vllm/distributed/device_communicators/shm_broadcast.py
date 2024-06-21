@@ -101,10 +101,6 @@ class ShmRingBuffer:
                        lambda *args, **kwargs: None):
                 self.shared_memory = shared_memory.SharedMemory(name=name)
             assert self.shared_memory.size == self.total_bytes_of_buffer
-            with memoryview(self.shared_memory.buf[self.metadata_offset:]
-                            ) as metadata_buffer:
-                tensor = torch.frombuffer(metadata_buffer, dtype=torch.uint8)
-                assert torch.all(tensor == 0)
 
     def __reduce__(self):
         return (
@@ -272,12 +268,10 @@ class ShmRingBufferIO:
         if group_rank == writer_rank:
             buffer = ShmRingBuffer(n_reader, max_chunk_bytes, max_chunks)
             dist.broadcast_object_list([buffer], src=global_ranks[writer_rank])
-            dist.barrier(pg)
             return ShmRingBufferIO(buffer, -1)
         else:
             recv = [None]
             dist.broadcast_object_list(recv, src=global_ranks[writer_rank])
-            dist.barrier(pg)
             buffer = recv[0]  # type: ignore
             rest_ranks = [r for r in ranks_inside_group if r != writer_rank]
             return ShmRingBufferIO(buffer, rest_ranks.index(group_rank))
