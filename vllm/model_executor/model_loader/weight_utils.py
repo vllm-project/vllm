@@ -15,7 +15,6 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
-from transformers.integrations.ggml import load_dequant_gguf_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import LoadConfig, ModelConfig
@@ -399,8 +398,13 @@ def gguf_quant_weights_iterator(
                     shape[-1], -1) if i == 1 else torch.tensor(param)
                 yield new_name, param
         else:
-            weight = load_dequant_gguf_tensor(shape, weight_type, weight)
-            yield name, torch.from_numpy(weight.copy())
+            import vllm._custom_ops as ops
+            if weight_type.name != "F32":
+                shape = shape[::-1]
+                weight = ops.ggml_dequantize(torch.tensor(weight).cuda(), weight_type, *shape)
+            else:
+                weight = torch.tensor(weight)
+            yield name, weight
 
 
 def kv_cache_scales_loader(
