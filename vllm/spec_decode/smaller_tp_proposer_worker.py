@@ -5,12 +5,12 @@ import torch
 from vllm.distributed.parallel_state import (get_tp_group,
                                              init_model_parallel_group,
                                              patch_tensor_parallel_group)
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
-from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
-from vllm.logger import init_logger
+from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 
 logger = init_logger(__name__)
 
