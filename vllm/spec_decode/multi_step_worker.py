@@ -39,7 +39,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
-    def init_device(self):
+    def init_device(self) -> None:
         super().init_device()
 
         self._proposer = Top1Proposer(
@@ -49,7 +49,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             max_proposal_len=self.max_model_len,
         )
 
-    def set_include_gpu_probs_tensor(self):
+    def set_include_gpu_probs_tensor(self) -> None:
         # Need include_gpu_probs_tensor for multi_step_worker
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
 

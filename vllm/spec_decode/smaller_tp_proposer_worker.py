@@ -6,7 +6,6 @@ from vllm.distributed.parallel_state import (get_tp_group,
                                              init_model_parallel_group,
                                              patch_tensor_parallel_group)
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
@@ -20,30 +19,24 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
     parallel degree than target model.
     This reduces the communication overhead of small draft models.
 
-    This is implemented by changing vLLM's tensor parallel group to a group of
-    size temporarily during forward passes of draft models.
+    To implement this feature, this class differs behavior based on is_dummy
+    flag, where dummy means worker that does not participate draft generation.
+    Participating workers use a smaller tp group by patching vLLM's tensor
+    parallel group temporarily during forward passes of draft models.
     """
     @classmethod
     def maybe_wrap_worker(cls, worker, draft_tensor_parallel_size: int,
                           target_tensor_parallel_size: int):
         """Wrap the worker in a SmallerTpProposerWorker if necessary.
         """
-        draft_tp = draft_tensor_parallel_size
-        target_tp = target_tensor_parallel_size
-
-        if draft_tp == target_tp:
+        if draft_tensor_parallel_size == target_tensor_parallel_size:
             return worker
 
-        if draft_tp > target_tp:
-            raise ValueError(
-                f"{cls} only supports draft_tp smaller than target_tp."
-                f"{draft_tp=} {target_tp=}")
-
         # gpu ranks that will generate draft tokens together
-        ranks = list(range(draft_tp))
+        draft_ranks = list(range(draft_tensor_parallel_size))
 
         logger.info("Wrapping {%s} in {%s}", type(worker), cls)
-        return cls(worker, ranks)
+        return cls(worker, draft_ranks)
 
     def __init__(self, worker: MultiStepWorker,
                  draft_ranks: List[int]):
@@ -51,8 +44,8 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
         Args:
             worker (MultiStepWorker): an actual worker wrapped with this class
-            draft_ranks (List[int]): if this value is given, only some
-            of the GPU ranks in this value participate in draft generation
+            draft_ranks (List[int]): if this value is given, only the GPU ranks
+            written in this value participate in draft generation
         """
         self._worker = worker
         self._draft_ranks = draft_ranks
@@ -67,10 +60,9 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         """
         return patch_tensor_parallel_group(self._tp_group)
 
-    def init_device(self):
-
+    def init_device(self) -> None:
         self._is_dummy = get_tp_group().rank not in self._draft_ranks
-        
+
         # dummy workers do nothing
         if self._is_dummy:
             return
@@ -84,7 +76,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         with self._patch_tensor_parallel_group():
             self._worker.init_device()
 
-    def set_include_gpu_probs_tensor(self):
+    def set_include_gpu_probs_tensor(self) -> None:
         if self._is_dummy:
             return
 
@@ -149,15 +141,6 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             return 0
 
         return self._worker.get_cache_block_size_bytes()
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self._worker.add_lora(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        return self._worker.remove_lora(lora_id)
-
-    def list_loras(self) -> Set[int]:
-        return self._worker.list_loras()
 
     @property
     def vocab_size(self) -> int:
