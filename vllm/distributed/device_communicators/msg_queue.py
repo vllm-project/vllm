@@ -1,11 +1,12 @@
-import zmq
-from zmq import Context, PUB, SUB, REQ, REP, SNDHWM, RCVHWM, SUBSCRIBE # type: ignore
+from zmq import Context, PUB, SUB, REQ, REP, SNDHWM, RCVHWM, SUBSCRIBE  # type: ignore
 from vllm.utils import get_open_port, get_ip
 import pickle
 from torch import distributed as dist
 from torch.distributed import ProcessGroup
 
+
 class Publisher:
+
     def __init__(self, n_reader: int):
         self.n_reader = n_reader
         context = Context()
@@ -38,7 +39,9 @@ class Publisher:
         self.socket.close()
         self.sync_socket.close()
 
+
 class Subscriber:
+
     def __init__(self, handle):
         self.n_reader, ip, port, sync_port = handle
         context = Context()
@@ -65,7 +68,9 @@ class Subscriber:
         self.socket.close()
         self.sync_socket.close()
 
+
 class PublishSubscribeMsgQueue:
+
     def __init__(self, n_reader: int, reader_rank: int, handle):
         self.reader_rank = reader_rank
         self._is_writer = self.reader_rank == -1
@@ -120,6 +125,8 @@ class PublishSubscribeMsgQueue:
             dist.broadcast_object_list(recv, src=global_ranks[writer_rank])
             handle = recv[0]  # type: ignore
             rest_ranks = [r for r in ranks_inside_group if r != writer_rank]
-            queue = PublishSubscribeMsgQueue(n_reader, rest_ranks.index(group_rank), handle)
+            queue = PublishSubscribeMsgQueue(n_reader,
+                                             rest_ranks.index(group_rank),
+                                             handle)
             queue.wait_for_ready()
             return queue
