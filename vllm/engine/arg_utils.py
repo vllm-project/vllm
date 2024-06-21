@@ -778,12 +778,16 @@ class EngineArgs:
         observability_config = ObservabilityConfig(
             otlp_traces_endpoint=self.otlp_traces_endpoint)
 
-        if (model_config.get_sliding_window() is not None
-                and scheduler_config.chunked_prefill_enabled
+        if model_config.get_sliding_window() is not None:
+            if (scheduler_config.chunked_prefill_enabled
                 and not scheduler_config.use_v2_block_manager):
-            raise ValueError(
-                "Chunked prefill is not supported with sliding window. "
-                "Set --disable-sliding-window to disable sliding window.")
+                raise ValueError(
+                    "Chunked prefill is not supported with sliding window. "
+                    "Set --disable-sliding-window to disable sliding window.")
+            if model_config.use_attention_sinks:
+                raise ValueError(
+                    "Attention sinks are not supported with sliding window. "
+                    "Set --disable-sliding-window to disable sliding window.")
 
         return EngineConfig(
             model_config=model_config,

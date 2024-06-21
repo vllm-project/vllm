@@ -23,7 +23,7 @@ def apply_attn_sinks_to_model(
             model_attn = module
         elif len(parts) == 5 and parts[-1] == "attn":
             # e.g. 'model.layers.21.self_attn.attn'
-            attn_sink_module = get_attention_sink(model_attn, model_config, cache_config)
+            attn_sink_module = _get_attention_sink(model_attn, model_config, cache_config)
             replace_submodule(model, module_name, attn_sink_module)
             layer_idx = parts[2]
             attn_sink_modules[layer_idx] = attn_sink_module
@@ -53,7 +53,7 @@ class _RopeIdentity(nn.Module):
         return q, k
 
 
-def get_attention_sink(
+def _get_attention_sink(
     model_attn: nn.Module,
     model_config: ModelConfig,
     cache_config: CacheConfig
