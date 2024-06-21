@@ -91,7 +91,8 @@ class LoraNotSupportedWorkerBase(WorkerBase):
         raise ValueError(f"{type(self)} does not support LoRA")
 
     def pin_lora(self, lora_id: int) -> bool:
-        return ValueError(f"{type(self)} does not support LoRA")
+        return ValueError(
+            f"{type(self)} does not support LoRA")  # type: ignore
 
     def list_loras(self) -> Set[int]:
         raise ValueError(f"{type(self)} does not support LoRA")

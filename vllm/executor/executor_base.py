@@ -88,7 +88,7 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def pin_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError
+        raise NotImplementedError  # type: ignore
 
     @abstractmethod
     def list_loras(self) -> Set[int]:
