@@ -62,8 +62,7 @@ from transformers.modeling_outputs import (
     Seq2SeqModelOutput,
 )
 from transformers.utils import (
-    logging,
-)
+    logging, )
 from transformers import BartConfig
 
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -180,8 +179,7 @@ class BartAttention(nn.Module):
         if (self.head_dim * num_heads) != self.embed_dim:
             raise ValueError(
                 f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
-                f" and `num_heads`: {num_heads})."
-            )
+                f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
         self.is_decoder = is_decoder
         self.is_causal = is_causal
@@ -192,7 +190,8 @@ class BartAttention(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return tensor.view(bsz, seq_len, self.num_heads,
+                           self.head_dim).transpose(1, 2).contiguous()
 
     def forward(
         self,
@@ -276,7 +275,7 @@ class BartAttention(nn.Module):
             key_states,
             value_states,
             attn_mask=attention_mask,
-            dropout_p= 0.0,
+            dropout_p=0.0,
             is_causal=is_causal,
         )
 
@@ -294,6 +293,7 @@ class BartAttention(nn.Module):
         attn_output = self.out_proj(attn_output)
 
         return attn_output, None, past_key_value
+
 
 class BartEncoderLayer(nn.Module):
 
@@ -382,11 +382,11 @@ class BartDecoderLayer(nn.Module):
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.encoder_attn = BartAttention(
-                self.embed_dim,
-                config.decoder_attention_heads,
-                is_decoder=True,
-                config=config,
-            )
+            self.embed_dim,
+            config.decoder_attention_heads,
+            is_decoder=True,
+            config=config,
+        )
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.fc1 = nn.Linear(self.embed_dim, config.decoder_ffn_dim)
         self.fc2 = nn.Linear(config.decoder_ffn_dim, self.embed_dim)
@@ -484,6 +484,7 @@ class BartDecoderLayer(nn.Module):
 
         return outputs
 
+
 class BartEncoder(nn.Module):
     """
     Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
@@ -524,7 +525,6 @@ class BartEncoder(nn.Module):
             [BartEncoderLayer(config) for _ in range(config.encoder_layers)])
 
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
-
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -640,7 +640,7 @@ class BartEncoder(nn.Module):
                 hidden_states,
                 attention_mask,
                 layer_head_mask=(head_mask[idx]
-                                    if head_mask is not None else None),
+                                 if head_mask is not None else None),
                 output_attentions=output_attentions,
             )
 
@@ -889,17 +889,16 @@ class BartDecoder(nn.Module):
             past_key_value = past_key_values[
                 idx] if past_key_values is not None else None
 
-
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
                 layer_head_mask=(head_mask[idx]
-                                    if head_mask is not None else None),
+                                 if head_mask is not None else None),
                 cross_attn_layer_head_mask=(cross_attn_head_mask[idx]
-                                            if cross_attn_head_mask
-                                            is not None else None),
+                                            if cross_attn_head_mask is not None
+                                            else None),
                 past_key_value=past_key_value,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
