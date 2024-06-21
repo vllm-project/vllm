@@ -71,7 +71,8 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         # now have column partitioned output
 
         if self.bias_stacked is not None:
-            self.bias_stacked = self.bias_stacked.view(-1, self.bias_stacked.shape[-1])
+            self.bias_stacked = self.bias_stacked.view(-1,
+                                                       self.bias_stacked.shape[-1])
             self.bias_stacked = self.bias_stacked[self.indices]
             output += self.bias_stacked
 

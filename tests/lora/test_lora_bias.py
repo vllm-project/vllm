@@ -71,7 +71,8 @@ def test_apply_lora(m, n, k, rank, dtype) -> None:
 
     output[:] = 0
     _apply_lora(input, lora_a_stack, lora_b_stack,
-                torch.full((len(input), ), -1, device="cuda"), output, lora_bias)
+                torch.full((len(input), ), -1, device="cuda"),
+                output, lora_bias)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -139,7 +140,8 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
         input, lora_a_stacks, lora_b_stacks,
         torch.randint(0,
                       lora_a_stacks[0].shape[0], (len(input), ),
-                      device="cuda"), output, (m // 2, m // 2), lora_bias_stacks)
+                      device="cuda"), output, (m // 2, m // 2),
+                       lora_bias_stacks)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
