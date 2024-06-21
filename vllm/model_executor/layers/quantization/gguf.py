@@ -28,7 +28,7 @@ class GGUFConfig(QuantizationConfig):
         return [torch.half, torch.bfloat16]
 
     def get_min_capability(self) -> int:
-        return 70
+        return 60
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -89,6 +89,26 @@ class GGUFLinearMethod(LinearMethodBase):
         shard_size = getattr(layer.qweight, "shard_size", None)
         qweight_type = layer.qweight_type.data.item()
         # we need to slice merged weight to pass right data
+        # NOTE: Dequantize
+        # if shard_id and shard_size:
+        #     weight = []
+        #     block_size, type_size = GGML_QUANT_SIZES[qweight_type]
+        #     offset = 0
+        #     # dequantize shard weights respectively
+        #     for id in shard_id:
+        #         shard_weight = layer.qweight[offset:offset + shard_size[id], :]
+        #         # the shape of dequantized shard weight
+        #         shard_shape = (shard_weight.shape[0],
+        #                        shard_weight.shape[1] // type_size * block_size)
+        #         weight.append(ops.ggml_dequantize(shard_weight, qweight_type, *shard_shape))
+        #         offset += shard_size[id]
+        #     weight = torch.cat(weight, axis=0)
+        # else:
+        #     shape = layer.qweight.tensor_shape
+        #     weight = ops.ggml_dequantize(layer.qweight, qweight_type, *shape)
+        # out = F.linear(x, weight, bias)
+        # return out
+
         if shard_id and shard_size:
             out = []
             block_size, type_size = GGML_QUANT_SIZES[qweight_type]
@@ -99,11 +119,12 @@ class GGUFLinearMethod(LinearMethodBase):
                 # the shape of dequantized shard weight
                 shard_shape = (shard_weight.shape[0],
                                shard_weight.shape[1] // type_size * block_size)
-                out.append(ops.ggml_dequantize(shard_weight, qweight_type, *shard_shape))
+                out.append(ops.ggml_mul_mat_a8(shard_weight, x, qweight_type, shard_shape[0]))
                 offset += shard_size[id]
-            out = torch.cat(out, axis=0)
+            out = torch.cat(out, axis=1)
         else:
             shape = layer.qweight.tensor_shape
-            out = ops.ggml_dequantize(layer.qweight, qweight_type, *shape)
-        out = F.linear(x, out, bias)
+            out = ops.ggml_mul_mat_a8(layer.qweight, x, qweight_type, shape[0])
+        if bias:
+            out.add_(bias)
         return out

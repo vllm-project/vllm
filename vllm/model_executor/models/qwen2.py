@@ -47,6 +47,22 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
+_GGUF_KEYS_MAPPING = {
+    "token_embd": "model.embed_tokens",
+    "blk": "model.layers",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+    "ffn_gate": "mlp.gate_proj",
+    "ffn_norm": "post_attention_layernorm",
+    "attn_norm": "input_layernorm",
+    "attn_q": "self_attn.q_proj",
+    "attn_v": "self_attn.v_proj",
+    "attn_k": "self_attn.k_proj",
+    "attn_output": "self_attn.o_proj",
+    "output.weight": "lm_head.weight",
+    "output_norm": "model.norm",
+}
+
 
 class Qwen2MLP(nn.Module):
 
@@ -358,6 +374,9 @@ class Qwen2ForCausalLM(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            for key_to_modify, new_key in _GGUF_KEYS_MAPPING.items():
+                if key_to_modify in name:
+                    name = name.replace(key_to_modify, new_key)
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:

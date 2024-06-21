@@ -26,7 +26,8 @@ def run_gguf_inference(model_path):
 
 
 if __name__ == "__main__":
-    repo_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF"
-    filename = "tinyllama-1.1b-chat-v1.0.Q4_0.gguf"
-    model = hf_hub_download(repo_id, filename=filename)
+    # repo_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF"
+    # filename = "tinyllama-1.1b-chat-v1.0.Q4_0.gguf"
+    # model = hf_hub_download(repo_id, filename=filename)
+    model = "/mnt/g/LLM/Qwen2-0.5B-Instruct.IQ2_XXS.gguf"
     run_gguf_inference(model)
