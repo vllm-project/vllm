@@ -106,7 +106,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
         capability = torch.cuda.get_device_capability()
         capability = capability[0] * 10 + capability[1]
-        self.use_marlin = capability < 89
+        # self.use_marlin = capability < 89
+        self.use_marlin = True
 
     def _create_scale_param(
         self,
@@ -141,6 +142,9 @@ class Fp8LinearMethod(LinearMethodBase):
 
         layer.process_after_load = True
         layer.logical_widths = output_partition_sizes
+
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
 
         # WEIGHT
         weight_dtype = (torch.float8_e4m3fn
@@ -294,18 +298,18 @@ class Fp8LinearMethod(LinearMethodBase):
 
                 # WEIGHTS
                 # Repack weights to gptq format (packed int32 elements)
-                original_fp8_weights = layer.weight
-                original_weight_shape = original_fp8_weights.shape
+                orig_fp8_weights = layer.weight
+                orig_weight_shape = orig_fp8_weights.shape
                 # View the tensor as uint8 to access the raw bits
-                tensor_uint8 = original_fp8_weights.view(torch.uint8)
+                tensor_int8 = orig_fp8_weights.view(torch.int8)
                 # Reshape to group every four elements together, with padding
-                num_elements = tensor_uint8.numel()
+                num_elements = tensor_int8.numel()
                 padded_size = (num_elements + 3) // 4 * 4
                 # Pad the tensor to ensure it is a multiple of 4
                 tensor_padded = torch.nn.functional.pad(
-                    tensor_uint8, (0, padded_size - num_elements))
+                    tensor_int8, (0, padded_size - num_elements))
                 # Reshape the padded tensor to (N, 4)
-                tensor_reshaped = tensor_padded.view(-1, 4)
+                tensor_reshaped = tensor_padded.reshape(-1, 4)
                 # Pack the 4 uint8 values into 1 int32
                 tensor_packed = (
                     tensor_reshaped[:, 0].to(torch.int32) & 0xFF
@@ -313,8 +317,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     (tensor_reshaped[:, 2].to(torch.int32) & 0xFF) << 16) | (
                         (tensor_reshaped[:, 3].to(torch.int32) & 0xFF) << 24)
                 # Reshape the packed tensor back to the desired shape
-                tensor_packed = tensor_packed.view(original_weight_shape[0],
-                                                   -1)
+                tensor_packed = tensor_packed.view(-1, orig_weight_shape[1])
 
                 # Repack weights to marlin format
                 marlin_qweight = ops.gptq_marlin_repack(
@@ -324,14 +327,16 @@ class Fp8LinearMethod(LinearMethodBase):
                     part_size_n,
                     weight_bits,
                 )
-                replace_tensor("weight", marlin_qweight)
+                # replace_tensor("weight", marlin_qweight)
+                layer.weight = Parameter(marlin_qweight, requires_grad=False)
 
                 # WEIGHT SCALES
                 # Currently Marlin doesn't support per-tensor scales, so we
                 # expand it to channelwise
                 scales_size_k = part_size_k
                 scales_size_n = part_size_n
-                scales = layer.weight_scale.repeat(1, scales_size_n)
+                scales = layer.weight_scale.repeat(1,
+                                                   scales_size_n).to(x.dtype)
                 # Permute scales
                 group_size = -1
                 marlin_scales = marlin_permute_scales(
@@ -341,7 +346,9 @@ class Fp8LinearMethod(LinearMethodBase):
                     group_size,
                     weight_bits,
                 )
-                replace_tensor("weight_scale", marlin_scales)
+                # replace_tensor("weight_scale", marlin_scales)
+                layer.weight_scale = Parameter(marlin_scales,
+                                               requires_grad=False)
 
                 # Allocate marlin workspace
                 max_workspace_size = (part_size_n // GPTQ_MARLIN_MIN_THREAD_N
@@ -359,7 +366,7 @@ class Fp8LinearMethod(LinearMethodBase):
             output = ops.fp8_marlin_gemm(
                 reshaped_x,
                 layer.weight,
-                layer.scales,
+                layer.weight_scale,
                 layer.g_idx,
                 layer.g_idx_sort_indices,
                 layer.workspace,

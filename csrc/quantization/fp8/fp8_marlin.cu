@@ -148,8 +148,8 @@ __device__ inline uint32_t prmt(uint32_t a) {
   return res;
 }
 
-// Fast FP8ToFp16/FP8ToBf16: Efficiently dequantize 8bit fp8_e4m3 values to fp16 or
-// bf16 Reference:
+// Fast FP8ToFp16/FP8ToBf16: Efficiently dequantize 8bit fp8_e4m3 values to fp16
+// or bf16 Reference:
 // - FP16:
 // https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L53-L85
 // - BF16:
@@ -169,11 +169,19 @@ __device__ inline typename ScalarType<half>::FragB dequant_8bit<half>(int q) {
 
   typename ScalarType<half>::FragB frag_b;
   #pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    uint16_t sign = (fp8_e4m3_vals[i] & 0x80) << 8;
-    uint16_t exp = (fp8_e4m3_vals[i] & 0x78) << 7;
-    uint16_t mantissa = (fp8_e4m3_vals[i] & 0x07) << 10;
-    frag_b[i] = __float2half_rn(__half2float(__ushort_as_half(sign | exp | mantissa)));
+  for (int i = 0; i < 2; ++i) {
+    uint16_t sign0 = (fp8_e4m3_vals[2 * i] & 0x80) << 8;
+    uint16_t exp0 = (fp8_e4m3_vals[2 * i] & 0x78) << 7;
+    uint16_t mantissa0 = (fp8_e4m3_vals[2 * i] & 0x07) << 10;
+
+    uint16_t sign1 = (fp8_e4m3_vals[2 * i + 1] & 0x80) << 8;
+    uint16_t exp1 = (fp8_e4m3_vals[2 * i + 1] & 0x78) << 7;
+    uint16_t mantissa1 = (fp8_e4m3_vals[2 * i + 1] & 0x07) << 10;
+
+    half h0 = __ushort_as_half(sign0 | exp0 | mantissa0);
+    half h1 = __ushort_as_half(sign1 | exp1 | mantissa1);
+
+    frag_b[i] = __halves2half2(h0, h1);
   }
 
   return frag_b;
@@ -193,7 +201,7 @@ dequant_8bit<nv_bfloat16>(int q) {
   #pragma unroll
   for (int i = 0; i < 4; ++i) {
     uint32_t sign = (fp8_e4m3_vals[i] & 0x80) << 24;
-    uint32_t exp = ((fp8_e4m3_vals[i] & 0x78) + 0x70) << 19; // Adjust exponent
+    uint32_t exp = ((fp8_e4m3_vals[i] & 0x78) + 0x70) << 19;  // Adjust exponent
     uint32_t mantissa = (fp8_e4m3_vals[i] & 0x07) << 16;
     uint32_t fp32_val = sign | exp | mantissa;
     fp32_intermediates[i] = __uint_as_float(fp32_val);
@@ -709,7 +717,7 @@ __global__ void Marlin(
       if constexpr (group_blocks >= thread_k_blocks) {
         int4* sh_s_stage =
             sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
-                                  (pipe / (group_blocks / thread_k_blocks)));
+                                 (pipe / (group_blocks / thread_k_blocks)));
         reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
       } else {
         int warp_id = threadIdx.x / 32;
@@ -739,44 +747,22 @@ __global__ void Marlin(
     for (int j = 0; j < 4; j++) {
       FragB frag_b0;
       FragB frag_b1;
-      if constexpr (num_bits == 4) {
-        int b_quant = frag_b_quant[k % 2][0][j];
-        int b_quant_shift = b_quant >> 8;
 
-        frag_b0 = dequant_4bit<scalar_t>(b_quant);
-        frag_b1 = dequant_4bit<scalar_t>(b_quant_shift);
+      int* frag_b_quant_ptr = reinterpret_cast<int*>(frag_b_quant[k % 2]);
+      int b_quant_0 = frag_b_quant_ptr[j * 2 + 0];
+      int b_quant_1 = frag_b_quant_ptr[j * 2 + 1];
 
-      } else {
-        int* frag_b_quant_ptr = reinterpret_cast<int*>(frag_b_quant[k % 2]);
-        int b_quant_0 = frag_b_quant_ptr[j * 2 + 0];
-        int b_quant_1 = frag_b_quant_ptr[j * 2 + 1];
+      frag_b0 = dequant_8bit<scalar_t>(b_quant_0);
+      frag_b1 = dequant_8bit<scalar_t>(b_quant_1);
 
-        frag_b0 = dequant_8bit<scalar_t>(b_quant_0);
-        frag_b1 = dequant_8bit<scalar_t>(b_quant_1);
+      if constexpr (group_blocks != -1) {
+        scale<scalar_t>(frag_b0, frag_s[k % 2][j], 0);
       }
 
-      // Apply scale to frag_b0
-      if constexpr (has_act_order) {
-        scale4<scalar_t>(frag_b0, act_frag_s[k % 2][0][j],
-                         act_frag_s[k % 2][1][j], act_frag_s[k % 2][2][j],
-                         act_frag_s[k % 2][3][j], 0);
-      } else {
-        if constexpr (group_blocks != -1) {
-          scale<scalar_t>(frag_b0, frag_s[k % 2][j], 0);
-        }
+      if constexpr (group_blocks != -1) {
+        scale<scalar_t>(frag_b1, frag_s[k % 2][j], 1);
       }
 
-      // Apply scale to frag_b1
-      if constexpr (has_act_order) {
-        scale4<scalar_t>(frag_b1, act_frag_s[k % 2][0][j],
-                         act_frag_s[k % 2][1][j], act_frag_s[k % 2][2][j],
-                         act_frag_s[k % 2][3][j], 1);
-
-      } else {
-        if constexpr (group_blocks != -1) {
-          scale<scalar_t>(frag_b1, frag_s[k % 2][j], 1);
-        }
-      }
 
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
@@ -1505,10 +1491,10 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s,
 }  // namespace fp8_marlin
 
 torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                               torch::Tensor& b_scales, torch::Tensor& g_idx,
-                               torch::Tensor& perm, torch::Tensor& workspace,
-                               int64_t num_bits, int64_t size_m, int64_t size_n,
-                               int64_t size_k, bool is_k_full) {
+                              torch::Tensor& b_scales, torch::Tensor& g_idx,
+                              torch::Tensor& perm, torch::Tensor& workspace,
+                              int64_t num_bits, int64_t size_m, int64_t size_n,
+                              int64_t size_k, bool is_k_full) {
   // Verify num_bits
   TORCH_CHECK(num_bits == 4 || num_bits == 8,
               "num_bits must be 4 or 8. Got = ", num_bits);
