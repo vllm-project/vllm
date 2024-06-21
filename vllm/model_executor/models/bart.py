@@ -500,7 +500,8 @@ class BartEncoder(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  lora_config: Optional[LoRAConfig] = None,
                  embed_tokens: Optional[nn.Embedding] = None):
-        super().__init__(config)
+        #super().__init__(config)
+        super().__init__()
 
         embed_dim = config.d_model
         self.padding_idx = config.pad_token_id
@@ -677,7 +678,8 @@ class BartDecoder(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
         embed_tokens: Optional[nn.Embedding] = None,
     ):
-        super().__init__(config)
+        #super().__init__(config)
+        super().__init__()
         self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_position_embeddings
         embed_scale = math.sqrt(
@@ -943,7 +945,8 @@ class BartModel(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  lora_config: Optional[LoRAConfig] = None):
-        super().__init__(config)
+        #super().__init__(config)
+        super().__init__()
 
         # padding_idx, vocab_size = config.pad_token_id, config.vocab_size
         # self.shared = nn.Embedding(vocab_size, config.d_model, padding_idx)
@@ -953,6 +956,8 @@ class BartModel(nn.Module):
 
         # # Initialize weights and apply final processing
         # self.post_init()
+
+        self.config = config
 
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
@@ -997,7 +1002,15 @@ class BartModel(nn.Module):
             encoder_input_ids: torch.Tensor, encoder_positions: torch.Tensor,
             kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata
     ) -> Union[Tuple, Seq2SeqModelOutput]:
-
+        decoder_inputs_embeds = None
+        decoder_input_ids = input_ids
+        attention_mask = None
+        head_mask = None
+        inputs_embeds = None
+        decoder_attention_mask = None
+        decoder_head_mask = None
+        cross_attn_head_mask = None
+        past_key_values = None
 
         # different to other models, Bart automatically creates decoder_input_ids from
         # input_ids if no decoder_input_ids are provided
@@ -1013,12 +1026,20 @@ class BartModel(nn.Module):
                 input_ids, self.config.pad_token_id,
                 self.config.decoder_start_token_id)
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (output_hidden_states
-                                if output_hidden_states is not None else
-                                self.config.output_hidden_states)
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        #output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = self.config.output_attentions
+
+        # output_hidden_states = (output_hidden_states
+        #                         if output_hidden_states is not None else
+        #                         self.config.output_hidden_states)
+
+        output_hidden_states = self.config.output_hidden_states
+
+        # use_cache = use_cache if use_cache is not None else self.config.use_cache
+        # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        use_cache = self.config.use_cache
+        return_dict = self.config.use_return_dict
 
         if encoder_outputs is None:
             encoder_outputs = self.encoder(
@@ -1084,7 +1105,7 @@ class BartForConditionalGeneration(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  lora_config: Optional[LoRAConfig] = None):
-        super().__init__(config)
+        #super().__init__(config)
         # self.model = BartModel(config)
         # self.register_buffer(
         #     "final_logits_bias",
@@ -1096,6 +1117,7 @@ class BartForConditionalGeneration(nn.Module):
         # # Initialize weights and apply final processing
         # self.post_init()
 
+        super().__init__()
         self.config = config
         self.model = BartModel(config,
                                cache_config,
