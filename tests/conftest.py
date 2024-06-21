@@ -233,11 +233,13 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[List[Image.Image]] = None,
+        **kwargs,
     ) -> List[Tuple[List[int], str]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
                                 max_new_tokens=max_tokens,
-                                images=images)
+                                images=images,
+                                **kwargs)
 
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
