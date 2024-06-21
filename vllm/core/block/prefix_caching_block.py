@@ -169,6 +169,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block = self.allocate_mutable_block(prev_block)
         block.append_token_ids(token_ids)
 
+        # Here we add the block content hash to cached_blocks,
+        # without yet setting its state to computed
+        # (It will be in computed state after it is freed)
+        new_block = self.promote_to_immutable_block(block)
+        assert new_block == block # Ensure was only cached
+
         return block
 
     def allocate_immutable_blocks(
@@ -228,7 +234,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
             # the block comes from evictor already contain computed result
             block = self._block_pool.init_block(prev_block=prev_block,
-                                                token_ids=[],
+                                                token_ids=None,
                                                 block_size=self._block_size,
                                                 physical_block_id=block_id)
             block.computed = False
@@ -257,7 +263,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def _decr_refcount_cached_block(self, block: Block) -> None:
         # Ensure this is immutable/cached block
-        assert block.computed
+        assert block.content_hash is not None
 
         block_id = block.block_id
         assert block_id is not None
@@ -289,7 +295,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert (block.block_id
                 is not None), "freeing unallocated block is undefined"
 
-        if block.computed:
+        if block.computed or block.content_hash is not None:
             # Immutable
             assert block.content_hash is not None
             self._decr_refcount_cached_block(block)
@@ -297,7 +303,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._block_pool.free_block(block)
         else:
             # Mutable
-            assert block.content_hash is None
             self._free_hashless_block(block)
 
     def _free_hashless_block(self, block: Block) -> None:
@@ -405,9 +410,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         if block.content_hash not in self._cached_blocks:
             # No cached content hash => Set this block as cached
+            # (Note that this block is not computed yet =>
+            #  Will be computed after free())
             self._cached_blocks[block.content_hash] = block.block_id
-            self._track_block_id_as_computed(block.block_id)
-            block.computed = True
             return block
 
         # Reuse the cached content hash
