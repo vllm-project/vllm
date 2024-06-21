@@ -12,6 +12,7 @@ from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
+                              QKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA)
 from vllm.lora.punica import bgmv, dispatch_bgmv_low_level
 
@@ -90,11 +91,11 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
 def _mcp_apply(x, bias, layer):
     """
     MergedColumnParallelLinearWithShardedLoRA and 
-    QKVParallelLinearWithShardedLora share the same 
+    MergedQKVParallelLinearWithShardedLora share the same 
     LoRa weight application method.
     
     The main difference is the step by shard_size for lora_b which can
-    vary for QKVParallelLinearWithShardedLora but is constant for 
+    vary for MergedQKVParallelLinearWithShardedLora but is constant for 
     MergedColumnParallelLinearWithShardedLoRA.
     """
     # expecting 2 for column parallel and 3 for qkv
@@ -167,9 +168,60 @@ class MergedColumnParallelLinearWithShardedLoRA(
         )
 
 
-class MergedQKVParallelLinearWithShardedLora(MergedQKVParallelLinearWithLora):
+class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
     """
     Differs from QKVParallelLinearWithLora by slicing the 
+    LoRA A's also.
+
+    Based on S-LoRA, slicing happens along the rank dim.
+    """
+
+    def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_size = self.lora_a_stacked.shape[2]
+        start_idx = tp_rank * shard_size
+        lora_a = lora_a[:, start_idx:start_idx + shard_size]
+        return lora_a
+
+    def apply(self, x: torch.Tensor,
+              bias: Optional[torch.Tensor]) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+
+        x = x.view(-1, x.shape[-1])
+        output, out_orig_shape = output.view(-1,
+                                             output.shape[-1]), output.shape
+        buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]),
+                             dtype=torch.float32,
+                             device=x.device)
+
+        bgmv(buffer, x, self.lora_a_stacked,
+             self.indices[:self.indices_len[0]], 0, 1.0)
+        buffer = tensor_model_parallel_all_gather(buffer)
+        bgmv(output, buffer, self.lora_b_stacked,
+             self.indices[:self.indices_len[0]], 0, 1.0)
+        # now have column partitioned output
+
+        output = output.view(*out_orig_shape)
+        return output
+
+    @classmethod
+    @_fully_sharded_can_replace
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        # specifying kwargs so they can be easily accessed in decorator
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+            decorate=False,
+        )
+
+
+class MergedQKVParallelLinearWithShardedLora(MergedQKVParallelLinearWithLora):
+    """
+    Differs from MergedQKVParallelLinearWithLora by slicing the 
     LoRA A's also.
 
     Based on S-LoRA, slicing happens along the rank dim.
