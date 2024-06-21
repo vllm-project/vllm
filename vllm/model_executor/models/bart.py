@@ -1299,6 +1299,27 @@ class BartForConditionalGeneration(nn.Module):
                 for past_state in layer_past[:2]) + layer_past[2:], )
         return reordered_past
 
+    stacked_params_mapping = {
+        "query": {
+            "param_name": "qkv_proj",
+            "shard_id": "q",
+        },
+        "key": {
+            "param_name": "qkv_proj",
+            "shard_id": "k",
+        },
+        "value": {
+            "param_name": "qkv_proj",
+            "shard_id": "v",
+        },
+    }
+
+    params_mapping = {
+        "beta": "bias",
+        "gamma": "weight",
+        "LayerNorm": "layernorm",
+    }
+
     def _rename_key(self, key: str):
         prefix = f"{self.base_model_prefix}."
         key = key[len(prefix):] if key.startswith(prefix) else key
@@ -1324,6 +1345,9 @@ class BartForConditionalGeneration(nn.Module):
         params_dict = dict(self.model.named_parameters())
 
         for name, loaded_weight in weights:
+            if 'shared.weight' in name:
+                continue
+
             name = self._rename_key(name)
             name, shard_id = self._rename_stacked_param(name)
 
