@@ -319,18 +319,20 @@ class LoRAModel:
                 f" but received {unexpected_modules}."
                 f" Please verify that the loaded LoRA module is correct")
         if os.path.isfile(lora_tensor_path):
-            tensors = safetensors.torch.load_file(lora_tensor_path)
+            tensors = safetensors.torch.load_file(lora_tensor_path,
+                                                  device="cpu")
         elif os.path.isfile(lora_bin_file_path):
-            tensors = torch.load(lora_bin_file_path)
+            tensors = torch.load(lora_bin_file_path, map_location="cpu")
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
         embeddings = None
         if os.path.isfile(new_embeddings_tensor_path):
             embeddings = safetensors.torch.load_file(
-                new_embeddings_tensor_path)
+                new_embeddings_tensor_path, device="cpu")
         elif os.path.isfile(new_embeddings_bin_file_path):
-            embeddings = torch.load(new_embeddings_bin_file_path)
+            embeddings = torch.load(new_embeddings_bin_file_path,
+                                    map_location="cpu")
 
         rank = config["r"]
         lora_alpha = config["lora_alpha"]
