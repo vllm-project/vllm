@@ -66,7 +66,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         if self._draft_ranks is None:
             yield
         else:
-            return patch_tensor_parallel_group(self._world_group, self._tp_group)
+            return patch_tensor_parallel_group(self._world_group,
+                                               self._tp_group)
 
     def init_device(self):
         if self._is_dummy:
@@ -116,7 +117,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         with self._patch_tensor_parallel_group():
             return super().determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
         if self._is_dummy:
             return
 

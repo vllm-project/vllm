@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
 
 import torch
+import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
@@ -463,8 +464,7 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
-def init_world_group(ranks: List[int],
-                     local_rank: int,
+def init_world_group(ranks: List[int], local_rank: int,
                      backend: str) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
@@ -475,8 +475,7 @@ def init_world_group(ranks: List[int],
     )
 
 
-def init_model_parallel_group(group_ranks: List[List[int]],
-                              local_rank: int,
+def init_model_parallel_group(group_ranks: List[List[int]], local_rank: int,
                               backend: str) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
