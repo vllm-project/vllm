@@ -342,7 +342,7 @@ __global__ void wvSpltK_hf_m1_sml_(const int K, const int N, const DTYPE* B,
 
   __shared__ half s[1024 * 32];
 
-  unsigned long n = (blockIdx.x * WvPrGrp + threadIdx.y) * YTILE;
+  uint64_t n = (blockIdx.x * WvPrGrp + threadIdx.y) * YTILE;
 
   for (uint32_t k = 0; k < min(K * M, 32 * 1024);
        k += THRDS * WvPrGrp * A_CHUNK) {
@@ -484,7 +484,7 @@ __global__ void wvSpltK_hf_m1_(const int K, const int N, const DTYPE* B,
   // Algorithm does 64 lane k-splitting / wave and uses
   // WG ID and Thread ID to find the index.
   //----------------------------------------------------
-  unsigned long n = (blockIdx.x * WvPrGrp + threadIdx.y) * YTILE;
+  uint64_t n = (blockIdx.x * WvPrGrp + threadIdx.y) * YTILE;
 
   // Check whether there will be fragmenation!
   // This will happen only for the last wave!
@@ -836,7 +836,7 @@ __global__ void wvSpltK_hf_m2_(const int K, const int N, const DTYPE* B,
   // Algorithm does 64 lane k-splitting / wave and uses
   // WG ID and Thread ID to find the index.
   //----------------------------------------------------
-  unsigned long n = (blockIdx.x * WvPrGrp + threadIdx.y) * YTILE;
+  uint64_t n = (blockIdx.x * WvPrGrp + threadIdx.y) * YTILE;
 
   // Check whether there will be fragmenation!
   // This will happen only for the last wave!
@@ -1188,7 +1188,7 @@ __global__ void wvSpltK_hf_m3_(const int K, const int N, const DTYPE* B,
   // Algorithm does 64 lane k-splitting / wave and uses
   // WG ID and Thread ID to find the index.
   //----------------------------------------------------
-  unsigned long n = (blockIdx.x * WvPrGrp + threadIdx.y) * YTILE;
+  uint64_t n = (blockIdx.x * WvPrGrp + threadIdx.y) * YTILE;
 
   // Check whether there will be fragmenation!
   // This will happen only for the last wave!
@@ -1540,7 +1540,7 @@ __global__ void wvSpltK_hf_m4_(const int K, const int N, const DTYPE* B,
   // Algorithm does 64 lane k-splitting / wave and uses
   // WG ID and Thread ID to find the index.
   //----------------------------------------------------
-  unsigned long n = (blockIdx.x * WvPrGrp + threadIdx.y) * YTILE;
+  uint64_t n = (blockIdx.x * WvPrGrp + threadIdx.y) * YTILE;
 
   // Check whether there will be fragmenation!
   // This will happen only for the last wave!
