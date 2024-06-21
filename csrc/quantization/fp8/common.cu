@@ -130,6 +130,25 @@ __global__ void scaled_fp8_quant_kernel(c10::Float8_e4m3fn* __restrict__ out,
   }
 }
 
+template <typename Tout, typename Tin, int Vec_size>
+__global__ void convert_fp8_kernel(
+    const Tin* __restrict__ src_data, Tout* __restrict__ dst_data, const float* scale, size_t N)
+{
+    const int64_t block_idx = blockIdx.x;
+
+    using V_in_vec = typename Vec<Tin, Vec_size>::Type;
+    using V_out_vec = typename Vec<Tout, Vec_size>::Type;
+    auto dst_data_vec = reinterpret_cast<V_out_vec*>(dst_data);
+    auto src_data_vec = reinterpret_cast<const V_in_vec*>(src_data);
+
+    int64_t startIdx = (threadIdx.x + blockDim.x * blockIdx.x);
+    auto idx = startIdx;
+    if (idx >= N) {
+        return;
+    }
+    dst_data_vec[idx] = fp8::scaled_vec_conversion<V_out_vec, V_in_vec>(src_data_vec[idx], *scale);
+}
+
 } // namespace vllm
 
 void static_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
@@ -171,32 +190,13 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
 }
 
 template <typename Tout, typename Tin, int Vec_size>
-__global__ void convert_fp8_kernel(
-    const Tin* __restrict__ src_data, Tout* __restrict__ dst_data, const float* scale, size_t N)
-{
-    const int64_t block_idx = blockIdx.x;
-
-    using V_in_vec = typename Vec<Tin, Vec_size>::Type;
-    using V_out_vec = typename Vec<Tout, Vec_size>::Type;
-    auto dst_data_vec = reinterpret_cast<V_out_vec*>(dst_data);
-    auto src_data_vec = reinterpret_cast<const V_in_vec*>(src_data);
-
-    int64_t startIdx = (threadIdx.x + blockDim.x * blockIdx.x);
-    auto idx = startIdx;
-    if (idx >= N) {
-        return;
-    }
-    dst_data_vec[idx] = fp8::scaled_vec_conversion<V_out_vec, V_in_vec>(src_data_vec[idx], *scale);
-}
-
-template <typename Tout, typename Tin, int Vec_size>
 struct call_convert_fp8
 {
     void operator()(torch::Tensor const& src_data, torch::Tensor& dst_data, torch::Tensor const& scale)
     {
         const auto N = src_data.numel() / Vec_size;
         constexpr dim3 numThreads{1024, 1, 1};
-        auto numBlocks = (N + numThreads.x - 1) / numThreads.x;
+        uint32_t numBlocks = (N + numThreads.x - 1) / numThreads.x;
         const dim3 grid{numBlocks, 1, 1};
         const auto stream = at::cuda::getCurrentCUDAStream();
 
