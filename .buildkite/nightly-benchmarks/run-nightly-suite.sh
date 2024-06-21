@@ -47,24 +47,28 @@ main() {
     if which lmdeploy >/dev/null; then
         echo "lmdeploy is available, redirect to run-lmdeploy-nightly.sh"
         bash ../.buildkite/nightly-benchmarks/scripts/run-lmdeploy-nightly.sh
+        exit 0
     fi
 
     # run tgi
     if [ -e /tgi-entrypoint.sh ]; then
         echo "tgi is available, redirect to run-tgi-nightly.sh"
         bash ../.buildkite/nightly-benchmarks/scripts/run-tgi-nightly.sh
+        exit 0
     fi
 
     # run trt
     if which trtllm-build >/dev/null; then
         echo "trtllm is available, redirect to run-trt-nightly.sh"
         bash ../.buildkite/nightly-benchmarks/scripts/run-trt-nightly.sh
+        exit 0
     fi
 
     # run vllm
-    if python3 -c "import vllm" &> /dev/null; then
+    if [ -e /vllm-workspace ]; then
         echo "vllm is available, redirect to run-vllm-nightly.sh"
         bash ../.buildkite/nightly-benchmarks/scripts/run-vllm-nightly.sh
+        exit 0
     fi
 
 }

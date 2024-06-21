@@ -246,7 +246,7 @@ upload_to_buildkite() {
     echo "buildkite-agent binary not found. Skip uploading the results."
     return 0
   fi
-  /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/${CURRENT_LLM_SERVING_ENGINE}_nightly_results.md
+  /workspace/buildkite-agent annotate --style "info" --context "trt-benchmark-results" < $RESULTS_FOLDER/${CURRENT_LLM_SERVING_ENGINE}_nightly_results.md
   /workspace/buildkite-agent artifact upload "$RESULTS_FOLDER/*"
 }
 
