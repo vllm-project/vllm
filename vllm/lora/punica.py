@@ -21,8 +21,7 @@ elif torch.cuda.get_device_capability() < (8, 0):
         "punica LoRA kernels require compute capability >= 8.0, "
         "but you are running on device with compute capability < 8.0. "
         "Falling back to unoptimized PyTorch-native implementation, "
-        "which may lead to performance drop."
-    )
+        "which may lead to performance drop.")
 
 
 def _check_punica_support():
