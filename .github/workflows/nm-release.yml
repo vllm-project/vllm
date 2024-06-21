@@ -29,6 +29,10 @@ jobs:
       benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
       benchmark_timeout: 720
       push_benchmark_results_to_gh_pages: ${{ inputs.push_benchmark_results_to_gh_pages }}
+
+      lm_eval_label: gcp-k8s-l4-solo
+      lm_eval_configuration: ./neuralmagic/lm-eval/full-small-models.yaml
+      lm_eval_timeout: 60
     secrets: inherit
 
   PYTHON-3-9:
@@ -47,6 +51,10 @@ jobs:
       benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
       benchmark_timeout: 720
       push_benchmark_results_to_gh_pages: ${{ inputs.push_benchmark_results_to_gh_pages }}
+
+      lm_eval_label: gcp-k8s-l4-solo
+      lm_eval_configuration: ./neuralmagic/lm-eval/full-small-models.yaml
+      lm_eval_timeout: 60
     secrets: inherit
 
   PYTHON-3-10:
@@ -65,6 +73,10 @@ jobs:
       benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
       benchmark_timeout: 720
       push_benchmark_results_to_gh_pages: ${{ inputs.push_benchmark_results_to_gh_pages }}
+
+      lm_eval_label: gcp-k8s-l4-solo
+      lm_eval_configuration: ./neuralmagic/lm-eval/full-small-models.yaml
+      lm_eval_timeout: 60
     secrets: inherit
 
   PYTHON-3-11:
@@ -83,4 +95,8 @@ jobs:
       benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
       benchmark_timeout: 720
       push_benchmark_results_to_gh_pages: ${{ inputs.push_benchmark_results_to_gh_pages }}
+
+      lm_eval_label: gcp-k8s-l4-solo
+      lm_eval_configuration: ./neuralmagic/lm-eval/full-small-models.yaml
+      lm_eval_timeout: 60
     secrets: inherit

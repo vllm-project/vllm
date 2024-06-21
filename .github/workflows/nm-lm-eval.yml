@@ -15,20 +15,16 @@ on:
         description: "git commit hash or branch name"
         type: string
         required: true
-      Gi_per_thread:
-        description: 'requested GiB to reserve per thread'
-        type: string
-        required: true
-      nvcc_threads:
-        description: "number of threads nvcc build threads"
-        type: string
-        required: true
       python:
         description: "python version, e.g. 3.10.12"
         type: string
         required: true
       whl:
         description: "whl to test (variable appears late binding so unusable outside 'download artifact')"
+        type: string
+        required: true
+      lm_eval_configuration:
+        description: 'file containing tests configuration (see: nm-vllm/neuralmagic/lm-eval)'
         type: string
         required: true
 
@@ -47,14 +43,6 @@ on:
         description: "git commit hash or branch name"
         type: string
         required: true
-      Gi_per_thread:
-        description: 'requested GiB to reserve per thread'
-        type: string
-        required: true
-      nvcc_threads:
-        description: "number of threads nvcc build threads"
-        type: string
-        required: true
       python:
         description: "python version, e.g. 3.10.12"
         type: string
@@ -63,9 +51,13 @@ on:
         description: "whl to test (variable appears late binding so unusable outside 'download artifact')"
         type: string
         required: true
+      lm_eval_configuration:
+        description: 'file containing tests configuration (see: nm-vllm/neuralmagic/lm-eval)'
+        type: string
+        required: true
 
 jobs:
-  TEST-ACCURACY-FULL:
+  LM-EVAL:
 
     runs-on: ${{ inputs.label }}
     timeout-minutes: ${{ fromJSON(inputs.timeout) }}
@@ -77,6 +69,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python }}
+      
+      - name: install automation components
+        run: |
+          sudo apt-get update --fix-missing
+          sudo apt-get install -y git-all
+          sudo apt-get install -y curl
 
       - name: checkout repository code
         uses: actions/checkout@v4
@@ -114,7 +112,8 @@ jobs:
             venv:
 
       - name: run lm-eval-accuracy
-        uses: ./.github/actions/nm-lm-eval-accuracy/
+        uses: ./.github/actions/nm-lm-eval/
         with:
           python: ${{ inputs.python }}
           venv:
+          lm_eval_configuration: ${{ inputs.lm_eval_configuration }}

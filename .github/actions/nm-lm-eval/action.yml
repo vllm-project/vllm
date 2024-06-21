@@ -1,5 +1,5 @@
-name: run lm-eval full accuracy test
-description: 'run lm-eval full accuracy test'
+name: run lm-eval accuracy test
+description: 'run lm-eval accuracy test'
 inputs:
   python:
     description: 'python version, e.g. 3.10.12'
@@ -7,15 +7,14 @@ inputs:
   venv:
     description: 'name for python virtual environment'
     required: true
+  lm_eval_configuration:
+    description: 'file containing test configuration'
+    required: true
 runs:
   using: composite
   steps:
   - id: lm-eval
     run: |
-      # move source directories
-      mv vllm vllm-ignore || echo "no 'vllm' folder to move"
-      mv csrc csrc-ignore || echo "no 'csrc' folder to move"
-
       if [ -n "${{ inputs.venv }}" ]; then
         COMMIT=${{ github.sha }}
         VENV="${{ inputs.venv }}-${COMMIT:0:7}"
@@ -26,7 +25,7 @@ runs:
       pip3 install pytest openai==1.3.9
 
       SUCCESS=0
-      pytest -v tests/accuracy/test_lm_eval_correctness.py || SUCCESS=$?
-      echo "test=${SUCCESS}" >> "$GITHUB_OUTPUT"
+      ./.github/scripts/nm-run-lm-eval-vllm.sh -c ${{ inputs.lm_eval_configuration }} || SUCCESS=$?
+      echo "lm_eval=${SUCCESS}" >> "$GITHUB_OUTPUT"
       exit ${SUCCESS}
     shell: bash

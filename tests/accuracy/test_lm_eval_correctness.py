@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, TypedDict
 
@@ -47,7 +48,11 @@ class EvalTaskDefinition(EvalTaskDefinitionOpts):
     tasks: List[Task]
 
 
-TEST_DATA_FILE = Path(__file__).parent / "lm-eval-tasks.yaml"
+TEST_DATA_FILE = os.environ.get("LM_EVAL_TEST_DATA_FILE", None)
+if TEST_DATA_FILE is None:
+    raise ValueError("LM_EVAL_TEST_DATA_FILE env variable is not set.")
+TEST_DATA_FILE = Path(TEST_DATA_FILE)
+
 TEST_DATA: List[EvalTaskDefinition] = [
     pytest.param(eval_def, id=eval_def["model_name"])
     for eval_def in yaml.safe_load(TEST_DATA_FILE.read_text(encoding="utf-8"))
@@ -69,7 +74,7 @@ def test_lm_eval_correctness(
     vllm_args = {
         "--model": model_name,
         "--disable-log-requests": None,
-        "--max-model-len": 2048,
+        "--max-model-len": 4096,
     }
 
     if eval_data.get("enable_tensor_parallel") is True:
@@ -88,13 +93,17 @@ def test_lm_eval_correctness(
 
     logger.info("launching server")
     with ServerContext(vllm_args, logger=logger) as _:
-        task_names = [t["name"] for t in eval_data["tasks"]]
+        task_names = [task["name"] for task in eval_data["tasks"]]
+        limit = eval_data["limit"]
+        new_fewshot = eval_data["num_fewshot"]
         logger.info("getting results for task_names=%s", task_names)
         results = lm_eval.simple_evaluate(
             model="local-completions",
             model_args=openai_args,
             tasks=task_names,
-            batch_size=64,
+            batch_size=32,
+            num_fewshot=new_fewshot,
+            limit=limit,
         )
 
     logger.info("clearing torch cache")

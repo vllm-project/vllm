@@ -66,6 +66,19 @@ on:
         description: "When set to true, the workflow pushes all benchmarking results to gh-pages UI"
         type: string
         default: "false"
+      # lm-eval related parameters
+      lm_eval_label:
+        description: "requested runner label (specifies instance)"
+        type: string
+        default: ""
+      lm_eval_timeout:
+        description: "time limit for lm_eval in minutes"
+        type: string
+        default: "60"
+      lm_eval_configuration:
+        description: "configuration for lm-eval test (see neuralmagic/lm-eval)"
+        type: string
+        default: "" 
 
 jobs:
 
@@ -134,16 +147,14 @@ jobs:
             push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
         secrets: inherit
 
-    TEST-ACCURACY-FULL:
+    LM-EVAL-SOLO:
       needs: [BUILD]
-      if: ${{ inputs.wf_category == 'WEEKLY' || inputs.wf_category == 'RELEASE' }}
-      uses: ./.github/workflows/nm-test-accuracy-full.yml
+      uses: ./.github/workflows/nm-lm-eval.yml
       with:
-        label: ${{ inputs.test_label_multi }}
-        timeout: ${{ inputs.benchmark_timeout }}
+        label: ${{ inputs.lm_eval_label }}
+        timeout: ${{ inputs.lm_eval_timeout }}
         gitref: ${{ inputs.gitref }}
-        Gi_per_thread: ${{ inputs.Gi_per_thread }}
-        nvcc_threads: ${{ inputs.nvcc_threads }}
         python: ${{ inputs.python }}
         whl: ${{ needs.BUILD.outputs.whl }}
+        lm_eval_configuration: ${{ inputs.lm_eval_configuration }}
       secrets: inherit
