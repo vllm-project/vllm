@@ -285,10 +285,16 @@ class ModelRunner:
         if is_prompt:
             context_len = seq_data.get_num_computed_tokens()
         else:
-            # get_num_computed_tokens is incorrect for spec decoding.
-            # So, we should have a special logic here.
-            # TODO(sang): Fix it.
-            context_len = seq_data.get_len() - 1
+            if is_encoder_seq:
+                # In decode phase, no new *encoder* tokens are
+                # introduced, so the context is always the full
+                # encoder sequence
+                context_len = seq_data.get_len()
+            else:
+                # get_num_computed_tokens is incorrect for spec decoding.
+                # So, we should have a special logic here.
+                # TODO(sang): Fix it.
+                context_len = seq_data.get_len() - 1
 
         if is_encoder_seq:
             seq_len = seq_data.get_len()
@@ -357,7 +363,7 @@ class ModelRunner:
                 block_table = computed_block_nums
 
         elif (self.scheduler_config.chunked_prefill_enabled or not is_prompt):
-            if seq_group_metadata.block_tables is not None:
+            if original_block_table is not None:
                 # chunked prefill or decode
                 block_table = original_block_table
                 assert block_table is not None
@@ -398,7 +404,9 @@ class ModelRunner:
             decode_only = False
             prefill_seq_lens.append(seq_len)
         else:
-            assert query_len == 1, (
+            # Except in encoder/decoder scenario, decode-phase
+            # query_len must be 1
+            assert is_encoder_seq or query_len == 1, (
                 "seq_len: {}, context_len: {}, query_len: {}".format(
                     seq_len, context_len, query_len))
             num_decode_tokens += query_len
@@ -425,7 +433,7 @@ class ModelRunner:
             for k, v in mm_kwargs.items():
                 multi_modal_kwargs_list[k].append(v)
 
-        if _is_block_tables_empty(seq_group_metadata.block_tables):
+        if _is_block_tables_empty(original_block_table):
             # During memory profiling, the block tables are not
             # initialized yet. In this case, we just use a dummy
             # slot mapping.
@@ -551,7 +559,8 @@ class ModelRunner:
                         "now.")
 
                 seq_data = seq_group_metadata.seq_data[seq_id]
-                block_table = seq_group_metadata.block_tables[seq_id]
+                block_table = None if seq_group_metadata.block_tables is None else \
+                                seq_group_metadata.block_tables[seq_id]
                 decode_only, \
                 num_prefills, \
                 num_prefill_tokens, \

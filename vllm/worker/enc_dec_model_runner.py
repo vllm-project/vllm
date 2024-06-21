@@ -101,8 +101,6 @@ class EncoderDecoderModelRunner(ModelRunner):
         sliding_window_blocks = 0
         block_aligned_sliding_window = 0
 
-        is_prompt = True
-
         # The following fields are only for flashinfer
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
         # for the precise definition of the following fields.
@@ -132,6 +130,9 @@ class EncoderDecoderModelRunner(ModelRunner):
 
         for seq_group_metadata in seq_group_metadata_list:
             computed_block_nums = None #seq_group_metadata.computed_block_nums
+
+            is_prompt = seq_group_metadata.is_prompt
+
             if (self.scheduler_config is not None
                     and self.scheduler_config.chunked_prefill_enabled
                     and not (computed_block_nums is None
@@ -157,7 +158,9 @@ class EncoderDecoderModelRunner(ModelRunner):
                 multi_modal_kwargs_list, is_encoder_seq=True)
 
         max_query_len = max(query_lens)
-        max_seq_len = max(prefill_seq_lens, default=0)
+
+        max_seq_len = max(prefill_seq_lens, default=0) if is_prompt else \
+                        max(decode_seq_lens, default=0)
 
         # Assume Eager Mode
         # TODO: CUDA Graph support
@@ -171,7 +174,7 @@ class EncoderDecoderModelRunner(ModelRunner):
             device=self.device,
         )
 
-        assert max_query_len > 0, ("query_lens: {}".format(query_lens))
+        assert (not is_prompt) or max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.int,
@@ -201,7 +204,7 @@ class EncoderDecoderModelRunner(ModelRunner):
                      out=query_start_loc[1:])
 
         # Set encoder-oriented attention metadata fields
-        attn_metadata.num_encoder_tokens = num_prefill_tokens
+        attn_metadata.num_encoder_tokens = sum(seq_lens)
         attn_metadata.encoder_seq_lens = seq_lens
         attn_metadata.encoder_seq_lens_tensor = seq_lens_tensor
         attn_metadata.max_encoder_seq_len = max_seq_len
