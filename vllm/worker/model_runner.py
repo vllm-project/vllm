@@ -774,9 +774,8 @@ class ModelRunner:
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
             assert seq_group_metadata_list is not None
-            if seq_group_metadata_list[0].is_prompt:
-                hidden_states = hidden_states.index_select(
-                    0, sampling_metadata.selected_token_indices)
+            hidden_states = hidden_states.index_select(
+                0, sampling_metadata.selected_token_indices)
             output.hidden_states = hidden_states
 
         return output

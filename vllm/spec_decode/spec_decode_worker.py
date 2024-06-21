@@ -13,6 +13,7 @@ from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
+from vllm.spec_decode.medusa_worker import MedusaWorker
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
@@ -106,6 +107,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
+        elif draft_worker_kwargs[
+                "model_config"].hf_config.model_type == "medusa":
+            proposer_worker = MedusaWorker(**draft_worker_kwargs)
+            disable_bonus_tokens = False
         elif draft_worker_kwargs[
                 "model_config"].hf_config.model_type == "mlp_speculator":
             proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
