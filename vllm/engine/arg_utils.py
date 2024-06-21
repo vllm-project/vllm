@@ -540,8 +540,8 @@ class EngineArgs:
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding.')
         parser.add_argument(
-            '--speculative-tensor-parallel-size',
-            '-spec-tp',
+            '--speculative-draft-tensor-parallel-size',
+            '-spec-draft-tp',
             type=int,
             default=EngineArgs.speculative_draft_tensor_parallel_size,
             help='Number of tensor parallel replicas for '
