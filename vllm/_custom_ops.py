@@ -406,7 +406,8 @@ def fp8_mm(a: torch.Tensor, b: torch.Tensor,
            scale_result: Optional[torch.Tensor], 
            solidx: int) -> torch.Tensor:
     result = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
-    return torch.ops._C.fp8_mm(a, b, result, scale_a, scale_b, scale_result, solidx)
+    torch.ops._C.fp8_mm(a, b, result, scale_a, scale_b, scale_result, solidx)
+    return result
 
 
 def get_device_attribute(attribute: int, device: int) -> int:
