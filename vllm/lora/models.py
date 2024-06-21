@@ -242,8 +242,9 @@ class LoRAModel:
                 loras[module_name].bias = tensor.to(device=device,
                                                       dtype=dtype).t()
                 if pin_memory:
-                    loras[module_name].bias = loras[
-                        module_name].bias.pin_memory()
+                    bias = loras[module_name].bias
+                    if bias is not None:
+                        loras[module_name].bias = bias.pin_memory()
             elif is_lora_a:
                 loras[module_name].lora_a = tensor.to(device=device,
                                                       dtype=dtype).t()

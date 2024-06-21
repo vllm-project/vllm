@@ -94,7 +94,7 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool, bool]:
         Tuple(module_name, is_lora_a):
             module_name: the name of the module, e.g. model.dense1,
             is_lora_a whether the tensor is lora_a or lora_b.
-            is_bias wheather the tensor is lora bias.
+            is_bias whether the tensor is lora bias.
     """
     parts = name.split(".")
     assert parts[0] == "base_model"
