@@ -23,6 +23,7 @@ from torch import nn
 
 from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -40,6 +41,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.utils import print_warning_once
+
+from vllm.sequence import SamplerOutput
 
 import math
 from typing import List, Optional, Tuple, Union
@@ -964,11 +967,11 @@ class BartModel(nn.Module):
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-        )
+        # self.embed_tokens = VocabParallelEmbedding(
+        #     self.vocab_size,
+        #     config.hidden_size,
+        #     org_num_embeddings=config.vocab_size,
+        # )
 
         self.encoder = BartEncoder(config,
                                    cache_config,
@@ -1109,9 +1112,6 @@ class BartForConditionalGeneration(nn.Module):
         # self.register_buffer(
         #     "final_logits_bias",
         #     torch.zeros((1, self.model.shared.num_embeddings)))
-        # self.lm_head = nn.Linear(config.d_model,
-        #                          self.model.shared.num_embeddings,
-        #                          bias=False)
 
         # # Initialize weights and apply final processing
         # self.post_init()
@@ -1122,18 +1122,24 @@ class BartForConditionalGeneration(nn.Module):
                                cache_config,
                                quant_config,
                                lora_config=lora_config)
+
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
-        )
+
+        self.lm_head = nn.Linear(config.d_model,
+                                 config.vocab_size,
+                                 bias=False)
+            
+        # self.lm_head = ParallelLMHead(
+        #     self.unpadded_vocab_size,
+        #     config.hidden_size,
+        #     org_num_embeddings=config.vocab_size,
+        #     padding_size=DEFAULT_VOCAB_PADDING_SIZE
+        #     # We need bigger padding if using lora for kernel
+        #     # compatibility
+        #     if not lora_config else lora_config.lora_vocab_padding_size,
+        # )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
@@ -1244,6 +1250,20 @@ class BartForConditionalGeneration(nn.Module):
         #     encoder_attentions=outputs.encoder_attentions,
         # )
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+                                       sampling_metadata)
+        return logits
+
+    def sample(
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
     def prepare_inputs_for_generation(
         self,
         decoder_input_ids,
@@ -1341,32 +1361,57 @@ class BartForConditionalGeneration(nn.Module):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
 
-        params_dict = dict(self.model.named_parameters())
+        model_params_dict = dict(self.model.named_parameters())
+        top_params_dict = dict(self.named_parameters())
+
 
         for name, loaded_weight in weights:
-            if 'shared.weight' in name:
-                continue
+            # if 'shared.weight' in name:
+            #     continue
 
             name = self._rename_key(name)
             name, shard_id = self._rename_stacked_param(name)
 
-            # Skip the specific downstream task weight.
-            if name.startswith('cls.'):
-                continue
-            # use Pooler instead.
-            if name.startswith('pooler.'):
-                continue
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
-                continue
+            if 'shared.weight' in name:
+                encoder_in_param = model_params_dict['encoder.embed_tokens.weight']
+                encoder_in_weight_loader = getattr(encoder_in_param, "weight_loader",
+                                                    default_weight_loader)
 
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            if shard_id:
-                weight_loader(param, loaded_weight, shard_id)
+                decoder_in_param = model_params_dict['decoder.embed_tokens.weight']
+                decoder_in_weight_loader = getattr(decoder_in_param, "weight_loader",
+                                                    default_weight_loader)
+
+                lm_head_in_param = top_params_dict['lm_head.weight']
+                lm_head_in_weight_loader = getattr(lm_head_in_param, "weight_loader",
+                                                    default_weight_loader)
+
+                if shard_id:
+                    encoder_in_weight_loader(encoder_in_param, loaded_weight, shard_id)
+                    decoder_in_weight_loader(decoder_in_param, loaded_weight, shard_id)
+                    lm_head_in_weight_loader(lm_head_in_param, loaded_weight, shard_id)
+                else:
+                    encoder_in_weight_loader(encoder_in_param, loaded_weight)
+                    decoder_in_weight_loader(decoder_in_param, loaded_weight)
+                    lm_head_in_weight_loader(lm_head_in_param, loaded_weight)
+
             else:
-                weight_loader(param, loaded_weight)
+                # Skip the specific downstream task weight.
+                if name.startswith('cls.'):
+                    continue
+                # use Pooler instead.
+                if name.startswith('pooler.'):
+                    continue
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in model_params_dict:
+                    continue
+
+                param = model_params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                if shard_id:
+                    weight_loader(param, loaded_weight, shard_id)
+                else:
+                    weight_loader(param, loaded_weight)
 
     # def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
 
