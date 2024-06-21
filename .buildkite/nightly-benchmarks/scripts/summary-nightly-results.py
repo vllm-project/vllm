@@ -28,9 +28,6 @@ serving_column_mapping = {
     "engine": "Engine",
 }
 
-
-
-
 if __name__ == "__main__":
 
     # collect results
@@ -39,7 +36,6 @@ if __name__ == "__main__":
         with open(test_file, "r") as f:
             raw_result = json.loads(f.read())
 
-            
         # attach the benchmarking command to raw_result
         with open(test_file.with_suffix(".commands"), "r") as f:
             command = json.loads(f.read())
@@ -52,28 +48,24 @@ if __name__ == "__main__":
         serving_results.append(raw_result)
         continue
 
-
     serving_results = pd.DataFrame.from_dict(serving_results)
-
 
     if not serving_results.empty:
         serving_results = serving_results[list(
             serving_column_mapping.keys())].rename(
                 columns=serving_column_mapping)
-            
+
     serving_md_table = tabulate(serving_results,
                                 headers='keys',
                                 tablefmt='pipe',
                                 showindex=False)
-            
-            
+
     prefix = os.environ.get("CURRENT_LLM_SERVING_ENGINE")
 
     # document benchmarking results in markdown
     with open(results_folder / f"{prefix}_nightly_results.md", "w") as f:
         f.write(serving_md_table)
         f.write('\n')
-        
 
     # document benchmarking results in json
     with open(results_folder / f"{prefix}_nightly_results.json", "w") as f:
