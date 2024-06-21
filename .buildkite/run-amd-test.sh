@@ -49,7 +49,7 @@ echo "--- Building container"
 sha=$(git rev-parse --short HEAD)
 image_name=rocm_${sha}
 container_name=rocm_${sha}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)
-DOCKER_BUILDKIT=1 docker build \
+docker build \
         -t ${image_name} \
         -f Dockerfile.rocm \
         --progress plain \
