@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+from typing import List, Optional
 from unittest.mock import patch
 
 import pytest
@@ -111,7 +112,10 @@ async def test_tokenizer_group_ray_pool_fault_tolerance(tokenizer_group_type):
 
     class FailingTokenizerGroup(TokenizerGroup):
 
-        def __init__(self, *args, fail_at=None, **kwargs):
+        def __init__(self,
+                     *args,
+                     fail_at: Optional[List[int]] = None,
+                     **kwargs):
             super().__init__(*args, **kwargs)
             self.i = 0
             self.fail_at = fail_at or []
@@ -185,6 +189,7 @@ async def test_tokenizer_group_ray_pool_fault_tolerance(tokenizer_group_type):
         fail_at=fail_at)
     tokenizer_actors = tokenizer_group_pool.tokenizer_actors.copy()
 
+    # Prompt too long error
     with pytest.raises(ValueError):
         await tokenizer_group_pool.encode_async(request_id="1",
                                                 prompt="prompt" * 100,

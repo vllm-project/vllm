@@ -142,7 +142,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
                     "%s died for second time in a row, marking "
                     "RayTokenizerGroupPool as unhealthy.", actor)
                 actor_is_alive = False
-                self._exception = e
+                if not self._exception:
+                    self._exception = e
                 self.check_health()
         finally:
             self._finalize_encode(actor, original_actor, actor_is_alive)
@@ -187,7 +188,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
                     "%s died for second time in a row, marking "
                     "RayTokenizerGroupPool as unhealthy.", actor)
                 actor_is_alive = False
-                self._exception = e
+                if not self._exception:
+                    self._exception = e
                 self.check_health()
         finally:
             self._finalize_encode(actor, original_actor, actor_is_alive)
