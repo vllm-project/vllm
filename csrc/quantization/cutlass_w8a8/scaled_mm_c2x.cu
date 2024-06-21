@@ -183,6 +183,9 @@ struct cutlass_2x_gemm {
       >::GemmKernel>;
   // clang-format on
 
+  static constexpr size_t kRequiredSharedMemSize =
+      sizeof(typename KernelType::SharedStorage);
+
   using Op = cutlass::gemm::device::GemmUniversalAdapter<KernelType>;
 };
 
@@ -248,6 +251,26 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   CUTLASS_CHECK(gemm_op.can_implement(args));
   cutlass::Status status = gemm_op(args, workspace.get(), stream);
   CUTLASS_CHECK(status);
+}
+
+template <typename Gemm, typename FallbackGemm, typename... EpilogueArgs>
+void fallback_cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
+                                  torch::Tensor const& b,
+                                  EpilogueArgs&&... args) {
+  // In some cases, the GPU isn't able to accomodate the
+  // shared memory requirements of the Gemm. In such cases, use
+  // the FallbackGemm instead.
+  static const int max_shared_mem_per_block_opt_in =
+      get_cuda_max_shared_memory_per_block_opt_in(0);
+  if (Gemm::kRequiredSharedMemSize <= max_shared_mem_per_block_opt_in) {
+    return cutlass_gemm_caller<Gemm>(out, a, b,
+                                     std::forward<EpilogueArgs>(args)...);
+  } else {
+    TORCH_CHECK(FallbackGemm::kRequiredSharedMemSize <=
+                max_shared_mem_per_block_opt_in);
+    return cutlass_gemm_caller<FallbackGemm>(
+        out, a, b, std::forward<EpilogueArgs>(args)...);
+  }
 }
 
 template <typename InType, typename OutType,
@@ -336,25 +359,27 @@ void cutlass_gemm_sm80_dispatch(torch::Tensor& out, torch::Tensor const& a,
       std::max(static_cast<uint32_t>(16), next_pow_2(m));  // next power of 2
   if (mp2 <= 16) {
     // M in [1, 16]
-    return cutlass_gemm_caller<Cutlass2xGemmM16>(
+    return fallback_cutlass_gemm_caller<Cutlass2xGemmM16, Cutlass2xGemmDefault>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 32) {
     // M in (16, 32]
-    return cutlass_gemm_caller<Cutlass2xGemmM32>(
+    return fallback_cutlass_gemm_caller<Cutlass2xGemmM32, Cutlass2xGemmDefault>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 64) {
     // M in (32, 64]
-    return cutlass_gemm_caller<Cutlass2xGemmM64>(
+    return fallback_cutlass_gemm_caller<Cutlass2xGemmM64, Cutlass2xGemmDefault>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 128) {
     // M in (64, 128]
     uint32_t const n = out.size(1);
     bool const small_n = n < 8192;
     if (small_n) {
-      return cutlass_gemm_caller<Cutlass2xGemmM128SmallN>(
+      return fallback_cutlass_gemm_caller<Cutlass2xGemmM128SmallN,
+                                          Cutlass2xGemmDefault>(
           out, a, b, std::forward<EpilogueArgs>(args)...);
     } else {
-      return cutlass_gemm_caller<Cutlass2xGemmM128BigN>(
+      return fallback_cutlass_gemm_caller<Cutlass2xGemmM128BigN,
+                                          Cutlass2xGemmDefault>(
           out, a, b, std::forward<EpilogueArgs>(args)...);
     }
   } else {
