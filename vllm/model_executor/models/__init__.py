@@ -67,16 +67,6 @@ _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
 }
 
-_CONDITIONAL_GENERATION_MODELS = {
-    "BartModel": ("bart", "BartForConditionalGeneration"),
-}
-
-_MODELS = {
-    **_GENERATION_MODELS,
-    **_EMBEDDING_MODELS,
-    **_CONDITIONAL_GENERATION_MODELS
-}
-
 # Architecture -> type.
 # out of tree models
 _OOT_MODELS: Dict[str, Type[nn.Module]] = {}
