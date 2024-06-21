@@ -28,6 +28,7 @@ class EngineArgs:
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
     load_format: str = 'auto'
+    weights_load_device: Optional[str] = None
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
     quantization_param_path: Optional[str] = None
@@ -168,6 +169,11 @@ class EngineArgs:
             '* "tensorizer" will load the weights using tensorizer from '
             'CoreWeave which assumes tensorizer_uri is set to the location of '
             'the serialized weights.')
+        parser.add_argument("--weights-load-device",
+                            type=str,
+                            default=EngineArgs.weights_load_device,
+                            choices=["cuda", "neuron", "hpu", "cpu"],
+                            help='Device on which weights are loaded.')
         parser.add_argument(
             '--dtype',
             type=str,
@@ -575,9 +581,11 @@ class EngineArgs:
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
+        device = device_config.device_type if self.weights_load_device is None else self.weights_load_device
         load_config = LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
+            device=device,
             model_loader_extra_config=self.model_loader_extra_config,
         )
 
