@@ -99,6 +99,10 @@ class GPUExecutor(ExecutorBase):
         assert lora_id > 0, "lora_id must be greater than 0."
         return self.driver_worker.remove_lora(lora_id)
 
+    def pin_lora(self, lora_id: int) -> bool:
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self.driver_worker.pin_lora(lora_id)
+
     def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
 
