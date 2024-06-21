@@ -67,6 +67,11 @@ _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
 }
 
+_MODELS = {
+    **_GENERATION_MODELS,
+    **_EMBEDDING_MODELS,
+}
+
 # Architecture -> type.
 # out of tree models
 _OOT_MODELS: Dict[str, Type[nn.Module]] = {}

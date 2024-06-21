@@ -20,7 +20,8 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import LLMInputs, PromptInputs, LLMInputsOptions
+from vllm.inputs import (LLMInputs, PromptInputs, LLMInputsOptions, 
+                        EncoderDecoderStringPrompts, EncoderDecoderLLMInputs)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
@@ -38,7 +39,9 @@ from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter
+from vllm.utils import (Counter,
+                        is_encoder_decoder_model_config,
+                        is_embedding_model_config)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -239,7 +242,7 @@ class LLMEngine:
             load_config=load_config,
         )
 
-        if not self.model_config.embedding_mode:
+        if not self._is_embedding_model():
             self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
@@ -315,6 +318,12 @@ class LLMEngine:
                     self.get_tokenizer_for_seq,
                 ),
             ))
+
+    def _is_encoder_decoder_model(self):
+        return is_encoder_decoder_model_config(self.model_config)
+
+    def _is_embedding_model(self):
+        return is_embedding_model_config(self.model_config)
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -464,33 +473,78 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = self._get_eos_token_id(lora_request)
 
-        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
-                       lora_request)
+        if self._is_encoder_decoder_model():
+            # Add encoder/decoder model request
+            encoder_seq_id = 0 # Encoder sequence id is not used
 
-        # Create a SequenceGroup based on SamplingParams or PoolingParams
-        if isinstance(params, SamplingParams):
-            seq_group = self._create_sequence_group_with_sampling(
-                request_id,
-                seq,
-                params,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-            )
-        elif isinstance(params, PoolingParams):
-            seq_group = self._create_sequence_group_with_pooling(
-                request_id,
-                seq,
-                params,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-            )
+            processed_encoder_inputs = {"prompt": processed_inputs.get("encoder_prompt"),
+                                        "prompt_token_ids": 
+                                            processed_inputs
+                                                .get("encoder_prompt_token_ids")}
+
+            encoder_seq = Sequence(encoder_seq_id, processed_encoder_inputs, block_size, eos_token_id,
+                                   lora_request)
+
+            decoder_seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
+                                   lora_request)
+
+
+
+            # Create a SequenceGroup based on SamplingParams or PoolingParams
+            if isinstance(params, SamplingParams):
+                seq_group = self._create_sequence_group_with_sampling(
+                    request_id,
+                    decoder_seq,
+                    params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    encoder_seq=encoder_seq
+                )
+            elif isinstance(params, PoolingParams):
+                seq_group = self._create_sequence_group_with_pooling(
+                    request_id,
+                    decoder_seq,
+                    params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    encoder_seq=encoder_seq
+                )
+            else:
+                raise ValueError(
+                    "Either SamplingParams or PoolingParams must be provided.")
+
+            # Add the sequence group to the scheduler.
+            self.scheduler.add_seq_group(seq_group)
         else:
-            raise ValueError(
-                "Either SamplingParams or PoolingParams must be provided.")
+            # Add decoder-only model request
+            decoder_seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
+                        lora_request)
 
-        # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+            # Create a SequenceGroup based on SamplingParams or PoolingParams
+            if isinstance(params, SamplingParams):
+                seq_group = self._create_sequence_group_with_sampling(
+                    request_id,
+                    decoder_seq,
+                    params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                )
+            elif isinstance(params, PoolingParams):
+                seq_group = self._create_sequence_group_with_pooling(
+                    request_id,
+                    decoder_seq,
+                    params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                )
+            else:
+                raise ValueError(
+                    "Either SamplingParams or PoolingParams must be provided.")
+
+            # Add the sequence group to the scheduler.
+            self.scheduler.add_seq_group(seq_group)
 
     def process_model_inputs(
         self,
@@ -498,22 +552,67 @@ class LLMEngine:
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
     ) -> LLMInputsOptions:
-        if isinstance(inputs, str):
-            inputs = {"prompt": inputs}
+        
+        if self._is_encoder_decoder_model():
+            # Encoder/decoder model input
 
-        if "prompt_token_ids" not in inputs:
-            tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                                 "skip_tokenizer_init is True")
+            if isinstance(inputs, str):
+                # Interpret a single input prompt as a single encoder input
+                # (leave decoder input to default)
+                inputs = {"encoder_prompt": inputs}
 
-            prompt_token_ids = tokenizer.encode(request_id=request_id,
-                                                prompt=inputs["prompt"],
-                                                lora_request=lora_request)
+            if isinstance(inputs,EncoderDecoderStringPrompts):
+                # Interpret a tuple of input string prompts as a single
+                # encoder input and a single decoder input, respectively
+                inputs = {"encoder_prompt": inputs[0],
+                          "decoder_prompt": inputs[1]}
+                
+            input_has_decoder_token_ids = "decoder_prompt_token_ids" in inputs
+            input_has_encoder_token_ids = "encoder_prompt_token_ids" in inputs
+
+            if not (input_has_decoder_token_ids and \
+                    input_has_encoder_token_ids):
+                tokenizer = self.get_tokenizer_group("prompts must be None if "
+                                                    "skip_tokenizer_init is True")
+
+                if not input_has_decoder_token_ids:
+                    decoder_prompt_token_ids = tokenizer.encode(request_id=request_id,
+                                                                prompt=inputs["decoder_prompt"],
+                                                                lora_request=lora_request)
+
+                    encoder_prompt_token_ids = tokenizer.encode(request_id=request_id,
+                                                                prompt=inputs["encoder_prompt"],
+                                                                lora_request=lora_request)
+
+            else:
+                decoder_prompt_token_ids = inputs["decoder_prompt_token_ids"]
+                encoder_prompt_token_ids = inputs["encoder_prompt_token_ids"]
+
+            return EncoderDecoderLLMInputs(decoder_prompt_token_ids=decoder_prompt_token_ids,
+                                           decoder_prompt=inputs.get("decoder_prompt"),
+                                           encoder_prompt_token_ids=encoder_prompt_token_ids,
+                                           encoder_prompt=inputs.get("encoder_prompt"),
+                                           multi_modal_data=inputs.get("multi_modal_data"))
+
         else:
-            prompt_token_ids = inputs["prompt_token_ids"]
+            # Decoder-only model input
 
-        return LLMInputs(prompt_token_ids=prompt_token_ids,
-                         prompt=inputs.get("prompt"),
-                         multi_modal_data=inputs.get("multi_modal_data"))
+            if isinstance(inputs, str):
+                inputs = {"prompt": inputs}
+
+            if "prompt_token_ids" not in inputs:
+                tokenizer = self.get_tokenizer_group("prompts must be None if "
+                                                    "skip_tokenizer_init is True")
+
+                prompt_token_ids = tokenizer.encode(request_id=request_id,
+                                                    prompt=inputs["prompt"],
+                                                    lora_request=lora_request)
+            else:
+                prompt_token_ids = inputs["prompt_token_ids"]
+
+            return LLMInputs(prompt_token_ids=prompt_token_ids,
+                            prompt=inputs.get("prompt"),
+                            multi_modal_data=inputs.get("multi_modal_data"))
 
     def add_request(
         self,
@@ -593,6 +692,7 @@ class LLMEngine:
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         trace_headers: Optional[Dict[str, str]] = None,
+        encoder_seq: Optional[Sequence] = None
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -621,6 +721,7 @@ class LLMEngine:
             sampling_params=sampling_params,
             lora_request=lora_request,
             trace_headers=trace_headers,
+            encoder_seq=encoder_seq
         )
 
         return seq_group
@@ -632,6 +733,7 @@ class LLMEngine:
         pooling_params: PoolingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        encoder_seq: Optional[Sequence] = None
     ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
         # Defensive copy of PoolingParams, which are used by the pooler
@@ -641,7 +743,8 @@ class LLMEngine:
                                   seqs=[seq],
                                   arrival_time=arrival_time,
                                   lora_request=lora_request,
-                                  pooling_params=pooling_params)
+                                  pooling_params=pooling_params,
+                                  encoder_seq=encoder_seq)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -717,7 +820,7 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-            if self.model_config.embedding_mode:
+            if self._is_embedding_model():
                 self._process_sequence_group_outputs(seq_group, outputs)
                 continue
 
