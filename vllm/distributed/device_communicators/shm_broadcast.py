@@ -154,12 +154,15 @@ class ShmRingBufferIO:
                 # found a block that is either
                 # (1) not written
                 # (2) read by all readers
+
+                # mark the block as not written
+                metadata_buffer[0] = 0
                 # let caller write to the buffer
                 with self.buffer.get_data(self.current_idx) as buf:
                     yield buf
 
                 # caller has written to the buffer
-                # reset the state
+                # mark the block as written
                 metadata_buffer[0] = 1
                 for i in range(1, self.buffer.n_reader + 1):
                     metadata_buffer[i] = 0
