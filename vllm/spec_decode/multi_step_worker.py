@@ -1,6 +1,6 @@
-from contextlib import contextmanager
 import copy
 import weakref
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
 import torch

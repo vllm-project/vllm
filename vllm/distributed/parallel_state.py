@@ -631,8 +631,8 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
-    _TP = init_model_parallel_group(group_ranks, get_world_group().local_rank,
-                                    backend)
+    _TP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank, backend)
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
@@ -644,8 +644,8 @@ def initialize_model_parallel(
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group_ranks.append(ranks)
-    _PP = init_model_parallel_group(group_ranks, get_world_group().local_rank,
-                                    backend)
+    _PP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank, backend)
 
 
 def ensure_model_parallel_initialized(
