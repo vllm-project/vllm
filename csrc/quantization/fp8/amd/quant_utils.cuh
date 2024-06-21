@@ -487,7 +487,7 @@ scaled_vec_conversion<uint8_t, uint16_t>(const uint16_t& a, float scale) {
   __half_raw tmp;
   tmp.x = a;
 
-  hip_fp8 f8{static_cast<float>(tmp.data / scale)};
+  hip_fp8 f8{static_cast<float>(tmp.data) / scale};
   return f8.data;
 }
 
@@ -509,10 +509,10 @@ scaled_vec_conversion<uint16_t, uint32_t>(const uint32_t& a, float scale) {
   f1.f = tmp.h2r.x.data / scale;
   f2.f = tmp.h2r.y.data / scale;
   if ((f1.ui32 & 0x7F800000) != 0x7F800000) {
-    f1.f = __builtin_amdgcn_fmed3f(f1.f, 240.0, -240.0);
+    f1.f = __builtin_amdgcn_fmed3f(f1.f, 224.0, -224.0);
   }
   if ((f2.ui32 & 0x7F800000) != 0x7F800000) {
-    f2.f = __builtin_amdgcn_fmed3f(f2.f, 240.0, -240.0);
+    f2.f = __builtin_amdgcn_fmed3f(f2.f, 224.0, -224.0);
   }
   return __builtin_amdgcn_cvt_pk_fp8_f32(f1.f, f2.f, 0, 0);
     #else
@@ -624,10 +624,10 @@ scaled_vec_conversion<uint16_t, float2>(const float2& a, float scale) {
   f1.f = a.x / scale;
   f2.f = a.y / scale;
   if ((f1.ui32 & 0x7F800000) != 0x7F800000) {
-    f1.f = __builtin_amdgcn_fmed3f(f1.f, 240.0, -240.0);
+    f1.f = __builtin_amdgcn_fmed3f(f1.f, 224.0, -224.0);
   }
   if ((f2.ui32 & 0x7F800000) != 0x7F800000) {
-    f2.f = __builtin_amdgcn_fmed3f(f2.f, 240.0, -240.0);
+    f2.f = __builtin_amdgcn_fmed3f(f2.f, 224.0, -224.0);
   }
   return __builtin_amdgcn_cvt_pk_fp8_f32(f1.f, f2.f, 0, 0);
     #else
