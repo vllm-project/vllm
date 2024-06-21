@@ -383,7 +383,8 @@ class NaiveBlockAllocator(BlockAllocator):
         for block in blocks:
             self.free(block)
 
-    def swap_in(self, blocks: List[Block]) -> None:
+    def swap_in(self, blocks: List[Block]) -> List[Block]:
+        new_blocks = []
         for block in blocks:
             if block.is_full:
                 alloc = self.allocate_immutable_block(block.prev_block,
@@ -391,7 +392,9 @@ class NaiveBlockAllocator(BlockAllocator):
             else:
                 alloc = self.allocate_mutable_block(block.prev_block)
                 alloc.append_token_ids(block.token_ids)
-            block.block_id = alloc.block_id
+            new_blocks.append(alloc)
+
+        return new_blocks
 
 
 class NaiveBlock(Block):

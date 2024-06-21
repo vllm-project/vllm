@@ -139,6 +139,9 @@ class BlockTable:
         """
         return cdiv(len(token_ids), block_size)
 
+    def update(self, blocks: List[Block]) -> None:
+        self._blocks.update(blocks)
+
     def allocate(self,
                  token_ids: List[int],
                  device: Device = Device.GPU) -> None:
@@ -157,7 +160,7 @@ class BlockTable:
         blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                      token_ids=token_ids,
                                                      device=device)
-        self._blocks.update(blocks)
+        self.update(blocks)
         self._num_full_slots = len(token_ids)
 
     def append_token_ids(self,

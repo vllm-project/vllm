@@ -231,8 +231,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         return self._allocators[device].get_physical_block_id(absolute_id)
 
-    def swap(self, blocks: List[Block], source_device: Device,
-             dest_device: Device) -> Dict[int, int]:
+    def swap(self, src_blocks: List[Block], src_device: Device,
+             dst_device: Device) -> Tuple[List[Block], Dict[int, int]]:
         """Execute the swap for the given blocks from source_device
         on to dest_device, save the current swap mapping and append 
         them to the accumulated `self._swap_mapping` for each 
@@ -240,24 +240,27 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
         Args:
             blocks: List of blocks to be swapped.
-            source_device (Device): Device to swap the 'blocks' from.
-            dest_device (Device): Device to swap the 'blocks' to.
+            src_device (Device): Device to swap the 'blocks' from.
+            dst_device (Device): Device to swap the 'blocks' to.
         
         Returns:
             Dict[int, int]: Swap mapping from source_device
                 on to dest_device.
         """
-        source_block_ids = [block.block_id for block in blocks]
-        self._allocators[source_device].swap_out(blocks)
-        self._allocators[dest_device].swap_in(blocks)
-        dest_block_ids = [block.block_id for block in blocks]
+        # Remove blocks from source device
+        src_block_ids = [block.block_id for block in src_blocks]
+        self._allocators[src_device].swap_out(src_blocks)
+
+        # Add blocks to destination device
+        dst_blocks = self._allocators[dst_device].swap_in(src_blocks)
+        dst_block_ids = [block.block_id for block in dst_blocks]
 
         current_swap_mapping: Dict[int, int] = {}
-        for src, dest in zip(source_block_ids, dest_block_ids):
-            if src is not None and dest is not None:
-                self._swap_mapping[src] = dest
-                current_swap_mapping[src] = dest
-        return current_swap_mapping
+        for src_block_id, dst_block_id in zip(src_block_ids, dst_block_ids):
+            if src_block_id is not None and dst_block_id is not None:
+                self._swap_mapping[src_block_id] = dst_block_id
+                current_swap_mapping[src_block_id] = dst_block_id
+        return (dst_blocks, current_swap_mapping)
 
     def get_num_blocks_touched(self,
                                blocks: List[Block],

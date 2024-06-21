@@ -137,7 +137,7 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def swap_in(self, blocks: List[Block]) -> None:
+    def swap_in(self, blocks: List[Block]) -> List[Block]:
         pass
 
     @property
@@ -262,8 +262,8 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def swap(self, blocks: List[Block], source_device: Device,
-             dest_device: Device) -> Dict[int, int]:
+    def swap(self, src_blocks: List[Block], src_device: Device,
+             dst_device: Device) -> Tuple[List[Block], Dict[int, int]]:
         pass
 
     @abstractmethod
