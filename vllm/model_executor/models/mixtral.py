@@ -56,88 +56,7 @@ from intel_extension_for_pytorch.cpu._auto_kernel_selection import (
     _enable_tpp,
     _disable_tpp,
 )
-class _IPEXlinearMOECPU(nn.Module):
-    def __init__(self, W13, W2, W3=None, tpp=False, woq=False):
-        super().__init__()
-        self.tpp = tpp
-        self.woq = woq
-        self.num_experts = W2.shape[0]
-        self.hidden_size = W2.shape[1]
-        self.intermediate_size = W2.shape[2]
 
-        linear_list = []
-        for i in range(W2.shape[0]):
-            if W3 is not None:
-                _W1 = W13[i]
-            else:
-                _W1 = W13[i][0 : self.intermediate_size, :]
-                _W3 = W13[i][self.intermediate_size : 2 * self.intermediate_size, :]
-            linear1 = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-            linear1.weight = nn.Parameter(_W1)
-            linear2 = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-            linear2.weight = nn.Parameter(W2[i])
-            linear3 = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-            linear3.weight = nn.Parameter(_W3)
-            linear_per_expert = nn.ModuleList([linear1, linear2, linear3])
-            linear_list.append(linear_per_expert)
-        self.linear_module_list = nn.ModuleList([linear_list[i] for i in range(W2.shape[0])])
-
-    def forward(self, hidden_states, score, topk):
-        batch_size, head_dim = hidden_states.shape
-        routing_weights = torch.nn.functional.softmax(score, dim=1, dtype=torch.float32)
-        routing_weights, selected_experts = torch.topk(routing_weights, topk, dim=-1)
-        routing_weights = routing_weights.to(hidden_states.dtype)
-        final_hidden_states = torch.zeros(
-            (batch_size, head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        expert_mask = torch.nn.functional.one_hot(
-            selected_experts, num_classes=self.num_experts
-        ).permute(2, 1, 0)
-        for expert_idx in range(self.num_experts):
-            idx, top_x = torch.where(expert_mask[expert_idx])
-            if (
-                hasattr(self.linear_module_list[expert_idx][0], "use_dnnl")
-                and self.linear_module_list[expert_idx][0].use_dnnl
-            ):
-                final_hidden_states = torch.ops.torch_ipex.mixtral_moe(
-                    hidden_states,
-                    top_x,
-                    idx,
-                    self.linear_module_list[expert_idx][0]._get_forward_weight(),
-                    self.linear_module_list[expert_idx][0].ctx.get_data_handle(),
-                    self.linear_module_list[expert_idx][2]._get_forward_weight(),
-                    self.linear_module_list[expert_idx][2].ctx.get_data_handle(),
-                    self.linear_module_list[expert_idx][1]._get_forward_weight(),
-                    self.linear_module_list[expert_idx][1].ctx.get_data_handle(),
-                    hasattr(self.linear_module_list[expert_idx][0], "use_dnnl")
-                    and self.linear_module_list[expert_idx][0].use_dnnl,
-                    routing_weights,
-                    final_hidden_states,
-                    False,
-                )
-            else:
-                final_hidden_states = torch.ops.torch_ipex.mixtral_moe_tpp(
-                    hidden_states,
-                    top_x,
-                    idx,
-                    self.linear_module_list[expert_idx][0].weight.detach(),
-                    self.linear_module_list[expert_idx][2].weight.detach(),
-                    self.linear_module_list[expert_idx][1].weight.detach(),
-                    (
-                        self.linear_module_list[expert_idx][0].tpp_fallback
-                        if hasattr(
-                            self.linear_module_list[expert_idx][0], "tpp_fallback"
-                        )
-                        else True
-                    ),
-                    routing_weights,
-                    final_hidden_states,
-                    False,
-                )
-
-        return final_hidden_states.view(-1, head_dim)
 
 class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
@@ -310,11 +229,11 @@ class MixtralMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         if not hasattr(self, "ipex_moe"):
-            self.ipex_moe = _IPEXlinearMOECPU(self.w13_weight, self.w2_weight)
+            self.ipex_moe = ipex.llm.modules.LinearMOE(W13=self.w13_weight, W2=self.w2_weight)
             _disable_tpp()
             if hidden_states.dtype is torch.bfloat16:
                 _enable_tpp()
-            self.ipex_moe = ipex.optimize(self.ipex_moe.eval(), dtype=hidden_states.dtype, inplace=True)
+            self.ipex_moe = ipex.llm.optimize(self.ipex_moe.eval(), dtype=hidden_states.dtype, inplace=True)
         final_hidden_states = self.ipex_moe(hidden_states, router_logits, self.top_k)
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
@@ -396,8 +315,9 @@ class MixtralAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        output, _ = self.o_proj(attn_output)
-        return output
+        # move self.o_proj to MixtralDecoderLayer to enable linear+add fusion when tp_size <=1
+        # output, _ = self.o_proj(attn_output)
+        return attn_output
 
 
 class MixtralDecoderLayer(nn.Module):
@@ -452,10 +372,19 @@ class MixtralDecoderLayer(nn.Module):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        if self.self_attn.o_proj.tp_size <=1 and not hasattr(self, "ipex_fusion") and hasattr(self.self_attn.o_proj, "ipex_linear"):
+                self.ipex_fusion = ipex.llm.modules.LinearAdd(self.self_attn.o_proj.ipex_linear)
+        if hasattr(self, "ipex_fusion"):
+            hidden_states = self.ipex_fusion(hidden_states, residual)
+            if not self.self_attn.o_proj.skip_bias_add and self.self_attn.o_proj.bias is not None:
+                hidden_states = hidden_states + self.self_attn.o_proj.bias
+            residual = hidden_states
+            hidden_states = self.post_attention_layernorm(
+                hidden_states)
+        else:
+            hidden_states, _ = self.self_attn.o_proj(hidden_states)
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual)
         hidden_states = self.block_sparse_moe(hidden_states)
         return hidden_states, residual
 

@@ -20,6 +20,7 @@ from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
+import intel_extension_for_pytorch as ipex
 from transformers import GPTJConfig
 
 from vllm.attention import Attention, AttentionMetadata
@@ -130,9 +131,18 @@ class GPTJMLP(nn.Module):
                               intermediate_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.fc_in(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states, _ = self.fc_out(hidden_states)
+        if not hasattr(self, "ipex_fusion"):
+            if hasattr(self.fc_in, "ipex_linear"):
+                self.ipex_fusion = ipex.llm.modules.LinearNewGelu(self.fc_in.ipex_linear)
+            elif hasattr(self.fc_in, "ipex_qlinear"):
+                self.ipex_fusion = ipex.llm.modules.LinearNewGelu(self.fc_in.ipex_qlinear)
+        if hasattr(self, "ipex_fusion"):
+            hidden_states = self.ipex_fusion(hidden_states)
+        else:
+            hidden_states, _ = self.fc_in(hidden_states)
+            hidden_states = self.act(hidden_states)
+        # move self.fc_out to GPTJBlock to enable linear+add+add fusion when tp_size <=1c
+        # hidden_states, _ = self.fc_out(hidden_states)
         return hidden_states
 
 
@@ -167,7 +177,20 @@ class GPTJBlock(nn.Module):
             attn_metadata=attn_metadata,
         )
         mlp_output = self.mlp(hidden_states)
-        hidden_states = attn_output + mlp_output + residual
+        if self.mlp.fc_out.tp_size <=1 and not hasattr(self, "ipex_fusion"):
+            if hasattr(self.mlp.fc_out, "ipex_linear"):
+                self.ipex_fusion = ipex.llm.modules.LinearAddAdd(self.mlp.fc_out.ipex_linear)
+            elif hasattr(self.mlp.fc_out, "ipex_qlinear"):
+                self.ipex_fusion = ipex.llm.modules.LinearAddAdd(self.mlp.fc_out.ipex_qlinear)
+        if hasattr(self, "ipex_fusion"):
+            hidden_states = self.ipex_fusion(
+                mlp_output, attn_output,  residual
+            )
+            if not self.mlp.fc_out.skip_bias_add and self.mlp.fc_out.bias is not None:
+                hidden_states = hidden_states + self.mlp.fc_out.bias
+        else:
+            mlp_output, _ = self.mlp.fc_out(mlp_output)
+            hidden_states = attn_output + mlp_output + residual
         return hidden_states
 
 

@@ -48,7 +48,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
-
+import intel_extension_for_pytorch as ipex
 
 class MixtralMLP(nn.Module):
 
@@ -132,25 +132,31 @@ class MixtralMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights,
-                                                       self.top_k,
-                                                       dim=-1)
-        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        if hasattr(self, "ipex_moe"):
+            final_hidden_states = self.ipex_moe(hidden_states, router_logits, self.top_k)
+        else:
+            routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+            routing_weights, selected_experts = torch.topk(routing_weights,
+                                                        self.top_k,
+                                                        dim=-1)
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
-        final_hidden_states = None
-        for expert_idx in self.expert_indicies:
-            expert_layer = self.experts[expert_idx]
-            expert_mask = (selected_experts == expert_idx)
-            expert_weights = (routing_weights * expert_mask).sum(dim=-1,
-                                                                 keepdim=True)
+            final_hidden_states = None
+            for expert_idx in self.expert_indicies:
+                expert_layer = self.experts[expert_idx]
+                expert_mask = (selected_experts == expert_idx)
+                expert_weights = (routing_weights * expert_mask).sum(dim=-1,
+                                                                    keepdim=True)
 
-            current_hidden_states = expert_layer(hidden_states).mul_(
-                expert_weights)
-            if final_hidden_states is None:
-                final_hidden_states = current_hidden_states
-            else:
-                final_hidden_states.add_(current_hidden_states)
+                current_hidden_states = expert_layer(hidden_states).mul_(
+                    expert_weights)
+                if final_hidden_states is None:
+                    final_hidden_states = current_hidden_states
+                else:
+                    final_hidden_states.add_(current_hidden_states)
+
+        if not hasattr(self, "ipex_moe") and hasattr(self.experts[0].w1, "ipex_qlinear"):
+            self.ipex_moe = ipex.llm.modules.LinearMOE(experts_module=self.experts)
 
         return tensor_model_parallel_all_reduce(final_hidden_states).view(
             num_tokens, hidden_dim)
@@ -229,9 +235,9 @@ class MixtralAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        output, _ = self.o_proj(attn_output)
-        return output
-
+        # move self.o_proj to MixtralDecoderLayer to enable linear+add fusion when tp_size <=1
+        # output, _ = self.o_proj(attn_output)
+        return attn_output
 
 class MixtralDecoderLayer(nn.Module):
 
@@ -282,9 +288,19 @@ class MixtralDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
         )
 
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        if self.self_attn.o_proj.tp_size <=1 and not hasattr(self, "ipex_fusion") and hasattr(self.self_attn.o_proj, "ipex_qlinear"):
+                self.ipex_fusion = ipex.llm.modules.LinearAdd(self.self_attn.o_proj.ipex_qlinear)
+        if hasattr(self, "ipex_fusion"):
+            hidden_states = self.ipex_fusion(hidden_states, residual)
+            if not self.self_attn.o_proj.skip_bias_add and self.self_attn.o_proj.bias is not None:
+                hidden_states = hidden_states + self.self_attn.o_proj.bias
+            residual = hidden_states
+            hidden_states = self.post_attention_layernorm(
+                hidden_states)
+        else:
+            hidden_states, _ = self.self_attn.o_proj(hidden_states)
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual)
         hidden_states = self.block_sparse_moe(hidden_states)
         return hidden_states, residual
 
