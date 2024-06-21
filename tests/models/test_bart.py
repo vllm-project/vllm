@@ -6,9 +6,7 @@ import pytest
 
 from .utils import check_logprobs_close
 
-MODELS = [
-    "facebook/bart-base"
-]
+MODELS = ["facebook/bart-base"]
 
 
 @pytest.mark.parametrize("model", MODELS)

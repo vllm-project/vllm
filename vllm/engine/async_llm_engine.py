@@ -13,7 +13,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
-from vllm.inputs import LLMInputs, PromptInputs
+from vllm.inputs import LLMInputs, PromptInputs, LLMInputsOptions
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -263,7 +263,7 @@ class _AsyncLLMEngine(LLMEngine):
         request_id: str,
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
-    ) -> LLMInputs:
+    ) -> LLMInputsOptions:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
 

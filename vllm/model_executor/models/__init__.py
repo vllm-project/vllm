@@ -68,7 +68,7 @@ _EMBEDDING_MODELS = {
 }
 
 _CONDITIONAL_GENERATION_MODELS = {
-    "BartModel": ("bart", ),
+    "BartModel": ("bart", "BartForConditionalGeneration"),
 }
 
 _MODELS = {

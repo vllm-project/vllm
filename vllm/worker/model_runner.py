@@ -25,7 +25,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available, make_tensor_with_pad)
+                        is_pin_memory_available, make_tensor_with_pad,
+                        is_encoder_decoder_model_config)
 
 logger = init_logger(__name__)
 
@@ -982,10 +983,7 @@ class ModelRunner:
         field of the HF config, if this field is present; otherwise
         return False.
         '''
-        return False if self.model_config is None else \
-                getattr(self.model_config.hf_config,
-                        "is_encoder_decoder",
-                        False)
+        return is_encoder_decoder_model_config(self.model_config)
 
     def _am_child(self):
         '''

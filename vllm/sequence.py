@@ -3,12 +3,12 @@ import copy
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
 
 import torch
 
 from vllm.block import LogicalTokenBlock
-from vllm.inputs import LLMInputs
+from vllm.inputs import LLMInputsOptions
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -212,7 +212,9 @@ class Sequence:
 
     Args:
         seq_id: The ID of the sequence.
-        inputs: The inputs of the sequence.
+        inputs: The inputs of the sequence. Note that for encoder/decoder 
+                inputs, Sequence makes no use of the encoder prompt (which is
+                tracked at the level of the SequenceGroup)
         block_size: The block size of the sequence. Should be the same as the
             block size used by the block manager and cache engine.
         lora_request: LoRA request.
@@ -221,7 +223,7 @@ class Sequence:
     def __init__(
         self,
         seq_id: int,
-        inputs: LLMInputs,
+        inputs: LLMInputsOptions,
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -250,11 +252,27 @@ class Sequence:
 
     @property
     def prompt(self) -> Optional[str]:
-        return self.inputs.get("prompt")
+        if "prompt" in self.inputs:
+            # Decoder-only prompt
+            return cast(Optional[str], self.inputs.get("prompt"))
+        elif "decoder_prompt" in self.inputs:
+            # In encoder/decoder scenario, self.prompt()
+            # returns the decoder prompt
+            return cast(Optional[str], self.inputs.get("decoder_prompt"))
+        else:
+            raise AttributeError("Invalid Sequence.inputs: {self.inputs}")
 
     @property
     def prompt_token_ids(self) -> List[int]:
-        return self.inputs["prompt_token_ids"]
+        if "prompt_token_ids" in self.inputs:
+            # Decoder-only prompt
+            return cast(List[int], self.inputs.get("prompt_token_ids"))
+        elif "decoder_prompt_token_ids" in self.inputs:
+            # In encoder/decoder scenario, self.prompt_token_ids()
+            # returns the decoder prompt
+            return cast(List[int], self.inputs.get("decoder_prompt_token_ids"))
+        else:
+            raise AttributeError("Invalid Sequence.inputs: {self.inputs}")
 
     @property
     def multi_modal_data(self) -> Optional["MultiModalData"]:

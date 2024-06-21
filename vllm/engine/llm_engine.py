@@ -20,7 +20,7 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import LLMInputs, PromptInputs
+from vllm.inputs import LLMInputs, PromptInputs, LLMInputsOptions
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
@@ -453,7 +453,7 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: LLMInputs,
+        processed_inputs: LLMInputsOptions,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
@@ -497,7 +497,7 @@ class LLMEngine:
         request_id: str,
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
-    ) -> LLMInputs:
+    ) -> LLMInputsOptions:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
 

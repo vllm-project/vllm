@@ -8,7 +8,8 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.inputs import (PromptInputs, PromptStrictInputs, TextPrompt,
                          TextTokensPrompt, TokensPrompt,
-                         parse_and_batch_prompt)
+                         PromptStrictInputsOptions, parse_and_batch_prompt,
+                         EncoderDecoderStringPrompts)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -243,8 +244,7 @@ class LLM:
                       "instead.")
     def generate(
         self,
-        prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
-                       Optional[Union[str, List[str]]]] = None,
+        prompts: PromptStrictInputsOptions = None,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,

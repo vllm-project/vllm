@@ -60,14 +60,14 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import CrossEntropyLoss
 
-from ...activations import ACT2FN
-from ...modeling_attn_mask_utils import (
+from transformers.activations import ACT2FN
+from transformers.modeling_attn_mask_utils import (
     _prepare_4d_attention_mask,
     _prepare_4d_attention_mask_for_sdpa,
     _prepare_4d_causal_attention_mask,
     _prepare_4d_causal_attention_mask_for_sdpa,
 )
-from ...modeling_outputs import (
+from transformers.modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPastAndCrossAttentions,
     CausalLMOutputWithCrossAttentions,
@@ -76,13 +76,15 @@ from ...modeling_outputs import (
     Seq2SeqQuestionAnsweringModelOutput,
     Seq2SeqSequenceClassifierOutput,
 )
-from ...modeling_utils import PreTrainedModel
-from ...utils import (
+from transformers.modeling_utils import PreTrainedModel
+from transformers.utils import (
     is_flash_attn_2_available,
     is_flash_attn_greater_or_equal_2_10,
     logging,
 )
-from .configuration_bart import BartConfig
+from transformers import BartConfig
+
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -1778,7 +1780,7 @@ class BartForConditionalGeneration(BartPreTrainedModel):
     ]
     _keys_to_ignore_on_load_missing = ["final_logits_bias"]
 
-    def __init__(self, config: BartConfig):
+    def __init__(self, config: BartConfig, cache_config: CacheConfig, quant_config: QuantizationConfig):
         super().__init__(config)
         self.model = BartModel(config)
         self.register_buffer(
@@ -1947,3 +1949,87 @@ class BartForConditionalGeneration(BartPreTrainedModel):
                 past_state.index_select(0, beam_idx.to(past_state.device))
                 for past_state in layer_past[:2]) + layer_past[2:], )
         return reordered_past
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        return
+
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+
+        expert_params_mapping = [
+            # These are the weight scales for the experts
+            # (param_name, weight_name, expert_id)
+            ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
+             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
+            for expert_id in range(self.config.num_local_experts)
+            for weight_name in ["w1", "w2", "w3"]
+        ] + [
+            # These are the weights for the experts
+            # (param_name, weight_name, expert_id)
+            ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
+             f"experts.{expert_id}.{weight_name}.weight", expert_id)
+            for expert_id in range(self.config.num_local_experts)
+            for weight_name in ["w1", "w2", "w3"]
+        ] + [
+            # These are the activation scales for the experts
+            # (param_name, weight_name, expert_id)
+            ("a13_scale" if weight_name in ["w1", "w3"] else "a2_scale",
+             f"experts.{expert_id}.{weight_name}.input_scale", expert_id)
+            for expert_id in range(self.config.num_local_experts)
+            for weight_name in ["w1", "w2", "w3"]
+        ]
+
+        params_dict = dict(self.named_parameters())
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                for param_name, weight_name, expert_id in expert_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param,
+                                  loaded_weight,
+                                  weight_name,
+                                  expert_id=expert_id)
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # Remapping the name of FP8 kv-scale.
+                    if name.endswith("kv_scale"):
+                        remapped_kv_scale_name = name.replace(
+                            ".kv_scale", ".attn.kv_scale")
+                        if remapped_kv_scale_name not in params_dict:
+                            print_warning_once(
+                                "Found kv scale in the checkpoint "
+                                f"(e.g. {name}), but not found the expected "
+                                f"name in the model "
+                                f"(e.g. {remapped_kv_scale_name}). "
+                                "kv-scale is not loaded.")
+                            continue
+                        else:
+                            name = remapped_kv_scale_name
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
