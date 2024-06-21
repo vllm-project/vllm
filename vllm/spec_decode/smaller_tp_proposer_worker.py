@@ -1,10 +1,11 @@
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 
 import torch
 
 from vllm.distributed.parallel_state import (get_tp_group,
                                              init_model_parallel_group,
                                              patch_tensor_parallel_group)
+from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -141,3 +142,12 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             return 0
 
         return self._worker.get_cache_block_size_bytes()
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self._worker.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self._worker.remove_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self._worker.list_loras()
