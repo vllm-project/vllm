@@ -15,8 +15,6 @@ from collections import namedtuple
 try:
     import torch
     TORCH_AVAILABLE = True
-    installed_path = os.path.dirname(torch.__file__)
-    sys.path.insert(0, os.path.dirname(installed_path))
 except (ImportError, NameError, AttributeError, OSError):
     TORCH_AVAILABLE = False
 
@@ -24,7 +22,6 @@ except (ImportError, NameError, AttributeError, OSError):
 SystemEnv = namedtuple(
     'SystemEnv',
     [
-        'vllm_git_hash',
         'torch_version',
         'is_debug_build',
         'cuda_compiled_version',
@@ -141,14 +138,6 @@ def get_conda_packages(run_lambda, patterns=None):
     return "\n".join(line for line in out.splitlines()
                      if not line.startswith("#") and any(name in line
                                                          for name in patterns))
-
-
-def get_vllm_git_hash():
-    try:
-        import vllm
-        return vllm.githash()
-    except ImportError:
-        return None
 
 
 def get_gcc_version(run_lambda):
@@ -549,7 +538,6 @@ def get_env_info():
     gpu_topo = get_gpu_topo(run_lambda)
 
     return SystemEnv(
-        vllm_git_hash=get_vllm_git_hash(),
         torch_version=version_str,
         is_debug_build=debug_mode_str,
         python_version='{} ({}-bit runtime)'.format(
@@ -626,7 +614,6 @@ env_info_fmt += """
 ROCM Version: {rocm_version}
 Neuron SDK Version: {neuron_sdk_version}
 vLLM Version: {vllm_version}
-vLLM Git Hash: {vllm_git_hash}
 vLLM Build Flags:
 {vllm_build_flags}
 GPU Topology:

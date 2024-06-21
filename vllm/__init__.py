@@ -14,15 +14,8 @@ from vllm.sampling_params import SamplingParams
 
 from .version import __version__
 
-
-def githash():
-    import torch
-    return torch.ops._C.githash()
-
-
 __all__ = [
     "__version__",
-    "githash",
     "LLM",
     "ModelRegistry",
     "PromptStrictInputs",
