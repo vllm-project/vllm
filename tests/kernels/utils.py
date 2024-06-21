@@ -11,8 +11,9 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import (make_tensor_with_pad, maybe_make_int_tensor,
-                        maybe_make_long_tensor, maybe_max,
-                        STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL)
+                        maybe_make_long_tensor, maybe_max, STR_BACKEND_ENV_VAR,
+                        STR_XFORMERS_ATTN_VAL)
+
 
 class QKVInputs(NamedTuple):
     '''

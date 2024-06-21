@@ -18,7 +18,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
                         STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
-                        make_tensor_with_pad)
+                        STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
+                        STR_NOT_IMPL_ENC_DEC_BACKEND, STR_NOT_IMPL_ENC_DEC_SWA,
+                        LIST_ENC_DEC_SUPPORTED_BACKENDS, make_tensor_with_pad)
 from vllm.worker.model_runner import LORA_WARMUP_RANK, ModelInput, ModelRunner
 
 logger = init_logger(__name__)
@@ -62,13 +64,46 @@ class EncoderDecoderModelRunner(ModelRunner):
                          kv_cache_dtype, is_driver_worker,
                          vision_language_config)
 
+        self._check_encoder_decoder_unsupported_scenarios()
+
+    def _check_encoder_decoder_unsupported_scenarios(self):
+        '''
+        Catch and raise NotImplemented errors if features unsupported
+        for encoder/decoder models are enabled, or if an otherwise
+        unsupported scenario is configured.
+        '''
+
         if not self._is_encoder_decoder_model():
             # Fail if EncoderDecoderModelRunner is constructed for a
             # non-encoder/decoder model i.e. decoder-only
             raise AttributeError(STR_ENCDECMR_ENCODER_DECODER_REQUIRED)
 
         if self.scheduler_config.chunked_prefill_enabled:
+            # Fail if chunked prefill is enabled
             raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL)
+
+        if self.cache_config.enable_prefix_caching:
+            # Fail if prefix caching is enabled
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE)
+
+        if self.sliding_window is not None:
+            # Fail if sliding window is enabled
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_SWA)
+
+        if not self.model_config.enforce_eager:
+            # Fail if CUDA graph is enabled
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_CUDAGRAPH)
+
+        backend_name = self.attn_backend.get_name()
+        caps_backend_name = backend_name.upper()
+        if caps_backend_name not in LIST_ENC_DEC_SUPPORTED_BACKENDS:
+            # Fail if the selected backend is not supported for
+            # encoder decoder models.
+            msg = STR_NOT_IMPL_ENC_DEC_BACKEND + \
+                f" {backend_name}; supported backends: " + \
+                    "{str(LIST_ENC_DEC_SUPPORTED_BACKENDS)}"
+
+            raise NotImplementedError(msg)
 
     def _prepare_encoder_model_input(
             self, seq_group_metadata_list: List[SequenceGroupMetadata],
