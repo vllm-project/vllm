@@ -19,6 +19,27 @@ PrefixHash = int
 _DEFAULT_LAST_ACCESSED_TIME = -1
 
 
+class BlockTracker:
+    __slots__ = ("active", "last_access", "computed")
+
+    def __init__(self):
+        self.active: bool = False
+        self.last_access: Optional[float] = None
+        self.computed: Optional[bool] = None
+
+    def enable(self):
+        assert not self.active
+        self.active = True
+        self.last_access = _DEFAULT_LAST_ACCESSED_TIME
+        self.computed = False
+
+    def disable(self):
+        assert self.active
+        self.active = False
+        self.last_access = None
+        self.computed = None
+
+
 class PrefixCachingBlockAllocator(BlockAllocator):
     """A block allocator that implements prefix caching.
 
@@ -45,8 +66,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # prefix hash will be in this dict, even if they have refcount 0.
         self._cached_blocks: Dict[PrefixHash, BlockId] = {}
 
-        # A mapping of blockId to Block to track those cached blocks
-        self._blocks: Dict[BlockId, Block] = {}
+        # Used to track status of each physical block id
+        self._block_tracker = {}
+        for block_id in range(num_blocks):
+            self._block_tracker[block_id] = BlockTracker()
 
         # Pre-allocate "num_blocks * extra_factor" block objects.
         # The "* extra_factor" is a buffer to allow more block objects
@@ -143,6 +166,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # TODO: Verify this change with Cade
         self._cached_blocks[block.content_hash] = block.block_id
         block.computed = True
+        self._track_block_id_as_computed(block.block_id)
 
         return block
 
@@ -178,10 +202,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         try:
             block = self._hashless_allocator.allocate_mutable_block(
                 prev_block=prev_block)
-
-            assert block.block_id not in self._blocks
-            assert block.block_id is not None
-            self._blocks[block.block_id] = block
+            self._track_block_id(block.block_id)
             return block
         except BlockAllocator.NoFreeBlocksError:
             # We must check the unused cached blocks before raising OOM.
@@ -210,12 +231,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                                 block_size=self._block_size,
                                                 physical_block_id=block_id)
             block.computed = False
-
             assert block.content_hash is None
-
-            assert block.block_id not in self._blocks
-            assert block.block_id is not None
-            self._blocks[block.block_id] = block
+            self._track_block_id(block.block_id)
             return block
 
         # No block available in hashless allocator, nor in unused cache blocks.
@@ -234,7 +251,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # In case a cached block was evicted, restore its tracking
             if block_id in self.evictor:
                 self.evictor.remove(block_id)
-            self._blocks[block_id] = block
+
+            self._track_block_id(block.block_id, computed=True)
 
     def _decr_refcount_cached_block(self, block: Block) -> None:
         # Ensure this is immutable/cached block
@@ -250,15 +268,15 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # No longer used
         assert block.content_hash in self._cached_blocks
-        assert block.block_id is not None
+        assert block_id is not None
 
         # Stop tracking the block
-        del self._blocks[block.block_id]
+        self._untrack_block_id(block_id)
 
         # Add the cached block to the evictor
         # (This keeps the cached block around so it can be reused)
-        self.evictor.add(block.block_id, block.content_hash,
-                         block.num_token_ids, block.last_accessed)
+        self.evictor.add(block_id, block.content_hash, block.num_token_ids,
+                         block.last_accessed)
 
     def free(self, block: Block) -> None:
         """Decrement the refcount of the block. If the decremented refcount is
@@ -290,7 +308,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # in which case, we cannot remove it from tracking
         refcount = self._refcounter.get(block_id)
         if refcount == 1:
-            del self._blocks[block_id]
+            self._untrack_block_id(block_id)
 
         # Decrement refcount and free to block pool
         self._hashless_allocator.free(block)
@@ -386,6 +404,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         if block.content_hash not in self._cached_blocks:
             # No cached content hash => Set this block as cached
             self._cached_blocks[block.content_hash] = block.block_id
+            self._track_block_id_as_computed(block.block_id)
             block.computed = True
             return block
 
@@ -449,8 +468,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """
 
         for block_id in block_ids:
-            if block_id in self._blocks:
-                self._blocks[block_id].last_accessed = now
+            if self._block_tracker[block_id].active:
+                self._block_tracker[block_id].last_access = now
             elif block_id in self.evictor:
                 self.evictor.update(block_id, now)
             else:
@@ -458,20 +477,30 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                     "Mark block as accessed which is not belonged to GPU")
 
     def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
-        """Mark blocks as computed, used in prefix caching."""
+        raise NotImplementedError("Marking as computed is incremental")
 
-        for block_id in block_ids:
-            if block_id in self._blocks:
-                # only those full block is valid for prefix caching
-                if self._blocks[block_id].is_full:
-                    self._blocks[block_id].computed = True
-            elif block_id not in self.evictor:
-                raise ValueError(f"Mark {block_id=} as computed which "
-                                 "is not belonged to GPU")
+    def _track_block_id(self,
+                        block_id: Optional[BlockId],
+                        computed: bool = False) -> None:
+        assert block_id is not None
+        self._block_tracker[block_id].enable()
+        self._block_tracker[block_id].computed = computed
+
+    def _untrack_block_id(self, block_id: Optional[BlockId]) -> None:
+        assert block_id is not None
+        self._block_tracker[block_id].disable()
+
+    def _track_block_id_as_computed(self, block_id: Optional[BlockId]) -> None:
+        assert block_id is not None
+
+        assert self._block_tracker[block_id].active
+        assert not self._block_tracker[block_id].computed
+
+        self._block_tracker[block_id].computed = True
 
     def block_is_computed(self, block_id: int) -> bool:
-        if block_id in self._blocks:
-            return self._blocks[block_id].computed
+        if self._block_tracker[block_id].active:
+            return self._block_tracker[block_id].computed
         else:
             return block_id in self.evictor
 
