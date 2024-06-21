@@ -61,6 +61,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        return_hidden_states: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -71,6 +72,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.vision_language_config = vision_language_config
+        self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -91,15 +93,17 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
+            num_attn_heads,
             self.model_config.get_head_size(),
             self.model_config.get_num_kv_heads(self.parallel_config),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
-        )
+        ) if num_attn_heads else None
 
         # Create processor for multi-modal data
         if self.vision_language_config is not None:
@@ -876,44 +880,46 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
     ) -> SamplerOutput:
         if self.lora_config:
-            assert model_input.lora_requests is not None
-            assert model_input.lora_mapping is not None
-            self.set_active_loras(model_input.lora_requests,
-                                  model_input.lora_mapping)
+            self.set_active_loras(model_input.lora_requests, model_input.lora_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
         prefill_meta = model_input.attn_metadata.prefill_metadata
         decode_meta = model_input.attn_metadata.decode_metadata
         if prefill_meta is None and decode_meta.use_cuda_graph:
-            assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
 
-        multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         hidden_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             kv_caches=kv_caches,
             attn_metadata=model_input.attn_metadata,
-            **multi_modal_kwargs,
+            **model_input.multi_modal_kwargs,
         )
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states,
-                                           model_input.sampling_metadata)
+        logits = self.model.compute_logits(hidden_states, model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
             return None
 
         # Sample the next token.
-        output = self.model.sample(
+        output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
+
+        if self.return_hidden_states:
+            # we only need to pass hidden states of most recent token
+            assert seq_group_metadata_list is not None
+            if seq_group_metadata_list[0].is_prompt:
+                hidden_states = hidden_states.index_select(
+                    0, sampling_metadata.selected_token_indices)
+            output.hidden_states = hidden_states
 
         return output
 
