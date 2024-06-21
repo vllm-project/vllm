@@ -24,7 +24,8 @@ def main(args: argparse.Namespace):
         model=args.model,
         speculative_model=args.speculative_model,
         num_speculative_tokens=args.num_speculative_tokens,
-        speculative_tensor_parallel_size=args.speculative_tensor_parallel_size,
+        speculative_draft_tensor_parallel_size=\
+            args.speculative_draft_tensor_parallel_size,
         tokenizer=args.tokenizer,
         quantization=args.quantization,
         tensor_parallel_size=args.tensor_parallel_size,
@@ -126,8 +127,8 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
     parser.add_argument('--speculative-model', type=str, default=None)
     parser.add_argument('--num-speculative-tokens', type=int, default=None)
-    parser.add_argument('--speculative-tensor-parallel-size',
-                        '-spec-tp',
+    parser.add_argument('--speculative-draft-tensor-parallel-size',
+                        '-spec-draft-tp',
                         type=int,
                         default=None)
     parser.add_argument('--tokenizer', type=str, default=None)

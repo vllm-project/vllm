@@ -94,7 +94,7 @@ def test_target_model_tp_gt_1(baseline_llm_generator, test_llm_generator,
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "speculative_tensor_parallel_size": 1,
+        "speculative_draft_tensor_parallel_size": 1,
     },
 ])
 @pytest.mark.parametrize("batch_size", [2])

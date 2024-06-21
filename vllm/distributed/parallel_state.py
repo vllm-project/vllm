@@ -696,6 +696,9 @@ def patch_tensor_parallel_group(world_group: GroupCoordinator,
     """Patch the tp group temporarily until this function ends.
     It requires the world group to be patched together to keep the integrity.
 
+    This method is for draft workers of speculative decoding to run draft model
+    with different tp degree from that of target model workers.
+
     Args:
         world_group (GroupCoordinator): the world group coordinator
         tp_group (GroupCoordinator): the tp group coordinator
