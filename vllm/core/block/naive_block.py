@@ -420,13 +420,10 @@ class NaiveBlock(Block):
                  allocator: BlockAllocator,
                  block_id: Optional[int] = None):
         self._token_ids: Optional[List[int]] = None
-        self._num_token_ids = 0
-        self._is_empty = True
         self._block_size = block_size
         self._prev_block = prev_block
         self._block_id = block_id
         self._allocator = allocator
-        self.pool_id = None
 
         self.append_token_ids(token_ids)
 
@@ -439,29 +436,22 @@ class NaiveBlock(Block):
         if token_ids is None:
             return
 
-        num_new_tokens = len(token_ids)
-        if num_new_tokens == 0:
+        if len(token_ids) == 0:
             return
 
+        # There is non-empty token ids => Ensure the block can be appended
         assert self._allocator.is_appendable(
             self
         ), "Block with id = {} is not appendable for token_ids = {}".format(
             self.block_id, token_ids)
 
-        if token_ids is None:
-            return
-
-        if self._is_empty:
+        if self._token_ids is None:
             # Most of the time, full block token ids are assigned and
             # simple assignment is faster than extend()
             self._token_ids = token_ids
-            self._is_empty = False
         else:
-            assert (self.num_empty_slots >= num_new_tokens
-                    and self._token_ids is not None)
+            assert len(token_ids) <= self.num_empty_slots
             self._token_ids.extend(token_ids)
-
-        self._num_token_ids += num_new_tokens
 
     @property
     def computed(self) -> bool:
@@ -493,7 +483,7 @@ class NaiveBlock(Block):
 
     @property
     def num_empty_slots(self) -> int:
-        return self._block_size - self._num_token_ids
+        return self._block_size - self.num_token_ids
 
     @property
     def token_ids(self) -> Optional[List[int]]:
