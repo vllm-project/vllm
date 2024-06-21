@@ -15,34 +15,6 @@
 
 namespace vllm {
   
-template <typename Tout, typename Tin, int Vec_size, bool Scaled>
-__global__ void convert_fp8_kernel(
-    const Tin* __restrict__ src_data, Tout* __restrict__ dst_data, const float* scale, size_t N)
-{
-    const int64_t block_idx = blockIdx.x;
-
-    using V_in_vec = typename Vec<Tin, Vec_size>::Type;
-    using V_out_vec = typename Vec<Tout, Vec_size>::Type;
-    auto dst_data_vec = reinterpret_cast<V_out_vec*>(dst_data);
-    auto src_data_vec = reinterpret_cast<const V_in_vec*>(src_data);
-
-    int64_t startIdx = (threadIdx.x + blockDim.x * blockIdx.x);
-    auto idx = startIdx;
-    if (idx >= N) {
-        return;
-    }
-    dst_data_vec[idx] = fp8::scaled_vec_conversion<V_out_vec, V_in_vec>(src_data_vec[idx], *scale);
-    //dst_data_vec[idx+1] = fp8_e4m3::vec_conversion<V_out_vec, V_in_vec, Scaled>(src_data_vec[idx+1], *scale);
-
-    //for (int64_t i = 0; i < loopSize; ++i) {
-    //    auto idx = startIdx + i;
-    //    if (idx >= N) {
-    //        return;
-    //    }
-    //    dst_data_vec[idx] = fp8_e4m3::vec_conversion<V_out_vec, V_in_vec, Scaled>(src_data_vec[idx], *scale);
-    //}
-}
-
 __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
   float old;
   old = (value >= 0)
@@ -199,28 +171,36 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
 }
 
 template <typename Tout, typename Tin, int Vec_size>
+__global__ void convert_fp8_kernel(
+    const Tin* __restrict__ src_data, Tout* __restrict__ dst_data, const float* scale, size_t N)
+{
+    const int64_t block_idx = blockIdx.x;
+
+    using V_in_vec = typename Vec<Tin, Vec_size>::Type;
+    using V_out_vec = typename Vec<Tout, Vec_size>::Type;
+    auto dst_data_vec = reinterpret_cast<V_out_vec*>(dst_data);
+    auto src_data_vec = reinterpret_cast<const V_in_vec*>(src_data);
+
+    int64_t startIdx = (threadIdx.x + blockDim.x * blockIdx.x);
+    auto idx = startIdx;
+    if (idx >= N) {
+        return;
+    }
+    dst_data_vec[idx] = fp8::scaled_vec_conversion<V_out_vec, V_in_vec>(src_data_vec[idx], *scale);
+}
+
+template <typename Tout, typename Tin, int Vec_size>
 struct call_convert_fp8
 {
     void operator()(torch::Tensor const& src_data, torch::Tensor& dst_data, torch::Tensor const& scale)
     {
-        const auto N = src_data.numel() / 2;
-        //std::cout << N << "\n";
-        constexpr uint32_t loopSize = 1;//std::max(N / 50000000LL, 1);
+        const auto N = src_data.numel() / Vec_size;
         constexpr dim3 numThreads{1024, 1, 1};
-        auto neededBlocks = (N + (numThreads.x * loopSize) - 1) / (numThreads.x * loopSize);
-        uint32_t actualBlocks = neededBlocks;
-
-        //static uint32_t maxBlocks = 0;
-        //if (actualBlocks != maxBlocks) {
-        //  maxBlocks = actualBlocks;
-        //  std::cout << actualBlocks << "\n";
-        //}
-
-        const dim3 grid{actualBlocks, 1, 1};
-
+        auto numBlocks = (N + numThreads.x - 1) / numThreads.x;
+        const dim3 grid{numBlocks, 1, 1};
         const auto stream = at::cuda::getCurrentCUDAStream();
 
-        vllm::convert_fp8_kernel<Tout, Tin, Vec_size, true>
+        vllm::convert_fp8_kernel<Tout, Tin, Vec_size>
             <<<grid, numThreads, 0, stream>>>(reinterpret_cast<Tin*>(src_data.data_ptr()),
                 reinterpret_cast<Tout*>(dst_data.data_ptr()), (float*)scale.data_ptr(), N);
     }
