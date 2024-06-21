@@ -362,7 +362,12 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         self,
         model_input: CPUModelInput,
         kv_caches: List[torch.Tensor],
-    ) -> Optional[SamplerOutput]:
+        num_steps: int = 1,
+    ) -> Optional[List[SamplerOutput]]:
+        if num_steps > 1:
+            raise ValueError(
+                "CPU worker does not support multi-step execution.")
+
         model_executable = self.model
         execute_model_kwargs = {
             "input_ids": model_input.input_tokens,
@@ -389,4 +394,4 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        return output
+        return [output]
