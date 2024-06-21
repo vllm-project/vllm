@@ -608,7 +608,7 @@ scaled_vec_conversion<uint2, bf16_8_t>(const bf16_8_t& a, float scale) {
 template <>
 __inline__ __device__ uint8_t
 scaled_vec_conversion<uint8_t, float>(const float& a, float scale) {
-  hip_fp8 f8(a);
+  hip_fp8 f8(a / scale);
   return f8.data;
 }
 
