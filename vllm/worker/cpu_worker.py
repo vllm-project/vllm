@@ -262,7 +262,11 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
 
-    @torch.inference_mode()
+    def child_loop(self):
+        while True:
+            self.execute_model()
+
+    @torch.no_grad()
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
@@ -285,7 +289,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             assert len(execute_model_req.blocks_to_swap_out) == 0
             data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
-                "blocks_to_copy": execute_model_req.blocks_to_copy,
+                "blocks_to_copy": blocks_to_copy,
             }
             broadcast_tensor_dict(data, src=0)
         else:

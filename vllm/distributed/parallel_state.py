@@ -33,6 +33,7 @@ from torch.distributed import Backend, ProcessGroup
 import vllm.envs as envs
 from vllm.logger import init_logger
 
+from intel_extension_for_pytorch._C import tpp_shm_allreduce
 
 @dataclass
 class GraphCaptureContext:
@@ -245,7 +246,8 @@ class GroupCoordinator:
         if (pynccl_comm is not None and not pynccl_comm.disabled):
             pynccl_comm.all_reduce(input_)
         else:
-            torch.distributed.all_reduce(input_, group=self.device_group)
+            # torch.distributed.all_reduce(input_, group=self.device_group)
+            tpp_shm_allreduce(input_, self.device_group)
         return input_
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
