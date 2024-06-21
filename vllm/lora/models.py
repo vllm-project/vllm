@@ -219,7 +219,7 @@ class LoRAModel:
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
-            module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name)
+            module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(tensor_name)
             if module_name not in loras:
                 lora_embeddings_tensor = None
                 if embeddings:
@@ -237,7 +237,13 @@ class LoRAModel:
                 loras[module_name] = LoRALayerWeights(module_name, rank,
                                                       lora_alpha, None, None,
                                                       lora_embeddings_tensor)
-            if is_lora_a:
+            if is_bias:
+                loras[module_name].bias = tensor.to(device=device,
+                                                      dtype=dtype).t()
+                if pin_memory:
+                    loras[module_name].bias = loras[
+                        module_name].bias.pin_memory()
+            elif is_lora_a:
                 loras[module_name].lora_a = tensor.to(device=device,
                                                       dtype=dtype).t()
                 if pin_memory:
@@ -493,7 +499,7 @@ class LoRAModelManager:
             if module_lora:
                 module_lora.optimize()
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
-                                module_lora.embeddings_tensor)
+                                module_lora.embeddings_tensor, module_lora.bias)
             else:
                 module.reset_lora(index)
         return True

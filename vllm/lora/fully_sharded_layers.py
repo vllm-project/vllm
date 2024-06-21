@@ -70,6 +70,11 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
              self.indices[:self.indices_len[0]], 0, 1.0)
         # now have column partitioned output
 
+        if self.bias_stacked is not None:
+            self.bias_stacked = self.bias_stacked.view(-1, self.bias_stacked.shape[-1])
+            self.bias_stacked = self.bias_stacked[self.indices]
+            output += self.bias_stacked
+
         output = output.view(*out_orig_shape)
         return output
 
@@ -119,6 +124,13 @@ def _mcp_apply(x, bias, layer):
                                 layer.lora_b_stacked[idx],
                                 layer.indices[:layer.indices_len[0]], 0, 1.0,
                                 left_offset, shard_size)
+        if layer.bias_stacked is not None:
+            bias = layer.bias_stacked[idx]
+            if bias is not None:
+                bias = bias.view(-1, bias.shape[-1])
+                bias = bias[layer.indices[:layer.indices_len[0]]]
+                output[:, left_offset: left_offset + shard_size] += bias
+
         left_offset += shard_size
 
     output = output.view(*out_orig_shape)
@@ -277,6 +289,15 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         lora_b = lora_b[:, start_idx:end_idx]
         return lora_b
 
+    def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
+        if bias is None:
+            return bias
+        shard_size = self.bias_stacked.shape[2]
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
+        bias = bias[start_idx:end_idx]
+        return bias
+
     def apply(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x)
 
@@ -301,6 +322,11 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         dispatch_bgmv_low_level(output, buffer, self.lora_b_stacked,
                                 self.indices[:self.indices_len[0]], 0, 1.0,
                                 start_idx, shard_size)
+
+        if self.bias_stacked is not None:
+            bias = self.bias_stacked.view(-1, self.bias_stacked.shape[-1])
+            bias = bias[self.indices[:self.indices_len[0]]]
+            output += bias
 
         output = output.view(*out_orig_shape)
         return output
