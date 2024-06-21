@@ -2,8 +2,16 @@ import pickle
 
 from torch import distributed as dist
 from torch.distributed import ProcessGroup
-from zmq import (PUB, RCVHWM, REP, REQ, SNDHWM, SUB, SUBSCRIBE,  # type: ignore
-                 Context)
+from zmq import (
+    PUB,  # type: ignore
+    RCVHWM,  # type: ignore
+    REP,  # type: ignore
+    REQ,  # type: ignore
+    SNDHWM,  # type: ignore
+    SUB,  # type: ignore
+    SUBSCRIBE,  # type: ignore
+    Context,
+)  # type: ignore
 
 from vllm.utils import get_ip, get_open_port
 

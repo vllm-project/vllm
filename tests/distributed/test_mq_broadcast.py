@@ -89,7 +89,7 @@ def subscriber(n_reader, reader_rank, handle):
 def test_simple_multiprocessing():
     n_reader = 3
     publisher = Publisher(n_reader)
-    handle = publisher.handle
+    handle = publisher.export_handle()
     queue = PublishSubscribeMsgQueue(n_reader, -1, publisher)
     context = multiprocessing.get_context("spawn")
     ps = []
