@@ -1,4 +1,4 @@
-from typing import List, Optional, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple
 
 import torch
 
@@ -9,10 +9,11 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
-from vllm.worker.worker import Worker
+from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
 
 class SmallerTpProposerWorker(ProposerWorkerBase):
     """Class which allows a speculative draft model to run with smaller tensor
@@ -44,12 +45,12 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         logger.info("Wrapping {%s} in {%s}", type(worker), cls)
         return cls(worker, ranks)
 
-    def __init__(self, worker: Union[Worker, ProposerWorkerBase],
+    def __init__(self, worker: MultiStepWorker,
                  draft_ranks: List[int]):
         """Create a SmallerTpProposerWorker.
 
         Args:
-            worker (Union[Worker, ProposerWorkerBase]): _description_
+            worker (MultiStepWorker): an actual worker wrapped with this class
             draft_ranks (List[int]): if this value is given, only some
             of the GPU ranks in this value participate in draft generation
         """
@@ -62,8 +63,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
     def _patch_tensor_parallel_group(self):
         """Temporarily patch the global tp group state with its own tp group
-        state. For consistency, it also updates the world group state.
-        Note that it has no effect when draft_ranks is None.
+        state.
         """
         return patch_tensor_parallel_group(self._tp_group)
 
