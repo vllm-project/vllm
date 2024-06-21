@@ -2,9 +2,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 try:
-    from vllm_flash_attn import flash_attn_varlen_func
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+    from vllm_flash_attn import flash_attn_varlen_func
 except ImportError:
     flash_attn_varlen_func = None
     BatchDecodeWithPagedKVCacheWrapper = None
