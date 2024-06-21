@@ -439,7 +439,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                                    physical_block_id=None)
         cached_block.block_id = cached_block_id
 
-        # Increment refcount of the cached block and possibly restore
+        # Increment refcount of the cached block and (possibly) restore
         # it from the evictor
         self._incr_refcount_cached_block(cached_block)
 
