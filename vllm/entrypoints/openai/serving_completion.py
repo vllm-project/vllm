@@ -291,12 +291,11 @@ class OpenAIServingCompletion(OpenAIServing):
                                 stop_reason=stop_reason,
                             )
                         ])
-                    if request.stream_options:
+                    if (request.stream_options and request.stream_options.include_usage):
                         if request.stream_options.continuous_usage_stats:
                             chunk.usage = current_usage
                         else:
-                            if request.stream_options.include_usage:
-                                chunk.usage = None
+                            chunk.usage = None
 
                     response_json = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"
