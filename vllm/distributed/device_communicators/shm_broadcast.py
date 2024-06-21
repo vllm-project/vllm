@@ -165,6 +165,7 @@ class ShmRingBufferIO:
                 # mark the block as written
                 metadata_buffer[0] = 1
                 for i in range(1, self.buffer.n_reader + 1):
+                    # set read flag to 0, meaning it is not read yet
                     metadata_buffer[i] = 0
                 break
 
