@@ -463,6 +463,30 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
+def init_world_group(ranks: List[int],
+                     local_rank: int,
+                     backend: str) -> GroupCoordinator:
+    return GroupCoordinator(
+        group_ranks=[ranks],
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        use_pynccl=False,
+        use_custom_allreduce=False,
+    )
+
+
+def init_model_parallel_group(group_ranks: List[List[int]],
+                              local_rank: int,
+                              backend: str) -> GroupCoordinator:
+    return GroupCoordinator(
+        group_ranks=group_ranks,
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        use_pynccl=True,
+        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
+    )
+
+
 _TP: Optional[GroupCoordinator] = None
 
 
@@ -553,15 +577,10 @@ def init_distributed_environment(
         ranks = list(range(torch.distributed.get_world_size()))
         if world_size != -1:
             assert world_size == len(ranks), (
-                "given world_size does not match with world_size of torch")
+                f"given world_size ({world_size}) does not match with"
+                f"world_size of torch ({len(ranks)})")
 
-        _WORLD = GroupCoordinator(
-            group_ranks=[ranks],
-            local_rank=local_rank,
-            torch_distributed_backend=backend,
-            use_pynccl=False,
-            use_custom_allreduce=False,
-        )
+        _WORLD = init_world_group(ranks, local_rank, backend)
     else:
         assert _WORLD.world_size == world_size, (
             "world group already initialized with a different world size")
@@ -618,13 +637,8 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
-    _TP = GroupCoordinator(
-        group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank,
-        torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
-    )
+    _TP = init_model_parallel_group(group_ranks, get_world_group().local_rank,
+                                    backend)
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
@@ -636,13 +650,8 @@ def initialize_model_parallel(
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group_ranks.append(ranks)
-    _PP = GroupCoordinator(
-        group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank,
-        torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
-    )
+    _PP = init_model_parallel_group(group_ranks, get_world_group().local_rank,
+                                    backend)
 
 
 def ensure_model_parallel_initialized(
@@ -686,6 +695,11 @@ def patch_tensor_parallel_group(world_group: Optional[GroupCoordinator],
                                 tp_group: Optional[GroupCoordinator]):
     """Patch the tp group temporarily until this function ends.
     It requires the world group to be patched together to keep the integrity.
+    If either world_group or tp_group is None, nothing happens.
+
+    Also it does not allow additional patch during patching, otherwise the
+    original state, which should be restored, will be lost.
+
     Args:
         world_group (Optional[GroupCoordinator]): the world group coordinator
         tp_group (Optional[GroupCoordinator]): the tp group coordinator

@@ -976,10 +976,9 @@ class SpeculativeConfig:
 
         This is mostly a copy of the target parallel config, except the tp_size.
         """
-
-        speculative_tensor_parallel_size = (
-            speculative_tensor_parallel_size
-            or target_parallel_config.tensor_parallel_size)
+        if speculative_tensor_parallel_size is None:
+            speculative_tensor_parallel_size = \
+                  target_parallel_config.tensor_parallel_size
 
         if speculative_tensor_parallel_size > \
             target_parallel_config.tensor_parallel_size:

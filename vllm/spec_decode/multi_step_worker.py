@@ -4,9 +4,9 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.distributed.parallel_state import (_ENABLE_CUSTOM_ALL_REDUCE,
-                                             GroupCoordinator, get_tp_group,
-                                             get_world_group,
+from vllm.distributed.parallel_state import (get_tp_group, get_world_group,
+                                             init_model_parallel_group,
+                                             init_world_group,
                                              patch_tensor_parallel_group)
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
@@ -23,6 +23,12 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     allocated enough space to store the additional KV. This reduces overhead
     by invoking the scheduler less.
 
+    In addition, it allows a speculative draft model to run with smaller tensor
+    parallel degree than target model. This is implemented by changing vLLM's
+    tensor parallel group to a group of the small size temporarily during
+    forward passes of draft models. This reduces the communication overhead of
+    small draft models. 
+
     The MultiStepWorker does not support cache swap operations, or beam search.
     Cache swap operations do not require large modifications. On the other hand,
     beam search requires memory allocations during sequence forks and thus
@@ -32,17 +38,11 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     def __init__(self, draft_ranks: Optional[List[int]] = None, **kwargs):
         """Create a MultiStepWorker.
 
-        It allows a speculative draft model to run with smaller tensor
-        parallel degree than target model.
-        This reduces the communication overhead of small draft models.
-
-        This is implemented by changing vLLM's tensor parallel group to a group
-        of the small size temporarily during forward passes of draft models.
-
         Args:
             draft_ranks (Optional[List[int]]): if this value is given, only some
             of the GPU ranks in this value participate in draft generation
         """
+        super().__init__(**kwargs)
 
         self._draft_ranks = draft_ranks
         self._is_dummy = False
@@ -53,12 +53,14 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             # whether the worker participates in draft generation or not
             self._is_dummy = kwargs['rank'] not in draft_ranks
 
-        super().__init__(**kwargs)
-
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
     def _patch_tensor_parallel_group(self):
+        """Temporarily patch the global tp group state with its own tp group
+        state. For consistency, it also updates the world group state.
+        Note that it has no effect when its tp group has not been initialized.
+        """
         return patch_tensor_parallel_group(self._world_group, self._tp_group)
 
     def init_device(self):
@@ -73,20 +75,10 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             tp_backend = torch.distributed.get_backend(
                 get_tp_group().device_group)
 
-            self._world_group = GroupCoordinator(
-                group_ranks=[self._draft_ranks],
-                local_rank=local_rank,
-                torch_distributed_backend=world_backend,
-                use_pynccl=False,
-                use_custom_allreduce=False,
-            )
-            self._tp_group = GroupCoordinator(
-                group_ranks=[self._draft_ranks],
-                local_rank=local_rank,
-                torch_distributed_backend=tp_backend,
-                use_pynccl=True,
-                use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
-            )
+            self._world_group = init_world_group(self._draft_ranks, local_rank,
+                                                 world_backend)
+            self._tp_group = init_model_parallel_group([self._draft_ranks],
+                                                       local_rank, tp_backend)
 
         with self._patch_tensor_parallel_group():
             super().init_device()
@@ -119,7 +111,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         with self._patch_tensor_parallel_group():
             return super().determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int):
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         if self._is_dummy:
             return
 
