@@ -125,6 +125,23 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             computed=computed,
         )
 
+    def _fetch_from_cache(self, prev_block: Optional[Block],
+                          token_ids: Optional[List[int]]) -> Optional[Block]:
+        block = self._block_pool.init_block(prev_block=prev_block,
+                                            token_ids=token_ids,
+                                            block_size=self._block_size,
+                                            physical_block_id=None)
+        assert block.content_hash is not None
+
+        cached_block_id = self._cached_blocks.get(block.content_hash, None)
+        if cached_block_id is None:
+            self._block_pool.free_block(block)
+            return None
+
+        block.block_id = cached_block_id
+        self._incr_refcount_cached_block(block)
+        return block
+
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: Optional[List[int]],
@@ -142,31 +159,15 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
-        block = self._block_pool.init_block(prev_block=prev_block,
-                                            token_ids=token_ids,
-                                            block_size=self._block_size,
-                                            physical_block_id=None)
-        assert block.content_hash is not None
+        cached_block = self._fetch_from_cache(prev_block=prev_block,
+                                              token_ids=token_ids)
+        if cached_block:
+            return cached_block
 
-        cached_block_id = self._cached_blocks.get(block.content_hash, None)
-        if cached_block_id is not None:
-            block.block_id = cached_block_id
-            self._incr_refcount_cached_block(block)
-            return block
-
-        self._block_pool.free_block(block)
-
+        # No cached block => Allocate a new block
+        # (which will be cached after free() is called on the block)
         block = self.allocate_mutable_block(prev_block)
         block.append_token_ids(token_ids)
-
-        assert block.content_hash is not None
-        assert block.block_id is not None
-
-        # Cache current block since it is full and its status as "computed"
-        # TODO: Verify this change with Cade
-        self._cached_blocks[block.content_hash] = block.block_id
-        block.computed = True
-        self._track_block_id_as_computed(block.block_id)
 
         return block
 
