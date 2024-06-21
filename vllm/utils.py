@@ -132,19 +132,23 @@ class LRUCache(Generic[T]):
 def is_hip() -> bool:
     return torch.version.hip is not None
 
+
 def get_hip_version() -> tuple:
     # call this function for ROCm only
     hip_version = str(torch.version.hip)
-    hip_version = hip_version.split("-")[0]    # ignore git sha
+    hip_version = hip_version.split("-")[0]  # ignore git sha
     return tuple(int(x) for x in hip_version.split("."))
+
 
 def is_hip_version_less_than(version: tuple) -> bool:
     # check whether hip version is less than the version
     return get_hip_version() < version
 
+
 def is_hip_version_equals(version: tuple) -> bool:
     # check whether hip version is equals to the version
     return get_hip_version() == version
+
 
 @lru_cache(maxsize=None)
 def is_cpu() -> bool:
