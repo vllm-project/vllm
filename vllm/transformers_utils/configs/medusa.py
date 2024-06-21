@@ -24,7 +24,8 @@ class MedusaConfig(PretrainedConfig):
         self.max_paths = max_paths
         self.topk = topk
         self.max_seq_len = int(2**20)
-        self.truncated_vocab_size = vocab_size if truncated_vocab_size is None else truncated_vocab_size
+        self.truncated_vocab_size = vocab_size if truncated_vocab_size is None\
+            else truncated_vocab_size
         if "architectures" not in kwargs:
             kwargs["architectures"] = ["MedusaModel"]
 

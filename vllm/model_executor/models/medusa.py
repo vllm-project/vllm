@@ -54,7 +54,8 @@ class Medusa(nn.Module):
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                self.truncated_vocab_size, logit_scale)
+                                                self.truncated_vocab_size,
+                                                logit_scale)
 
         self.token_map = None
 
@@ -67,12 +68,13 @@ class Medusa(nn.Module):
         logits = []
 
         for hs, lm_head in zip(hidden_states, self.lm_heads):
-            _logits = self.logits_processor(lm_head.weight, hs, sampling_metadata)
+            _logits = self.logits_processor(lm_head.weight, hs,
+                                            sampling_metadata)
 
             if self.token_map is None:
                 logits.append(_logits)
             else:
-                logits.append(-torch.inf*torch.ones(
+                logits.append(-torch.inf * torch.ones(
                     size=(*_logits.shape[:-1], self.orig_vocab_size),
                     device=_logits.device,
                     dtype=_logits.dtype))
@@ -80,7 +82,6 @@ class Medusa(nn.Module):
                 logits[-1][..., self.token_map] = _logits
 
         return logits
-
 
     def sample(
         self,
@@ -132,7 +133,9 @@ class Medusa(nn.Module):
             name = name.replace("medusa_heads.", "")
 
             if name == "token_map":
-                self.token_map = nn.Parameter(loaded_weight, requires_grad=False).to(device=self.lm_heads[0].weight.device)
+                self.token_map = nn.Parameter(
+                    loaded_weight, requires_grad=False).to(
+                        device=self.lm_heads[0].weight.device)
                 continue
 
             # Skip loading extra heads

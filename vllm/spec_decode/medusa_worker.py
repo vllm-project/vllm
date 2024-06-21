@@ -16,7 +16,7 @@ from vllm.worker.worker import Worker
 class MedusaWorker(NonLLMProposerWorkerBase, Worker):
     """Worker for Medusa.
     """
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -53,7 +53,8 @@ class MedusaWorker(NonLLMProposerWorkerBase, Worker):
 
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
-        seq_lens, query_lens = self._prepare_input_tensors(seq_group_metadata_list)
+        seq_lens, query_lens = self._prepare_input_tensors(
+            seq_group_metadata_list)
 
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list, seq_lens, query_lens, self.device,
@@ -103,7 +104,7 @@ class MedusaWorker(NonLLMProposerWorkerBase, Worker):
         """
 
         return self._proposer.get_spec_proposals(execute_model_req)
-    
+
     def _raise_if_unsupported(
         self,
         execute_model_req: ExecuteModelRequest,

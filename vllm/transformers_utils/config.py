@@ -6,8 +6,9 @@ from transformers import PretrainedConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             JAISConfig, MedusaConfig, MLPSpeculatorConfig,
-                                             MPTConfig, RWConfig)
+                                             JAISConfig, MedusaConfig,
+                                             MLPSpeculatorConfig, MPTConfig,
+                                             RWConfig)
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig

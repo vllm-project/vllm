@@ -917,7 +917,8 @@ class SpeculativeConfig:
                     "yet support distributed inferencing (TP > 1).")
 
             if draft_model_config.hf_config.model_type == "medusa":
-               draft_model_config.hf_config.set_num_lookahead_tokens(num_speculative_tokens)
+                draft_model_config.hf_config.set_num_lookahead_tokens(
+                    num_speculative_tokens)
 
             n_predict = getattr(draft_model_config.hf_config, "n_predict",
                                 None)
