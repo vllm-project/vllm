@@ -15,13 +15,12 @@ ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
 # (i.e. those that do not appear in `FA_GFX_ARCHS`)
 # Triton FA is used by default on ROCm now so this is unnecessary.
 ARG BUILD_FA="1"
-
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
 ARG FA_BRANCH="ae7928c"
 
 # Whether to build triton on rocm
 ARG BUILD_TRITON="1"
-
+ARG TRITON_BRANCH="0ef1848"
 
 ### Base image build stage
 FROM $BASE_IMAGE AS base
@@ -50,7 +49,6 @@ ARG APP_MOUNT=/vllm-workspace
 WORKDIR ${APP_MOUNT}
 
 RUN pip install --upgrade pip
-RUN pip install --no-cache-dir fastapi ninja tokenizers pandas
 # Install torch == 2.4.0 on ROCm
 RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-5.7"*) \
@@ -74,6 +72,12 @@ ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/t
 
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV CCACHE_DIR=/root/.cache/ccache
+
+
+### AMD-SMI build stage
+FROM base AS build_amdsmi
+RUN cd /opt/rocm/share/amd_smi \
+    && pip wheel . --wheel-dir=/install
 
 
 ### Flash-Attention build stage
@@ -104,23 +108,20 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
 ### Triton build stage
 FROM base AS build_triton
 ARG BUILD_TRITON
+ARG TRITON_BRANCH
 # Build triton
 RUN --mount=type=cache,target=${CCACHE_DIR} \
     if [ "$BUILD_TRITON" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
     && git clone https://github.com/OpenAI/triton.git \
-    && cd triton/python \
+    && cd triton \
+    && git checkout "${TRITON_BRANCH}" \
+    && cd python \
     && python3 setup.py bdist_wheel --dist-dir=/install; \
     # Create an empty directory otherwise as later build stages expect one
     else mkdir -p /install; \
     fi
-
-
-### AMD-SMI build stage
-FROM base AS build_amdsmi
-RUN cd /opt/rocm/share/amd_smi \
-    && pip wheel . --wheel-dir=/install
 
 
 ### Final vLLM build stage
@@ -154,12 +155,20 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
             patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h rocm_patch/rocm_bf16.patch;; \
         *"rocm-6.1"*) \
             # Bring in upgrades to HIP graph earlier than ROCm 6.2 for vLLM
-            cp rocm_patch/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6 \
+            wget -N https://github.com/ROCm/vllm/raw/main/rocm_patch/libamdhip64.so.6 -P rocm_patch \
+            && cp rocm_patch/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6 \
             # Prevent interference if torch bundles its own HIP runtime
             && rm -f "$(python3 -c 'import torch; print(torch.__path__[0])')"/lib/libamdhip64.so || true;; \
         *) ;; esac \
     && python3 setup.py clean --all \
     && python3 setup.py develop
+
+# Copy amdsmi wheel(s)
+RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install \
+    mkdir -p libs \
+    && cp /install/*.whl libs \
+    # Preemptively uninstall to avoid same-version no-installs
+    && pip uninstall -y amdsmi;
 
 # Copy triton wheel(s) if any
 RUN --mount=type=bind,from=build_triton,src=/install,target=/install \
@@ -176,14 +185,6 @@ RUN --mount=type=bind,from=build_fa,src=/install,target=/install \
         cp /install/*.whl libs \
         # Preemptively uninstall to avoid same-version no-installs
         && pip uninstall -y flash-attn; fi
-
-# Copy amdsmi wheel(s) if any
-RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install \
-    mkdir -p libs \
-    && if ls /install/*.whl; then \
-        cp /install/*.whl libs \
-        # Preemptively uninstall to avoid same-version no-installs
-        && pip uninstall -y amdsmi; fi
 
 # Install any dependencies that were built
 RUN --mount=type=cache,target=/root/.cache/pip \
