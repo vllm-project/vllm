@@ -491,7 +491,7 @@ class LlamaForCausalLM(nn.Module):
                         continue
                     name = name.replace(weight_name, param_name)
                     param = params_dict[name]
-                    if "activation_scaling_factor" in name or "weights_scaling_factor" in name:
+                    if "activation_scaling_factor" in name or "weight_scaling_factor" in name:
                         param.data.copy_(loaded_weight)
                     elif "output_scaling_factor" in name:
                         param.data.copy_(loaded_weight)
