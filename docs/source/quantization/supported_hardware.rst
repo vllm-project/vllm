@@ -1,6 +1,6 @@
 .. _supported_hardware_for_quantization:
 
-Supported Hardware for Quantization Methods
+Supported Hardware for Quantization Kernels
 ===========================================
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
@@ -8,14 +8,14 @@ The table below shows the compatibility of various quantization implementations 
 ==============  ======  =======  =======  =====  ======  =======  =========  =======  ==============  ==========
 Implementation  Volta   Turing   Ampere   Ada    Hopper  AMD GPU  Intel GPU  x86 CPU  AWS Inferentia  Google TPU
 ==============  ======  =======  =======  =====  ======  =======  =========  =======  ==============  ==========
-AQLM            ✅     ✅       ✅      ✅     ✅     ❌       ❌        ❌       ❌              ❌
-AWQ             ❌     ✅       ✅      ✅     ✅     ❌       ❌        ❌       ❌              ❌
-DeepSpeedFP     ✅     ✅       ✅      ✅     ✅     ❌       ❌        ❌       ❌              ❌
-FP8             ❌     ❌       ❌      ✅     ✅     ❌       ❌        ❌       ❌              ❌
-Marlin          ❌     ❌       ✅      ✅     ✅     ❌       ❌        ❌       ❌              ❌
-GPTQ            ✅     ✅       ✅      ✅     ✅     ❌       ❌        ❌       ❌              ❌
-SqueezeLLM      ✅     ✅       ✅      ✅     ✅     ❌       ❌        ❌       ❌              ❌
-bitsandbytes    ✅     ✅       ✅      ✅     ✅     ❌       ❌        ❌       ❌              ❌
+AQLM            ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+AWQ             ❌      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+DeepSpeedFP     ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+FP8             ❌      ❌       ❌       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+Marlin          ❌      ❌       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+GPTQ            ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+SqueezeLLM      ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+bitsandbytes    ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
 ==============  ======  =======  =======  =====  ======  =======  =========  =======  ==============  ==========
 
 Notes:
