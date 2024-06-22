@@ -8,7 +8,6 @@
             "server_port": 8000
         },
         "lmdeploy_client_parameters": {
-            "model": "llama2",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
             "num_prompts": 200,

@@ -116,6 +116,9 @@ run_serving_tests() {
       echo "vllm failed to start within the timeout period."
     fi
 
+    # get model name
+    model_name=$(python ../.buildkite/nightly-benchmarks/scripts/get-lmdeploy-modelname.py)
+
     # iterate over different QPS
     for qps in $qps_list; do
       # remove the surrounding single quote from qps
@@ -134,6 +137,7 @@ run_serving_tests() {
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \
         --request-rate $qps \
+        --model \"$model_name\" \
         $client_args"
 
       echo "Running test case $test_name with qps $qps"
