@@ -1,7 +1,6 @@
 """
-Attention computation layer with attention sink logic,
+Attention computation layer with vLLM-specific attention sink logic,
 as described in https://github.com/mit-han-lab/streaming-llm.
-Currently works for Llama (should eventually work for all RoPE models).
 """
 from typing import List, Optional, Tuple
 
@@ -9,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm import _custom_ops as ops
-from vllm.attention import AttentionMetadata
+from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
@@ -26,7 +25,8 @@ class StreamingAttentionSink(nn.Module):
         head_dim: int,
         kv_scale: float,
         rotary_emb_layer: Optional[RotaryEmbedding],
-        attn_layer,
+        attn_layer: Attention,
+        chunked_prefill_enabled: bool
     ) -> None:
         super().__init__()
         self.model_context_len = model_context_len
@@ -39,6 +39,7 @@ class StreamingAttentionSink(nn.Module):
         self.rotary_emb = rotary_emb_layer
         self.use_alibi = rotary_emb_layer is None
         self.attn = attn_layer
+        self.chunked_prefill_enabled = chunked_prefill_enabled
         self.positions = None
 
         if attn_backend not in (_Backend.XFORMERS, _Backend.FLASH_ATTN):
@@ -65,7 +66,7 @@ class StreamingAttentionSink(nn.Module):
         if self.use_alibi:
             return self._forward_alibi(q, k, v, kv_cache, attn_metadata)
         else:
-            return self._forward_rope(q, k, v, kv_cache, attn_metadata)
+            return self._NEW_forward_rope(q, k, v, kv_cache, attn_metadata)
 
     def _NEW_forward_rope(
         self,
@@ -85,8 +86,42 @@ class StreamingAttentionSink(nn.Module):
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_dim)
 
-        prefill_meta = attn_metadata.prefill_metadata
-        decode_meta = attn_metadata.decode_metadata
+        if (attn_metadata.prefill_metadata is not None
+            and not self.chunked_prefill_enabled):
+            # non-chunked prefill (entire prompt)
+            assert attn_metadata.decode_metadata is None
+            
+            k_original = k.clone()
+            q, k = self.rotary_emb(self.positions, q, k)
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+
+            k_original = k_original.view(-1, self.num_kv_heads, self.head_dim)
+            v = v.view(-1, self.num_kv_heads, self.head_dim)
+
+            # put original pre-rotated keys back in cache
+            if self.attn_backend == _Backend.FLASH_ATTN:
+                ops.reshape_and_cache_flash(
+                    k_original,
+                    v,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                    self.kv_cache_dtype,
+                )
+            elif self.attn_backend == _Backend.XFORMERS:
+                PagedAttention.write_to_paged_cache(
+                    k_original,
+                    v,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    self.kv_scale
+                )
+
+            return attn_output
+        
+        # else, decode only or decode + chunked prefill
         
         k_original = k.clone()
         device = q.device
@@ -112,19 +147,30 @@ class StreamingAttentionSink(nn.Module):
         # batch size = num sequences
         batch_size = block_tables_tensor.shape[0]
         original_keys: List[Tuple[torch.Tensor]] = []
+        
+        # loop through each sequence
         for i in range(batch_size):
-            num_past_tokens = seq_lens[i] - 1  # assumes decode only yields 1 token
+            num_past_tokens = context_lens_tensor[i].item()
             within_context_len = num_past_tokens < model_context_len
             block_table = block_tables_tensor[i]
             
+            num_blocks = num_past_tokens // block_size + 1
             if hasattr(attn_metadata, 'phys_bnums_list'):
                 phys_bnums = phys_bnums_list[i]
             else:
-                phys_bnums = block_table[:-1]
+                if i < attn_metadata.num_prefills:
+                    print("seq_len - context_len =", attn_metadata.seq_lens[i] - num_past_tokens)
+                    phys_bnums = block_table[:num_blocks - 1]
+                else:
+                    phys_bnums = block_table[:-1]
                 phys_bnums_list.append(phys_bnums)
+                print(attn_metadata.seq_lens[i], phys_bnums)
             
             rem = num_past_tokens % block_size
-            rem_phys_bnum = block_table[-1]
+            if i < attn_metadata.num_prefills:
+                rem_phys_bnum = block_table[num_blocks - 1]
+            else:
+                rem_phys_bnum = block_table[-1]
             
             # read unrotated keys from cache
             # FA shape: [len(phys_bnums), block_size, num_heads, head_size]
@@ -195,13 +241,18 @@ class StreamingAttentionSink(nn.Module):
                     
         # put original pre-rotated keys back in cache
         for i in range(batch_size):
-            num_past_tokens = seq_lens[i] - 1
+            num_past_tokens = context_lens_tensor[i]
             within_context_len = num_past_tokens < model_context_len
             block_table = block_tables_tensor[i]
+            
+            num_blocks = num_past_tokens // block_size + 1
             phys_bnums = phys_bnums_list[i]
 
             rem = num_past_tokens % block_size
-            rem_phys_bnum = block_table[-1]
+            if i < attn_metadata.num_prefills:
+                rem_phys_bnum = block_table[num_blocks - 1]
+            else:
+                rem_phys_bnum = block_table[-1]
 
             full_past_keys, rem_past_keys = original_keys[i]
             key_cache.index_put_((phys_bnums,), full_past_keys)

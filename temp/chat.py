@@ -19,7 +19,7 @@ beam_search_params = SamplingParams(
 )
 
 
-def get_prompt(model, file_path="./prompts.json", magic_word=True) -> List[Tuple[str, SamplingParams]]:
+def get_prompt(model, file_path="/workspace/vllm/tests/prompts/attn-sinks-prompts.txt", magic_word=True) -> List[Tuple[str, SamplingParams]]:
     with open(file_path, "r") as f:
         prompts = json.load(f)
     
@@ -74,7 +74,7 @@ def process_requests(engine: LLMEngine,
                 print("Output stats:", cum_logprob, avg_logprob, out.finish_reason, f"isnan={math.isnan(cum_logprob)}")
 
 
-def main():
+if __name__ == "__main__":
     model = "meta-llama/Llama-2-13b-chat-hf"
     model = "mistralai/Mixtral-8x7B-Instruct-v0.1" # TODO
     model = "tiiuae/falcon-7b-instruct"
@@ -88,24 +88,12 @@ def main():
         enforce_eager=True,
         block_size=16,
         dtype="bfloat16",
-        use_attention_sinks=True
+        use_attention_sinks=True,
+        enable_chunked_prefill=True
     )
 
     engine = LLMEngine.from_engine_args(args)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    # prompts = get_prompt(model, magic_word=True)
-    prompts = get_long_prompt()
+    prompts = get_prompt(model, magic_word=True)
+    # prompts = get_long_prompt()
     process_requests(engine, prompts, tokenizer)
-
-    # model = engine.model_executor.driver_worker.model_runner.model
-    # for module_name, module in model.named_modules(remove_duplicate=False):
-    #     print(module_name)
-        # parts = module_name.split(".")
-        # if len(parts) != 5: continue
-        # if parts[-1] == "attn":
-        #     print(module_name)
-        #     print(dir(module))
-
-
-if __name__ == "__main__":
-    main()

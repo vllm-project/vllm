@@ -211,7 +211,12 @@ class ModelRunner:
                     "This may lead to less accurate results!")
 
         if self.model_config.use_attention_sinks:
-            apply_attn_sinks_to_model(self.model, self.model_config, self.cache_config)
+            apply_attn_sinks_to_model(
+                self.model,
+                self.model_config,
+                self.cache_config,
+                self.scheduler_config.chunked_prefill_enabled
+            )
 
     def save_sharded_state(
         self,
@@ -765,6 +770,7 @@ class ModelRunner:
         else:
             model_executable = self.model
 
+        # print(f"execute model: input_ids={input_tokens}, positions={input_positions}")
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
