@@ -18,8 +18,8 @@ if TYPE_CHECKING:
     S3_ENDPOINT_URL: Optional[str] = None
     VLLM_CONFIG_ROOT: str = ""
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
-    VLLM_NO_USAGE_STATS: bool = False
-    VLLM_DO_NOT_TRACK: bool = False
+    VLLM_NO_USAGE_STATS: bool = True
+    VLLM_DO_NOT_TRACK: bool = True
     VLLM_USAGE_SOURCE: str = ""
     VLLM_CONFIGURE_LOGGING: int = 1
     VLLM_LOGGING_LEVEL: str = "INFO"
@@ -162,11 +162,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Usage stats collection
     "VLLM_USAGE_STATS_SERVER":
     lambda: os.environ.get("VLLM_USAGE_STATS_SERVER", "https://stats.vllm.ai"),
+    # UPSTREAM SYNC: following changes force tracking to be disabled
     "VLLM_NO_USAGE_STATS":
-    lambda: os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1",
+    lambda: True,
     "VLLM_DO_NOT_TRACK":
-    lambda: (os.environ.get("VLLM_DO_NOT_TRACK", None) or os.environ.get(
-        "DO_NOT_TRACK", None) or "0") == "1",
+    lambda: True,
     "VLLM_USAGE_SOURCE":
     lambda: os.environ.get("VLLM_USAGE_SOURCE", "production"),
 
