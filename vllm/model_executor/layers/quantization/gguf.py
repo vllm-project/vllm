@@ -102,13 +102,25 @@ class GGUFLinearMethod(LinearMethodBase):
                 shard_weight = layer.qweight[offset:offset + shard_size[id][0], :shard_size[id][1]].contiguous()
                 qweight_type = layer.qweight_type.shard_weight_type[id]
                 # the shape of dequantized shard weight
-                out.append(ops.ggml_mul_mat_a8(shard_weight, x, qweight_type, shard_weight.shape[0]))
+                if qweight_type >= 16:
+                    block_size, type_size = GGML_QUANT_SIZES[qweight_type]
+                    shard_shape = (shard_weight.shape[0], shard_weight.shape[1]//type_size*block_size)
+                    weight = ops.ggml_dequantize(shard_weight, qweight_type, *shard_shape)
+                    out.append(x @ weight.T)
+                else:
+                    out.append(ops.ggml_mul_mat_a8(shard_weight, x, qweight_type, shard_weight.shape[0]))
                 offset += shard_size[id][0]
             out = torch.cat(out, axis=1)
         else:
             qweight = layer.qweight
             qweight_type = layer.qweight_type.data.item()
-            out = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
+            if qweight_type >= 16:
+                block_size, type_size = GGML_QUANT_SIZES[qweight_type]
+                shape = (qweight.shape[0], qweight.shape[1]//type_size*block_size)
+                weight = ops.ggml_dequantize(qweight, qweight_type, *shape)
+                out = x @ weight.T
+            else:
+                out = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
         if bias:
             out.add_(bias)
         return out
