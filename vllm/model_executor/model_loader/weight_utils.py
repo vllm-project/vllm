@@ -384,19 +384,22 @@ def gguf_quant_weights_iterator(
     reader = GGUFReader(gguf_file)
     for tensor in reader.tensors:
         name = tensor.name
+        weight_type = tensor.tensor_type
+        if weight_type.name != "F32" and "blk" in name:
+            name = name.replace("weight", "qweight_type")
+            param = torch.tensor(weight_type)
+            yield name, param
+
+    for tensor in reader.tensors:
+        name = tensor.name
         shape = tensor.shape
         weight = tensor.data
         weight_type = tensor.tensor_type
         # for F32, no need to rename
         if weight_type.name != "F32" and "blk" in name:
-            weight_name = name.replace("weight", "qweight")
-            weight_type_name = name.replace("weight", "qweight_type")
-            for i, (new_name, param) in enumerate(
-                    zip([weight_type_name, weight_name],
-                        [weight_type, weight])):
-                param = torch.tensor(param).view(
-                    shape[-1], -1) if i == 1 else torch.tensor(param)
-                yield new_name, param
+            name = name.replace("weight", "qweight")
+            param = torch.tensor(weight)
+            yield name, param
         else:
             import vllm._custom_ops as ops
             if weight_type.name != "F32":
