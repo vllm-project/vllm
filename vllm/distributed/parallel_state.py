@@ -20,6 +20,7 @@ If you only need to use the distributed environment without model/pipeline
  steps.
 """
 import contextlib
+import pickle
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -30,9 +31,6 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
-from torch.distributed.distributed_c10d import (_get_pg_default_device,
-                                                _object_to_tensor,
-                                                _tensor_to_object)
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -346,10 +344,7 @@ class GroupCoordinator:
                                                 group=self.device_group)
         return obj_list
 
-    def send_object(self,
-                    obj: Any,
-                    dst: int,
-                    group: Optional[ProcessGroup] = None) -> None:
+    def send_object(self, obj: Any, dst: int) -> None:
         """Send the input object list to the destination rank."""
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
@@ -357,22 +352,27 @@ class GroupCoordinator:
             "Invalid destination rank. Destination rank is the same "
             "as the current rank.")
 
-        current_device = _get_pg_default_device(group)
-        # Serialize object to tensor.
-        object_tensor, size_tensor = _object_to_tensor(obj, current_device,
-                                                       group)
+        # Serialize object to tensor and get the size as well
+        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
+
+        size_tensor = torch.tensor([object_tensor.numel()],
+                                   dtype=torch.long,
+                                   device="cpu")
 
         # Send object size
-        torch.distributed.send(size_tensor, dst=dst, group=group)
+
+        torch.distributed.send(size_tensor,
+                               dst=self.ranks[dst],
+                               group=self.cpu_group)
 
         # Send object
-        torch.distributed.send(object_tensor, dst=dst, group=group)
+        torch.distributed.send(object_tensor,
+                               dst=self.ranks[dst],
+                               group=self.cpu_group)
 
         return None
 
-    def recv_object(self,
-                    src: int,
-                    group: Optional[ProcessGroup] = None) -> Any:
+    def recv_object(self, src: int) -> Any:
         """Receive the input object list from the source rank."""
         assert src < self.world_size, f"Invalid src rank ({src})"
 
@@ -380,27 +380,29 @@ class GroupCoordinator:
             "Invalid source rank. Source rank is the same as the current rank."
         )
 
-        current_device = _get_pg_default_device(group)
-
-        size_tensor = torch.empty(1, dtype=torch.long, device=current_device)
+        size_tensor = torch.empty(1, dtype=torch.long, device="cpu")
 
         # Receive object size
-        rank_size = torch.distributed.recv(size_tensor, src=src, group=group)
+        rank_size = torch.distributed.recv(size_tensor,
+                                           src=src,
+                                           group=self.cpu_group)
 
         # Tensor to receive serialized objects into.
         object_tensor = torch.empty(  # type: ignore[call-overload]
             size_tensor.item(),  # type: ignore[arg-type]
             dtype=torch.uint8,
-            device=current_device)
+            device="cpu")
 
         rank_object = torch.distributed.recv(object_tensor,
                                              src=src,
-                                             group=group)
-        assert (rank_size == rank_object
-                ), "Mismatch in return ranks for object sizes and objects."
-        # Deserialize objects using their stored sizes.
+                                             group=self.cpu_group)
 
-        return _tensor_to_object(object_tensor, size_tensor.item(), group)
+        assert rank_object == rank_size, (
+            "Received object sender rank does not match the size sender rank.")
+
+        obj = pickle.loads(object_tensor.numpy().tobytes())
+
+        return obj
 
     def broadcast_tensor_dict(
         self,
@@ -511,7 +513,6 @@ class GroupCoordinator:
         if dst is None:
             dst = self.next_rank
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
-        dst = self.ranks[dst]
 
         metadata_list: List[Tuple[Any, Any]] = []
         assert isinstance(
@@ -521,7 +522,7 @@ class GroupCoordinator:
         # `metadata_list` lives in CPU memory.
         # `send_object_list` has serialization & deserialization,
         # all happening on CPU. Therefore, we can use the CPU group.
-        self.send_object(metadata_list, dst=dst, group=metadata_group)
+        self.send_object(metadata_list, dst=dst)
         for tensor in tensor_list:
             if tensor.numel() == 0:
                 # Skip sending empty tensors.
@@ -551,9 +552,8 @@ class GroupCoordinator:
         if src is None:
             src = self.prev_rank
         assert src < self.world_size, f"Invalid src rank ({src})"
-        src = self.ranks[src]
 
-        recv_metadata_list = self.recv_object(src=src, group=metadata_group)
+        recv_metadata_list = self.recv_object(src=src)
         tensor_dict = {}
         for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
