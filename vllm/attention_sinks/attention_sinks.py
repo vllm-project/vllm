@@ -122,6 +122,8 @@ class StreamingAttentionSink(nn.Module):
             return attn_output
         
         # else, decode only or decode + chunked prefill
+        if not self.chunked_prefill_enabled:
+            assert attn_metadata.num_prefills == 0
         
         k_original = k.clone()
         device = q.device
@@ -129,28 +131,32 @@ class StreamingAttentionSink(nn.Module):
         model_context_len = self.model_context_len
 
         # cache seq_lens
+        # TODO: remove this, just use attn_metadata.seq_lens
         if hasattr(attn_metadata, 'seq_lens_clone'):
             seq_lens = attn_metadata.seq_lens_clone
         else:
             seq_lens = attn_metadata.seq_lens_tensor.tolist()
             attn_metadata.seq_lens_clone = seq_lens
 
-        # cache phys_bnums
-        if hasattr(attn_metadata, 'phys_bnums_list'):
-            phys_bnums_list = attn_metadata.phys_bnums_list
-        else:
-            phys_bnums_list = []
-        
         block_tables_tensor = attn_metadata.block_tables
         context_lens_tensor = attn_metadata.context_lens_tensor
 
         # batch size = num sequences
         batch_size = block_tables_tensor.shape[0]
-        original_keys: List[Tuple[torch.Tensor]] = []
+        assert context_lens_tensor.shape[0] == batch_size
+
+        # cache phys_bnums
+        if hasattr(attn_metadata, 'phys_bnums_list'):
+            phys_bnums_list = attn_metadata.phys_bnums_list
+        else:
+            phys_bnums_list: List[torch.Tensor] = [None] * batch_size
+        
+        original_keys: List[Tuple[torch.Tensor]] = [None] * batch_size
         
         # loop through each sequence
         for i in range(batch_size):
             num_past_tokens = context_lens_tensor[i].item()
+            if num_past_tokens == 0: continue
             within_context_len = num_past_tokens < model_context_len
             block_table = block_tables_tensor[i]
             
@@ -159,12 +165,11 @@ class StreamingAttentionSink(nn.Module):
                 phys_bnums = phys_bnums_list[i]
             else:
                 if i < attn_metadata.num_prefills:
-                    print("seq_len - context_len =", attn_metadata.seq_lens[i] - num_past_tokens)
+                    print(f"prefill {i}: len block table:", block_table.shape, "num_blocks:", num_blocks)
                     phys_bnums = block_table[:num_blocks - 1]
                 else:
                     phys_bnums = block_table[:-1]
-                phys_bnums_list.append(phys_bnums)
-                print(attn_metadata.seq_lens[i], phys_bnums)
+                phys_bnums_list[i] = phys_bnums
             
             rem = num_past_tokens % block_size
             if i < attn_metadata.num_prefills:
@@ -180,7 +185,7 @@ class StreamingAttentionSink(nn.Module):
                 rem_past_keys = key_cache[rem_phys_bnum, :rem, :, :]
             elif self.attn_backend == _Backend.XFORMERS:
                 rem_past_keys = key_cache[rem_phys_bnum, :, :, :rem, :]
-            original_keys.append((full_past_keys.clone(), rem_past_keys.clone()))
+            original_keys[i] = (full_past_keys.clone(), rem_past_keys.clone())
             
             # use positions within cache (capped by context length)
             pos_start = 0 if within_context_len else 2 * block_size - 1 - rem
@@ -241,7 +246,8 @@ class StreamingAttentionSink(nn.Module):
                     
         # put original pre-rotated keys back in cache
         for i in range(batch_size):
-            num_past_tokens = context_lens_tensor[i]
+            num_past_tokens = context_lens_tensor[i].item()
+            if num_past_tokens == 0: continue
             within_context_len = num_past_tokens < model_context_len
             block_table = block_tables_tensor[i]
             

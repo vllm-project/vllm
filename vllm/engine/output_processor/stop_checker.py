@@ -17,7 +17,7 @@ class StopChecker:
     def __init__(self, max_model_len: int,
                  get_tokenizer_for_seq: Callable[[Sequence],
                                                  PreTrainedTokenizer],
-                 use_attention_sinks: bool):
+                 use_attention_sinks: bool = False):
         # Do not use it directly, but use `self._get_max_model_len`.
         self._max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
