@@ -156,7 +156,7 @@ def send_recv_test_worker(tp_size: int, pp_size: int, rank: int,
     size = 64
     test_tensor = torch.arange(64, dtype=torch.float32, device="cuda")
 
-    if not get_pp_group().is_first_rank: 
+    if not get_pp_group().is_first_rank:
         recv_tensor = get_pp_group().recv(size, dtype=torch.float32)
 
     if not get_pp_group().is_last_rank:
