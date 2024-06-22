@@ -1,0 +1,119 @@
+#!/bin/bash -e
+
+# simple helper script to launch distributed tests
+
+usage() {
+    echo "Usage: ${0} <options>"
+    echo
+    echo "  -s    - src directory, i.e. location of package *.py files."
+    echo "  -t    - test directory, i.e. location of *.py test files. (default 'tests/')"
+    echo "  -r    - desired results base directory. xml results will mirror provided tests directory structure. (default 'test-results/')"
+    echo "  -h    - this list of options"
+    echo
+    echo "note: all paths are relative to 'nm-vllm' root"
+    echo
+    exit 1
+}
+
+SRC_DIR=
+TEST_DIR=tests
+RESULTS_DIR=test-results
+
+while getopts "hs:t:r:" OPT; do
+    case "${OPT}" in
+	h)
+	    usage
+	    ;;
+    s)
+        SRC_DIR="${OPTARG}"
+        ;;
+	t)
+	    TEST_DIR="${OPTARG}"
+	    ;;
+    r)
+        RESULTS_DIR="${OPTARG}"
+        ;;
+    esac
+done
+
+# check if variables are valid
+if [ -z "${SRC_DIR}" ]; then
+    echo "please set desired source directory"
+    usage
+fi
+
+if [ -z "${RESULTS_DIR}" ]; then
+    echo "please set desired results base directory"
+    usage
+fi
+
+if [ -z "${TEST_DIR}" ]; then
+    echo "please set test directory"
+    usage
+fi
+
+if [ ! -d "${TEST_DIR}" ]; then
+    echo "specified test directory, '${TEST_DIR}' does not exist ..."
+    usage
+fi
+
+# find distributed tests
+TESTS_DOT_PY=$(find ${TEST_DIR} -type f -wholename "*distributed/test*.py")
+TESTS_FOUND=(${TESTS_DOT_PY})
+
+echo "found:"
+for FOUND in "${TESTS_FOUND[@]}"; do
+    echo "${FOUND}"
+done
+
+# run tests
+SUCCESS=0
+CC_PYTEST_FLAGS="--cov=${SRC_DIR} --cov=${TEST_DIR} --cov-report=html:cc-vllm-html --cov-append"
+for TEST in "${TESTS_FOUND[@]}"
+do
+    LOCAL_SUCCESS=0
+    RESULT_XML=$(echo ${TEST} | sed -e "s/${TEST_DIR}/${RESULTS_DIR}/" | sed -e "s/.py/.xml/")
+
+    # report which test is being run
+    # (in CI, if a test hangs, this logs *which* test is running *before* it hangs)
+    echo "=== RUNNING TEST: ${TEST} ==="
+
+    # test_same_node needs to be launched with torchrun
+    if [[ "${TEST}" == *"distributed/test_same_node"* ]]; then
+        VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 ${TEST} || LOCAL_SUCCESS=$?
+    
+    # we cannot re-initialize vllm in the same process with TP>1
+    # so, we launch the model tests here one by one, rather than with a pytest.mark.parameterize
+    elif [[ "${TEST}" == *"distributed/models_core/test_llm_logprobs"* ]]; then
+        TEST_DIST_MODEL="meta-llama/Meta-Llama-3-8B-Instruct" DISTRIBUTED_EXECUTOR_BACKEND="ray" pytest ${CC_PYTEST_FLAGS} --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+        TEST_DIST_MODEL="meta-llama/Meta-Llama-3-8B-Instruct" DISTRIBUTED_EXECUTOR_BACKEND="mp" pytest ${CC_PYTEST_FLAGS} --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+    
+    # otherwise run as usual
+    elif [[ "${TEST}" == *"distributed"* ]]; then
+        pytest ${CC_PYTEST_FLAGS} --junitxml=${RESULT_XML} ${TEST} || LOCAL_SUCCESS=$?
+    
+    # fail if any non-distributed tests get in here somehow
+    else
+        echo "FOUND NON DISTRIBUTED TEST RUNNING ---- counting as failure"
+        LOCAL_SUCCESS=1
+    fi
+
+    if [[ $LOCAL_SUCCESS == 0 ]]; then
+        echo "=== PASSED TEST: ${TEST} ==="
+    # if a file does not run any tests, pytest reports exit code of 5
+    # since we skip full modules in our skipping strategy, this is common
+    elif [[ $LOCAL_SUCCESS == 5 ]]; then
+        echo "=== SKIPPED TEST: ${TEST} ==="
+    # otherwise, report failure
+    else
+        echo "=== FAILED TEST: ${TEST} ==="
+        SUCCESS=$((SUCCESS + LOCAL_SUCCESS))
+    fi
+
+done
+
+if [ "${SUCCESS}" -eq "0" ]; then
+    exit 0
+else
+    exit 1
+fi
