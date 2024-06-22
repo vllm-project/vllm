@@ -98,6 +98,7 @@ class EngineArgs:
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
+    disable_bonus_tokens_in_kv_cache: bool = True
 
     qlora_adapter_name_or_path: Optional[str] = None
 
@@ -564,6 +565,15 @@ class EngineArgs:
             help='Min size of window for ngram prompt lookup in speculative '
             'decoding.')
 
+        parser.add_argument(
+            '--disable-bonus-tokens-in-kv-cache',
+            type=int,
+            default=EngineArgs.disable_bonus_tokens_in_kv_cache,
+            help='A boolean flag to control the use of bonus tokens during '
+            'speculative decoding in models that rely on KV cache. If set '
+            'to True, bonus tokens will be disabled and if set to False, '
+            'bonus tokens will be enabled.')
+
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
                             default=EngineArgs.model_loader_extra_config,
@@ -684,6 +694,7 @@ class EngineArgs:
             use_v2_block_manager=self.use_v2_block_manager,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
+            disable_bonus_tokens_in_kv_cache=self.disable_bonus_tokens_in_kv_cache,
         )
 
         scheduler_config = SchedulerConfig(

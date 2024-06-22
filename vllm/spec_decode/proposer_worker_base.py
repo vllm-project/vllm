@@ -14,6 +14,7 @@ class ProposerWorkerBase(WorkerBase, SpeculativeProposer):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
+        seq_ids_with_bonus_token_in_last_step: set=set(),
     ) -> Tuple[Optional[List[SamplerOutput]], bool]:
         raise NotImplementedError
 

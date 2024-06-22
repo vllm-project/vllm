@@ -42,6 +42,7 @@ class Top1Proposer(SpeculativeProposer):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
+        seq_ids_with_bonus_token_in_last_step: set=set(),
     ) -> SpeculativeProposals:
         """Get speculative proposals given the input batch.
 
@@ -72,6 +73,8 @@ class Top1Proposer(SpeculativeProposer):
             maybe_sampler_output, transposed = self._worker.sampler_output(
                 execute_model_req=nonzero_execute_model_req,
                 sample_len=proposal_len,
+                seq_ids_with_bonus_token_in_last_step=\
+                    seq_ids_with_bonus_token_in_last_step,
             )
             (
                 proposal_lens,

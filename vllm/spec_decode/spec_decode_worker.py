@@ -1,5 +1,5 @@
 from functools import cached_property
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import torch
 
@@ -18,6 +18,7 @@ from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
+                                   get_all_seq_ids_with_request_ids,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker import Worker
@@ -52,6 +53,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         draft_worker_kwargs=draft_worker_kwargs,
         disable_by_batch_size=speculative_config.
         speculative_disable_by_batch_size,
+        disable_bonus_tokens_in_kv_cache=speculative_config.
+        disable_bonus_tokens_in_kv_cache
     )
 
     return spec_decode_worker
@@ -91,6 +94,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         scorer_worker: WorkerBase,
         draft_worker_kwargs: Dict[str, Any],
         disable_by_batch_size: Optional[int],
+        disable_bonus_tokens_in_kv_cache: bool,
     ) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
@@ -98,13 +102,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         ngram_prompt_lookup_min = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
 
-        disable_bonus_tokens = True
         if ngram_prompt_lookup_max > 0:
             disable_bonus_tokens = False
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
         else:
+            disable_bonus_tokens = disable_bonus_tokens_in_kv_cache
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
@@ -151,6 +155,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         self.probs_dtype = self.rejection_sampler.probs_dtype
         self.token_id_dtype = self.rejection_sampler.token_id_dtype
+        # Tracks the sequence IDs that received a bonus token ID in
+        # their last forward pass.
+        self.seq_with_bonus_token_in_last_step = set()
 
         # Lazy initiazliation.
         self.scorer: SpeculativeScorer
@@ -382,9 +389,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sequence.
         """
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
-
         # Generate proposals using draft worker.
-        proposals = self.proposer_worker.get_spec_proposals(execute_model_req)
+        proposals = self.proposer_worker.get_spec_proposals(
+            execute_model_req, self.seq_with_bonus_token_in_last_step)
 
         proposal_scores = self.scorer.score_proposals(
             execute_model_req,
@@ -500,10 +507,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
              k=self.scorer_worker.model_config.max_logprobs,
              dim=-1,
          )
-
+        
         # Get the sequence ids and num_logprobs (sampling parameter) in the
         # batch.
         seq_ids = get_all_seq_ids(seq_group_metadata_list)
+        #seq_ids_with_request_ids = get_all_seq_ids_with_request_ids(seq_group_metadata_list)
         num_logprobs_per_seq = get_all_num_logprobs(seq_group_metadata_list)
 
         # Serialize all tensors to CPU Python lists.
@@ -526,7 +534,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             for sequence_index in range(batch_size):
                 # Each sequence may have a different num_logprobs; retrieve it.
                 num_logprobs = num_logprobs_per_seq[sequence_index]
-
+                #seq_id = seq_ids_with_request_ids[sequence_index][0]
+                seq_id = seq_ids[sequence_index]
                 step_output_token_ids.append(
                     create_sequence_group_output(
                         token_id=accepted_token_ids_by_step[step_index]
@@ -535,22 +544,28 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                             step_index][sequence_index],
                         token_id_logprob=accepted_token_id_logprobs_by_step[
                             step_index][sequence_index],
-                        seq_id=seq_ids[sequence_index],
+                        seq_id=seq_id,
                         topk_token_ids=topk_indices_by_step[step_index]
                         [sequence_index][:num_logprobs],
                         topk_logprobs=topk_logprobs_by_step[step_index]
                         [sequence_index][:num_logprobs],
                     ))
-
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
-
+        
+        
+        for seq_index, seq_id in enumerate(seq_ids):
+            last_token_id = accepted_token_ids_by_step[-1][seq_index]
+            if last_token_id == -1:
+                self.seq_with_bonus_token_in_last_step.discard(seq_id)
+            else:
+                self.seq_with_bonus_token_in_last_step.add(seq_id)
+        
         maybe_rejsample_metrics = (
             self._metrics.maybe_collect_rejsample_metrics(k))
         if maybe_rejsample_metrics is not None:
             sampler_output_list[
                 0].spec_decode_worker_metrics = maybe_rejsample_metrics
-
         return sampler_output_list
 
     @cached_property

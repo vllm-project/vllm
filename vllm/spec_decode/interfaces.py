@@ -58,6 +58,7 @@ class SpeculativeProposer(ABC):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
+        seq_ids_with_bonus_token_in_last_step: set=set(),
     ) -> SpeculativeProposals:
         raise NotImplementedError
 

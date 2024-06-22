@@ -790,6 +790,7 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        disable_bonus_tokens_in_kv_cache: bool,
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -823,6 +824,10 @@ class SpeculativeConfig:
                 window, if provided.
             ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
                 window, if provided.
+            disable_bonus_tokens_in_kv_cache (bool): A boolean flag to control
+            the use of bonus tokens during speculative decoding in models that
+            rely on KV cache. If set to True, bonus tokens will be disabled
+            and if set to False, bonus tokens will be enabled.
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
@@ -918,6 +923,7 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size,
             ngram_prompt_lookup_max,
             ngram_prompt_lookup_min,
+            disable_bonus_tokens_in_kv_cache,
         )
 
     @staticmethod
@@ -989,6 +995,7 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        disable_bonus_tokens_in_kv_cache: bool,
     ):
         """Create a SpeculativeConfig object.
 
@@ -1002,6 +1009,10 @@ class SpeculativeConfig:
                 enqueue requests is larger than this value.
             ngram_prompt_lookup_max: Max size of ngram token window.
             ngram_prompt_lookup_min: Min size of ngram token window.
+            disable_bonus_tokens_in_kv_cache: A boolean flag to control the
+                use of bonus tokens during speculative decoding in models that 
+                rely on KV cache. If set to True, bonus tokens will be disabled 
+                and if set to False, bonus tokens will be enabled.
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
@@ -1010,6 +1021,8 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size
         self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
         self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
+        self.disable_bonus_tokens_in_kv_cache = \
+            disable_bonus_tokens_in_kv_cache
 
         self._verify_args()
 
