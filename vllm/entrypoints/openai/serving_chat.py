@@ -525,7 +525,7 @@ class OpenAIServingChat(OpenAIServing):
                             name=request.tool_choice.function.name,
                             arguments=output.text))
                     ])
-            elif not request.tool_choice or request.tool_choice == "none":
+            else:
                 message = ChatMessage(role=role, content=output.text)
 
             choice_data = ChatCompletionResponseChoice(
