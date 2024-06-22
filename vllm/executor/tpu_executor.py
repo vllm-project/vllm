@@ -82,6 +82,9 @@ class TPUExecutor(ExecutorBase):
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError("LoRA is not implemented for TPU backend.")
 
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError("LoRA is not implemented for TPU backend.")
+
     def list_loras(self) -> Set[int]:
         raise NotImplementedError("LoRA is not implemented for TPU backend.")
 
