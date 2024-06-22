@@ -8,10 +8,10 @@ import pytest
 import ray
 import torch
 
-from vllm.distributed import (broadcast_tensor_dict,
+from vllm.distributed import (broadcast_tensor_dict, get_pp_group,
                               is_pipeline_model_parallel_first_rank,
                               is_pipeline_model_parallel_last_rank,
-                              get_pp_group, tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 
 from ..utils import init_test_distributed_environment, multi_process_parallel
