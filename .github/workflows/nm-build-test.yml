@@ -117,7 +117,7 @@ jobs:
             gitref: ${{ github.ref }}
             python: ${{ inputs.python }}
             whl: ${{ needs.BUILD.outputs.whl }}
-            test_skip_env_vars: ${{ inputs.test_skip_env_vars_distributed }}
+            test_skip_env_vars: neuralmagic/tests/test_skip_env_vars/distributed_smoke.txt
         secrets: inherit
 
     UPLOAD:
