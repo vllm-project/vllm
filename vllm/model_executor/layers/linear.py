@@ -275,6 +275,11 @@ class ColumnParallelLinear(LinearBase):
 
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
+
+        # materialize GGUF UninitializedParameter
+        if isinstance(param, UninitializedParameter):
+            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
+
         param_data = param.data
         if output_dim is not None:
             shard_size = param_data.shape[output_dim]
@@ -286,6 +291,9 @@ class ColumnParallelLinear(LinearBase):
             param_data, loaded_weight = fp8_scales_shard_indexer(param_data,
                                                                  loaded_weight,
                                                                  shard_id=0)
+        
+        if fp8_scales_shard_indexer is None and len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)

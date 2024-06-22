@@ -101,26 +101,24 @@ class GGUFLinearMethod(LinearMethodBase):
             for id in shard_id:
                 shard_weight = layer.qweight[offset:offset + shard_size[id][0], :shard_size[id][1]].contiguous()
                 qweight_type = layer.qweight_type.shard_weight_type[id]
-                # the shape of dequantized shard weight
-                if qweight_type >= 16:
-                    block_size, type_size = GGML_QUANT_SIZES[qweight_type]
-                    shard_shape = (shard_weight.shape[0], shard_weight.shape[1]//type_size*block_size)
-                    weight = ops.ggml_dequantize(shard_weight, qweight_type, *shard_shape)
-                    out.append(x @ weight.T)
-                else:
-                    out.append(ops.ggml_mul_mat_a8(shard_weight, x, qweight_type, shard_weight.shape[0]))
+                out.append(self._fuse_mul_mat(x, shard_weight, qweight_type))
                 offset += shard_size[id][0]
             out = torch.cat(out, axis=1)
         else:
             qweight = layer.qweight
             qweight_type = layer.qweight_type.data.item()
-            if qweight_type >= 16:
-                block_size, type_size = GGML_QUANT_SIZES[qweight_type]
-                shape = (qweight.shape[0], qweight.shape[1]//type_size*block_size)
-                weight = ops.ggml_dequantize(qweight, qweight_type, *shape)
-                out = x @ weight.T
-            else:
-                out = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
+            out = self._fuse_mul_mat(x, qweight, qweight_type)
         if bias:
             out.add_(bias)
         return out
+
+    def _fuse_mul_mat(self, x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) -> torch.Tensor:
+        # use dequantize mulmat for IQmatrix, mmq for k-quants
+        if qweight_type >= 16:
+            block_size, type_size = GGML_QUANT_SIZES[qweight_type]
+            shape = (qweight.shape[0], qweight.shape[1]//type_size*block_size)
+            weight = ops.ggml_dequantize(qweight, qweight_type, *shape)
+            y = x @ weight.T
+        else:
+            y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
+        return y
