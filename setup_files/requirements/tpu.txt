@@ -1,5 +1,5 @@
 # Common dependencies
--r requirements-common.txt
+-r common.txt
 
 # Dependencies for TPU
 # Currently, the TPU backend uses a nightly version of PyTorch XLA.
