@@ -1,5 +1,4 @@
 import asyncio
-import sys
 from io import StringIO
 from typing import Awaitable, List
 
@@ -136,9 +135,6 @@ async def main(args):
 
     output_buffer.seek(0)
     await write_file(args.output_file, output_buffer.read().strip())
-
-    # Temporary workaround for https://github.com/vllm-project/vllm/issues/4789
-    sys.exit(0)
 
 
 if __name__ == "__main__":
