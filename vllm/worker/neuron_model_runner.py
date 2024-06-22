@@ -11,8 +11,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.worker.model_input import ModelInput
-from vllm.worker.model_runner_base import ModelRunnerBase
+from vllm.worker.model_runner_base import ModelInput, ModelRunnerBase
 
 logger = init_logger(__name__)
 

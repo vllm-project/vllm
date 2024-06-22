@@ -26,8 +26,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
-from vllm.worker.model_input import ModelInput
-from vllm.worker.model_runner_base import ModelRunnerBase
+from vllm.worker.model_runner_base import ModelInput, ModelRunnerBase
 
 logger = init_logger(__name__)
 

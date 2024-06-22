@@ -17,8 +17,7 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.cpu_model_runner import CPUModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase)
-from vllm.worker.worker_input import WorkerInput
+                                     LoraNotSupportedWorkerBase, WorkerInput)
 
 logger = init_logger(__name__)
 

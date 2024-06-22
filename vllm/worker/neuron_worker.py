@@ -11,8 +11,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase)
-from vllm.worker.worker_input import WorkerInput
+                                     LoraNotSupportedWorkerBase, WorkerInput)
 
 
 class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):

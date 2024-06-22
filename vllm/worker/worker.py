@@ -20,8 +20,7 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
-from vllm.worker.worker_base import LocalOrDistributedWorkerBase
-from vllm.worker.worker_input import WorkerInput
+from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 
 class Worker(LocalOrDistributedWorkerBase):

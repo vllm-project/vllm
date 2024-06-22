@@ -15,8 +15,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
-from vllm.worker.model_input import ModelInput
-from vllm.worker.model_runner_base import ModelRunnerBase
+from vllm.worker.model_runner_base import ModelInput, ModelRunnerBase
 
 logger = init_logger(__name__)
 
