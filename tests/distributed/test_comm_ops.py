@@ -9,8 +9,6 @@ import ray
 import torch
 
 from vllm.distributed import (broadcast_tensor_dict, get_pp_group,
-                              is_pipeline_model_parallel_first_rank,
-                              is_pipeline_model_parallel_last_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 
@@ -130,13 +128,13 @@ def send_recv_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
         "f": torch.tensor([], dtype=torch.float32, device="cuda"),
     }
 
-    if not is_pipeline_model_parallel_first_rank():
+    if not get_pp_group().is_first_rank:
         recv_dict = get_pp_group().recv_tensor_dict()
 
-    if not is_pipeline_model_parallel_last_rank():
+    if not get_pp_group().is_last_rank:
         get_pp_group().send_tensor_dict(test_dict)
 
-    if not is_pipeline_model_parallel_first_rank():
+    if not get_pp_group().is_first_rank:
         assert len(recv_dict) == len(test_dict)
         assert torch.allclose(recv_dict["a"], test_dict["a"])
         assert torch.allclose(recv_dict["b"], test_dict["b"])
@@ -158,13 +156,13 @@ def send_recv_test_worker(tp_size: int, pp_size: int, rank: int,
     size = 64
     test_tensor = torch.arange(64, dtype=torch.float32, device="cuda")
 
-    if not is_pipeline_model_parallel_first_rank():
+    if not get_pp_group().is_first_rank: 
         recv_tensor = get_pp_group().recv(size, dtype=torch.float32)
 
-    if not is_pipeline_model_parallel_last_rank():
+    if not get_pp_group().is_last_rank:
         get_pp_group().send(test_tensor)
 
-    if not is_pipeline_model_parallel_first_rank():
+    if not get_pp_group().is_first_rank:
         assert torch.allclose(test_tensor, recv_tensor)
 
 
