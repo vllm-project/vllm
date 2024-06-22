@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional, Union
 import torch
 import torch.distributed
 
-from .parallel_state import get_pp_group, get_tp_group
+from .parallel_state import get_tp_group
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:

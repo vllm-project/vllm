@@ -494,8 +494,10 @@ class GroupCoordinator:
         return tensor_dict
 
     def send_tensor_dict(
-            self, tensor_dict: Dict[Any, Union[torch.Tensor, Any]],
-            dst: Optional[int] = None) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+        self,
+        tensor_dict: Dict[Any, Union[torch.Tensor, Any]],
+        dst: Optional[int] = None
+    ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
         """Send the input tensor dictionary.
         NOTE: `dst` is the local rank of the source rank.
         """
@@ -533,7 +535,9 @@ class GroupCoordinator:
         return None
 
     def recv_tensor_dict(
-            self, src: Optional[int] = None) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+        self,
+        src: Optional[int] = None
+    ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
         """Recv the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
         """
