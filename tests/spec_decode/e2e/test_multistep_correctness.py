@@ -131,7 +131,7 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-    }
+    },
 ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [2])
@@ -176,8 +176,8 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
         "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 3,
-    }
+        "num_speculative_tokens": 5,
+    },
 ])
 @pytest.mark.parametrize(
     "output_len",
@@ -231,7 +231,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-    }
+    },
 ])
 @pytest.mark.parametrize(
     "output_len",
@@ -279,7 +279,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-    }
+    },
 ])
 @pytest.mark.parametrize("max_output_len", [
     256,
@@ -320,7 +320,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-    }
+    },
 ])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize(
@@ -364,7 +364,7 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-    }
+    },
 ])
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize(
@@ -411,7 +411,7 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-    }
+    },
 ])
 @pytest.mark.parametrize(
     "output_len",
@@ -465,7 +465,7 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-    }
+    },
 ])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
@@ -554,7 +554,7 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
         "speculative_disable_by_batch_size": 2,
-    }
+    },
 ])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("output_len", [10])
@@ -648,8 +648,14 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
 def test_enable_bonus_tokens_in_kv_cache(
     baseline_llm_generator, test_llm_generator, batch_size: int,
     output_len: int):
-    """Verify that speculative decoding produces exact equality to without spec
-    decode with many different values of k.
+    """
+    Test speculative decoding with bonus token acceptance enabled for a model 
+    using KV cache.
+
+    This test verifies that speculative decoding produces results exactly 
+    matching those from non-speculative decoding across various values of 'k' 
+    and batch sizes when bonus token acceptance is enabled. It ensures 
+    correctness by comparing the output of speculative decoding with the baseline.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
