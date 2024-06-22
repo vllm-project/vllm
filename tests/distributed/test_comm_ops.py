@@ -11,7 +11,7 @@ import torch
 from vllm.distributed import (broadcast_tensor_dict,
                               is_pipeline_model_parallel_first_rank,
                               is_pipeline_model_parallel_last_rank,
-                              recv_tensor_dict, send_tensor_dict,
+                              get_pp_group,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 
@@ -132,10 +132,10 @@ def send_recv_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
     }
 
     if not is_pipeline_model_parallel_first_rank():
-        recv_dict = recv_tensor_dict()
+        recv_dict = get_pp_group().recv_tensor_dict()
 
     if not is_pipeline_model_parallel_last_rank():
-        send_tensor_dict(test_dict)
+        get_pp_group().send_tensor_dict(test_dict)
 
     if not is_pipeline_model_parallel_first_rank():
         assert len(recv_dict) == len(test_dict)

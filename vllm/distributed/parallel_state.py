@@ -495,7 +495,7 @@ class GroupCoordinator:
 
     def send_tensor_dict(
             self, tensor_dict: Dict[Any, Union[torch.Tensor, Any]],
-            dst: int) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+            dst: Optional[int] = None) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
         """Send the input tensor dictionary.
         NOTE: `dst` is the local rank of the source rank.
         """
@@ -505,6 +505,9 @@ class GroupCoordinator:
 
         group = self.device_group
         metadata_group = self.cpu_group
+
+        if dst is None:
+            dst = self.next_rank
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
         dst = self.ranks[dst]
 
@@ -530,7 +533,7 @@ class GroupCoordinator:
         return None
 
     def recv_tensor_dict(
-            self, src: int) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+            self, src: Optional[int] = None) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
         """Recv the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -540,6 +543,9 @@ class GroupCoordinator:
 
         group = self.device_group
         metadata_group = self.cpu_group
+
+        if src is None:
+            src = self.prev_rank
         assert src < self.world_size, f"Invalid src rank ({src})"
         src = self.ranks[src]
 
