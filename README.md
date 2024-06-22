@@ -1,17 +1,13 @@
-<h1 style="display: flex; align-items: center;" >
-     <img width="100" height="100" alt="tool icon" src="https://neuralmagic.com/wp-content/uploads/2024/04/icon_nm_vllm-002-copy.svg" />
-      <span>&nbsp;&nbsp;nm-vllm</span>
-  </h1>
+# nm-vllm
 
 ## Overview
 
-[vLLM](https://github.com/vllm-project/vllm) is a fast and easy-to-use library for LLM inference that Neural Magic regularly contributes to. 
-
-`nm-vllm` is our supported enterprise distribution of vLLM.
+`nm-vllm` is our supported enterprise distribution of [vLLM](https://github.com/vllm-project/vllm).
 
 ## Installation
 
-The [nm-vllm PyPi package](https://pypi.neuralmagic.com/simple/nm-vllm/index.html) includes pre-compiled binaries for CUDA (version 12.1) kernels, streamlining the setup process. For other PyTorch or CUDA versions, please compile the package from source.
+### PyPI
+The [nm-vllm PyPi package](https://pypi.neuralmagic.com/simple/nm-vllm/index.html) includes pre-compiled binaries for CUDA (version 12.1) kernels. For other PyTorch or CUDA versions, please compile the package from source.
 
 Install it using pip:
 ```bash
@@ -28,6 +24,17 @@ You can also build and install `nm-vllm` from source (this will take ~10 minutes
 git clone https://github.com/neuralmagic/nm-vllm.git
 cd nm-vllm
 pip install -e .[sparse] --extra-index-url https://pypi.neuralmagic.com/simple
+```
+
+### Docker
+
+The [`nm-vllm` container registry](https://github.com/neuralmagic/nm-vllm/pkgs/container/nm-vllm-openai) includes premade docker images.
+
+Launch the OpenAI-compatible server with:
+
+```bash
+MODEL_ID=Qwen/Qwen2-0.5B-Instruct
+docker run --gpus all --shm-size 2g ghcr.io/neuralmagic/nm-vllm-openai:latest --model $MODEL_ID
 ```
 
 ## Models
