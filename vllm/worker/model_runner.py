@@ -757,7 +757,7 @@ class ModelRunner:
             lora_requests = metadata_dict.pop("lora_requests")
             multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
 
-            use_cuda_graph = metadata_dict.pop('use_cuda_graph')
+            use_cuda_graph = metadata_dict['use_cuda_graph']
             is_profile_run = metadata_dict.pop('is_profile_run')
             if self.attn_backend.get_name() == "flashinfer":
                 self._create_flashinfer_wrapper(metadata_dict, use_cuda_graph,
