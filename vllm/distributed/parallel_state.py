@@ -346,6 +346,8 @@ class GroupCoordinator:
 
     def send_object(self, obj: Any, dst: int) -> None:
         """Send the input object list to the destination rank."""
+        """NOTE: `dst` is the local rank of the destination rank."""
+
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         assert dst != self.rank, (
@@ -374,6 +376,8 @@ class GroupCoordinator:
 
     def recv_object(self, src: int) -> Any:
         """Receive the input object list from the source rank."""
+        """NOTE: `src` is the local rank of the source rank."""
+
         assert src < self.world_size, f"Invalid src rank ({src})"
 
         assert src != self.rank, (
@@ -586,24 +590,33 @@ class GroupCoordinator:
         """
         torch.distributed.barrier(group=self.cpu_group)
 
-    def send(self, tensor: torch.Tensor, dst: int) -> None:
+    def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
         """Sends a tensor to the destination rank in a non-blocking way"""
+        """NOTE: `dst` is the local rank of the destination rank."""
+        if dst is None:
+            dst = self.next_rank
+
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is not None and not pynccl_comm.disabled:
-            pynccl_comm.send(tensor)
+            pynccl_comm.send(tensor, dst)
         else:
-            torch.distributed.isend(tensor, dst, self.device_group)
+            torch.distributed.send(tensor, self.ranks[dst], self.device_group)
 
-    def recv(self, size: torch.Size, dtype: torch.dtype,
-             src: int) -> torch.Tensor:
+    def recv(self,
+             size: torch.Size,
+             dtype: torch.dtype,
+             src: Optional[int] = None) -> torch.Tensor:
         """Receives a tensor from the src rank."""
+        """NOTE: `src` is the local rank of the destination rank."""
+        if src is None:
+            src = self.prev_rank
+
         tensor = torch.empty(size, dtype=dtype, device=self.device)
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is not None and not pynccl_comm.disabled:
-            pynccl_comm.recv(tensor)
+            pynccl_comm.recv(tensor, src)
         else:
-            req = torch.distributed.irecv(tensor, src, self.device_group)
-            req.wait()
+            torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
 
     def destroy(self):
