@@ -353,9 +353,9 @@ class GroupCoordinator:
         """Send the input object list to the destination rank."""
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
-        # Bypass the function if we are using only 1 GPU.
-        if self.world_size == 1:
-            return obj
+        assert dst != self.rank, (
+            "Invalid destination rank. Destination rank is the same "
+            "as the current rank.")
 
         current_device = _get_pg_default_device(group)
         # Serialize object to tensor.
@@ -376,9 +376,9 @@ class GroupCoordinator:
         """Receive the input object list from the source rank."""
         assert src < self.world_size, f"Invalid src rank ({src})"
 
-        # Bypass the function if we are using only 1 GPU.
-        if self.world_size == 1:
-            return None
+        assert src != self.rank, (
+            "Invalid source rank. Source rank is the same as the current rank."
+        )
 
         current_device = _get_pg_default_device(group)
 
