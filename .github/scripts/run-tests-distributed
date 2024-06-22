@@ -58,7 +58,7 @@ if [ ! -d "${TEST_DIR}" ]; then
 fi
 
 # find distributed tests
-TESTS_DOT_PY=$(find ${TEST_DIR} -type f -wholename "*distributed/test*.py")
+TESTS_DOT_PY=$(find ${TEST_DIR} -type f -wholename "*distributed*test*.py")
 TESTS_FOUND=(${TESTS_DOT_PY})
 
 echo "found:"

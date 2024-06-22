@@ -107,19 +107,18 @@ jobs:
             test_skip_env_vars: ${{ inputs.test_skip_env_vars }}
         secrets: inherit
 
-    # TODO: re-enable
-    # TEST-MULTI:
-    #     needs: [BUILD]
-    #     if: success() && contains(fromJSON('["NIGHTLY", "WEEKLY", "RELEASE"]'), inputs.wf_category)
-    #     uses: ./.github/workflows/nm-test.yml
-    #     with:
-    #         test_label: ${{ inputs.test_label_multi }}
-    #         timeout: ${{ inputs.test_timeout }}
-    #         gitref: ${{ github.ref }}
-    #         python: ${{ inputs.python }}
-    #         whl: ${{ needs.BUILD.outputs.whl }}
-    #         test_skip_env_vars: ${{ inputs.test_skip_env_vars }}
-    #     secrets: inherit
+    TEST-MULTI:
+        needs: [BUILD]
+        if: success()
+        uses: ./.github/workflows/nm-test.yml
+        with:
+            test_label: ${{ inputs.test_label_multi }}
+            timeout: ${{ inputs.test_timeout }}
+            gitref: ${{ github.ref }}
+            python: ${{ inputs.python }}
+            whl: ${{ needs.BUILD.outputs.whl }}
+            test_skip_env_vars: ${{ inputs.test_skip_env_vars_distributed }}
+        secrets: inherit
 
     UPLOAD:
         needs: [TEST-SOLO]
