@@ -42,11 +42,17 @@ steps:
     command: bash .buildkite/run-neuron-test.sh
     soft_fail: false
 
-  - label: "Intel Test"
+  - label: "Intel CPU Test"
     depends_on: ~
     agents:
-      queue: intel
+      queue: intel-cpu
     command: bash .buildkite/run-cpu-test.sh
+
+  - label: "Intel GPU Test"
+    depends_on: ~
+    agents:
+      queue: intel-gpu
+    command: bash .buildkite/run-xpu-test.sh
 
   {% for step in steps %}
   {% if step.gpu == "a100" %}
