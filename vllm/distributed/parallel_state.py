@@ -175,6 +175,16 @@ class GroupCoordinator:
         return self.ranks[-1]
 
     @property
+    def is_first_rank(self):
+        """Return whether the caller is the first process in the group"""
+        return self.rank == self.first_rank
+
+    @property
+    def is_last_rank(self):
+        """Return whether the caller is the last process in the group"""
+        return self.rank == self.last_rank
+
+    @property
     def next_rank(self):
         """Return the global rank of the process that follows the caller"""
         rank_in_group = self.rank_in_group
@@ -859,28 +869,6 @@ def get_tensor_model_parallel_world_size():
 def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
-
-
-def get_pipeline_model_parallel_world_size():
-    """Return world size for the pipeline model parallel group."""
-    return get_pp_group().world_size
-
-
-def get_pipeline_model_parallel_rank():
-    """Return my rank for the pipeline model parallel group."""
-    return get_pp_group().rank_in_group
-
-
-def is_pipeline_model_parallel_first_rank():
-    """Return True if the rank is the first rank in the
-    pipeline model parallel group."""
-    return get_pp_group().rank_in_group == 0
-
-
-def is_pipeline_model_parallel_last_rank():
-    """Return True if the rank is the last rank in the
-    pipeline model parallel group."""
-    return get_pp_group().rank_in_group == get_pp_group().world_size - 1
 
 
 def destroy_model_parallel():
