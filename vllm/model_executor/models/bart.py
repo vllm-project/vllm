@@ -712,19 +712,9 @@ class BartDecoder(nn.Module):
         self.embed_tokens = value
 
     def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask: Optional[torch.LongTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        cross_attn_head_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+        self, input_ids: torch.Tensor, positions: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor], encoder_positions: Optional[torch.Tensor],
+        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata
     ) -> Union[Tuple, BaseModelOutputWithPastAndCrossAttentions]:
         r"""
         Args:
@@ -1043,9 +1033,12 @@ class BartModel(nn.Module):
         use_cache = self.config.use_cache
         return_dict = self.config.use_return_dict
 
-        if encoder_outputs is None:
-            encoder_outputs = self.encoder(
+        if encoder_input_ids.numel() > 0:
+            # Run encoder attention if a non-zero number of encoder tokens
+            # are provided as input
+            encoder_hidden_states = self.encoder(
                 input_ids=input_ids,
+
                 attention_mask=attention_mask,
                 head_mask=head_mask,
                 inputs_embeds=inputs_embeds,
@@ -1053,21 +1046,21 @@ class BartModel(nn.Module):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-        # If the user passed a tuple for encoder_outputs, we wrap it in a BaseModelOutput when return_dict=True
-        elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=encoder_outputs[0],
-                hidden_states=encoder_outputs[1]
-                if len(encoder_outputs) > 1 else None,
-                attentions=encoder_outputs[2]
-                if len(encoder_outputs) > 2 else None,
-            )
+        # # If the user passed a tuple for encoder_outputs, we wrap it in a BaseModelOutput when return_dict=True
+        # elif return_dict and not isinstance(encoder_hidden_states, BaseModelOutput):
+        #     encoder_hidden_states = BaseModelOutput(
+        #         last_hidden_state=encoder_hidden_states[0],
+        #         hidden_states=encoder_hidden_states[1]
+        #         if len(encoder_hidden_states) > 1 else None,
+        #         attentions=encoder_hidden_states[2]
+        #         if len(encoder_hidden_states) > 2 else None,
+        #     )
 
         # decoder outputs consists of (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
             attention_mask=decoder_attention_mask,
-            encoder_hidden_states=encoder_outputs[0],
+            encoder_hidden_states=encoder_hidden_states[0],
             encoder_attention_mask=attention_mask,
             head_mask=decoder_head_mask,
             cross_attn_head_mask=cross_attn_head_mask,
@@ -1080,7 +1073,7 @@ class BartModel(nn.Module):
         )
 
         if not return_dict:
-            return decoder_outputs + encoder_outputs
+            return decoder_outputs + encoder_hidden_states
 
         return Seq2SeqModelOutput(
             last_hidden_state=decoder_outputs.last_hidden_state,
@@ -1088,9 +1081,9 @@ class BartModel(nn.Module):
             decoder_hidden_states=decoder_outputs.hidden_states,
             decoder_attentions=decoder_outputs.attentions,
             cross_attentions=decoder_outputs.cross_attentions,
-            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
-            encoder_hidden_states=encoder_outputs.hidden_states,
-            encoder_attentions=encoder_outputs.attentions,
+            encoder_last_hidden_state=encoder_hidden_states.last_hidden_state,
+            encoder_hidden_states=encoder_hidden_states.hidden_states,
+            encoder_attentions=encoder_hidden_states.attentions,
         )
 
 
