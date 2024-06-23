@@ -178,6 +178,7 @@ class ChameleonDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
+            qk_layernorm=config.qk_layernorm,
             quant_config=quant_config,
             bias=False,
             cache_config=cache_config,
