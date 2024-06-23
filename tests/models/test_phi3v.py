@@ -129,8 +129,8 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-def test_multi_res_inputs(vllm_runner, vllm_multi_res_images,
-                model_and_config, dtype: str, max_tokens: int) -> None:
+def test_multi_res_inputs(vllm_runner, vllm_multi_res_images, model_and_config,
+                          dtype: str, max_tokens: int) -> None:
     model_id, vlm_config = model_and_config
 
     vllm_image_prompts = [
@@ -145,5 +145,5 @@ def test_multi_res_inputs(vllm_runner, vllm_multi_res_images,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
         vllm_model.generate_greedy(vllm_image_prompts,
-                                                  max_tokens,
-                                                  images=vllm_multi_res_images)
+                                   max_tokens,
+                                   images=vllm_multi_res_images)
