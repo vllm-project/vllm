@@ -129,7 +129,7 @@ def init_test_distributed_environment(
     ensure_model_parallel_initialized(tp_size, pp_size)
 
 
-def multi_process_tensor_parallel(
+def multi_process_parallel(
     tp_size: int,
     pp_size: int,
     test_target,
