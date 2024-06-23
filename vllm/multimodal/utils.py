@@ -28,6 +28,9 @@ class ImageFetchAiohttp:
         """Load PIL image from a url or base64 encoded openai GPT4V format"""
 
         if image_url.startswith('http'):
+            if not cls.is_url_allowed(image_url):
+                raise ValueError("URL not allowed")
+            
             # Avoid circular import
             from vllm import __version__ as VLLM_VERSION
 
