@@ -1,6 +1,7 @@
 import base64
 from io import BytesIO
 from typing import Optional, Union
+from urllib.parse import urlparse
 
 import aiohttp
 from PIL import Image
@@ -9,6 +10,7 @@ from vllm.config import ModelConfig
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.image import ImagePixelData
 
+ALLOWED_DOMAINS = ["example.com", "another-allowed-domain.com"]
 
 class ImageFetchAiohttp:
     aiohttp_client: Optional[aiohttp.ClientSession] = None
@@ -20,8 +22,16 @@ class ImageFetchAiohttp:
             connector = aiohttp.TCPConnector()
             cls.aiohttp_client = aiohttp.ClientSession(timeout=timeout,
                                                        connector=connector)
-
         return cls.aiohttp_client
+
+    @classmethod
+    def is_url_allowed(cls, url: str) -> bool:
+        parsed_url = urlparse(url)
+        if parsed_url.scheme not in ["http", "https"]:
+            return False
+        if parsed_url.hostname not in ALLOWED_DOMAINS:
+            return False
+        return True
 
     @classmethod
     async def fetch_image(cls, image_url: str) -> Image.Image:
@@ -59,7 +69,7 @@ async def async_get_and_parse_image(image_url: str) -> ImagePixelData:
 
 
 def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:
-    """encode image to base64 format."""
+    """Encode image to base64 format."""
 
     buffered = BytesIO()
     if format == 'JPEG':
@@ -73,7 +83,7 @@ def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     return Image.open(BytesIO(base64.b64decode(image)))
 
 
-# TODO(ywang96): move this to a model registry for preprocessing vision
+# TODO: move this to a model registry for preprocessing vision
 # language prompts based on the model type.
 def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
                                config: ModelConfig) -> str:
