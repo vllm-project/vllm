@@ -73,9 +73,10 @@ class Phi3ImageEmbeddingBase(nn.Module):
         LAYER_IDX = self.layer_idx
         TYPE_FEATURE = self.type_feature
 
-        img_processor_output = self.img_processor(img_embeds,
-                                                  output_hidden_states=True)
-        img_feature = img_processor_output.hidden_states[LAYER_IDX]
+        # NOTE: we skip the step to select the vision feature layer since
+        # this is already done inside the img_processor
+        img_feature = self.img_processor(img_embeds,
+                                         vision_feature_layer=LAYER_IDX)
 
         if TYPE_FEATURE == "patch":
             patch_feature = img_feature[:, 1:]
