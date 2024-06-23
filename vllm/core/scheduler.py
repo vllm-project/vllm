@@ -141,8 +141,6 @@ class SchedulerOutputs:
             self._sort_by_lora_ids()
 
         self.num_prompt_adapters: int = len(self.prompt_adapter_requests)
-        if self.num_prompt_adapters > 0:
-            self._sort_by_prompt_adapter_ids()
 
     def is_empty(self) -> bool:
         # NOTE: We do not consider the ignored sequence groups.
@@ -153,12 +151,6 @@ class SchedulerOutputs:
         self.scheduled_seq_groups = sorted(
             self.scheduled_seq_groups,
             key=lambda g: (g.seq_group.lora_int_id, g.seq_group.request_id))
-
-    def _sort_by_prompt_adapter_ids(self):
-        self.scheduled_seq_groups = sorted(
-            self.scheduled_seq_groups,
-            key=lambda g:
-            (g.seq_group.prompt_adapter_id, g.seq_group.request_id))
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:

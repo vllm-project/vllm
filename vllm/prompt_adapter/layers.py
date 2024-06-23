@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-import numpy
 import torch
 from torch import nn
 
@@ -21,7 +20,8 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
         super().__init__()
         self.base_layer = base_layer
         self.embedding_tensors: Dict[int, torch.Tensor] = {}
-        self.indices: torch.Tensor
+        self.indices_gpu: torch.Tensor
+        self.flag: bool = False
 
     def reset_prompt_adapter(self, index: int):
         self.embedding_tensors[index] = 0
@@ -39,18 +39,18 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
         self,
         base_indices: List[int],
     ):
-        self.indices = base_indices
+        self.indices_gpu = torch.tensor(base_indices, device="cuda")
+        self.flag = torch.sum(self.indices_gpu) > 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         hidden_states = self.base_layer(x)
-        unique_indices = numpy.unique(self.indices)
-        for idx in unique_indices:
-            if idx != 0:
-                pa_idx = self.embedding_tensors[idx].prompt_embedding
-                mask = (self.indices == idx)
-                try:
+        if self.flag:
+            unique_indices = torch.unique(self.indices_gpu)
+            for idx in unique_indices:
+                if idx != 0:
+                    pa_idx = self.embedding_tensors[
+                        idx.item()].prompt_embedding
+                    mask = (self.indices_gpu == idx)
                     n_adapters = sum(mask) // pa_idx.shape[0]
                     hidden_states[mask] = pa_idx.repeat(n_adapters, 1)
-                except Exception:
-                    pass
         return hidden_states

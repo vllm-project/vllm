@@ -2,6 +2,7 @@ import logging
 import math
 from typing import Callable, Dict, List, Optional, Type
 
+import torch
 from peft.utils import load_peft_weights
 from torch import nn
 
@@ -29,18 +30,18 @@ class PromptAdapterModel(AdapterModel):
                  num_virtual_tokens=None,
                  prompt_embedding=None) -> None:
         self.id = prompt_adapter_id
-        self.kv_cache = None
         self.prompt_embedding = prompt_embedding
         self.num_virtual_tokens = num_virtual_tokens
 
     @classmethod
-    def from_local_checkpoint(cls,
-                              adapter_model_and_path,
-                              prompt_adapter_id,
-                              torch_device='cuda') -> "PromptAdapterModel":
-        adapters_weights = load_peft_weights(adapter_model_and_path,
-                                             torch_device)
-        prompt_embedding = adapters_weights["prompt_embeddings"].half()
+    def from_local_checkpoint(
+            cls,
+            adapter_model_path: str,
+            prompt_adapter_id: int,
+            device: str = "cuda",
+            dtype: Optional[torch.dtype] = None) -> "PromptAdapterModel":
+        adapters_weights = load_peft_weights(adapter_model_path, device)
+        prompt_embedding = adapters_weights["prompt_embeddings"].to(dtype)
         num_virtual_tokens = prompt_embedding.shape[0]
         return cls(prompt_adapter_id, num_virtual_tokens, prompt_embedding)
 
@@ -62,8 +63,8 @@ class PromptAdapterModelManager(AdapterModelManager):
         """
         self.model: nn.Module = model
         # Dict instead of a Set for compatibility with LRUCache.
-        self.prompt_adapter_index_to_id: List[Optional[int]] =\
-                                         [None] * self.prompt_adapter_slots
+        self.prompt_adapter_index_to_id: List[
+            Optional[int]] = [None] * self.prompt_adapter_slots
         self.max_num_seqs = max_num_seqs
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.prompt_adapter_config = prompt_adapter_config
@@ -87,7 +88,7 @@ class PromptAdapterModelManager(AdapterModelManager):
     def capacity(self) -> int:
         return self.prompt_adapter_config.max_cpu_prompt_adapters
 
-    def activate_prompt_adapter(
+    def activate_adapter(
         self,
         prompt_adapter_id: int,
     ) -> bool:
@@ -96,9 +97,9 @@ class PromptAdapterModelManager(AdapterModelManager):
         if prompt_adapter_id in self._active_adapters:
             return False
         first_free_slot = next(
-            ((i, prompt_adapter_id) for i, prompt_adapter_id in \
-                            enumerate(self.prompt_adapter_index_to_id)
-             if prompt_adapter_id is None), None)
+            ((i, prompt_adapter_id) for i, prompt_adapter_id in enumerate(
+                self.prompt_adapter_index_to_id) if prompt_adapter_id is None),
+            None)
         if first_free_slot is None:
             raise ValueError("No free prompt_adapter slots")
         index, _ = first_free_slot
@@ -112,11 +113,7 @@ class PromptAdapterModelManager(AdapterModelManager):
             v.set_prompt_adapter(prompt_adapter_id, prompt_adapter_model)
         return True
 
-    @property
-    def activate_adapter(self):
-        return self.activate_prompt_adapter
-
-    def _deactivate_prompt_adapter(self, prompt_adapter_id: int):
+    def _deactivate_adapter(self, prompt_adapter_id: int):
         try:
             index = self.prompt_adapter_index_to_id.index(prompt_adapter_id)
             self.prompt_adapter_index_to_id[index] = None
@@ -125,31 +122,10 @@ class PromptAdapterModelManager(AdapterModelManager):
         except ValueError:
             pass
 
-    @property
-    def _deactivate_adapter(self):
-        return self._deactivate_prompt_adapter
-
-    @property
-    def deactivate_prompt_adapter(self):
-        return self.deactivate_adapter
-
-    def _add_prompt_adapter(self, prompt_adapter: PromptAdapterModel):
+    def _add_adapter(self, prompt_adapter: PromptAdapterModel):
         self._registered_adapters[prompt_adapter.id] = prompt_adapter
 
-    @property
-    def _add_adapter(self):
-        return self._add_prompt_adapter
-
-    @property
-    def add_prompt_adapter(self):
-        return self.add_adapter
-
-    @property
-    def remove_prompt_adapter(self):
-        return self.remove_adapter
-
-    def _set_prompt_adapter_mapping(self,
-                                    mapping: PromptAdapterMapping) -> None:
+    def _set_adapter_mapping(self, mapping: PromptAdapterMapping) -> None:
         for k, v in self.modules.items():
             v.set_mapping(mapping.index_mapping)
 
@@ -163,6 +139,7 @@ class PromptAdapterModelManager(AdapterModelManager):
                 self.register_module(module.__class__.__name__,
                                      replaced_module)
                 replaced_module.set_mapping(self.base_indices)
+                break
 
     def replace_submodule(self, model: nn.Module, module_name: str,
                           new_module: nn.Module) -> nn.Module:
@@ -175,31 +152,11 @@ class PromptAdapterModelManager(AdapterModelManager):
     def register_module(self, module_name: str, module: nn.Module):
         self.modules[module_name] = module
 
-    @property
-    def set_prompt_adapter_mapping(self):
-        return self.set_adapter_mapping
-
-    @property
-    def _set_adapter_mapping(self):
-        return self._set_prompt_adapter_mapping
-
-    @property
-    def list_prompt_adapters(self):
-        return self.list_adapters
-
-    @property
-    def get_prompt_adapter(self):
-        return self.get_adapter
-
-    def remove_all_prompt_adapters(self):
+    def remove_all_adapters(self):
         """Remove all PromptAdapterModel from the manager."""
         self._registered_adapters.clear()
         self.prompt_adapter_index_to_id = [None] * self.prompt_adapter_slots
         self._active_adapters.clear()
-
-    @property
-    def remove_all_adapters(self):
-        return self.remove_all_prompt_adapters
 
 
 class PromptAdapterLRUCache(AdapterLRUCache[PromptAdapterModel]):
@@ -220,14 +177,12 @@ class LRUCachePromptAdapterModelManager(PromptAdapterModelManager):
         prompt_adapter_config: PromptAdapterConfig,
     ):
         self.prompt_adapter_config = prompt_adapter_config
-        super().__init__(model, max_num_seqs, \
-                         max_num_batched_tokens, prompt_adapter_config)
-        self._registered_adapters: PromptAdapterLRUCache = \
-                PromptAdapterLRUCache(self.capacity,
-                                    self.deactivate_prompt_adapter)
-        self._active_adapters: PromptAdapterLRUCache = \
-                PromptAdapterLRUCache(self.prompt_adapter_slots,
-                                  self._deactivate_prompt_adapter)
+        super().__init__(model, max_num_seqs, max_num_batched_tokens,
+                         prompt_adapter_config)
+        self._registered_adapters = PromptAdapterLRUCache(
+            self.capacity, self.deactivate_adapter)
+        self._active_adapters = PromptAdapterLRUCache(
+            self.prompt_adapter_slots, self._deactivate_adapter)
 
     def list_adapters(self) -> Dict[int, PromptAdapterModel]:
         """List all registered PromptAdapterModel."""
@@ -236,7 +191,7 @@ class LRUCachePromptAdapterModelManager(PromptAdapterModelManager):
     def add_adapter(self, prompt_adapter: PromptAdapterModel) -> bool:
         """Add a PromptAdapterModel to the manager."""
         if prompt_adapter.id not in self._registered_adapters:
-            self._add_prompt_adapter(prompt_adapter)
+            self._add_adapter(prompt_adapter)
             was_added = True
         else:
             # We always touch to update the LRU cache order
@@ -251,12 +206,12 @@ class LRUCachePromptAdapterModelManager(PromptAdapterModelManager):
         if prompt_adapter_id not in self._active_adapters and len(
                 self._active_adapters) >= self.prompt_adapter_slots:
             self._active_adapters.remove_oldest()
-        result = super().activate_prompt_adapter(prompt_adapter_id)
+        result = super().activate_adapter(prompt_adapter_id)
         # We always touch to update the LRU cache order
         self._active_adapters.touch(prompt_adapter_id)
         return result
 
-    def remove_oldest_prompt_adapter(self) -> bool:
+    def remove_oldest_adapter(self) -> bool:
         if len(self._registered_adapters) > 0:
             self._registered_adapters.remove_oldest()
             return True
@@ -268,12 +223,14 @@ def create_prompt_adapter_manager(
         max_num_seqs: int,
         max_num_batched_tokens: int,
         prompt_adapter_config: PromptAdapterConfig,
-        prompt_adapter_manager_cls: Type[PromptAdapterModelManager] \
-                                    = PromptAdapterModelManager,
+        prompt_adapter_manager_cls: Type[
+            PromptAdapterModelManager] = PromptAdapterModelManager,
         **kwargs) -> PromptAdapterModelManager:
     """Create a PromptAdapterModel for a given model."""
     prompt_adapter_manager = prompt_adapter_manager_cls(
-        model=model, max_num_seqs=max_num_seqs, \
-        max_num_batched_tokens=max_num_batched_tokens, \
-        prompt_adapter_config=prompt_adapter_config, **kwargs)
+        model=model,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        prompt_adapter_config=prompt_adapter_config,
+        **kwargs)
     return prompt_adapter_manager

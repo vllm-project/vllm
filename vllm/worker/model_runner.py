@@ -196,8 +196,9 @@ class ModelRunner:
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens, self.device,
                 self.prompt_adapter_config)
-            self.model = self.prompt_adapter_manager\
-                                .create_prompt_adapter_manager(self.model)
+            self.model = (
+                self.prompt_adapter_manager.create_prompt_adapter_manager(
+                                                            self.model))
 
         if self.kv_cache_dtype == "fp8" and is_hip():
             # Currently only ROCm accepts kv-cache scaling factors
@@ -902,28 +903,28 @@ class ModelRunner:
     def remove_all_loras(self):
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
-        self.lora_manager.remove_all_loras()
+        self.lora_manager.remove_all_adapters()
 
     def set_active_loras(self, lora_requests: Set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
-        self.lora_manager.set_active_loras(lora_requests, lora_mapping)
+        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.add_lora(lora_request)
+        return self.lora_manager.add_adapter(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.remove_lora(lora_id)
+        return self.lora_manager.remove_adapter(lora_id)
 
     def list_loras(self) -> Set[int]:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.list_loras()
+        return self.lora_manager.list_adapters()
 
     def remove_all_prompt_adapters(self):
         if not self.prompt_adapter_manager:
@@ -935,25 +936,24 @@ class ModelRunner:
             prompt_adapter_mapping: PromptAdapterMapping) -> None:
         if not self.prompt_adapter_manager:
             raise RuntimeError("PromptAdapter is not enabled.")
-        self.prompt_adapter_manager.set_active_prompt_adapters(
+        self.prompt_adapter_manager.set_active_adapters(
             prompt_adapter_requests, prompt_adapter_mapping)
 
     def add_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
         if not self.prompt_adapter_manager:
             raise RuntimeError("PromptAdapter is not enabled.")
-        return self.prompt_adapter_manager.add_prompt_adapter(
-            prompt_adapter_request)
+        return self.prompt_adapter_manager.add_adapter(prompt_adapter_request)
 
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
         if not self.prompt_adapter_manager:
             raise RuntimeError("PromptAdapter is not enabled.")
-        return self.prompt_adapter_manager.remove_lora(prompt_adapter_id)
+        return self.prompt_adapter_manager.remove_adapter(prompt_adapter_id)
 
     def list_prompt_adapters(self) -> Set[int]:
         if not self.prompt_adapter_manager:
             raise RuntimeError("PromptAdapter is not enabled.")
-        return self.prompt_adapter_manager.list_prompt_adapters()
+        return self.prompt_adapter_manager.list_adapters()
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[torch.Tensor]) -> None:

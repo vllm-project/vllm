@@ -442,6 +442,9 @@ class LLMEngine:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+        if self.prompt_adapter_config:
+            self.prompt_adapter_config.verify_with_model_config(
+                self.model_config)
 
     def _get_eos_token_id(
             self, lora_request: Optional[LoRARequest]) -> Optional[int]:

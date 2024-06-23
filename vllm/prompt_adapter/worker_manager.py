@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Optional, Set, Type
+from typing import Any, Set, Type
 
 import torch
 
@@ -32,8 +32,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
         prompt_adapter_config: PromptAdapterConfig,
         prompt_adapter_model_cls: Type[PromptAdapterModel] = PromptAdapterModel
     ):
-        self._prompt_adapter_manager: Optional[
-            PromptAdapterModelManager] = None
+        self._adapter_manager: PromptAdapterModelManager
         self.max_num_seqs = max_num_seqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self._prompt_adapter_model_cls = prompt_adapter_model_cls
@@ -55,23 +54,19 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
             prompt_adapter_config=self.prompt_adapter_config,
             prompt_adapter_manager_cls=self._manager_cls,
         )
-        self._prompt_adapter_manager = prompt_adapter_manager
+        self._adapter_manager = prompt_adapter_manager
         return prompt_adapter_manager.model
 
-    @property
-    def set_active_prompt_adapters(self):
-        return self.set_active_adapters
-
-    def _load_prompt_adapter(
+    def _load_adapter(
             self, prompt_adapter_request: PromptAdapterRequest
     ) -> PromptAdapterModel:
         try:
-            prompt_adapter = self._prompt_adapter_model_cls\
-                .from_local_checkpoint(
+            prompt_adapter = (
+                self._prompt_adapter_model_cls.from_local_checkpoint(
                     prompt_adapter_request.prompt_adapter_local_path,
                     prompt_adapter_id=prompt_adapter_request.prompt_adapter_id,
-                    torch_device=str(self.device)
-                )
+                    device=str(self.device),
+                    dtype=self.prompt_adapter_config.prompt_adapter_dtype))
         except Exception as e:
             raise RuntimeError(
                 f"Loading prompt_adapter "
@@ -82,42 +77,6 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
     def add_dummy_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
         return True
-
-    @property
-    def add_dummy_adapter(self):
-        return self.add_dummy_prompt_adapter
-
-    @property
-    def create_manager(self):
-        return self.create_prompt_adapter_manager
-
-    @property
-    def _load_adapter(self):
-        return self._load_prompt_adapter
-
-    @property
-    def _model_manager(self):
-        return self._prompt_adapter_manager
-
-    @property
-    def add_prompt_adapter(self):
-        return self.add_adapter
-
-    @property
-    def remove_prompt_adapter(self):
-        return self.remove_adapter
-
-    @property
-    def remove_all_prompt_adapters(self):
-        return self.remove_all_adapters
-
-    @property
-    def list_prompt_adapters(self):
-        return self.list_adapters
-
-    @property
-    def _apply_prompt_adapters(self):
-        return self._apply_adapters
 
 
 class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
@@ -142,8 +101,8 @@ class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
             max_num_batched_tokens=self.max_num_batched_tokens,
             prompt_adapter_config=self.prompt_adapter_config,
             prompt_adapter_manager_cls=self._prompt_adapter_manager_cls)
-        self._prompt_adapter_manager: \
-            LRUCachePromptAdapterModelManager = prompt_adapter_manager
+        self._adapter_manager: LRUCachePromptAdapterModelManager = (
+            prompt_adapter_manager)
         return prompt_adapter_manager.model
 
     def _apply_adapters(
@@ -154,31 +113,29 @@ class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
             if prompt_adapter_request
         }
         if len(prompt_adapters_map
-               ) > self._prompt_adapter_manager.prompt_adapter_slots:
+               ) > self._adapter_manager.prompt_adapter_slots:
             raise RuntimeError(
                 f"Number of requested prompt_adapters "
                 f"({len(prompt_adapters_map)}) is greater "
                 "than the number of GPU prompt_adapter slots "
-                f"({self._prompt_adapter_manager.prompt_adapter_slots}).")
+                f"({self._adapter_manager.prompt_adapter_slots}).")
         for prompt_adapter in prompt_adapters_map.values():
-            self.add_prompt_adapter(prompt_adapter)
+            self.add_adapter(prompt_adapter)
 
     def add_adapter(self,
                     prompt_adapter_request: PromptAdapterRequest) -> bool:
-        if prompt_adapter_request.prompt_adapter_id not in \
-            self.list_prompt_adapters():
+        if prompt_adapter_request.prompt_adapter_id not in self.list_adapters(
+        ):
             # Remove before we load the new prompt_adapter to save memory
-            if len(self._prompt_adapter_manager
-                   ) + 1 > self._prompt_adapter_manager.capacity:
-                self._prompt_adapter_manager.remove_oldest_prompt_adapter()
-            prompt_adapter = self._load_prompt_adapter(prompt_adapter_request)
-            loaded = self._prompt_adapter_manager.add_prompt_adapter(
-                prompt_adapter)
+            if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
+                self._adapter_manager.remove_oldest_adapter()
+            prompt_adapter = self._load_adapter(prompt_adapter_request)
+            loaded = self._adapter_manager.add_adapter(prompt_adapter)
         else:
             # If the prompt_adapter is already loaded, just touch it to
             # update its position in the caches
-            loaded = self._prompt_adapter_manager.get_prompt_adapter(
+            loaded = self._adapter_manager.get_adapter(
                 prompt_adapter_request.prompt_adapter_id)
-        self._prompt_adapter_manager.activate_prompt_adapter(
+        self._adapter_manager.activate_adapter(
             prompt_adapter_request.prompt_adapter_id)
         return loaded

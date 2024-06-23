@@ -13,7 +13,9 @@ class PromptAdapterRequest(AdapterRequest):
     prompt_adapter_id: int
     prompt_adapter_local_path: str
     prompt_adapter_num_virtual_tokens: int
-    __hash__ = AdapterRequest.__hash__
+
+    def __hash__(self):
+        return super().__hash__()
 
     @property
     def adapter_id(self):

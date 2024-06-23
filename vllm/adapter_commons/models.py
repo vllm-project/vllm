@@ -1,4 +1,4 @@
-from abc import abstractproperty
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Hashable, Optional, TypeVar
 
 from torch import nn
@@ -9,12 +9,12 @@ from vllm.utils import LRUCache
 logger = init_logger(__name__)
 
 
-class AdapterModel:
+class AdapterModel(ABC):
 
     def __init__(self, model_id=None):
         self.id = model_id
 
-    @classmethod
+    @abstractmethod
     def from_local_checkpoint(cls, model_dir, model_id=None, **kwargs):
         # Common initialization code
         # Load weights or embeddings from local checkpoint
@@ -37,7 +37,7 @@ class AdapterLRUCache(LRUCache[T]):
         return super()._on_remove(key, value)
 
 
-class AdapterModelManager:
+class AdapterModelManager(ABC):
 
     def __init__(
         self,
@@ -57,14 +57,17 @@ class AdapterModelManager:
     def __len__(self) -> int:
         return len(self._registered_adapters)
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def adapter_slots(self):
         ...
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def capacity(self):
         ...
 
+    @abstractmethod
     def _deactivate_adapter(self, adapter_id: int):
         raise NotImplementedError("Subclasses must implement this method.")
 
@@ -75,16 +78,14 @@ class AdapterModelManager:
             return True
         return False
 
-    def activate_adapter(self, adapter_id: int) -> bool:
-        raise NotImplementedError("Subclasses must implement this method.")
-
+    @abstractmethod
     def _add_adapter(self, adapter: Any):
         raise NotImplementedError("Subclasses must implement this method.")
 
     def add_adapter(self, adapter: Any) -> bool:
         if adapter.id not in self._registered_adapters:
             if len(self._registered_adapters) >= self.capacity:
-                raise RuntimeError("No free " + self.adapter_type + " slots.")
+                raise RuntimeError(f'No free {self.adapter_type} slots.')
             self._add_adapter(adapter)
             return True
         return False
@@ -94,6 +95,7 @@ class AdapterModelManager:
             self._set_adapter_mapping(mapping)
         self._last_mapping = mapping
 
+    @abstractmethod
     def _set_adapter_mapping(self, mapping: Any) -> None:
         raise NotImplementedError("Subclasses must implement this method.")
 
