@@ -17,6 +17,7 @@ from typing import Dict, Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
+from PIL import Image
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
@@ -278,24 +279,18 @@ def _image_processor(
 ) -> Dict[str, torch.Tensor]:
     image = data.image
 
-    if isinstance(image, torch.Tensor):
-        pixel_values = image.to(model_config.dtype)
-        batch_size, _, _, h, w = pixel_values.shape
-        image_sizes = torch.tensor([(w, h) for _ in range(batch_size)])
+    if isinstance(image, Image.Image):
+        # Temporary patch before dynamic number of image tokens is supported
+        _, _, h, w = vlm_config.image_input_shape
+        if (w//336, h) != (image.width, image.height):
+            logger.warning(
+                "Dynamic image shape is currently not supported. "
+                "Resizing input image to (%d, %d).", w, h)
 
-        return {"pixel_values": pixel_values, "image_sizes": image_sizes}
-
-    # Temporary patch before dynamic number of image tokens is supported
-    _, _, h, w = vlm_config.image_input_shape
-    if (w, h) != (image.width, image.height):
-        logger.warning(
-            "Dynamic image shape is currently not supported. "
-            "Resizing input image to (%d, %d).", w, h)
-
-        data.image = image.resize((w, h))
+            data.image = image.resize((w, h))
 
     return MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
-        ._default_input_processor(data, model_config, vlm_config)
+            ._default_input_processor(data, model_config, vlm_config)
 
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input(_image_processor)
