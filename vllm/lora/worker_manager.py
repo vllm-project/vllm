@@ -123,6 +123,9 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 self._cached_dummy_lora = dummy_lora
         return self._adapter_manager.add_adapter(dummy_lora)
 
+    def pin_lora(self, lora_id: int) -> bool:
+        return self._adapter_manager.pin_lora(lora_id)
+
 
 class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     """WorkerLoRAManager that manages LoRA models on the worker side.

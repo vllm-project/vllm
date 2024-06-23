@@ -1028,6 +1028,9 @@ class LLMEngine:
 
     def list_loras(self) -> Set[int]:
         return self.model_executor.list_loras()
+      
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_executor.pin_lora(lora_id)
 
     def add_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
