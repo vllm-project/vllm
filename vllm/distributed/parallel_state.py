@@ -168,7 +168,7 @@ class GroupCoordinator:
         self.shm_broadcaster: Optional[ShmRingBufferIO] = None
         if self.world_size > 1 and is_in_the_same_node(self.cpu_group):
             self.shm_broadcaster = ShmRingBufferIO.create_from_process_group(
-                self.cpu_group, 1 << 20, 6)
+                self.cpu_group)
 
     @property
     def first_rank(self):

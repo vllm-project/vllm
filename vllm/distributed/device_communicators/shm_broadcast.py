@@ -69,8 +69,8 @@ class ShmRingBuffer:
 
     def __init__(self,
                  n_reader: int,
-                 max_chunk_bytes: int,
-                 max_chunks: int,
+                 max_bytes: int = 10 << 20,
+                 max_chunks: int = 1000,
                  name: Optional[str] = None):
         """
         A shared memory ring buffer implementation for broadcast communication.
@@ -125,12 +125,11 @@ class ShmRingBuffer:
         same shared memory buffer.
         """# noqa
 
-        self.max_chunk_bytes = max_chunk_bytes
         self.n_reader = n_reader
         self.flags_size = 1 + n_reader
         self.metadata_size = self.flags_size + 8
-        self.max_bytes = 10 * 1024 * 1024  # 10 MB
-        self.max_chunks = 1000
+        self.max_bytes = max_bytes
+        self.max_chunks = max_chunks
         self.total_bytes_of_buffer = self.max_bytes + self.metadata_size * self.max_chunks  # noqa
         self.data_offset = 0
         self.metadata_offset = self.max_bytes
@@ -158,7 +157,7 @@ class ShmRingBuffer:
     def __reduce__(self):
         return (
             self.__class__,
-            (self.n_reader, self.max_chunk_bytes, self.max_chunks,
+            (self.n_reader, self.max_bytes, self.max_chunks,
              self.shared_memory.name),
         )
 
@@ -400,10 +399,12 @@ class ShmRingBufferIO:
         else:
             return self.dequeue()
 
-    def create_from_process_group(pg: ProcessGroup,
-                                  max_chunk_bytes,
-                                  max_chunks,
-                                  writer_rank=0) -> "ShmRingBufferIO":
+    def create_from_process_group(
+        pg: ProcessGroup,
+        writer_rank=0,
+        max_bytes=10 << 20,
+        max_chunks=1000,
+    ) -> "ShmRingBufferIO":
         group_rank = dist.get_rank(pg)
         group_world_size = dist.get_world_size(pg)
         ranks_inside_group = list(range(group_world_size))
@@ -411,7 +412,7 @@ class ShmRingBufferIO:
         n_reader = group_world_size - 1
         buffer: ShmRingBuffer
         if group_rank == writer_rank:
-            buffer = ShmRingBuffer(n_reader, max_chunk_bytes, max_chunks)
+            buffer = ShmRingBuffer(n_reader, max_bytes, max_chunks)
             dist.broadcast_object_list([buffer],
                                        src=global_ranks[writer_rank],
                                        group=pg)

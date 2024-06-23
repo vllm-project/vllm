@@ -57,7 +57,7 @@ def worker_fn_wrapper(fn):
 def worker_fn():
     writer_rank = 2
     broadcaster = ShmRingBufferIO.create_from_process_group(
-        dist.group.WORLD, 1024, 2, writer_rank)
+        dist.group.WORLD, writer_rank)
     # test broadcasting with about 400MB of data
     N = 10_000
     if dist.get_rank() == writer_rank:
