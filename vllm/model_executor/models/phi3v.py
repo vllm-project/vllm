@@ -282,7 +282,7 @@ def _image_processor(
     if isinstance(image, Image.Image):
         # Temporary patch before dynamic number of image tokens is supported
         _, _, h, w = vlm_config.image_input_shape
-        if (w//336, h) != (image.width, image.height):
+        if (w, h) != (image.width, image.height):
             logger.warning(
                 "Dynamic image shape is currently not supported. "
                 "Resizing input image to (%d, %d).", w, h)
