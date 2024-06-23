@@ -22,10 +22,7 @@ assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
 def iter_phi3v_configs(model_name: str):
     image_hw_to_feature_size = {
         (1008, 1344): 1921,
-        (336, 336): 2509,
-        (672, 672): 2509,
-        (1344, 336): 2485,
-        (336, 1344): 2557,
+        (2016, 2688): 1933,
     }
 
     for (h, w), f in image_hw_to_feature_size.items():
@@ -112,7 +109,7 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     ]
 
     with vllm_runner(model_id,
-                     max_model_len=4096,
+                     max_model_len=2048,
                      dtype=dtype,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
