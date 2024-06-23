@@ -1,6 +1,5 @@
 # Common dependencies
 -r requirements-common.txt
---index-url https://download.pytorch.org/whl/cpu
 
 # Dependencies for x86_64 CPUs
 torch == 2.3.1+cpu
