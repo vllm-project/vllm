@@ -36,11 +36,10 @@ class ImageFetchAiohttp:
     @classmethod
     async def fetch_image(cls, image_url: str) -> Image.Image:
         """Load PIL image from a url or base64 encoded openai GPT4V format"""
-
         if image_url.startswith('http'):
             if not cls.is_url_allowed(image_url):
                 raise ValueError("URL not allowed")
-            
+
             # Avoid circular import
             from vllm import __version__ as VLLM_VERSION
 
@@ -70,7 +69,6 @@ async def async_get_and_parse_image(image_url: str) -> ImagePixelData:
 
 def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:
     """Encode image to base64 format."""
-
     buffered = BytesIO()
     if format == 'JPEG':
         image = image.convert('RGB')
@@ -89,7 +87,6 @@ def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
                                config: ModelConfig) -> str:
     """Combine image and text prompts for vision language model depending on
     the model architecture."""
-
     if config.hf_config.model_type in ("llava", "llava_next"):
         full_prompt = f"{image_prompt}\n{text_prompt}"
     elif config.hf_config.model_type == 'phi3_v':
