@@ -7,9 +7,9 @@ from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Set,
                     Tuple, Union)
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, VisionLanguageConfig,
-                         PromptAdapterConfig)
+                         ModelConfig, ParallelConfig, PromptAdapterConfig,
+                         SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
