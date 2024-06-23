@@ -13,7 +13,7 @@ from vllm.utils import update_environment_variables
 
 def get_arrays(n: int) -> List[np.ndarray]:
     np.random.seed(0)
-    sizes = np.random.randint(1, 10000, n)
+    sizes = np.random.randint(1, 10_000, n)
     # on average, each array will have 5k elements
     # with int64, each array will have 40kb
     return [np.random.randint(1, 100, i) for i in sizes]
