@@ -130,7 +130,7 @@ class ShmRingBuffer:
         self.flags_size = 1 + n_reader
         self.metadata_size = self.flags_size + 8
         self.max_bytes = 10 * 1024 * 1024  # 10 MB
-        self.max_chunks = max_chunks
+        self.max_chunks = 1000
         self.total_bytes_of_buffer = self.max_bytes + self.metadata_size * self.max_chunks  # noqa
         self.data_offset = 0
         self.metadata_offset = self.max_bytes
