@@ -47,7 +47,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
-        _is_driver_worker: bool = False,
+        is_driver_worker: bool = False,
     ) -> None:
         assert device_config.device_type == "xpu"
         assert is_xpu()
@@ -62,7 +62,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
-        self._is_driver_worker = _is_driver_worker
+        self._is_driver_worker = is_driver_worker
         if self._is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
@@ -80,7 +80,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             load_config=self.load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
-            _is_driver_worker=_is_driver_worker,
+            is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
         )
         # Uninitialized cache engine. Will be initialized by

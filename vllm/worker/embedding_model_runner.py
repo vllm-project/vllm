@@ -99,10 +99,7 @@ class EmbeddingModelRunner(
                          **kwargs) -> ModelInputForGPUWithPoolingMetadata:
         if make_attn_metadata:
             kwargs["attn_backend"] = self.attn_backend
-        return ModelInputForGPUWithPoolingMetadata.new(
-            attn_backend=self.attn_backend,
-            **kwargs,
-        )
+        return ModelInputForGPUWithPoolingMetadata.new(**kwargs, )
 
     def prepare_model_input(
         self,

@@ -950,7 +950,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                                      self.pin_memory)
         return model_input.replace(
             sampling_metadata=sampling_metadata,
-            is_prompt=seq_group_metadata_list[0].is_prompt)
+            is_prompt=seq_group_metadata_list[0].is_prompt
+            if seq_group_metadata_list else None)
 
     @torch.inference_mode()
     def execute_model(
