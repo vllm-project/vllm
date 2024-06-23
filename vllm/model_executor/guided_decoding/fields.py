@@ -19,7 +19,7 @@ class GuidedDecodingFields:
     guided_json_object: Optional[bool] = None
 
     def __post_init__(self):
-        """Validate that some fields are mutally exclusive."""
+        """Validate that some fields are mutually exclusive."""
         guide_count = sum([
             self.guided_json is not None,
             self.guided_regex is not None,

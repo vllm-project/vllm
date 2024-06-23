@@ -1,16 +1,17 @@
 import asyncio
 import concurrent.futures
 from typing import Optional, Union
+
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionNamedToolChoiceParam, ChatCompletionRequest,
     CompletionRequest)
-
 from vllm.model_executor.guided_decoding.fields import GuidedDecodingFields
 from vllm.model_executor.guided_decoding.outlines_decoding import (
     get_outlines_guided_decoding_logits_processor)
 from vllm.sampling_params import LogitsProcessor
 
 global_thread_pool = None
+
 
 async def get_guided_decoding_logits_processor_async(
         request: GuidedDecodingFields, tokenizer) -> Optional[LogitsProcessor]:
@@ -27,9 +28,9 @@ async def get_guided_decoding_logits_processor_async(
         tokenizer,
     )
 
+
 def get_guided_decoding_logits_processor(
-        request: GuidedDecodingFields,
-        tokenizer) -> Optional[LogitsProcessor]:
+        request: GuidedDecodingFields, tokenizer) -> Optional[LogitsProcessor]:
     # request = _adapt_request_for_tool_use(request)
     if request.guided_decoding_backend == 'outlines':
         return get_outlines_guided_decoding_logits_processor(

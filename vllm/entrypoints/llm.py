@@ -1,5 +1,6 @@
 from contextlib import contextmanager
-from typing import ClassVar, List, Optional, Sequence, Union, cast, overload, Dict
+from typing import (ClassVar, Dict, List, Optional, Sequence, Union, cast,
+                    overload)
 
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -302,12 +303,10 @@ class LLM:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
-        self._validate_and_add_requests(
-            inputs=inputs,
-            params=sampling_params,
-            lora_request=lora_request,
-            guided_options=guided_options
-        )
+        self._validate_and_add_requests(inputs=inputs,
+                                        params=sampling_params,
+                                        lora_request=lora_request,
+                                        guided_options=guided_options)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
@@ -526,10 +525,10 @@ class LLM:
             if len(params) != num_requests:
                 raise ValueError("The lengths of prompts and params "
                                  "must be the same.")
-            
+
             params = [
-                self._add_guided_processor(param, guided_options) for param in params
-                if isinstance(param, SamplingParams)
+                self._add_guided_processor(param, guided_options)
+                for param in params if isinstance(param, SamplingParams)
             ]
         elif isinstance(params, SamplingParams):
             params = self._add_guided_processor(params, guided_options)
@@ -542,7 +541,11 @@ class LLM:
                     lora_request, Sequence) else lora_request,
             )
 
-    def _add_guided_processor(self, params: SamplingParams, guided_options: Optional[Union[Dict, "GuidedDecodingFields"]] = None):
+    def _add_guided_processor(
+            self,
+            params: SamplingParams,
+            guided_options: Optional[Union[Dict,
+                                           "GuidedDecodingFields"]] = None):
         if guided_options:
             if isinstance(guided_options, dict):
                 guided_options = GuidedDecodingFields(**guided_options)

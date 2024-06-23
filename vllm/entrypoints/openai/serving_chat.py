@@ -25,14 +25,10 @@ from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
-<<<<<<< HEAD
     GuidedDecodingFields, get_guided_decoding_logits_processor_async)
-=======
-    get_guided_decoding_logits_processor)
 from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import (async_get_and_parse_image,
                                    get_full_image_text_prompt)
->>>>>>> upstream/main
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,

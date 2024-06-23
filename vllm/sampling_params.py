@@ -2,14 +2,11 @@
 import copy
 from enum import IntEnum
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from pydantic import Field
 from typing_extensions import Annotated
-
-if TYPE_CHECKING:
-    from vllm.model_executor.guided_decoding.fields import GuidedDecodingFields
 
 _SAMPLING_EPS = 1e-5
 
@@ -350,5 +347,4 @@ class SamplingParams:
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens}),"
-            f"guided_options={self.guided_options})")
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}),")

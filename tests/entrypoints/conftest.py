@@ -26,7 +26,7 @@ def sample_json_schema():
                 },
                 "minItems": 3
             },
-            "work history": {
+            "work_history": {
                 "type": "array",
                 "items": {
                     "type": "object",
@@ -45,7 +45,7 @@ def sample_json_schema():
                 }
             }
         },
-        "required": ["name", "age", "skills", "work history"]
+        "required": ["name", "age", "skills", "work_history"]
     }
 
 

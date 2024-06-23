@@ -16,11 +16,10 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.entrypoints.llm import LLM
 from vllm.inputs import TextPrompt
-from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
 
