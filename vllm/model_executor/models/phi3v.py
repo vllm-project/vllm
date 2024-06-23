@@ -278,6 +278,13 @@ def _image_processor(
 ) -> Dict[str, torch.Tensor]:
     image = data.image
 
+    if isinstance(image, torch.Tensor):
+        pixel_values = image.to(model_config.dtype)
+        batch_size, _, _, h, w = pixel_values.shape
+        image_sizes = torch.tensor([(w, h) for _ in range(batch_size)])
+
+        return {"pixel_values": pixel_values, "image_sizes": image_sizes}
+
     # Temporary patch before dynamic number of image tokens is supported
     _, _, h, w = vlm_config.image_input_shape
     if (w, h) != (image.width, image.height):
