@@ -15,6 +15,7 @@
 # limitations under the License.
 from typing import Dict, Iterable, List, Literal, Optional, Tuple, TypedDict
 
+import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -272,6 +273,41 @@ class Phi3VImagePixelInputs(TypedDict):
     """Shape: (batch_size, 2)"""
 
 
+# FIXME(Isotr0py): Remove these function after dynamic number of image tokens is supported
+# copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
+def calc_padded_size(width, height, padding_unit=336):
+    target_height = int(np.ceil(height / padding_unit) * padding_unit)
+    top_padding = int((target_height - height) / 2)
+    bottom_padding = target_height - height - top_padding
+    padded_width = width
+    padded_height = height + top_padding + bottom_padding
+    return padded_width, padded_height
+
+
+# copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
+def calc_hd_transform_size(width, height, hd_num=16):  
+    transposed = False  
+    if width < height:  
+        width, height = height, width  
+        transposed = True  
+  
+    ratio = width / height  
+    scale = 1  
+    while scale * np.ceil(scale / ratio) <= hd_num:  
+        scale += 1  
+    scale -= 1  
+  
+    new_width = int(scale * 336)  
+    new_height = int(new_width / ratio)  
+  
+    padded_width, padded_height = calc_padded_size(new_width, new_height)  
+      
+    if transposed:  
+        padded_width, padded_height = padded_height, padded_width  
+  
+    return padded_width, padded_height  
+
+
 def _image_processor(
     data: ImagePixelData,
     model_config: ModelConfig,
@@ -282,7 +318,7 @@ def _image_processor(
     if isinstance(image, Image.Image):
         # Temporary patch before dynamic number of image tokens is supported
         _, _, h, w = vlm_config.image_input_shape
-        if (w, h) != (image.width, image.height):
+        if (w, h) != calc_hd_transform_size(image.width, image.height):
             logger.warning(
                 "Dynamic image shape is currently not supported. "
                 "Resizing input image to (%d, %d).", w, h)
