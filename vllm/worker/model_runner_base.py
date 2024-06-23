@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
     from vllm.model_executor import SamplingMetadata
 
-T = TypeVar('T', bound="ModelInputBase")
+T = TypeVar('T', bound="ModelRunnerInputBase")
 
 
 def _add_attn_metadata_broadcastable_dict(
@@ -78,14 +78,14 @@ def _add_sampling_metadata_broadcastable_dict(
 
 
 @dataclasses.dataclass(frozen=True)
-class ModelInputBase(ABC):
+class ModelRunnerInputBase(ABC):
     """Local inputs to each worker's model runner. May contain
     device-specific data. Different worker backends may have different methods
     of converting from the global ExecuteModelRequest produced by the LLM
-    engine to the worker-local ModelInputBase objects.
+    engine to the worker-local ModelRunnerInputBase objects.
 
     Model runners that support multi-GPU execution should define a
-    ModelInputBase subclass, add their required fields, and specify how to
+    ModelRunnerInputBase subclass, add their required fields, and specify how to
     serialize/deserialize a ModelInput for broadcast between workers.
     """
 
@@ -133,8 +133,8 @@ class ModelRunnerBase(ABC, Generic[T]):
     model. Model execution may communicate data with model runners in other
     processes, but it should not include control plane metadata communication.
 
-    Each ModelRunnerBase subclass should define a corresponding ModelInputBase
-    subclass.
+    Each ModelRunnerBase subclass should define a corresponding
+    ModelRunnerInputBase subclass.
     """
 
     @abstractmethod
@@ -142,7 +142,7 @@ class ModelRunnerBase(ABC, Generic[T]):
                          make_attn_metadata: bool = False,
                          **model_input_fields) -> T:
         """
-        Make an instance of a ModelInputBase from the given fields. If
+        Make an instance of a ModelRunnerInputBase from the given fields. If
         make_attn_metadata=True, then AttentionMetadata will be created from
         fields extracted from model_input_fields.
         """

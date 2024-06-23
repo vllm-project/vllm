@@ -16,7 +16,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
-    ModelInputBase, ModelRunnerBase, _add_attn_metadata_broadcastable_dict,
+    ModelRunnerBase, ModelRunnerInputBase,
+    _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict, _init_attn_metadata_from_kwargs,
     _init_sampling_metadata_from_kwargs)
 
@@ -29,7 +30,7 @@ _PAD_SLOT_ID = -1
 
 
 @dataclass(frozen=True)
-class CPUModelInput(ModelInputBase):
+class CPUModelInput(ModelRunnerInputBase):
     """
     Used by the CPUModelRunner.
     """

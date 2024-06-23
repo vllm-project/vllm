@@ -11,13 +11,13 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.worker.model_runner_base import ModelInputBase, ModelRunnerBase
+from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
 logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
-class ModelInputForNeuron(ModelInputBase):
+class ModelInputForNeuron(ModelRunnerInputBase):
     """
     Used by the NeuronModelRunner.
     """

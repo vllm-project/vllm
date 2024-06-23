@@ -28,7 +28,8 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
-    ModelInputBase, ModelRunnerBase, _add_attn_metadata_broadcastable_dict,
+    ModelRunnerBase, ModelRunnerInputBase,
+    _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict, _init_attn_metadata_from_kwargs,
     _init_sampling_metadata_from_kwargs)
 
@@ -51,7 +52,7 @@ TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
 
 @dataclass(frozen=True)
-class ModelInputForGPU(ModelInputBase):
+class ModelInputForGPU(ModelRunnerInputBase):
     """
     This base class contains metadata needed for the base model forward pass
     but not metadata for possible additional steps, e.g., sampling. Model
