@@ -757,17 +757,17 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def _pin_lora_in_cpu_cache(self, lora_id: int):
         try:
-            self._registered_loras.pin(lora_id)
+            self._registered_adapters.pin(lora_id)
         except ValueError as err:
             raise ValueError("Pinning failed. "
                              f"LoRA {lora_id} is not registered.") from err
 
     def _pin_lora_in_gpu_cache(self, lora_id: int):
-        if lora_id not in self._active_loras:
+        if lora_id not in self._active_adapters:
             # move lora to gpu if not already active
-            self.activate_lora(lora_id)
+            self.activate_adapter(lora_id)
 
-        self._active_loras.pin(lora_id)
+        self._active_adapters.pin(lora_id)
 
 
 def create_lora_manager(
