@@ -102,19 +102,6 @@ def vllm_images(request) -> List[MultiModalData]:
 
 
 @pytest.fixture()
-def vllm_multi_res_images(request) -> List[MultiModalData]:
-    vision_language_config = request.getfixturevalue("model_and_config")[1]
-    assert vision_language_config.image_input_type == (
-        VisionLanguageConfig.ImageInputType.PIXEL_VALUES)
-
-    dynamic_size = [(512, 512), (1024, 1024)]
-    return [
-        ImagePixelData(Image.open(filename).resize(size))
-        for filename, size in zip(IMAGE_FILES, dynamic_size)
-    ]
-
-
-@pytest.fixture()
 def vllm_image_tensors(request) -> List[torch.Tensor]:
     return [torch.load(filename) for filename in PIXEL_VALUES_FILES]
 
