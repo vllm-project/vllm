@@ -160,22 +160,16 @@ class StreamingAttentionSink(nn.Module):
             within_context_len = num_past_tokens < model_context_len
             block_table = block_tables_tensor[i]
             
-            num_blocks = num_past_tokens // block_size + 1
+            num_blocks = min(num_past_tokens // block_size + 1, model_context_len // block_size)
             if hasattr(attn_metadata, 'phys_bnums_list'):
                 phys_bnums = phys_bnums_list[i]
             else:
-                if i < attn_metadata.num_prefills:
-                    print(f"prefill {i}: len block table:", block_table.shape, "num_blocks:", num_blocks)
-                    phys_bnums = block_table[:num_blocks - 1]
-                else:
-                    phys_bnums = block_table[:-1]
+                # print(f"seq {i}: len block table:", block_table.shape, "num_blocks:", num_blocks)
+                phys_bnums = block_table[:num_blocks - 1]
                 phys_bnums_list[i] = phys_bnums
             
             rem = num_past_tokens % block_size
-            if i < attn_metadata.num_prefills:
-                rem_phys_bnum = block_table[num_blocks - 1]
-            else:
-                rem_phys_bnum = block_table[-1]
+            rem_phys_bnum = block_table[num_blocks - 1]
             
             # read unrotated keys from cache
             # FA shape: [len(phys_bnums), block_size, num_heads, head_size]
@@ -251,14 +245,11 @@ class StreamingAttentionSink(nn.Module):
             within_context_len = num_past_tokens < model_context_len
             block_table = block_tables_tensor[i]
             
-            num_blocks = num_past_tokens // block_size + 1
+            num_blocks = min(num_past_tokens // block_size + 1, model_context_len // block_size)
             phys_bnums = phys_bnums_list[i]
 
             rem = num_past_tokens % block_size
-            if i < attn_metadata.num_prefills:
-                rem_phys_bnum = block_table[num_blocks - 1]
-            else:
-                rem_phys_bnum = block_table[-1]
+            rem_phys_bnum = block_table[num_blocks - 1]
 
             full_past_keys, rem_past_keys = original_keys[i]
             key_cache.index_put_((phys_bnums,), full_past_keys)

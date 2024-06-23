@@ -7,7 +7,7 @@ from huggingface_hub import login
 from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 
 
-# login(token=os.environ.get("HF_TOKEN"))
+login(token=os.environ.get("HF_TOKEN"))
 
 MAX_GEN_TOKENS = 500
 beam_search_params = SamplingParams(
@@ -80,9 +80,9 @@ if __name__ == "__main__":
     model = "tiiuae/falcon-7b-instruct"
     model = "bigscience/bloom-7b1"
     model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
-    model = "meta-llama/Meta-Llama-3-8B-Instruct"
     model = "mosaicml/mpt-7b-chat"
     model = "lmsys/vicuna-7b-v1.5"
+    model = "meta-llama/Meta-Llama-3-8B-Instruct"
     args = EngineArgs(
         model=model,
         enforce_eager=True,
