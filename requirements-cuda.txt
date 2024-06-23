@@ -5,5 +5,6 @@
 ray >= 2.9
 nvidia-ml-py # for pynvml package
 torch == 2.3.0
+torchvision == 0.18.0   # required for the image processor of phi3v
 xformers == 0.0.26.post1  # Requires PyTorch 2.3.0
 vllm-flash-attn == 2.5.9  # Requires PyTorch 2.3.0

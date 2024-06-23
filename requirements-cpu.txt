@@ -1,6 +1,8 @@
 # Common dependencies
 -r requirements-common.txt
+--index-url https://download.pytorch.org/whl/cpu
 
 # Dependencies for x86_64 CPUs
 torch == 2.3.1+cpu
+torchvision == 0.18.1+cpu   # required for the image processor of phi3v
 triton >= 2.2.0  # FIXME(woosuk): This is a hack to avoid import error.
