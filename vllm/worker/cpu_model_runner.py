@@ -1,6 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -15,7 +15,13 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
-from vllm.worker.model_runner_base import ModelInput, ModelRunnerBase
+from vllm.worker.model_runner_base import (
+    ModelInputBase, ModelRunnerBase, _add_attn_metadata_broadcastable_dict,
+    _add_sampling_metadata_broadcastable_dict, _init_attn_metadata_from_kwargs,
+    _init_sampling_metadata_from_kwargs)
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -23,7 +29,7 @@ _PAD_SLOT_ID = -1
 
 
 @dataclass(frozen=True)
-class CPUModelInput(ModelInput):
+class CPUModelInput(ModelInputBase):
     """
     Used by the CPUModelRunner.
     """
@@ -33,29 +39,29 @@ class CPUModelInput(ModelInput):
     sampling_metadata: Optional["SamplingMetadata"] = None
     multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
 
-    @property
-    def broadcastable_fields(self) -> Tuple[str, ...]:
-        return (
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
+        tensor_dict = self._get_attrs([
             "input_tokens",
             "input_positions",
             "multi_modal_kwargs",
-        )
+        ])
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                  self.sampling_metadata)
+        return tensor_dict
 
     @classmethod
-    def _get_init_kwargs(  # type: ignore
-            cls, **kwargs) -> Dict[str, Any]:
-        kwargs = cls._init_attn_metadata_from_kwargs(**kwargs)
-        kwargs = cls._init_sampling_metadata_from_kwargs(**kwargs)
-        return super()._get_init_kwargs(**kwargs)
-
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
-        tensor_dict = super().as_broadcastable_tensor_dict()
-        self._add_attn_metadata_broadcastable_dict(tensor_dict,
-                                                   self.attn_metadata)
-        self._add_sampling_metadata_broadcastable_dict(tensor_dict,
-                                                       self.sampling_metadata)
-        return tensor_dict
+    def new(cls,
+            attn_backend: Optional["AttentionBackend"] = None,
+            selected_token_indices: Optional[torch.Tensor] = None,
+            **kwargs) -> "CPUModelInput":
+        if attn_backend is not None:
+            kwargs = _init_attn_metadata_from_kwargs(attn_backend, **kwargs)
+        if selected_token_indices is not None:
+            kwargs = _init_sampling_metadata_from_kwargs(
+                selected_token_indices, **kwargs)
+        return cls(**kwargs)
 
 
 class CPUModelRunner(ModelRunnerBase[CPUModelInput]):

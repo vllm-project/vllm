@@ -6,6 +6,9 @@ import torch
 from vllm.attention import AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.worker.embedding_model_runner import (
+    ModelInputForGPUWithPoolingMetadata)
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 
@@ -48,7 +51,7 @@ class MockAttentionBackend(AttentionBackend):
         pass
 
 
-def test_gpu_model_input():
+def test_model_runner_input():
     sampling_metadata = SamplingMetadata(
         ["seq_group"],
         "selected_token_indices",
@@ -62,7 +65,8 @@ def test_gpu_model_input():
         slot_mapping=torch.zeros(1),
     )
     model_input = ModelInputForGPUWithSamplingMetadata.new(
-        num_seq_groups=10,
+        input_tokens=torch.ones(10),
+        input_positions=torch.ones(10),
         sampling_metadata=sampling_metadata,
         attn_metadata=attn_metadata)
 
@@ -73,20 +77,22 @@ def test_gpu_model_input():
     attn_backend = MockAttentionBackend()
     received_model_input = ModelInputForGPUWithSamplingMetadata.new(
         attn_backend=attn_backend, **tensor_dict)
+    # Check that received copy has correct values.
     assert isinstance(received_model_input,
                       ModelInputForGPUWithSamplingMetadata)
-
-    # Broadcast should not contain empty values.
-    for field in dataclasses.fields(model_input):
-        if getattr(model_input, field.name) is None:
-            assert field.name not in tensor_dict
-    # Broadcast should contain all non-empty fields defined by the developer
-    # for this input type.
-    for field_name in model_input.broadcastable_fields:
-        if getattr(model_input, field_name, None) is not None:
-            assert field_name in tensor_dict
-
-    # Check that received copy has correct values.
+    assert received_model_input.input_tokens is not None
+    assert (
+        received_model_input.input_tokens == model_input.input_tokens).all()
+    assert received_model_input.input_positions is not None
+    assert (received_model_input.input_positions == model_input.input_positions
+            ).all()
+    assert received_model_input.multi_modal_kwargs is None
+    assert (received_model_input.multi_modal_kwargs ==
+            model_input.multi_modal_kwargs)
+    assert received_model_input.lora_requests is None
+    assert received_model_input.lora_requests == model_input.lora_requests
+    assert received_model_input.lora_mapping is None
+    assert received_model_input.lora_mapping == model_input.lora_mapping
     for field in dataclasses.fields(AttentionMetadata):
         assert getattr(received_model_input.attn_metadata, field.name,
                        None) == getattr(attn_metadata, field.name, None)
@@ -94,3 +100,51 @@ def test_gpu_model_input():
     assert (received_model_input.sampling_metadata.selected_token_indices ==
             sampling_metadata.selected_token_indices)
     assert received_model_input.sampling_metadata.seq_groups is None
+
+
+def test_embedding_model_runner_input():
+    pooling_metadata = PoolingMetadata(
+        seq_groups=[[0]],
+        seq_data={},
+        prompt_lens=[1],
+    )
+    attn_metadata = AttentionMetadata(
+        num_prefills=1,
+        num_prefill_tokens=2,
+        num_decode_tokens=3,
+        slot_mapping=torch.zeros(1),
+    )
+    model_input = ModelInputForGPUWithPoolingMetadata.new(
+        input_tokens=torch.ones(10),
+        input_positions=torch.ones(10),
+        pooling_metadata=pooling_metadata,
+        attn_metadata=attn_metadata)
+
+    assert isinstance(model_input, ModelInputForGPUWithPoolingMetadata)
+
+    # Test round trip serialization.
+    tensor_dict = model_input.as_broadcastable_tensor_dict()
+    attn_backend = MockAttentionBackend()
+    received_model_input = ModelInputForGPUWithPoolingMetadata.new(
+        attn_backend=attn_backend, **tensor_dict)
+    # Check that received copy has correct values.
+    assert isinstance(received_model_input,
+                      ModelInputForGPUWithPoolingMetadata)
+    assert received_model_input.input_tokens is not None
+    assert (
+        received_model_input.input_tokens == model_input.input_tokens).all()
+    assert received_model_input.input_positions is not None
+    assert (received_model_input.input_positions == model_input.input_positions
+            ).all()
+    assert received_model_input.multi_modal_kwargs is None
+    assert (received_model_input.multi_modal_kwargs ==
+            model_input.multi_modal_kwargs)
+    assert received_model_input.lora_requests is None
+    assert received_model_input.lora_requests == model_input.lora_requests
+    assert received_model_input.lora_mapping is None
+    assert received_model_input.lora_mapping == model_input.lora_mapping
+    for field in dataclasses.fields(AttentionMetadata):
+        assert getattr(received_model_input.attn_metadata, field.name,
+                       None) == getattr(attn_metadata, field.name, None)
+    # Pooling metadata is not broadcast.
+    assert received_model_input.pooling_metadata is None

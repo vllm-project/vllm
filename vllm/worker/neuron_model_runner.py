@@ -11,13 +11,13 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.worker.model_runner_base import ModelInput, ModelRunnerBase
+from vllm.worker.model_runner_base import ModelInputBase, ModelRunnerBase
 
 logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
-class ModelInputForNeuron(ModelInput):
+class ModelInputForNeuron(ModelInputBase):
     """
     Used by the NeuronModelRunner.
     """
@@ -29,6 +29,10 @@ class ModelInputForNeuron(ModelInput):
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
         raise NotImplementedError("ModelInputForNeuron cannot be broadcast.")
+
+    @classmethod
+    def new(cls, **kwargs) -> "ModelInputForNeuron":
+        return cls(**kwargs)
 
 
 class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
@@ -186,10 +190,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             self.device,
             self.pin_memory)
 
-        return ModelInputForNeuron(input_tokens=input_tokens,
-                                   input_positions=input_positions,
-                                   input_block_ids=input_block_ids,
-                                   sampling_metadata=sampling_metadata)
+        return ModelInputForNeuron.new(input_tokens=input_tokens,
+                                       input_positions=input_positions,
+                                       input_block_ids=input_block_ids,
+                                       sampling_metadata=sampling_metadata)
 
     @torch.inference_mode()
     def execute_model(

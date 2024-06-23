@@ -12,7 +12,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
-from vllm.worker.model_runner_base import ModelInput, ModelRunnerBase
+from vllm.worker.model_runner_base import ModelInputBase, ModelRunnerBase
 
 logger = init_logger(__name__)
 
@@ -258,7 +258,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
             worker_input: WorkerInput = self.prepare_worker_input(
                 execute_model_req=execute_model_req)
-            model_input: ModelInput = self.model_runner.prepare_model_input(
+            model_input: ModelInputBase = self.model_runner.prepare_model_input(
                 execute_model_req.seq_group_metadata_list)
 
             if self.do_metadata_broadcast:
