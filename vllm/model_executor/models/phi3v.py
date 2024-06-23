@@ -273,7 +273,7 @@ class Phi3VImagePixelInputs(TypedDict):
     """Shape: (batch_size, 2)"""
 
 
-# FIXME(Isotr0py): Remove these function after dynamic number of image tokens is supported
+# FIXME(Isotr0py): Remove these after dynamic num_img_tokens is supported
 # copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
 def calc_padded_size(width, height, padding_unit=336):
     target_height = int(np.ceil(height / padding_unit) * padding_unit)
@@ -285,27 +285,27 @@ def calc_padded_size(width, height, padding_unit=336):
 
 
 # copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
-def calc_hd_transform_size(width, height, hd_num=16):  
-    transposed = False  
-    if width < height:  
-        width, height = height, width  
-        transposed = True  
-  
-    ratio = width / height  
-    scale = 1  
-    while scale * np.ceil(scale / ratio) <= hd_num:  
-        scale += 1  
-    scale -= 1  
-  
-    new_width = int(scale * 336)  
-    new_height = int(new_width / ratio)  
-  
-    padded_width, padded_height = calc_padded_size(new_width, new_height)  
-      
-    if transposed:  
-        padded_width, padded_height = padded_height, padded_width  
-  
-    return padded_width, padded_height  
+def calc_hd_transform_size(width, height, hd_num=16):
+    transposed = False
+    if width < height:
+        width, height = height, width
+        transposed = True
+
+    ratio = width / height
+    scale = 1
+    while scale * np.ceil(scale / ratio) <= hd_num:
+        scale += 1
+    scale -= 1
+
+    new_width = int(scale * 336)
+    new_height = int(new_width / ratio)
+
+    padded_width, padded_height = calc_padded_size(new_width, new_height)
+
+    if transposed:
+        padded_width, padded_height = padded_height, padded_width
+
+    return padded_width, padded_height
 
 
 def _image_processor(
