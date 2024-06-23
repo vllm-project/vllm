@@ -130,14 +130,6 @@ class StreamingAttentionSink(nn.Module):
         block_size = self.block_size
         model_context_len = self.model_context_len
 
-        # cache seq_lens
-        # TODO: remove this, just use attn_metadata.seq_lens
-        if hasattr(attn_metadata, 'seq_lens_clone'):
-            seq_lens = attn_metadata.seq_lens_clone
-        else:
-            seq_lens = attn_metadata.seq_lens_tensor.tolist()
-            attn_metadata.seq_lens_clone = seq_lens
-
         block_tables_tensor = attn_metadata.block_tables
         context_lens_tensor = attn_metadata.context_lens_tensor
 
@@ -227,7 +219,8 @@ class StreamingAttentionSink(nn.Module):
                 key_cache[rem_phys_bnum, :, :, :rem, :] = rem_past_keys
             
             if not within_context_len:
-                # cap number of tokens to consider with model context len
+                # must be decode
+                # => cap number of tokens to consider with model context len
                 attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
                 self.positions[i] = model_context_len - 1
 
@@ -280,10 +273,6 @@ class StreamingAttentionSink(nn.Module):
                 self.kv_cache_dtype,
                 self.kv_scale
             )
-        
-        # revert seq_lens inside metadata
-        # so that next attn layer starts with same seq lens
-        attn_metadata.seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
         
         return attn_output
 

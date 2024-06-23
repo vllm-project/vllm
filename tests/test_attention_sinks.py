@@ -34,6 +34,7 @@ _RETRIEVAL_COLOR = "mint green"
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("attn_backend", ["XFORMERS", "FLASH_ATTN"])
+@pytest.mark.parametrize("enable_chunked_prefill", [False, True])
 def test_correctness(
     vllm_runner,
     model: str,
@@ -44,6 +45,7 @@ def test_correctness(
     dtype: str,
     batch_size: int,
     attn_backend: str,
+    enable_chunked_prefill: bool,
     monkeypatch: pytest.MonkeyPatch
 ):
     if model == "mosaicml/mpt-7b-chat" and attn_backend == "XFORMERS":
@@ -62,7 +64,8 @@ def test_correctness(
         model,
         max_model_len=max_model_len,
         dtype=dtype,
-        enforce_eager=True
+        enforce_eager=True,
+        enable_chunked_prefill=enable_chunked_prefill
     ) as normal_model:
         # bypass context length cap for normal generation
         # to compare w/ attention sinks, which generates past context length
@@ -80,7 +83,8 @@ def test_correctness(
         max_model_len=max_model_len,
         dtype=dtype,
         enforce_eager=True,
-        use_attention_sinks=True
+        use_attention_sinks=True,
+        enable_chunked_prefill=enable_chunked_prefill
     ) as sink_model:
         sink_outputs = sink_model.generate_w_cum_logprobs(prompts, params)
     
@@ -113,6 +117,7 @@ def test_correctness(
     ("XFORMERS", 8),
     ("XFORMERS", 16)
 ])
+@pytest.mark.parametrize("enable_chunked_prefill", [False, True])
 def test_eviction(
     model: str,
     max_model_len: int,
@@ -120,6 +125,7 @@ def test_eviction(
     batch_size: int,
     attn_backend: str,
     block_size: int,
+    enable_chunked_prefill: bool,
     monkeypatch: pytest.MonkeyPatch
 ):
     prompt = _get_prompt(model)
@@ -134,7 +140,8 @@ def test_eviction(
         dtype=dtype,
         block_size=block_size,
         enforce_eager=True,
-        use_attention_sinks=True
+        use_attention_sinks=True,
+        enable_chunked_prefill=enable_chunked_prefill
     )
     engine = LLMEngine.from_engine_args(engine_args)
 
