@@ -142,12 +142,30 @@ class BartLearnedPositionalEmbedding(nn.Embedding):
 
     def forward(self,
                 input_ids: torch.Tensor,
+                attn_type: AttentionType,
+                attn_metadata: AttentionMetadata,
                 past_key_values_length: int = 0):
         """`input_ids' shape is expected to be [bsz x seqlen]."""
 
+        assert attn_type != AttentionType.ENCODER_DECODER
+
         bsz, seq_len = get_bsz_seq_len(input_ids)
-        positions = torch.arange(past_key_values_length,
-                                 past_key_values_length + seq_len,
+        # afeldman-nm: This BART implementation is designed for vLLM, which
+        # packs variable-length sequences into a single vector
+        # without padding
+        assert bsz == 1
+
+        if attn_type == AttentionType.ENCODER:
+            seq_lens=attn_metadata.encoder_seq_lens
+        else:
+            # AttentionType.DECODER
+            seq_lens=attn_metadata.seq_lens
+
+        positions=[]
+        for seq_len in seq_lens:
+            positions.extend(list(range(seq_len)))
+
+        positions = torch.tensor(positions,
                                  dtype=torch.long,
                                  device=self.weight.device).expand(bsz, -1)
 
@@ -229,7 +247,7 @@ class BartEncoderAttention(nn.Module):
                                 attn_metadata,
                                 attn_type=AttentionType.ENCODER)
 
-        output, _ = self.out_proj(attn_output)
+        output = self.out_proj(attn_output)
         return output
 
 class BartDecoderSelfAttention(nn.Module):
@@ -291,7 +309,7 @@ class BartDecoderSelfAttention(nn.Module):
                                 attn_metadata,
                                 attn_type=AttentionType.DECODER)
 
-        output, _ = self.out_proj(attn_output)
+        output = self.out_proj(attn_output)
         return output
 
 class BartCrossAttention(nn.Module):
@@ -356,7 +374,7 @@ class BartCrossAttention(nn.Module):
                                 attn_metadata,
                                 attn_type=AttentionType.ENCODER_DECODER)
 
-        output, _ = self.out_proj(attn_output)
+        output = self.out_proj(attn_output)
         return output
 
 class BartEncoderLayer(nn.Module):
@@ -398,7 +416,7 @@ class BartEncoderLayer(nn.Module):
                 returned tensors for more detail.
         """
         residual = hidden_states
-        hidden_states, attn_weights, _ = self.self_attn(
+        hidden_states = self.self_attn(
             hidden_states=hidden_states,
             kv_caches=kv_caches, 
             attn_metadata=attn_metadata
@@ -444,6 +462,12 @@ class BartDecoderLayer(nn.Module):
         self.activation_fn = ACT2FN[config.activation_function]
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
+
+        '''
+        afeldman-nm: personally I would call this "cross-attention",
+        however I left the name as "encoder_attn" to maintain consistency
+        with the name of the pretrained weights.
+        '''
         self.encoder_attn = BartCrossAttention(
             self.embed_dim,
             config.decoder_attention_heads,
@@ -480,7 +504,7 @@ class BartDecoderLayer(nn.Module):
                 Whether or not to return the attentions tensors of all attention layers. See `attentions` under
                 returned tensors for more detail.
         """
-        residual = hidden_states
+        residual = decoder_hidden_states
 
         # Self Attention
         hidden_states = self.self_attn(
@@ -624,7 +648,7 @@ class BartEncoder(nn.Module):
         input_ids = input_ids.view(-1, input_ids.shape[-1])
         inputs_embeds = self.embed_tokens(input_ids)
 
-        embed_pos = self.embed_positions(input)
+        embed_pos = self.embed_positions(input,AttentionType.ENCODER,attn_metadata)
         embed_pos = embed_pos.to(inputs_embeds.device)
 
         hidden_states = inputs_embeds + embed_pos
@@ -633,7 +657,7 @@ class BartEncoder(nn.Module):
         for idx, encoder_layer in enumerate(self.layers):
             hidden_states = encoder_layer(
                 hidden_states=hidden_states, 
-                kv_caches=kv_caches, 
+                kv_caches=kv_caches[idx], 
                 attn_metadata=attn_metadata,
             )
 
@@ -769,7 +793,7 @@ class BartDecoder(nn.Module):
         inputs_embeds = self.embed_tokens(input)
 
         # embed positions
-        decoder_positions = self.embed_positions(input, past_key_values_length)
+        decoder_positions = self.embed_positions(input,AttentionType.DECODER,attn_metadata)
         decoder_positions = decoder_positions.to(inputs_embeds.device)
 
         hidden_states = inputs_embeds + decoder_positions
@@ -780,7 +804,7 @@ class BartDecoder(nn.Module):
         for idx, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 decoder_hidden_states=hidden_states, 
-                kv_caches=kv_caches, 
+                kv_caches=kv_caches[idx], 
                 attn_metadata=attn_metadata,
                 encoder_hidden_states=encoder_hidden_states, 
             )
@@ -976,7 +1000,7 @@ class BartForConditionalGeneration(nn.Module):
         """
         hidden_states = self.model(input_ids, positions, encoder_input_ids,
                                    encoder_positions, kv_caches, attn_metadata)
-        return hidden_states
+        return hidden_states[0,:,:]
 
         # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
