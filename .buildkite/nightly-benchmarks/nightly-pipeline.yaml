@@ -30,7 +30,6 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  - wait
   - label: "A100 vllm benchmark"
     agents:
       queue: A100
@@ -62,7 +61,6 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  - wait
   - label: "A100 tgi benchmark"
     agents:
       queue: A100
@@ -94,7 +92,6 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  - wait
   - label: "A100 lmdeploy benchmark"
     agents:
       queue: A100
@@ -126,5 +123,4 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  - wait
   
