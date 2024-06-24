@@ -125,20 +125,6 @@ class ModelRunnerInputBase(ABC):
         """
         raise NotImplementedError
 
-    def _get_attrs(self, attrs: List[str]) -> Dict[str, Any]:
-        """
-        Helper method to get a dictionary from attribute name to value.
-        Attributes whose values are None will not be added to the returned
-        dictionary.
-        """
-        tensor_dict: Dict[str, Union[int, torch.Tensor]] = {}
-        for attr in attrs:
-            val = getattr(self, attr, None)
-            if val is not None:
-                tensor_dict[attr] = val
-
-        return tensor_dict
-
 
 class ModelRunnerBase(ABC, Generic[T]):
     """

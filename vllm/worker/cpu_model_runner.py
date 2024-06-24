@@ -42,11 +42,11 @@ class CPUModelInput(ModelRunnerInputBase):
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
-        tensor_dict = self._get_attrs([
-            "input_tokens",
-            "input_positions",
-            "multi_modal_kwargs",
-        ])
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+        }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
                                                   self.sampling_metadata)

@@ -46,10 +46,10 @@ class ModelInputForXPU(ModelRunnerInputBase):
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
-        tensor_dict = self._get_attrs([
-            "input_tokens",
-            "input_positions",
-        ])
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+        }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
                                                   self.sampling_metadata)
@@ -175,7 +175,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        self.execute_model(seqs, kv_caches)
+        model_input = self.prepare_model_input(seqs)
+        self.execute_model(model_input, kv_caches)
         torch.xpu.synchronize()
         return
 
