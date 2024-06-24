@@ -148,8 +148,67 @@ __device__ inline uint32_t prmt(uint32_t a) {
   return res;
 }
 
+// Efficiently dequantize an int32 value into a full B-fragment of 4 fp16
+// values. We mostly follow the strategy in the link below, with some small
+// changes:
+// - FP16:
+// https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L215-L287
+// - BF16:
+// https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L327-L385
+template <typename scalar_t>
+__device__ inline typename ScalarType<scalar_t>::FragB dequant_4bit(int q) {
+  STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
+}
+
+template <>
+__device__ inline typename ScalarType<half>::FragB dequant_4bit<half>(int q) {
+  const int LO = 0x000f000f;
+  const int HI = 0x00f000f0;
+  const int EX = 0x64006400;
+  // Guarantee that the `(a & b) | c` operations are LOP3s.
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+  // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
+  // directly into `SUB` and `ADD`.
+  const int SUB = 0x64086408;
+  const int MUL = 0x2c002c00;
+  const int ADD = 0xd480d480;
+  typename ScalarType<half>::FragB frag_b;
+  frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
+                      *reinterpret_cast<const half2*>(&SUB));
+  frag_b[1] = __hfma2(*reinterpret_cast<half2*>(&hi),
+                      *reinterpret_cast<const half2*>(&MUL),
+                      *reinterpret_cast<const half2*>(&ADD));
+  return frag_b;
+}
+
+template <>
+__device__ inline typename ScalarType<nv_bfloat16>::FragB
+dequant_4bit<nv_bfloat16>(int q) {
+  static constexpr uint32_t MASK = 0x000f000f;
+  static constexpr uint32_t EX = 0x43004300;
+
+  // Guarantee that the `(a & b) | c` operations are LOP3s.
+
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  q >>= 4;
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+
+  typename ScalarType<nv_bfloat16>::FragB frag_b;
+  static constexpr uint32_t MUL = 0x3F803F80;
+  static constexpr uint32_t ADD = 0xC308C308;
+
+  frag_b[0] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&lo),
+                      *reinterpret_cast<const nv_bfloat162*>(&MUL),
+                      *reinterpret_cast<const nv_bfloat162*>(&ADD));
+  frag_b[1] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&hi),
+                      *reinterpret_cast<const nv_bfloat162*>(&MUL),
+                      *reinterpret_cast<const nv_bfloat162*>(&ADD));
+  return frag_b;
+}
+
 // Fast FP8ToFp16/FP8ToBf16: Efficiently dequantize 8bit fp8_e4m3 values to fp16
-// or bf16 Reference:
+// bf16 Reference:
 // - FP16:
 // https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L53-L85
 // - BF16:
@@ -161,28 +220,17 @@ __device__ inline typename ScalarType<scalar_t>::FragB dequant_8bit(int q) {
 
 template <>
 __device__ inline typename ScalarType<half>::FragB dequant_8bit<half>(int q) {
-  uint8_t fp8_e4m3_vals[4];
-  fp8_e4m3_vals[0] = static_cast<uint8_t>((q >> 0) & 0xFF);
-  fp8_e4m3_vals[1] = static_cast<uint8_t>((q >> 8) & 0xFF);
-  fp8_e4m3_vals[2] = static_cast<uint8_t>((q >> 16) & 0xFF);
-  fp8_e4m3_vals[3] = static_cast<uint8_t>((q >> 24) & 0xFF);
+  c10::Float8_e4m3fn fp8_e4m3_vals[4];
+  fp8_e4m3_vals[0] = static_cast<c10::Float8_e4m3fn>((q >> 0) & 0xFF);
+  fp8_e4m3_vals[1] = static_cast<c10::Float8_e4m3fn>((q >> 8) & 0xFF);
+  fp8_e4m3_vals[2] = static_cast<c10::Float8_e4m3fn>((q >> 16) & 0xFF);
+  fp8_e4m3_vals[3] = static_cast<c10::Float8_e4m3fn>((q >> 24) & 0xFF);
 
   typename ScalarType<half>::FragB frag_b;
-  #pragma unroll
-  for (int i = 0; i < 2; ++i) {
-    uint16_t sign0 = (fp8_e4m3_vals[2 * i] & 0x80) << 8;
-    uint16_t exp0 = (fp8_e4m3_vals[2 * i] & 0x78) << 7;
-    uint16_t mantissa0 = (fp8_e4m3_vals[2 * i] & 0x07) << 10;
-
-    uint16_t sign1 = (fp8_e4m3_vals[2 * i + 1] & 0x80) << 8;
-    uint16_t exp1 = (fp8_e4m3_vals[2 * i + 1] & 0x78) << 7;
-    uint16_t mantissa1 = (fp8_e4m3_vals[2 * i + 1] & 0x07) << 10;
-
-    half h0 = __ushort_as_half(sign0 | exp0 | mantissa0);
-    half h1 = __ushort_as_half(sign1 | exp1 | mantissa1);
-
-    frag_b[i] = __halves2half2(h0, h1);
-  }
+  frag_b[0] = __halves2half2(static_cast<half>(fp8_e4m3_vals[1]),
+                             static_cast<half>(fp8_e4m3_vals[0]));
+  frag_b[1] = __halves2half2(static_cast<half>(fp8_e4m3_vals[3]),
+                             static_cast<half>(fp8_e4m3_vals[2]));
 
   return frag_b;
 }
@@ -190,28 +238,17 @@ __device__ inline typename ScalarType<half>::FragB dequant_8bit<half>(int q) {
 template <>
 __device__ inline typename ScalarType<nv_bfloat16>::FragB
 dequant_8bit<nv_bfloat16>(int q) {
-  uint8_t fp8_e4m3_vals[4];
-  fp8_e4m3_vals[0] = static_cast<uint8_t>((q >> 0) & 0xFF);
-  fp8_e4m3_vals[1] = static_cast<uint8_t>((q >> 8) & 0xFF);
-  fp8_e4m3_vals[2] = static_cast<uint8_t>((q >> 16) & 0xFF);
-  fp8_e4m3_vals[3] = static_cast<uint8_t>((q >> 24) & 0xFF);
+  c10::Float8_e4m3fn fp8_e4m3_vals[4];
+  fp8_e4m3_vals[0] = static_cast<c10::Float8_e4m3fn>((q >> 0) & 0xFF);
+  fp8_e4m3_vals[1] = static_cast<c10::Float8_e4m3fn>((q >> 8) & 0xFF);
+  fp8_e4m3_vals[2] = static_cast<c10::Float8_e4m3fn>((q >> 16) & 0xFF);
+  fp8_e4m3_vals[3] = static_cast<c10::Float8_e4m3fn>((q >> 24) & 0xFF);
 
   typename ScalarType<nv_bfloat16>::FragB frag_b;
-  float fp32_intermediates[4];
-  #pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    uint32_t sign = (fp8_e4m3_vals[i] & 0x80) << 24;
-    uint32_t exp = ((fp8_e4m3_vals[i] & 0x78) + 0x70) << 19;  // Adjust exponent
-    uint32_t mantissa = (fp8_e4m3_vals[i] & 0x07) << 16;
-    uint32_t fp32_val = sign | exp | mantissa;
-    fp32_intermediates[i] = __uint_as_float(fp32_val);
-  }
-
-  uint32_t* bf16_result_ptr = reinterpret_cast<uint32_t*>(&frag_b);
-  bf16_result_ptr[0] = __float_as_int(fp32_intermediates[0]) >> 16;
-  bf16_result_ptr[1] = __float_as_int(fp32_intermediates[1]) >> 16;
-  bf16_result_ptr[2] = __float_as_int(fp32_intermediates[2]) >> 16;
-  bf16_result_ptr[3] = __float_as_int(fp32_intermediates[3]) >> 16;
+  frag_b[0] = __halves2bfloat162(static_cast<nv_bfloat16>(fp8_e4m3_vals[1]),
+                                 static_cast<nv_bfloat16>(fp8_e4m3_vals[0]));
+  frag_b[1] = __halves2bfloat162(static_cast<nv_bfloat16>(fp8_e4m3_vals[3]),
+                                 static_cast<nv_bfloat16>(fp8_e4m3_vals[2]));
 
   return frag_b;
 }
@@ -227,6 +264,27 @@ __device__ inline void scale(typename ScalarType<scalar_t>::FragB& frag_b,
       ScalarType<scalar_t>::num2num2(reinterpret_cast<scalar_t*>(&frag_s)[i]);
   frag_b[0] = __hmul2(frag_b[0], s);
   frag_b[1] = __hmul2(frag_b[1], s);
+}
+
+// Same as above, but for act_order (each K is multiplied individually)
+template <typename scalar_t>
+__device__ inline void scale4(typename ScalarType<scalar_t>::FragB& frag_b,
+                              typename ScalarType<scalar_t>::FragS& frag_s_1,
+                              typename ScalarType<scalar_t>::FragS& frag_s_2,
+                              typename ScalarType<scalar_t>::FragS& frag_s_3,
+                              typename ScalarType<scalar_t>::FragS& frag_s_4,
+                              int i) {
+  using scalar_t2 = typename ScalarType<scalar_t>::scalar_t2;
+  scalar_t2 s_val_1_2;
+  s_val_1_2.x = reinterpret_cast<scalar_t*>(&frag_s_1)[i];
+  s_val_1_2.y = reinterpret_cast<scalar_t*>(&frag_s_2)[i];
+
+  scalar_t2 s_val_3_4;
+  s_val_3_4.x = reinterpret_cast<scalar_t*>(&frag_s_3)[i];
+  s_val_3_4.y = reinterpret_cast<scalar_t*>(&frag_s_4)[i];
+
+  frag_b[0] = __hmul2(frag_b[0], s_val_1_2);
+  frag_b[1] = __hmul2(frag_b[1], s_val_3_4);
 }
 
 // Given 2 floats multiply by 2 scales (halves)
@@ -268,6 +326,59 @@ __device__ inline void barrier_release(int* lock, bool reset = false) {
     asm volatile("red.relaxed.gpu.global.add.s32 [%0], %1;\n"
                  :
                  : "l"(lock), "r"(val));
+  }
+}
+
+// For a given "a" of size [M,K] performs a permutation of the K columns based
+// on the given "perm" indices.
+__global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
+                                    int const* __restrict__ perm_int_ptr,
+                                    int4* __restrict__ out_int4_ptr, int size_m,
+                                    int size_k, int block_rows) {
+  int start_row = block_rows * blockIdx.x;
+  int finish_row = start_row + block_rows;
+  if (finish_row > size_m) {
+    finish_row = size_m;
+  }
+  int cur_block_rows = finish_row - start_row;
+
+  int row_stride = size_k * sizeof(half) / 16;
+
+  auto permute_row = [&](int row) {
+    int iters = size_k / default_threads;
+    int rest = size_k % default_threads;
+
+    int offset = row * row_stride;
+
+    half const* a_row_half = reinterpret_cast<half const*>(a_int4_ptr + offset);
+    half* out_half = reinterpret_cast<half*>(out_int4_ptr + offset);
+
+    int base_k = 0;
+
+    for (int i = 0; i < iters; i++) {
+      int cur_k = base_k + threadIdx.x;
+      int src_pos = perm_int_ptr[cur_k];
+
+      out_half[cur_k] = a_row_half[src_pos];
+
+      base_k += default_threads;
+    }
+
+    if (rest) {
+      if (threadIdx.x < rest) {
+        int cur_k = base_k + threadIdx.x;
+        int src_pos = perm_int_ptr[cur_k];
+
+        out_half[cur_k] = a_row_half[src_pos];
+      }
+    }
+  };
+
+  for (int i = 0; i < cur_block_rows; i++) {
+    int cur_row = start_row + i;
+    if (cur_row < size_m) {
+      permute_row(cur_row);
+    }
   }
 }
 
@@ -712,30 +823,101 @@ __global__ void Marlin(
   auto fetch_scales_to_registers = [&](int k, int full_pipe) {
     int pipe = full_pipe % stages;
 
-    // No act-order case
-    if constexpr (group_blocks != -1) {
-      if constexpr (group_blocks >= thread_k_blocks) {
-        int4* sh_s_stage =
-            sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
-                                 (pipe / (group_blocks / thread_k_blocks)));
-        reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
-      } else {
-        int warp_id = threadIdx.x / 32;
-        int n_warps = thread_n_blocks / 4;
+    if constexpr (!has_act_order) {
+      // No act-order case
+      if constexpr (group_blocks != -1) {
+        if constexpr (group_blocks >= thread_k_blocks) {
+          int4* sh_s_stage =
+              sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
+                                   (pipe / (group_blocks / thread_k_blocks)));
+          reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
+        } else {
+          int warp_id = threadIdx.x / 32;
+          int n_warps = thread_n_blocks / 4;
 
-        int warp_row = warp_id / n_warps;
+          int warp_row = warp_id / n_warps;
 
-        int cur_k = warp_row * 16;
-        cur_k += k_iter_size * (k % b_sh_wr_iters);
+          int cur_k = warp_row * 16;
+          cur_k += k_iter_size * (k % b_sh_wr_iters);
 
-        int k_blocks = cur_k / 16;
-        int cur_group_id = k_blocks / group_blocks;
+          int k_blocks = cur_k / 16;
+          int cur_group_id = k_blocks / group_blocks;
 
-        int4* sh_s_stage = sh_s + s_sh_stage * pipe;
+          int4* sh_s_stage = sh_s + s_sh_stage * pipe;
 
-        reinterpret_cast<int4*>(&frag_s[k % 2])[0] =
-            sh_s_stage[s_sh_rd + cur_group_id * s_sh_stride];
+          reinterpret_cast<int4*>(&frag_s[k % 2])[0] =
+              sh_s_stage[s_sh_rd + cur_group_id * s_sh_stride];
+        }
       }
+
+      return;
+    }
+
+    // Act-order case
+
+    // Determine K of the "current" thread-block
+    int cur_k = slice_k_start + tb_k * full_pipe;
+    if (cur_k >= prob_k || cur_k >= slice_k_finish) {
+      return;
+    }
+
+    // Reset (to current thread-block) since we read g_idx portion from the
+    // shared memory
+    cur_k = 0;
+
+    // Progress to current iteration
+    cur_k += k_iter_size * (k % b_sh_wr_iters);
+
+    // Determine "position" inside the thread-block (based on warp and
+    // thread-id)
+    int warp_id = threadIdx.x / 32;
+    int n_warps =
+        thread_n_blocks / 4;  // Each warp processes 4 16-size tiles over N
+
+    int warp_row = warp_id / n_warps;
+    int warp_col = warp_id % n_warps;
+
+    cur_k += warp_row * 16;
+
+    int th_id = threadIdx.x % 32;
+    cur_k += (th_id % 4) * 2;  // Due to tensor-core layout for fp16 B matrix
+
+    int s_col_shift =
+        /*slice_n_offset +*/ (act_s_col_warp_stride * warp_col) +
+        (th_id / 4) * act_s_col_stride;
+
+    if (is_same_group[pipe]) {
+      if (k % 2 == 0) {
+        *(reinterpret_cast<int4*>(&(act_frag_s[k % 2][0][0]))) =
+            sh_s[(same_group_id[pipe] - sh_first_group_id) * s_sh_stride +
+                 s_col_shift];
+      } else {
+        *(reinterpret_cast<int4*>(&(act_frag_s[k % 2][0][0]))) =
+            *(reinterpret_cast<int4*>(&(act_frag_s[(k - 1) % 2][0][0])));
+      }
+
+      for (int i = 1; i < 4; i++) {
+        *(reinterpret_cast<int4*>(&(act_frag_s[k % 2][i][0]))) =
+            *(reinterpret_cast<int4*>(&(act_frag_s[k % 2][0][0])));
+      }
+      return;
+    }
+
+    int4* sh_g_idx_stage = sh_g_idx + g_idx_stage * pipe;
+    int* sh_g_idx_int_ptr = reinterpret_cast<int*>(sh_g_idx_stage);
+
+    constexpr int k_frag_offsets[4] = {0, 1, 8,
+                                       9};  // Tensor core offsets per thread
+
+  #pragma unroll
+    for (int i = 0; i < 4; i++) {
+      int actual_k = cur_k + k_frag_offsets[i];
+
+      int group_id = sh_g_idx_int_ptr[actual_k];
+      int rel_group_id = group_id - sh_first_group_id;
+
+      *(reinterpret_cast<int4*>(&(act_frag_s[k % 2][i][0]))) =
+          sh_s[rel_group_id * s_sh_stride + s_col_shift];
     }
   };
 
@@ -747,22 +929,44 @@ __global__ void Marlin(
     for (int j = 0; j < 4; j++) {
       FragB frag_b0;
       FragB frag_b1;
+      if constexpr (num_bits == 4) {
+        int b_quant = frag_b_quant[k % 2][0][j];
+        int b_quant_shift = b_quant >> 8;
 
-      int* frag_b_quant_ptr = reinterpret_cast<int*>(frag_b_quant[k % 2]);
-      int b_quant_0 = frag_b_quant_ptr[j * 2 + 0];
-      int b_quant_1 = frag_b_quant_ptr[j * 2 + 1];
+        frag_b0 = dequant_4bit<scalar_t>(b_quant);
+        frag_b1 = dequant_4bit<scalar_t>(b_quant_shift);
 
-      frag_b0 = dequant_8bit<scalar_t>(b_quant_0);
-      frag_b1 = dequant_8bit<scalar_t>(b_quant_1);
+      } else {
+        int* frag_b_quant_ptr = reinterpret_cast<int*>(frag_b_quant[k % 2]);
+        int b_quant_0 = frag_b_quant_ptr[j * 2 + 0];
+        int b_quant_1 = frag_b_quant_ptr[j * 2 + 1];
 
-      if constexpr (group_blocks != -1) {
-        scale<scalar_t>(frag_b0, frag_s[k % 2][j], 0);
+        frag_b0 = dequant_8bit<scalar_t>(b_quant_0);
+        frag_b1 = dequant_8bit<scalar_t>(b_quant_1);
       }
 
-      if constexpr (group_blocks != -1) {
-        scale<scalar_t>(frag_b1, frag_s[k % 2][j], 1);
+      // Apply scale to frag_b0
+      if constexpr (has_act_order) {
+        scale4<scalar_t>(frag_b0, act_frag_s[k % 2][0][j],
+                         act_frag_s[k % 2][1][j], act_frag_s[k % 2][2][j],
+                         act_frag_s[k % 2][3][j], 0);
+      } else {
+        if constexpr (group_blocks != -1) {
+          scale<scalar_t>(frag_b0, frag_s[k % 2][j], 0);
+        }
       }
 
+      // Apply scale to frag_b1
+      if constexpr (has_act_order) {
+        scale4<scalar_t>(frag_b1, act_frag_s[k % 2][0][j],
+                         act_frag_s[k % 2][1][j], act_frag_s[k % 2][2][j],
+                         act_frag_s[k % 2][3][j], 1);
+
+      } else {
+        if constexpr (group_blocks != -1) {
+          scale<scalar_t>(frag_b1, frag_s[k % 2][j], 1);
+        }
+      }
 
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
@@ -1424,8 +1628,27 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s,
   TORCH_CHECK(prob_k % thread_k == 0, "prob_k = ", prob_k,
               " is not divisible by thread_k = ", thread_k);
 
-  // Only support channelwise or per-tensor
-  int group_blocks = -1;
+  int group_blocks = 0;
+  if (has_act_order) {
+    if (is_k_full) {
+      TORCH_CHECK(group_size != -1);
+      group_blocks = group_size / 16;
+      TORCH_CHECK(prob_k % group_blocks == 0, "prob_k = ", prob_k,
+                  " is not divisible by group_blocks = ", group_blocks);
+    } else {
+      TORCH_CHECK(group_size == 0);
+      group_blocks = 0;
+    }
+
+  } else {
+    if (group_size == -1) {
+      group_blocks = -1;
+    } else {
+      group_blocks = group_size / 16;
+      TORCH_CHECK(prob_k % group_blocks == 0, "prob_k = ", prob_k,
+                  " is not divisible by group_blocks = ", group_blocks);
+    }
+  }
 
   const int4* A_ptr = (const int4*)A;
   const int4* B_ptr = (const int4*)B;
@@ -1436,6 +1659,14 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s,
   int4* a_tmp_ptr = (int4*)a_tmp;
 
   int* locks = (int*)workspace;
+
+  if (has_act_order) {
+    // Permute A columns
+    int block_rows = div_ceil(prob_m, blocks);
+    permute_cols_kernel<<<blocks, default_threads, 0, stream>>>(
+        A_ptr, perm_ptr, a_tmp_ptr, prob_m, prob_k, block_rows);
+    A_ptr = a_tmp_ptr;
+  }
 
   // If we have a full K, then we can run the non-act-order version of Marlin
   // (since the weight rows are reordered by increasing group ids, and by having
@@ -1558,7 +1789,7 @@ torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
               " and perm.size(0) = ", perm.size(0),
               ", where size_k = ", size_k);
 
-  // No groupsize or act order needed!
+  // Detect groupsize and act_order
   int num_groups = -1;
   int group_size = -1;
   bool has_act_order = g_idx.size(0) != 0;
@@ -1567,8 +1798,30 @@ torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(b_rank == 2, "b_scales rank = ", b_rank, " is not 2");
   TORCH_CHECK(b_scales.size(1) == size_n, "b_scales dim 1 = ", b_scales.size(1),
               " is not size_n = ", size_n);
+  // Channelwise only for FP8
   TORCH_CHECK(b_scales.size(0) == 1)
   num_groups = b_scales.size(0);
+
+  if (has_act_order) {
+    if (is_k_full) {
+      TORCH_CHECK(num_groups > 1, "For act_order, num_groups must be > 1");
+      TORCH_CHECK(size_k % num_groups == 0, "size_k = ", size_k,
+                  ", is not divisible by num_groups = ", num_groups);
+      group_size = size_k / num_groups;
+    } else {
+      group_size = 0;
+    }
+
+  } else {
+    if (num_groups > 1) {
+      TORCH_CHECK(
+          size_k % num_groups == 0, "size_k = ", size_k,
+          ", is not divisible by b_scales.size(0) = ", b_scales.size(0));
+      group_size = size_k / num_groups;
+    } else {
+      group_size = -1;
+    }
+  }
 
   // Verify workspace size
   TORCH_CHECK(

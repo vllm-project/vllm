@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
@@ -271,19 +272,10 @@ class Fp8LinearMethod(LinearMethodBase):
                 print("REPACK")
                 layer.marlin_state = GPTQMarlinState.READY
 
-                # Newly generated tensors need to replace existing tensors that
-                # are already registered as parameters by vLLM
-                def replace_tensor(name, new_t):
-                    # It is important to use resize_() here since it ensures
-                    # the same buffer is reused
-                    getattr(layer, name).resize_(new_t.shape)
-                    getattr(layer, name).copy_(new_t)
-                    del new_t
-
                 device = layer.weight.device
 
                 # NO ACT ORDER
-                # Reset g_idx related tensors
+                # Reset g_idx related tensors to zero
                 layer.g_idx = Parameter(
                     torch.empty(0, dtype=torch.int, device=device),
                     requires_grad=False,
@@ -293,41 +285,60 @@ class Fp8LinearMethod(LinearMethodBase):
                     requires_grad=False,
                 )
 
+                # WEIGHTS
                 # FP8 is always 8 bits
                 weight_bits = 8
+                # # Repack weights to gptq format (packed int32 elements)
+                fp8_weights = layer.weight
+                # # View the tensor as uint8 to access the raw bits
+                # tensor_int8 = orig_fp8_weights.view(torch.int8)
+                # # Reshape to group every four elements together, with padding
+                # num_elements = tensor_int8.numel()
+                # padded_size = (orig_weight_shape[0] + 3) // 4 * 4
+                # # Pad the tensor to ensure it is a multiple of 4
+                # tensor_padded = torch.nn.functional.pad(
+                #     tensor_int8, (padded_size - orig_weight_shape[0], 0))
+                # print(tensor_int8.shape)
+                # print(tensor_padded.shape)
+                # # Reshape the padded tensor to (4, N)
+                # tensor_reshaped = tensor_padded.reshape(4, -1)
+                # # Pack the 4 uint8 values into 1 int32
+                # tensor_packed = (
+                #     tensor_reshaped[0, :].to(torch.int32) & 0xFF
+                # ) | ((tensor_reshaped[1, :].to(torch.int32) & 0xFF) << 8) | (
+                #     (tensor_reshaped[2, :].to(torch.int32) & 0xFF) << 16) | (
+                #         (tensor_reshaped[3, :].to(torch.int32) & 0xFF) << 24)
+                # # Reshape the packed tensor back to the desired shape
+                # tensor_packed = tensor_packed.view(-1, orig_weight_shape[1])
 
-                # WEIGHTS
-                # Repack weights to gptq format (packed int32 elements)
-                orig_fp8_weights = layer.weight
-                orig_weight_shape = orig_fp8_weights.shape
-                # View the tensor as uint8 to access the raw bits
-                tensor_int8 = orig_fp8_weights.view(torch.int8)
-                # Reshape to group every four elements together, with padding
-                num_elements = tensor_int8.numel()
-                padded_size = (num_elements + 3) // 4 * 4
-                # Pad the tensor to ensure it is a multiple of 4
-                tensor_padded = torch.nn.functional.pad(
-                    tensor_int8, (0, padded_size - num_elements))
-                # Reshape the padded tensor to (N, 4)
-                tensor_reshaped = tensor_padded.reshape(-1, 4)
-                # Pack the 4 uint8 values into 1 int32
-                tensor_packed = (
-                    tensor_reshaped[:, 0].to(torch.int32) & 0xFF
-                ) | ((tensor_reshaped[:, 1].to(torch.int32) & 0xFF) << 8) | (
-                    (tensor_reshaped[:, 2].to(torch.int32) & 0xFF) << 16) | (
-                        (tensor_reshaped[:, 3].to(torch.int32) & 0xFF) << 24)
-                # Reshape the packed tensor back to the desired shape
-                tensor_packed = tensor_packed.view(-1, orig_weight_shape[1])
+                print("ORIG FP8 WEIGHT", fp8_weights.shape)
+                fp8_uint8 = fp8_weights.view(dtype=torch.uint8).cpu().numpy()
+
+                i = 0
+                row = 0
+                gptq_qweight = np.zeros(
+                    (fp8_weights.shape[0] // 32 * weight_bits,
+                     fp8_weights.shape[1]),
+                    dtype=np.uint32)
+                while row < gptq_qweight.shape[0]:
+                    for j in range(i, i + (32 // weight_bits)):
+                        gptq_qweight[row] |= fp8_uint8[j] << (weight_bits *
+                                                              (j - i))
+                    i += 32 // weight_bits
+                    row += 1
+
+                gptq_qweight = torch.from_numpy(gptq_qweight.astype(
+                    np.int32)).to(device)
+                print("GPTQ PACKED WEIGHT", gptq_qweight.shape)
 
                 # Repack weights to marlin format
                 marlin_qweight = ops.gptq_marlin_repack(
-                    tensor_packed,
+                    gptq_qweight,
                     layer.g_idx_sort_indices,
                     part_size_k,
                     part_size_n,
                     weight_bits,
                 )
-                # replace_tensor("weight", marlin_qweight)
                 layer.weight = Parameter(marlin_qweight, requires_grad=False)
 
                 # WEIGHT SCALES
@@ -335,8 +346,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 # expand it to channelwise
                 scales_size_k = part_size_k
                 scales_size_n = part_size_n
-                scales = layer.weight_scale.repeat(1,
-                                                   scales_size_n).to(x.dtype)
+                scales = layer.weight_scale.repeat(1, scales_size_n).to(
+                    torch.float16)
                 # Permute scales
                 group_size = -1
                 marlin_scales = marlin_permute_scales(
@@ -346,7 +357,6 @@ class Fp8LinearMethod(LinearMethodBase):
                     group_size,
                     weight_bits,
                 )
-                # replace_tensor("weight_scale", marlin_scales)
                 layer.weight_scale = Parameter(marlin_scales,
                                                requires_grad=False)
 
@@ -362,7 +372,20 @@ class Fp8LinearMethod(LinearMethodBase):
                 # group-size and shard of scales/zp
                 layer.is_k_full = True
 
+                torch.cuda.synchronize()
+
             print("MARLIN FP8")
+            print("RESHAPE X", reshaped_x.shape)
+            print("WEIGHT", layer.weight.shape)
+            print("SCALES", layer.weight_scale.shape)
+            print("G IDX", layer.g_idx.shape)
+            print("G IDX SORT INDICES", layer.g_idx_sort_indices.shape)
+            print("WORKSPACE", layer.workspace.shape)
+            print("M", size_m)
+            print("N", part_size_n)
+            print("K", part_size_k)
+            print("IS K FULL", layer.is_k_full)
+            torch.cuda.synchronize()
             output = ops.fp8_marlin_gemm(
                 reshaped_x,
                 layer.weight,
@@ -376,6 +399,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 part_size_k,
                 layer.is_k_full,
             )
+            torch.cuda.synchronize()
 
             if bias is not None:
                 output.add_(bias)  # In-place add
