@@ -213,13 +213,15 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
         k = x.shape[1]
 
         solidx = self._config._tuned.get((m, n, k), 0)
-        if is_hip() and bias is None and solidx != 0:
+        if is_hip() and solidx != 0:
             res = ops.fp8_mm(x_quant, weight.t(), out_dtype, asf, wsf, osf,
                              int(solidx))
             if osf is not None:
                 res_upscaled = torch.empty_like(res, dtype=x.dtype)
                 ops.convert_fp8(res_upscaled, res, 1 / osf)
                 res = res_upscaled
+            if bias is not None:
+                res += bias
         else:
             _save_shapes(m, n, k)
             res, _ = torch._scaled_mm(x_quant,
