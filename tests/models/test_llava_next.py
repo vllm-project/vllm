@@ -4,7 +4,6 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
-from vllm.utils import is_hip
 
 from ..conftest import IMAGE_FILES
 
@@ -73,8 +72,6 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     return hf_input_ids, hf_output_str
 
 
-@pytest.mark.skipif(
-    is_hip(), reason="ROCm is skipping xfail tests to conserve CI resources")
 @pytest.mark.xfail(
     reason="Inconsistent image processor being used due to lack "
     "of support for dynamic image token replacement")

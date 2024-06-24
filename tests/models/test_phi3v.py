@@ -4,7 +4,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
-from vllm.utils import is_cpu, is_hip
+from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_FILES
 
@@ -76,8 +76,6 @@ if is_cpu():
 # TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
 # Since we use _attn_implementation="eager" for hf_runner, here is
 # numeric difference for longer context and test can't pass
-@pytest.mark.skipif(
-    is_hip(), reason="ROCm is skipping xfail tests to conserve CI resources")
 @pytest.mark.xfail(
     reason="Inconsistent image processor being used due to lack "
     "of support for dynamic image token replacement")

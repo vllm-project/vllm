@@ -126,7 +126,13 @@ class WorkerWrapperBase:
             # suppress the warning in `update_environment_variables`
             del os.environ[key]
             if is_hip():
-                os.environ.pop("HIP_VISIBLE_DEVICES", None)
+                hip_env_var = "HIP_VISIBLE_DEVICES"
+                if hip_env_var in os.environ:
+                    logger.warning(
+                        "Ignoring pre-set environment variable `%s=%s` as "
+                        "%s has also been set, which takes precedence.",
+                        hip_env_var, os.environ[hip_env_var], key)
+                os.environ.pop(hip_env_var, None)
         update_environment_variables(envs)
 
     def init_worker(self, *args, **kwargs):
