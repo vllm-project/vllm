@@ -34,6 +34,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        is_driver_worker: bool,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -45,6 +46,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+        self.is_driver_worker = is_driver_worker
 
         assert self.device_config.device_type == "tpu"
         if self.cache_config.cache_dtype == "auto":
