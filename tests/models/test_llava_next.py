@@ -7,7 +7,7 @@ from vllm.config import VisionLanguageConfig
 
 from ..conftest import IMAGE_FILES
 
-pytestmark = pytest.mark.llava
+pytestmark = pytest.mark.vlm
 
 _PREFACE = (
     "A chat between a curious human and an artificial intelligence assistant. "

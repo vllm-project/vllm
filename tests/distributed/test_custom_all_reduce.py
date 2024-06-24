@@ -11,8 +11,8 @@ from vllm.distributed.communication_op import (  # noqa
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
                                              get_tp_group, graph_capture)
 
-from ..utils import (init_test_distributed_environment,
-                     multi_process_tensor_parallel)
+from ..utils import (ensure_model_parallel_initialized,
+                     init_test_distributed_environment, multi_process_parallel)
 
 random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for _ in range(8)]
@@ -27,8 +27,8 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
                                       distributed_init_port)
-
-    group = get_tensor_model_parallel_group()
+    ensure_model_parallel_initialized(tp_size, pp_size)
+    group = get_tensor_model_parallel_group().device_group
 
     # A small all_reduce for warmup.
     # this is needed because device communicators might be created lazily
@@ -112,4 +112,4 @@ def test_custom_allreduce(tp_size, pipeline_parallel_size, test_target):
     world_size = tp_size * pipeline_parallel_size
     if world_size > torch.cuda.device_count():
         pytest.skip("Not enough GPUs to run the test.")
-    multi_process_tensor_parallel(tp_size, pipeline_parallel_size, test_target)
+    multi_process_parallel(tp_size, pipeline_parallel_size, test_target)

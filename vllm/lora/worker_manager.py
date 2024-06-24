@@ -221,6 +221,9 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
     def remove_lora(self, lora_id: int) -> bool:
         return self._lora_manager.remove_lora(lora_id)
 
+    def pin_lora(self, lora_id: int) -> bool:
+        return self._lora_manager.pin_lora(lora_id)
+
     def remove_all_loras(self):
         self._lora_manager.remove_all_loras()
 

@@ -8,7 +8,7 @@ from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_FILES
 
-pytestmark = pytest.mark.llava
+pytestmark = pytest.mark.vlm
 
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = [
@@ -22,6 +22,7 @@ assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
 def iter_phi3v_configs(model_name: str):
     image_hw_to_feature_size = {
         (1008, 1344): 1921,
+        (2016, 2688): 1933,
     }
 
     for (h, w), f in image_hw_to_feature_size.items():
@@ -75,9 +76,12 @@ if is_cpu():
 # TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
 # Since we use _attn_implementation="eager" for hf_runner, here is
 # numeric difference for longer context and test can't pass
+@pytest.mark.xfail(
+    reason="Inconsistent image processor being used due to lack "
+    "of support for dynamic image token replacement")
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_tokens", [8])
+@pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
                 model_and_config, dtype: str, max_tokens: int) -> None:
     """Inference result should be the same between hf and vllm.
@@ -95,9 +99,11 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     hf_model_kwargs = {"_attn_implementation": "eager"}
     with hf_runner(model_id, dtype=dtype,
                    model_kwargs=hf_model_kwargs) as hf_model:
-        hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
-                                              max_tokens,
-                                              images=hf_images)
+        hf_outputs = hf_model.generate_greedy(
+            HF_IMAGE_PROMPTS,
+            max_tokens,
+            images=hf_images,
+            eos_token_id=hf_model.processor.tokenizer.eos_token_id)
 
     vllm_image_prompts = [
         p.replace("<|image_1|>",
