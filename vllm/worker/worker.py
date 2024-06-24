@@ -73,6 +73,14 @@ class Worker(WorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
+        # Return hidden states from target model if the draft model is an
+        # mlp_speculator
+        speculative_args = {} if speculative_config is None \
+            or (speculative_config.draft_model_config.model ==
+                model_config.model) \
+              or (speculative_config.draft_model_config.hf_config.model_type !=
+                  "mlp_speculator") else {"return_hidden_states": True}
+
         ModelRunnerClass = (EmbeddingModelRunner if
                             self.model_config.embedding_mode else ModelRunner)
         self.model_runner = ModelRunnerClass(
@@ -87,6 +95,7 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
             control_vector_config=control_vector_config
+            **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
@@ -209,7 +218,8 @@ class Worker(WorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
+                                        self.parallel_config,
+                                        self.device_config)
         self.gpu_cache = self.cache_engine.gpu_cache
 
     def _warm_up_model(self) -> None:
@@ -326,6 +336,9 @@ class Worker(WorkerBase):
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_runner.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
