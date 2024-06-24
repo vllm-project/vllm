@@ -9,6 +9,7 @@ import torch_xla.core.xla_model as xm
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -33,6 +34,7 @@ class TPUModelRunner:
         cache_config: CacheConfig,
         load_config: LoadConfig,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        is_driver_worker: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -41,6 +43,7 @@ class TPUModelRunner:
         self.cache_config = cache_config
         self.load_config = load_config
         self.vision_language_config = vision_language_config
+        self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
         self.max_num_blocks_per_seq = (self.model_config.max_model_len //
@@ -387,6 +390,8 @@ class TPUModelRunner:
         inputs = self.prepare_inputs(seq_group_metadata_list)
         next_token_ids = self.model(inputs[0], inputs[1], kv_caches,
                                     *inputs[2:])
+        if not self.is_driver_worker:
+            return []
         next_token_ids = next_token_ids.cpu().tolist()
 
         i = 0
@@ -409,7 +414,14 @@ class TPUModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> SamplerOutput:
-        assert seq_group_metadata_list is not None
+        if self.is_driver_worker:
+            assert seq_group_metadata_list is not None
+            metadata_dict = {"seq_group_metadata_list": seq_group_metadata_list}
+            broadcast_tensor_dict(metadata_dict, src=0)
+        else:
+            metadata_dict = broadcast_tensor_dict(src=0)
+            seq_group_metadata_list = metadata_dict.pop("seq_group_metadata_list")
+
         if seq_group_metadata_list[0].is_prompt:
             # NOTE(woosuk): To reduce the compilation time, we only compile the
             # prefill inputs with batch size 1. Because the scheduler is not

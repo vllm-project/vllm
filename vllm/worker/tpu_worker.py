@@ -59,11 +59,14 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.model_runner = TPUModelRunner(model_config, parallel_config,
                                            scheduler_config, device_config,
                                            cache_config, load_config,
-                                           vision_language_config)
+                                           vision_language_config,
+                                           is_driver_worker=is_driver_worker)
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
         if self.parallel_config.world_size > 1:
+            # FIXME(woosuk): local_world_size should be used instead of
+            # parallel_config.world_size.
             pjrt.initialize_multiprocess(self.local_rank,
                                          self.parallel_config.world_size)
 
