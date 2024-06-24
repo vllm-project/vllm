@@ -330,11 +330,12 @@ def scaled_int8_quant(
 
 
 # qqq ops
-def qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor, s1: torch.Tensor,
-             s2: torch.Tensor, s3: torch, workspace: torch.Tensor, size_m: int,
-             size_n: int, size_k: int) -> torch.Tensor:
+def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
+                    s1: torch.Tensor, s2: torch.Tensor, s3: torch.Tensor,
+                    workspace: torch.Tensor, size_m: int, size_n: int,
+                    size_k: int) -> torch.Tensor:
     return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s1, s2, s3, workspace,
-                                    size_m, size_n, size_k)
+                                        size_m, size_n, size_k)
 
 
 # moe

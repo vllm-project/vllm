@@ -4,7 +4,7 @@
  * https://github.com/IST-DASLab/marlin/blob/master/marlin/marlin_cuda.cpp
  * Modified by HandH1998
  * Copyright (C) 2024 HandH1998
- * Copyright (C) Marlin.2024 Elias Frantar (elias.frantar@ist.ac.at)
+ * Copyright (C) Marlin.2024 Elias Frantar
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,31 +29,26 @@
 
 #include <iostream>
 
+#include "../marlin/dense/common/base.h"
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+
+#else
+
+  #include "../marlin/dense/common/mem.h"
+
+#endif
+
 template <typename T>
 inline std::string str(T x) {
   return std::to_string(x);
 }
 
-namespace vllm {
 namespace qqq {
-
-constexpr int ceildiv(int a, int b) { return (a + b - 1) / b; }
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 
-// Instances of `Vec` are used to organize groups of >>registers<<, as needed
-// for instance as inputs to tensor core operations. Consequently, all
-// corresponding index accesses must be compile-time constants, which is why we
-// extensively use `#pragma unroll` throughout the kernel code to guarantee
-// this.
-template <typename T, int n>
-struct Vec {
-  T elems[n];
-  __device__ T& operator[](int i) { return elems[i]; }
-};
-
 using I4 = Vec<int, 4>;
-
 // Matrix fragments for tensor core instructions; their precise layout is
 // documented here:
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#matrix-fragments-for-mma-m16n8k16-with-integer-type
@@ -64,32 +59,6 @@ using FragS_GROUP = Vec<half2, 1>;  // weight per-group quantization scales
 using FragS_CHANNEL =
     Vec<float, 2>;  // weight per-channel quantization scales or activaton
                     // per-token quantization scales
-
-// Predicated asynchronous global->shared copy; used for inputs A where we apply
-// predication to handle batchsizes that are not multiples of 16.
-__device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr,
-                                      bool pred = true) {
-  const int BYTES = 16;
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile(
-      "{\n"
-      "   .reg .pred p;\n"
-      "   setp.ne.b32 p, %0, 0;\n"
-      "   @p cp.async.cg.shared.global [%1], [%2], %3;\n"
-      "}\n" ::"r"((int)pred),
-      "r"(smem), "l"(glob_ptr), "n"(BYTES));
-}
-
-// Asynchronous global->shared copy
-__device__ inline void cp_async4(void* smem_ptr, const void* glob_ptr) {
-  const int BYTES = 16;
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile(
-      "{\n"
-      "   cp.async.cg.shared.global [%0], [%1], %2;\n"
-      "}\n" ::"r"(smem),
-      "l"(glob_ptr), "n"(BYTES));
-}
 
 // NOTE(HandH1998): cp.async.cg only support BYTES = 16, however,
 // cp.async.ca can support BYTES = 4, 8, 16;
@@ -104,17 +73,6 @@ __device__ inline void cp_async1(void* smem_ptr, const void* glob_ptr) {
       "   cp.async.ca.shared.global [%0], [%1], %2;\n"
       "}\n" ::"r"(smem),
       "l"(glob_ptr), "n"(BYTES));
-}
-
-// Async copy fence.
-__device__ inline void cp_async_fence() {
-  asm volatile("cp.async.commit_group;\n" ::);
-}
-
-// Wait until at most `n` async copy stages are still pending.
-template <int n>
-__device__ inline void cp_async_wait() {
-  asm volatile("cp.async.wait_group %0;\n" ::"n"(n));
 }
 
 // m16n8k16 tensor core mma instruction with int8 inputs and int32
@@ -133,7 +91,7 @@ __device__ inline void mma(const FragA& a_frag, const FragB& frag_b,
 }
 
 // Instruction for loading a full 16x16 matrix fragment of operand A from shared
-// memory, directly in tensor core layout.
+// memory, directly in int8 tensor core layout.
 __device__ inline void ldsm4(FragA& frag_a, const void* smem_ptr) {
   uint32_t* a = reinterpret_cast<uint32_t*>(&frag_a);
   uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
@@ -158,6 +116,18 @@ inline __device__ float int32_to_float(int h) {
   return res;
 }
 
+// Lookup-table based 3-input logical operation; explicitly used for
+// dequantization as the compiler does not seem to automatically recognize it in
+// all cases.
+template <int lut>
+__device__ inline int lop3(int a, int b, int c) {
+  int res;
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(res)
+               : "r"(a), "r"(b), "r"(c), "n"(lut));
+  return res;
+}
+
 // Efficiently dequantize an int32 value into a full B-fragment of 4 int8 values
 // for weight per channel dequant.
 __device__ inline FragB dequant_per_channel(int q) {
@@ -167,21 +137,8 @@ __device__ inline FragB dequant_per_channel(int q) {
   return frag_b;
 }
 
-// Lookup-table based 3-input logical operation;
-// explicitly used for dequantization as the compiler does not seem to
-// automatically recognize it in all cases.
-template <int lut>
-__device__ inline uint32_t lop3(uint32_t a, uint32_t b, uint32_t c) {
-  uint32_t res;
-  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
-               : "=r"(res)
-               : "r"(a), "r"(b), "r"(c), "n"(lut));
-  return res;
-}
-
-// TODO(HandH1998): optimize dequant_per_group, as it doesn't have a very good
-// performance for now Efficiently dequantize an int32 value into a full
-// B-fragment of 4 int8 values for weight per group dequant.
+// Efficiently dequantize an int32 value into a full B-fragment of 4 int8 values
+// for weight per group dequant.
 __device__ inline FragB dequant_per_group(int q, FragS_GROUP& frag_s, int i) {
   static constexpr uint32_t LO = 0x000f000f;
   static constexpr uint32_t HI = 0x00f000f0;
@@ -224,39 +181,6 @@ __device__ inline FragB dequant_per_group(int q, FragS_GROUP& frag_s, int i) {
                : "r"(t0), "r"(t1), "n"(MASK_0246));
   frag_b[0] = (uint8s ^ UINT8s_TO_INT8s_MASK);
   return frag_b;
-}
-
-// Wait until barrier reaches `count`, then lock for current threadblock.
-__device__ inline void barrier_acquire(int* lock, int count) {
-  if (threadIdx.x == 0) {
-    int state = -1;
-    do
-      // Guarantee that subsequent writes by this threadblock will be visible
-      // globally.
-      asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
-                   : "=r"(state)
-                   : "l"(lock));
-    while (state != count);
-  }
-  __syncthreads();
-}
-
-// Release barrier and increment visitation count.
-__device__ inline void barrier_release(int* lock, bool reset = false) {
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    if (reset) {
-      lock[0] = 0;
-      return;
-    }
-    int val = 1;
-    // Make sure that all writes since acquiring this barrier are visible
-    // globally, while releasing the barrier.
-    asm volatile("fence.acq_rel.gpu;\n");
-    asm volatile("red.relaxed.gpu.global.add.s32 [%0], %1;\n"
-                 :
-                 : "l"(lock), "r"(val));
-  }
 }
 
 template <const int threads,          // number of threads in a threadblock
@@ -500,7 +424,7 @@ __global__ void Marlin(
   }
 
   // Since B-accesses have non-constant stride they have to be computed at
-  // runtime; we break dependicies between subsequent accesses with a tile by
+  // runtime; we break dependencies between subsequent accesses with a tile by
   // maintining multiple pointers (we have enough registers), a tiny
   // optimization.
   const int4* B_ptr[b_sh_wr_iters];
@@ -581,7 +505,7 @@ __global__ void Marlin(
     // It may seem inefficient that we reload the groups for every sub-tile;
     // however, this does not seem to be a significant bottleneck, while some
     // theoretically better attempts have lead to bad instruction ordering by
-    // the compiler and correspondingly a noticable drop in performance.
+    // the compiler and correspondingly a noticeable drop in performance.
     if constexpr (group_blocks != -1) {
       int4* sh_s3_stage =
           sh_s3 + s3_sh_stage * ((group_blocks / thread_k_blocks) *
@@ -683,9 +607,9 @@ __global__ void Marlin(
   };
 
   // Since multiple threadblocks may process parts of the same column slice, we
-  // finally have to globally reduce over the results. As the striped partioning
-  // minimizes the number of such reductions and our outputs are usually rather
-  // small, we perform this reduction serially in L2 cache.
+  // finally have to globally reduce over the results. As the striped
+  // partitioning minimizes the number of such reductions and our outputs are
+  // usually rather small, we perform this reduction serially in L2 cache.
   // global_reduce works on INT32 elements, which are the results of INT8 GEMM.
   // This is why we need another INT32 maxtrix `C` to reduce instead of the
   // original half matrix `D`.
@@ -870,7 +794,7 @@ __global__ void Marlin(
 
     // Process results and, if necessary, proceed to the next column slice.
     // While this pattern may not be the most readable, other ways of writing
-    // the loop seemed to noticeably worse performance after compliation.
+    // the loop seemed to noticeably worse performance after compilation.
     if (slice_iters == 0) {
       cp_async_wait<0>();
       bool last = slice_idx == slice_count - 1;
@@ -1199,11 +1123,11 @@ void marlin_qqq_cuda(const void* A, const void* B, void* C, void* D, void* s1,
   }
 }
 }  // namespace qqq
-}  // namespace vllm
 
-torch::Tensor marlin_qqq_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                              torch::Tensor& s1, torch::Tensor& s2,
-                              torch::Tensor& s3, torch::Tensor& workspace,
+torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
+                              torch::Tensor const& b_q_weight,
+                              torch::Tensor const& s1, torch::Tensor const& s2,
+                              torch::Tensor const& s3, torch::Tensor& workspace,
                               int64_t size_m, int64_t size_n, int64_t size_k) {
   // Verify M
   TORCH_CHECK(size_m == a.size(0),
@@ -1217,13 +1141,13 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(size_k == a.size(1),
               "Shape mismatch: a.size(1) = " + str(a.size(1)) +
                   ", size_k = " + str(size_k));
-  TORCH_CHECK(size_k % vllm::qqq::tile_size == 0,
-              "size_k = " + str(size_k) + " is not divisible by tile_size = " +
-                  str(vllm::qqq::tile_size));
-  TORCH_CHECK((size_k / vllm::qqq::tile_size) == b_q_weight.size(0),
-              "Shape mismatch: b_q_weight.size(0) = " +
-                  str(b_q_weight.size(0)) + ", size_k = " + str(size_k) +
-                  ", tile_size = " + str(vllm::qqq::tile_size));
+  TORCH_CHECK(size_k % qqq::tile_size == 0,
+              "size_k = " + str(size_k) +
+                  " is not divisible by tile_size = " + str(qqq::tile_size));
+  TORCH_CHECK(
+      (size_k / qqq::tile_size) == b_q_weight.size(0),
+      "Shape mismatch: b_q_weight.size(0) = " + str(b_q_weight.size(0)) +
+          ", size_k = " + str(size_k) + ", tile_size = " + str(qqq::tile_size));
 
   int groupsize = (s3.numel() == 0) ? -1 : size_k / s3.size(0);
   // Verify groupsize
@@ -1234,10 +1158,9 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(s2.numel() == size_n,
               "Shape mismatch: s2.numel() = " + str(s2.numel()) +
                   ", size_n = " + str(size_n));
-  TORCH_CHECK(
-      b_q_weight.size(1) % vllm::qqq::tile_size == 0,
-      "b_q_weight.size(1) = " + str(b_q_weight.size(1)) +
-          " is not divisible by tile_size = " + str(vllm::qqq::tile_size));
+  TORCH_CHECK(b_q_weight.size(1) % qqq::tile_size == 0,
+              "b_q_weight.size(1) = " + str(b_q_weight.size(1)) +
+                  " is not divisible by tile_size = " + str(qqq::tile_size));
   if (groupsize != -1) {
     TORCH_CHECK(s3.size(1) == size_n,
                 "Shape mismatch: s3.size(1) = " + str(s3.size(1)) +
@@ -1248,7 +1171,7 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   }
 
   int actual_size_n =
-      (b_q_weight.size(1) / vllm::qqq::tile_size) * vllm::qqq::pack_factor_4bit;
+      (b_q_weight.size(1) / qqq::tile_size) * qqq::pack_factor_4bit;
   TORCH_CHECK(size_n == actual_size_n,
               "Shape mismatch: size_n = " + str(size_n) +
                   ", actual_size_n = " + str(actual_size_n));
@@ -1277,12 +1200,11 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(s3.dtype() == torch::kFloat16, "s3's dtype is not float16");
 
   // Verify workspace size
-  TORCH_CHECK(size_n % vllm::qqq::min_thread_n == 0,
-              "size_n = " + str(size_n) +
-                  ", is not divisible by min_thread_n = " +
-                  str(vllm::qqq::min_thread_n));
-  int min_workspace_size =
-      (size_n / vllm::qqq::min_thread_n) * vllm::qqq::max_par;
+  TORCH_CHECK(
+      size_n % qqq::min_thread_n == 0,
+      "size_n = " + str(size_n) +
+          ", is not divisible by min_thread_n = " + str(qqq::min_thread_n));
+  int min_workspace_size = (size_n / qqq::min_thread_n) * qqq::max_par;
   TORCH_CHECK(workspace.numel() >= min_workspace_size,
               "workspace.numel = " + str(workspace.numel()) +
                   " is below min_workspace_size = " + str(min_workspace_size));
@@ -1290,7 +1212,7 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   // Alloc C matrix
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto options_c = torch::TensorOptions().dtype(torch::kInt).device(a.device());
-  torch::Tensor c = torch::empty({vllm::qqq::max_par * 64, size_n}, options_c);
+  torch::Tensor c = torch::empty({qqq::max_par * 64, size_n}, options_c);
 
   // Alloc D matrix
   auto options_d =
@@ -1307,11 +1229,11 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   int sms = -1;
 
   int dev = a.get_device();
-  vllm::qqq::marlin_qqq_cuda(
+  qqq::marlin_qqq_cuda(
       a.data_ptr(), b_q_weight.data_ptr(), c.data_ptr(), d.data_ptr(),
       s1.data_ptr(), s2.data_ptr(), s3.data_ptr(), size_m, size_n, size_k,
       workspace.data_ptr(), groupsize, dev, at::cuda::getCurrentCUDAStream(dev),
-      thread_k, thread_n, sms, vllm::qqq::max_par);
+      thread_k, thread_n, sms, qqq::max_par);
 
   return d;
 }

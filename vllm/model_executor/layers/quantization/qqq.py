@@ -12,46 +12,64 @@ from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
+MARLIN_QQQ_TILE = 16
+MARLIN_QQQ_MIN_THREAD_N = 64
+MARLIN_QQQ_MIN_THREAD_K = 128
+MARLIN_QQQ_MAX_PARALLEL = 16
+
+MARLIN_QQQ_SUPPORTED_NUM_BITS = [4]
+MARLIN_QQQ_SUPPORTED_GROUP_SIZES = [-1, 128]
+MARLIN_SUPPORTED_SYM = [True]
+
 
 class QQQConfig(QuantizationConfig):
     """Config class for QQQ
-    TODO(HandH1998): add reference later
-    Reference: 
+    
+    Reference: https://arxiv.org/pdf/2406.09904
     """
 
     def __init__(
         self,
+        weight_bits: int,
         group_size: int,
     ) -> None:
-        # Group size for the quantization.
+        self.weight_bits = weight_bits
         self.group_size = group_size
-        if self.group_size != 128 and self.group_size != -1:
+
+        # Verify
+        if self.weight_bits not in MARLIN_QQQ_SUPPORTED_NUM_BITS:
             raise ValueError(
-                "Currently, only group size 128 and -1 (channelwise) "
-                "is supported for QQQ, but got group_size of "
-                f"{self.group_size}")
+                f"QQQ does not support weight_bits = {self.weight_bits}. "
+                f"Only weight_bits = {MARLIN_QQQ_SUPPORTED_NUM_BITS} "
+                "are supported.")
+        if self.group_size not in MARLIN_QQQ_SUPPORTED_GROUP_SIZES:
+            raise ValueError(
+                f"QQQ does not support group_size = {self.group_size}. "
+                f"Only group_sizes = {MARLIN_QQQ_SUPPORTED_GROUP_SIZES} "
+                "are supported.")
 
         # 4 Bits packed into 32 bit datatype.
-        self.pack_factor = 32 // 4
+        self.pack_factor = 32 // self.weight_bits
 
         # Tile size used by QQQ kernels.
-        self.tile_size = 16
+        self.tile_size = MARLIN_QQQ_TILE
 
         # Min out_features dim
-        self.min_n_threads = 64
+        self.min_n_threads = MARLIN_QQQ_MIN_THREAD_N
 
         # Min in_features dim
-        self.min_k_threads = 128
+        self.min_k_threads = MARLIN_QQQ_MIN_THREAD_K
 
         # Max parallel problems to solve at once (improves large
         # batch performance)
-        self.max_parallel = 16
+        self.max_parallel = MARLIN_QQQ_MAX_PARALLEL
 
         # Permutation length used by the QQQ kernels.
         self.perm_len = 1024
 
     def __repr__(self) -> str:
-        return f"QQQConfig(group_size={self.group_size})"
+        return "QQQConfig(weight_bits={}, group_size={})".format(
+            self.weight_bits, self.group_size)
 
     @classmethod
     def get_name(cls) -> str:
@@ -75,8 +93,9 @@ class QQQConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "QQQConfig":
+        weight_bits = cls.get_from_keys(config, ["wbits"])
         group_size = cls.get_from_keys(config, ["group_size"])
-        return cls(group_size)
+        return cls(weight_bits, group_size)
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["QQQLinearMethod"]:
@@ -249,8 +268,8 @@ class QQQLinearMethod(LinearMethodBase):
 
         x_int8, s1 = ops.scaled_int8_quant(x_2d)
 
-        output_2d = ops.qqq_gemm(x_int8, qweight, s1, s2, s3, workspace,
-                                 size_m, size_n, size_k)
+        output_2d = ops.marlin_qqq_gemm(x_int8, qweight, s1, s2, s3, workspace,
+                                        size_m, size_n, size_k)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 

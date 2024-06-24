@@ -94,9 +94,10 @@ void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales);
 
-torch::Tensor marlin_qqq_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                              torch::Tensor& s1, torch::Tensor& s2,
-                              torch::Tensor& s3, torch::Tensor& workspace,
+torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
+                              torch::Tensor const& b_q_weight,
+                              torch::Tensor const& s1, torch::Tensor const& s2,
+                              torch::Tensor const& s3, torch::Tensor& workspace,
                               int64_t size_m, int64_t size_n, int64_t size_k);
 #endif
 
