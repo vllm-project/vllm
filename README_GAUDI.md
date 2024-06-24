@@ -100,6 +100,10 @@ The following configurations have been validated to be function with Gaudi devic
 -   [meta-llama/Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf)
     with tensor parallelism 8x HPU, BF16 datatype with random
     or greedy sampling
+-   [mistralai/Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3)
+    on single HPU or with tensor parallelism 2x HPU, BF16 datatype with random or greedy sampling
+-   [mistralai/Mixtral-8x7B-Instruct-v0.1](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1)
+    with tensor parallelism 2x HPU, BF16 datatype with random or greedy sampling
 
 
 
