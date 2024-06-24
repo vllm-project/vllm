@@ -145,7 +145,7 @@ class ShmRingBufferIO:
     @contextmanager
     def acquire_write(self):
         assert self._is_writer, "Only writers can acquire write"
-        start_time = time.time()
+        start_time = time.monotonic()
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
@@ -161,7 +161,7 @@ class ShmRingBufferIO:
                     time.sleep(1e-7)
 
                     # if we wait for a long time, we should warn the user
-                    if time.time(
+                    if time.monotonic(
                     ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
                         logger.warning(
                             "No available block found in %s second. ",
@@ -196,7 +196,7 @@ class ShmRingBufferIO:
     @contextmanager
     def acquire_read(self):
         assert self._is_reader, "Only readers can acquire read"
-        start_time = time.time()
+        start_time = time.monotonic()
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
@@ -215,7 +215,7 @@ class ShmRingBufferIO:
                     time.sleep(1e-7)
 
                     # if we wait for a long time, we should warn the user
-                    if time.time(
+                    if time.monotonic(
                     ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
                         logger.warning(
                             "No available block found in %s second. ",
