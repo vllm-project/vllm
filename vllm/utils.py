@@ -822,7 +822,13 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         processed_args = []
         for arg in args:
             if arg.startswith('--'):
-                processed_args.append('--' + arg[len('--'):].replace('_', '-'))
+                if '=' in arg:
+                    key, value = arg.split('=', 1)
+                    key = '--' + key[len('--'):].replace('_', '-')
+                    processed_args.append(f'{key}={value}')
+                else:
+                    processed_args.append('--' +
+                                          arg[len('--'):].replace('_', '-'))
             else:
                 processed_args.append(arg)
 
