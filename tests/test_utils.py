@@ -151,26 +151,32 @@ def test_underscore_to_dash(parser):
 
 
 def test_mixed_usage(parser):
-    args = parser.parse_args(
-        ['--image_input_type', 'image_features', '--model-name', 'gpt2'])
+    args = parser.parse_args([
+        '--image_input_type', 'image_features', '--model-name',
+        'facebook/opt-125m'
+    ])
     assert args.image_input_type == 'image_features'
-    assert args.model_name == 'gpt2'
+    assert args.model_name == 'facebook/opt-125m'
 
 
 def test_with_equals_sign(parser):
     args = parser.parse_args(
-        ['--image_input_type=pixel_values', '--model-name=bert'])
+        ['--image_input_type=pixel_values', '--model-name=facebook/opt-125m'])
     assert args.image_input_type == 'pixel_values'
-    assert args.model_name == 'bert'
+    assert args.model_name == 'facebook/opt-125m'
 
 
 def test_with_int_value(parser):
     args = parser.parse_args(['--batch_size', '32'])
     assert args.batch_size == 32
+    args = parser.parse_args(['--batch-size', '32'])
+    assert args.batch_size == 32
 
 
 def test_with_bool_flag(parser):
     args = parser.parse_args(['--enable_feature'])
+    assert args.enable_feature is True
+    args = parser.parse_args(['--enable-feature'])
     assert args.enable_feature is True
 
 
@@ -183,4 +189,3 @@ def test_missing_required_argument(parser):
     parser.add_argument('--required-arg', required=True)
     with pytest.raises(SystemExit):
         parser.parse_args([])
-
