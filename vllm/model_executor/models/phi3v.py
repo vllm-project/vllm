@@ -348,7 +348,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
             _, _, _, h, w = image.shape
         else:
             w, h = image.size
-        
+
         w, h = _calc_hd_transform_size(w, h)
 
         image_feature_size = _get_phi3v_image_feature_size(input_width=w,
@@ -356,20 +356,20 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     else:
         image_features = multi_modal_data.image_features
         image_feature_size = image_features.shape[-2]
-    
+
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     tokenizer = _cached_get_tokenizer(model_config.tokenizer)
 
     # We need to get the token for "<", not "▁<"
     # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/raw/main/tokenizer.json
     a_token_id, = tokenizer.encode("a", add_special_tokens=False)
-    a_token_id_, *image_1_token_ids = tokenizer.encode("a<|image_1|>",
-                                                       add_special_tokens=False)
+    a_token_id_, *image_1_token_ids = tokenizer.encode(
+        "a<|image_1|>", add_special_tokens=False)
     assert a_token_id == a_token_id_
 
     new_token_ids: List[int] = []
     for i in range(len(prompt_token_ids) - len(image_1_token_ids) + 1):
-        if prompt_token_ids[i:i+len(image_1_token_ids)] == image_1_token_ids:
+        if prompt_token_ids[i:i + len(image_1_token_ids)] == image_1_token_ids:
             new_token_ids.append(multimodal_config.image_token_id)
 
             # No need to further scan the list since we only replace once
