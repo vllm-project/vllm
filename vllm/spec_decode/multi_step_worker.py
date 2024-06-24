@@ -1,6 +1,6 @@
 import copy
 import weakref
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -25,10 +25,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     requires more thought for MultiStepWorker support.
     """
 
-    def __init__(self, **kwargs):
-        """Create a MultiStepWorker.
-        """
-        super().__init__(**kwargs)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
@@ -46,16 +44,6 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     def set_include_gpu_probs_tensor(self) -> None:
         # Need include_gpu_probs_tensor for multi_step_worker
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
-
-    def load_model(self) -> None:
-        super().load_model()
-
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        return super().determine_num_available_blocks()
-
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        super().initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @torch.inference_mode()
     def sampler_output(
@@ -105,6 +93,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
+
         return self._proposer.get_spec_proposals(execute_model_req)
 
     @staticmethod
@@ -218,13 +207,3 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 execute_model_req.seq_group_metadata_list):
             raise NotImplementedError(
                 "MultiStepWorker does not support beam search.")
-
-    @torch.inference_mode()
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
-        return super().execute_model(execute_model_req)
-
-    def get_cache_block_size_bytes(self) -> int:
-        return super().get_cache_block_size_bytes()
