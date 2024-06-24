@@ -35,7 +35,8 @@ from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import (DummyImageDataFactories, ImageFeatureData,
-                                   ImageInputProcessors, ImagePixelData)
+                                   ImageInputProcessors, ImagePixelData,
+                                   _cached_get_tokenizer)
 from vllm.sequence import SamplerOutput
 
 _KEYS_TO_MODIFY_MAPPING = {
@@ -287,29 +288,8 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
     return seq_data, mm_data
 
 
-def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
-    if multi_modal_data is None or not isinstance(
-            multi_modal_data, (ImagePixelData, ImageFeatureData)):
-        return llm_inputs
-
-    model_config = ctx.model_config
-    multimodal_config = ctx.get_multimodal_config()
-
-    # TODO: Dynamic feature size
-    return ImageInputProcessors.input_processor_for_clip(
-        model_config,
-        multimodal_config,
-        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-        llm_inputs,
-        image_token_id=32044,
-        image_feature_size_override=1921,
-    )
-
-
-# FIXME(Isotr0py): Remove these after dynamic num_img_tokens is supported
 # copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
-def calc_padded_size(width, height, padding_unit=336):
+def _calc_padded_size(width, height, padding_unit=336):
     target_height = int(np.ceil(height / padding_unit) * padding_unit)
     top_padding = int((target_height - height) / 2)
     bottom_padding = target_height - height - top_padding
@@ -319,7 +299,7 @@ def calc_padded_size(width, height, padding_unit=336):
 
 
 # copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
-def calc_hd_transform_size(width, height, hd_num=16):
+def _calc_hd_transform_size(width, height, hd_num=16):
     transposed = False
     if width < height:
         width, height = height, width
@@ -334,12 +314,83 @@ def calc_hd_transform_size(width, height, hd_num=16):
     new_width = int(scale * 336)
     new_height = int(new_width / ratio)
 
-    padded_width, padded_height = calc_padded_size(new_width, new_height)
+    padded_width, padded_height = _calc_padded_size(new_width, new_height)
 
     if transposed:
         padded_width, padded_height = padded_height, padded_width
 
     return padded_width, padded_height
+
+
+def _get_phi3v_image_feature_size(
+    *,
+    input_height: int,
+    input_width: int,
+) -> int:
+    h, w = input_height, input_width
+
+    # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L178
+    return (h // 336 * w // 336 + 1) * 144 + 1 + (h // 336 + 1) * 12
+
+
+def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or not isinstance(
+            multi_modal_data, (ImagePixelData, ImageFeatureData)):
+        return llm_inputs
+
+    model_config = ctx.model_config
+    multimodal_config = ctx.get_multimodal_config()
+
+    if isinstance(multi_modal_data, ImagePixelData):
+        image = multi_modal_data.image
+        if isinstance(image, torch.Tensor):
+            _, _, _, h, w = image.shape
+        else:
+            w, h = image.size
+        
+        w, h = _calc_hd_transform_size(w, h)
+
+        image_feature_size = _get_phi3v_image_feature_size(input_width=w,
+                                                           input_height=h)
+    else:
+        image_features = multi_modal_data.image_features
+        image_feature_size = image_features.shape[-2]
+    
+    prompt_token_ids = llm_inputs["prompt_token_ids"]
+    tokenizer = _cached_get_tokenizer(model_config.tokenizer)
+
+    # We need to get the token for "<", not "▁<"
+    # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/raw/main/tokenizer.json
+    a_token_id, = tokenizer.encode("a", add_special_tokens=False)
+    a_token_id_, *image_1_token_ids = tokenizer.encode("a<|image_1|>",
+                                                       add_special_tokens=False)
+    assert a_token_id == a_token_id_
+
+    new_token_ids: List[int] = []
+    for i in range(len(prompt_token_ids) - len(image_1_token_ids) + 1):
+        if prompt_token_ids[i:i+len(image_1_token_ids)] == image_1_token_ids:
+            new_token_ids.append(multimodal_config.image_token_id)
+
+            # No need to further scan the list since we only replace once
+            new_token_ids.extend(prompt_token_ids[i + len(image_1_token_ids):])
+            break
+        else:
+            new_token_ids.append(prompt_token_ids[i])
+
+    # NOTE: Create a defensive copy of the original inputs
+    llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
+                           prompt=llm_inputs.get("prompt"),
+                           multi_modal_data=multi_modal_data)
+
+    return ImageInputProcessors.input_processor_for_clip(
+        model_config,
+        multimodal_config,
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        llm_inputs,
+        image_token_id=multimodal_config.image_token_id,
+        image_feature_size_override=image_feature_size,
+    )
 
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()

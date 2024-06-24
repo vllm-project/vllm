@@ -1,3 +1,4 @@
+import re
 from typing import List, Tuple
 
 import pytest
@@ -54,16 +55,17 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     image_token_id = vlm_config.image_token_id
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    image_token_str = tokenizer.decode(image_token_id)
+    image_token_str = tokenizer.decode(image_token_id).replace("|", r"\|")
 
     hf_input_ids = [
         input_id if input_id != image_token_id else 0
         for idx, input_id in enumerate(input_ids)
+        if input_id != image_token_id or input_ids[idx - 1] != image_token_id
     ]
-    hf_output_str = output_str \
-        .replace(image_token_str * vlm_config.image_feature_size, "") \
-        .replace("<|user|>", "") \
+    hf_output_str = output_str.replace("<|user|>", "") \
         .replace("<|end|>\n<|assistant|>", " ")
+    hf_output_str = re.sub(fr"({image_token_str})+", " ", hf_output_str)
+    hf_output_str = re.sub(r"(<\|image_\d+\|>)+", " ", hf_output_str)
 
     return hf_input_ids, hf_output_str
 
@@ -74,11 +76,6 @@ if is_cpu():
 
 
 # TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
-# Since we use _attn_implementation="eager" for hf_runner, here is
-# numeric difference for longer context and test can't pass
-@pytest.mark.xfail(
-    reason="Inconsistent image processor being used due to lack "
-    "of support for dynamic image token replacement")
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
