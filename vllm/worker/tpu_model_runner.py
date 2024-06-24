@@ -329,10 +329,11 @@ class TPUModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         padded_batch_size: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
         t = []
         p = []
+        n = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.sampling_params is not None
             sampling_params = seq_group_metadata.sampling_params
@@ -340,13 +341,25 @@ class TPUModelRunner:
             t.append(sampling_params.temperature
                      if sampling_params.temperature >= 1e-5 else 1e-5)
             p.append(sampling_params.top_p)
+            n.append(sampling_params.n)
         num_paddings = padded_batch_size - len(seq_group_metadata_list)
         t += [1.0] * num_paddings
         p += [1.0] * num_paddings
+        n += [1] * num_paddings
+
+        if any(top_p != 1 for top_p in p):
+            raise NotImplementedError(
+                "Top-p sampling is currently not supported by the TPU "
+                "backend due to performance issues.")
+        if any(num_samples != 1 for num_samples in n):
+            raise NotImplementedError(
+                "Parallel sampling (n > 1) is currently not supported by the "
+                "TPU backend due to performance issues.")
 
         t = torch.tensor(t, dtype=torch.float32, device=self.device)
         p = torch.tensor(p, dtype=torch.float32, device=self.device)
-        return t, p
+        n = torch.tensor(n, dtype=torch.int32, device=self.device)
+        return t, p, n
 
     def prepare_inputs(
         self,
@@ -429,6 +442,7 @@ class ModelWrapper(nn.Module):
         input_lens: torch.Tensor,
         t: torch.Tensor,
         p: torch.Tensor,
+        n: torch.Tensor,
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
