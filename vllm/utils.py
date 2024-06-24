@@ -773,6 +773,7 @@ def _cuda_device_count_stateless() -> int:
             return torch._C._cuda_getDeviceCount()
     return torch.cuda._device_count_nvml()
 
+
 def cuda_device_count_stateless() -> int:
     """Get number of CUDA devices, caching based on the value of
     CUDA_VISIBLE_DEVICES at the time of call.
