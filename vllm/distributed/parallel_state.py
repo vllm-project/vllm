@@ -681,7 +681,7 @@ def model_parallel_is_initialized():
     return (_TP is not None and _PP is not None)
 
 
-TP_STATE_PATCHED = False
+_TP_STATE_PATCHED = False
 
 
 @contextmanager
@@ -694,10 +694,10 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
     Args:
         tp_group (GroupCoordinator): the tp group coordinator
     """
-    global TP_STATE_PATCHED
-    assert not TP_STATE_PATCHED, "Should not call when it's already patched"
+    global _TP_STATE_PATCHED
+    assert not _TP_STATE_PATCHED, "Should not call when it's already patched"
 
-    TP_STATE_PATCHED = True
+    _TP_STATE_PATCHED = True
     old_tp_group = get_tp_group()
     global _TP
     _TP = tp_group
@@ -705,7 +705,7 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         yield
     finally:
         # restore the original state
-        TP_STATE_PATCHED = False
+        _TP_STATE_PATCHED = False
         _TP = old_tp_group
 
 
