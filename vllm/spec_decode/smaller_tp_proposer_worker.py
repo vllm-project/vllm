@@ -92,6 +92,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         if self._is_dummy:
+            # this case is not used now
             return -1, -1
 
         with self._patch_tensor_parallel_group():
