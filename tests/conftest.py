@@ -113,6 +113,12 @@ def example_prompts() -> List[str]:
         prompts += _read_prompts(filename)
     return prompts
 
+@pytest.fixture
+def example_encoder_decoder_prompts() -> List[str]:
+    prompts = []
+    for filename in _TEST_PROMPTS:
+        prompts += _read_prompts(filename)
+    return prompts
 
 @pytest.fixture
 def example_long_prompts() -> List[str]:
