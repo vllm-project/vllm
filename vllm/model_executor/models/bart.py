@@ -159,7 +159,12 @@ class BartLearnedPositionalEmbedding(nn.Embedding):
             seq_lens=attn_metadata.encoder_seq_lens
         else:
             # AttentionType.DECODER
-            seq_lens=attn_metadata.seq_lens
+            if attn_metadata.num_prefill_tokens > 0:
+                # Prefill
+                seq_lens=attn_metadata.seq_lens
+            else:
+                # Decode: infer one (1) new token per sequence
+                seq_lens=[1]*len(attn_metadata.seq_lens)
 
         positions=[]
         for seq_len in seq_lens:
@@ -793,10 +798,10 @@ class BartDecoder(nn.Module):
         inputs_embeds = self.embed_tokens(input)
 
         # embed positions
-        decoder_positions = self.embed_positions(input,AttentionType.DECODER,attn_metadata)
-        decoder_positions = decoder_positions.to(inputs_embeds.device)
+        embed_pos = self.embed_positions(input,AttentionType.DECODER,attn_metadata)
+        embed_pos = embed_pos.to(inputs_embeds.device)
 
-        hidden_states = inputs_embeds + decoder_positions
+        hidden_states = inputs_embeds + embed_pos
         hidden_states = self.layernorm_embedding(hidden_states)
 
         # decoder layers
@@ -880,6 +885,8 @@ class BartModel(nn.Module):
             encoder_input_ids: torch.Tensor, encoder_positions: torch.Tensor,
             kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata
     ) -> Union[Tuple, Seq2SeqModelOutput]:
+
+        encoder_hidden_states = None
 
         if encoder_input_ids.numel() > 0:
             # Run encoder attention if a non-zero number of encoder tokens
