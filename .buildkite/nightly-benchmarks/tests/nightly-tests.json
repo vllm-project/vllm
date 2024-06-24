@@ -28,7 +28,7 @@
         },
         "trt_server_parameters": {
             "model_path": "meta-llama/Llama-2-70b-chat-hf",
-            "model_name": "llama-2-7b-chat-hf",
+            "model_name": "llama-2-70b-chat-hf",
             "model_type": "llama",
             "model_dtype": "float16",
             "model_tp_size": 4,
