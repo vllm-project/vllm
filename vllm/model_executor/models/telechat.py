@@ -101,12 +101,6 @@ class TELECHATAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        if self.head_dim * self.total_num_heads != self.embed_dim:
-            raise ValueError(
-                "`embed_dim` must be divisible by num_heads "
-                f"(got `embed_dim`: {self.embed_dim} and `num_heads`: {self.num_heads})."
-            )
-
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
                 config, "original_max_position_embeddings", None):
