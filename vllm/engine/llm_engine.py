@@ -558,7 +558,8 @@ class LLMEngine:
                 # (leave decoder input to default)
                 inputs = {"encoder_prompt": inputs}
 
-            if isinstance(inputs, EncoderDecoderStringPrompts):
+            if isinstance(inputs, tuple) and len(inputs) == 2:
+                # Detect input which is EncoderDecoderStringPrompts (i.e. Tuple[str,str])
                 # Interpret a tuple of input string prompts as a single
                 # encoder input and a single decoder input, respectively
                 inputs = {
