@@ -80,17 +80,16 @@ def test_draft_model_tp_lt_target_model_tp4(test_llm_generator,
         # cleaned up properly, and its server host thread leaks, causing the
         # second run of the test to fail with internal NCCL error.
         "use_async": True,
-
     }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    {
+@pytest.mark.parametrize(
+    "per_test_common_llm_kwargs",
+    [{
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
         # Artificially limit the draft model max model len; this forces vLLM
         # to skip speculation once the sequences grow beyond 32-k tokens.
         "speculative_max_model_len": 32,
-    },
-])
+    }])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
