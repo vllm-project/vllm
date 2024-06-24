@@ -144,7 +144,7 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
         speculative tokens per sequence is determined by max_proposal_len.
         """
         return self._proposer.get_spec_proposals(
-            execute_model_req)
+            execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
     def _raise_if_unsupported(
         self,
