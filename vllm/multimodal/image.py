@@ -7,6 +7,7 @@ from transformers import CLIPVisionConfig
 
 from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
+from vllm.model_executor.models.clip import get_clip_num_patches
 from vllm.logger import init_logger
 from vllm.sequence import SequenceData
 from vllm.transformers_utils.image_processor import get_image_processor
@@ -18,17 +19,9 @@ logger = init_logger(__name__)
 _cached_get_image_processor = lru_cache(get_image_processor)
 
 
-def get_clip_num_patches(hf_config: CLIPVisionConfig) -> int:
-    image_size = hf_config.image_size
-    patch_size = hf_config.patch_size
-
-    assert image_size % patch_size == 0
-    return image_size // patch_size
-
-
 def get_clip_image_feature_size(hf_config: CLIPVisionConfig) -> int:
-    num_patches = get_clip_num_patches(hf_config)
-    return num_patches * num_patches
+    return get_clip_num_patches(image_size=hf_config.image_size,
+                                patch_size=hf_config.patch_size)
 
 
 class DummyImageDataFactories:
