@@ -197,6 +197,9 @@ steps:
   gpu: a100
   num_gpus: 4
   commands: 
+  # FIXIT: find out which code initialize cuda before running the test
+  # before the fix, we need to use spawn to test it
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
