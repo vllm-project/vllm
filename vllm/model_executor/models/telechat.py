@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -56,9 +56,6 @@ class TELECHATMLP(nn.Module):
         super().__init__()
         hidden_size = config.hidden_size
         bias = config.add_bias_linear
-        if config.activation_function=='silu':
-            up_intermediate_size = 2 * intermediate_size
-       
         self.c_fc = MergedColumnParallelLinear(
             input_size=hidden_size,
             output_sizes=[intermediate_size] * 2,
@@ -106,8 +103,8 @@ class TELECHATAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         if self.head_dim * self.total_num_heads != self.embed_dim:
             raise ValueError(
-                f"`embed_dim` must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
+                "`embed_dim` must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim} and `num_heads`: {self.num_heads})."
             )
 
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -171,9 +168,12 @@ class TELECHATBlock(nn.Module):
             quant_config=None
             ):
         super().__init__()
-        LayerNorm = nn.LayerNorm if not config.use_RMSNorm else RMSNorm
         hidden_size = config.hidden_size
-        inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
+        inner_dim = (
+            config.n_inner
+            if config.n_inner is not None
+            else 4 * hidden_size
+        )
         self.attn = TELECHATAttention(config, quant_config=quant_config)
         self.mlp = TELECHATMLP(inner_dim, config, quant_config=quant_config)
 
@@ -211,7 +211,6 @@ class TELECHATBlock(nn.Module):
 
 
 class TELECHATModel(nn.Module):
-    _keys_to_ignore_on_load_missing = [r"attn.masked_bias", r"attn.bias", r"lm_head.weight"]
     def __init__(
         self,
         config,
