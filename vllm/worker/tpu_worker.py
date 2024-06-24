@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
+from torch_xla._internal import pjrt
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
@@ -62,6 +63,10 @@ class TPUWorker(LoraNotSupportedWorkerBase):
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
+        if self.parallel_config.world_size > 1:
+            pjrt.initialize_multiprocess(self.local_rank,
+                                         self.parallel_config.world_size)
+
         self.device = xm.xla_device()
         self.device_config.device = self.device
         torch.set_grad_enabled(False)
