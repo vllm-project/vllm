@@ -165,7 +165,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
             model = self._lora_manager.model
             supported_lora_modules = model.supported_lora_modules
             packed_modules_mapping = model.packed_modules_mapping
-            expected_lora_modules = []
+            expected_lora_modules: List[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
                     expected_lora_modules.extend(
@@ -220,6 +220,9 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
 
     def remove_lora(self, lora_id: int) -> bool:
         return self._lora_manager.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self._lora_manager.pin_lora(lora_id)
 
     def remove_all_loras(self):
         self._lora_manager.remove_all_loras()

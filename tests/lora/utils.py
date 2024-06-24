@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import torch
 
@@ -9,13 +9,13 @@ class DummyLoRAManager:
 
     def __init__(self):
         super().__init__()
-        self._loras = {}
+        self._loras: Dict[str, LoRALayerWeights] = {}
 
     def set_module_lora(self, module_name: str, lora: LoRALayerWeights):
         self._loras[module_name] = lora
 
-    def get_module_lora(self, module_name: str) -> Optional[LoRALayerWeights]:
-        return self._loras.get(module_name, None)
+    def get_module_lora(self, module_name: str) -> LoRALayerWeights:
+        return self._loras[module_name]
 
     def init_random_lora(self,
                          module_name: str,
@@ -68,11 +68,11 @@ class DummyLoRAManager:
         module_name: str,
         input_dim: int,
         output_dims: List[int],
-        noop_lora_index: List[int] = None,
-        rank=8,
+        noop_lora_index: Optional[List[int]] = None,
+        rank: int = 8,
     ):
-        base_loras = []
-        noop_lora_index = set(noop_lora_index or [])
+        base_loras: List[LoRALayerWeights] = []
+        noop_lora_index_set = set(noop_lora_index or [])
 
         for i, out_dim in enumerate(output_dims):
             base_lora = self.init_lora(
@@ -80,7 +80,7 @@ class DummyLoRAManager:
                 input_dim,
                 out_dim,
                 rank=rank,
-                noop=i in noop_lora_index,
+                noop=i in noop_lora_index_set,
             )
             base_loras.append(base_lora)
         packed_lora = PackedLoRALayerWeights.pack(base_loras)

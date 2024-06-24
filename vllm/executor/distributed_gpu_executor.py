@@ -100,6 +100,13 @@ class DistributedGPUExecutor(GPUExecutor):
             lora_id=lora_id,
         )
 
+    def pin_lora(self, lora_id: int) -> bool:
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self._run_workers(
+            "pin_lora",
+            lora_id=lora_id,
+        )
+
     def list_loras(self) -> Set[int]:
         return self._run_workers("list_loras")
 

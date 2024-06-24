@@ -59,7 +59,7 @@ vLLM is flexible and easy to use with:
 - Tensor parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
-- Support NVIDIA GPUs, AMD GPUs, and Intel CPUs
+- Support NVIDIA GPUs, AMD GPUs, Intel CPUs and GPUs
 - (Experimental) Prefix caching support
 - (Experimental) Multi-lora support
 
@@ -112,6 +112,7 @@ vLLM is a community project. Our compute resources for development and testing a
 - Trainy
 - UC Berkeley
 - UC San Diego
+- ZhenFund
 
 We also have an official fundraising venue through [OpenCollective](https://opencollective.com/vllm). We plan to use the fund to support the development, maintenance, and adoption of vLLM.
 

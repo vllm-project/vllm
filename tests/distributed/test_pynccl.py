@@ -1,5 +1,6 @@
 import multiprocessing
 import os
+from typing import Dict, List
 
 import pytest
 import torch
@@ -17,9 +18,9 @@ from vllm.utils import update_environment_variables
 
 def distributed_run(fn, world_size):
     number_of_processes = world_size
-    processes = []
+    processes: List[multiprocessing.Process] = []
     for i in range(number_of_processes):
-        env = {}
+        env: Dict[str, str] = {}
         env['RANK'] = str(i)
         env['LOCAL_RANK'] = str(i)
         env['WORLD_SIZE'] = str(number_of_processes)
@@ -167,9 +168,13 @@ def send_recv_worker_fn():
                              dtype=torch.float32).cuda(pynccl_comm.rank)
     with pynccl_comm.change_state(enable=True):
         if pynccl_comm.rank == 0:
-            pynccl_comm.send(tensor)
+            pynccl_comm.send(tensor,
+                             dst=(pynccl_comm.rank + 1) %
+                             pynccl_comm.world_size)
         else:
-            pynccl_comm.recv(tensor)
+            pynccl_comm.recv(tensor,
+                             src=(pynccl_comm.rank - 1) %
+                             pynccl_comm.world_size)
     result = tensor.mean().cpu().item()
     assert result == 1
 
@@ -202,9 +207,13 @@ def multiple_send_recv_worker_fn():
                              device=device)
     with pynccl_comm.change_state(enable=True):
         if torch.distributed.get_rank() in [0, 1]:
-            pynccl_comm.send(tensor)
+            pynccl_comm.send(tensor,
+                             dst=(pynccl_comm.rank + 1) %
+                             pynccl_comm.world_size)
         else:
-            pynccl_comm.recv(tensor)
+            pynccl_comm.recv(tensor,
+                             src=(pynccl_comm.rank - 1) %
+                             pynccl_comm.world_size)
     result = tensor.mean().cpu().item()
     if torch.distributed.get_rank() in [0, 2]:
         assert result == 1

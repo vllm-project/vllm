@@ -1,12 +1,12 @@
-import argparse
 import random
 import time
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
+                        create_kv_caches_with_random)
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512
@@ -54,14 +54,17 @@ def main(
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
-    block_tables = []
+    block_tables_lst: List[List[int]] = []
     for _ in range(num_seqs):
         block_table = [
             random.randint(0, NUM_BLOCKS - 1)
             for _ in range(max_num_blocks_per_seq)
         ]
-        block_tables.append(block_table)
-    block_tables = torch.tensor(block_tables, dtype=torch.int, device=device)
+        block_tables_lst.append(block_table)
+
+    block_tables = torch.tensor(block_tables_lst,
+                                dtype=torch.int,
+                                device=device)
 
     # Create the KV cache.
     key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,
@@ -158,7 +161,7 @@ def main(
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Benchmark the paged attention kernel.")
     parser.add_argument("--version",
                         type=str,

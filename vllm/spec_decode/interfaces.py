@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
+
 import torch
 
 from vllm.sequence import ExecuteModelRequest
@@ -45,6 +46,9 @@ class SpeculativeScores:
     # Token ids sampled from the scoring model. Used for speculative bonus
     # tokens and also non-speculative normal decoding.
     token_ids: torch.Tensor
+
+    # Optional last hidden states from the scoring model.
+    hidden_states: Optional[torch.Tensor] = None
 
     def __repr__(self):
         return (f"SpeculativeScores("

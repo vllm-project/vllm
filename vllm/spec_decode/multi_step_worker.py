@@ -1,6 +1,6 @@
 import copy
 import weakref
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -249,7 +249,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         # Shallow-copy the list of SequenceGroupMetadata. This allows us to
         # append tokens and change is_prompt without external side-effects.
-        new_seq_group_metadata_list = []
+        new_seq_group_metadata_list: List[SequenceGroupMetadata] = []
 
         for old_seq_group_metadata in seq_group_metadata_list:
             # We must shallow-copy seq_group_metadata as is_prompt could change.
@@ -257,7 +257,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             new_seq_group_metadata_list.append(seq_group_metadata)
 
             # We must shallow-copy seq_data as we will append token ids
-            new_seq_data = {}
+            new_seq_data: Dict[int, SequenceData] = {}
             for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
                 new_seq_data[seq_id] = copy.copy(old_seq_data)
                 new_seq_data[
