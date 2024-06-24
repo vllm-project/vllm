@@ -290,27 +290,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight_bits = 8
                 # # Repack weights to gptq format (packed int32 elements)
                 fp8_weights = layer.weight
-                # # View the tensor as uint8 to access the raw bits
-                # tensor_int8 = orig_fp8_weights.view(torch.int8)
-                # # Reshape to group every four elements together, with padding
-                # num_elements = tensor_int8.numel()
-                # padded_size = (orig_weight_shape[0] + 3) // 4 * 4
-                # # Pad the tensor to ensure it is a multiple of 4
-                # tensor_padded = torch.nn.functional.pad(
-                #     tensor_int8, (padded_size - orig_weight_shape[0], 0))
-                # print(tensor_int8.shape)
-                # print(tensor_padded.shape)
-                # # Reshape the padded tensor to (4, N)
-                # tensor_reshaped = tensor_padded.reshape(4, -1)
-                # # Pack the 4 uint8 values into 1 int32
-                # tensor_packed = (
-                #     tensor_reshaped[0, :].to(torch.int32) & 0xFF
-                # ) | ((tensor_reshaped[1, :].to(torch.int32) & 0xFF) << 8) | (
-                #     (tensor_reshaped[2, :].to(torch.int32) & 0xFF) << 16) | (
-                #         (tensor_reshaped[3, :].to(torch.int32) & 0xFF) << 24)
-                # # Reshape the packed tensor back to the desired shape
-                # tensor_packed = tensor_packed.view(-1, orig_weight_shape[1])
-
                 print("ORIG FP8 WEIGHT", fp8_weights.shape)
                 fp8_uint8 = fp8_weights.view(dtype=torch.uint8).cpu().numpy()
 
@@ -347,7 +326,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 scales_size_k = part_size_k
                 scales_size_n = part_size_n
                 scales = layer.weight_scale.repeat(1, scales_size_n).to(
-                    torch.float16)
+                    x.dtype)
                 # Permute scales
                 group_size = -1
                 marlin_scales = marlin_permute_scales(
