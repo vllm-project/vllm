@@ -33,7 +33,7 @@ SPEC_MODEL = "ibm-granite/granite-3b-code-instruct-accelerator"
 MAX_SPEC_TOKENS = 5
 
 # precision
-PRECISION = "float32"
+PRECISION = "bfloat16"
 
 
 @pytest.mark.parametrize(
