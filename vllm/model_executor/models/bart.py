@@ -121,6 +121,13 @@ def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int,
 
     return shifted_input_ids
 
+def get_bsz_seq_len(input_ids):
+    shp = input_ids.shape
+    ndim = len(shp)
+    if ndim == 1:
+        return 1, input_ids.numel()
+    else:
+        return shp[:2]
 
 class BartLearnedPositionalEmbedding(nn.Embedding):
     """
@@ -138,7 +145,7 @@ class BartLearnedPositionalEmbedding(nn.Embedding):
                 past_key_values_length: int = 0):
         """`input_ids' shape is expected to be [bsz x seqlen]."""
 
-        bsz, seq_len = input_ids.shape[:2]
+        bsz, seq_len = get_bsz_seq_len(input_ids)
         positions = torch.arange(past_key_values_length,
                                  past_key_values_length + seq_len,
                                  dtype=torch.long,

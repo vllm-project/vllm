@@ -10,10 +10,10 @@ encoder_prompts = [
 ]
 # - Decoder prompts
 decoder_prompts = [
-    "",
-    "",
-    "",
-    "",
+    "ad",
+    "b",
+    "cat",
+    "dabble",
 ]
 # - Unified prompts
 prompts = [enc_dec for enc_dec in zip(encoder_prompts, decoder_prompts)]
