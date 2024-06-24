@@ -16,7 +16,7 @@ class ProposerWorkerBase(WorkerBase, SpeculativeProposer):
         sample_len: int,
         # If set, this contains all sequence IDs that were assigned
         # bonus tokens in their last forward pass.
-        seq_ids_with_bonus_token_in_last_step: set,
+        seq_ids_with_bonus_token_in_last_step: set=set(),
     ) -> Tuple[Optional[List[SamplerOutput]], bool]:
         raise NotImplementedError
 

@@ -49,7 +49,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
-        seq_ids_with_bonus_token_in_last_step: set,
+        seq_ids_with_bonus_token_in_last_step: set=set(),
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass sample_len times. Returns the list of
         sampler output, one per model forward pass, along with indicator of
