@@ -1,6 +1,6 @@
 """Minimal implementation of CLIPVisionModel intended to be only used 
 within a vision language model."""
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
 
-def get_clip_num_patches(image_size: int, patch_size: int) -> int:
+def get_clip_num_patches(*, image_size: int, patch_size: int) -> int:
     assert image_size % patch_size == 0
     return (image_size // patch_size)**2
 
@@ -39,8 +39,8 @@ class CLIPVisionEmbeddings(nn.Module):
             bias=False,
         )
 
-        self.num_patches = get_clip_num_patches(self.image_size,
-                                                self.patch_size)
+        self.num_patches = get_clip_num_patches(image_size=self.image_size,
+                                                patch_size=self.patch_size)
         self.num_positions = self.num_patches + 1
         self.position_embedding = nn.Embedding(self.num_positions,
                                                self.embed_dim)
@@ -101,7 +101,7 @@ class CLIPEncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
 
-    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor]:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
         residual = hidden_states
 
