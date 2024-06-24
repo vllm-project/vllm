@@ -3,7 +3,7 @@ import os
 import pytest
 import ray
 import torch
-
+from vllm.utils import is_hip
 from vllm.utils import cuda_device_count_stateless
 
 
@@ -25,7 +25,8 @@ def test_cuda_device_count_stateless():
     CUDA_VISIBLE_DEVICES is changed."""
 
     # skip this test if rocm does not support this yet
-    if torch.version.hip and not hasattr(torch.cuda, "_device_count_amdsmi"):
+    if is_hip() and (not hasattr(torch.cuda, "_device_count_amdsmi")
+                     or not torch.cuda._HAS_PYNVML):
         pytest.skip("no support to _device_count_amdsmi yet")
 
     actor = _CUDADeviceCountStatelessTestActor.options(  # type: ignore
