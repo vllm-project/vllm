@@ -13,6 +13,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.parameter import vLLMParameter, PackedParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -487,6 +488,84 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+    def _default_loading(self, param: vLLMParameter, loaded_weight,
+                         loaded_shard_id):
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+        shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
+        shard_size = self.output_sizes[loaded_shard_id] // tp_size
+        if isinstance(param, PackedParameter):
+            shard_size, shard_offset = param.adjust_packed_shard(
+                shard_offset, shard_size)
+        param.data = param.data.narrow(param.output_dim, shard_offset,
+                                       shard_size)
+        loaded_weight.narrow(param.output_dim, tp_rank * shard_size,
+                             shard_size)
+        return param, loaded_weight
+
+    def _load_no_shard_id(self, param):
+        current_shard_offset = 0
+        shard_offsets: List[Tuple[int, int, int]] = []
+        for i, output_size in enumerate(self.output_sizes):
+            shard_offsets.append((i, current_shard_offset, output_size))
+            current_shard_offset += output_size
+
+        if isinstance(param, PackedParameter):
+            packed_dim = param.packed_dim
+
+        for shard_id, shard_offset, shard_size in shard_offsets:
+            # Special case for Quantization.
+            # If quantized, we need to adjust the offset and size to account
+            # for the packing.
+            if packed_dim == param.output_dim: # Define this relationship more clearly
+                param.adjust_packed_shard(
+                    shard_size=shard_size,
+                    shard_offset=shard_offset
+                )
+
+            loaded_weight_shard = loaded_weight.narrow(
+                param.output_dim, shard_offset, shard_size)
+            self.weight_loader_new(param, loaded_weight_shard, shard_id)
+
+    def weight_loader_new(self,
+                          param: vLLMParameter,
+                          loaded_weight: torch.Tensor,
+                          loaded_shard_id: Optional[int] = None):
+
+        param_data = param.data
+
+        if loaded_shard_id is None:
+            if param.output_dim is None:
+                assert param_data.shape == loaded_weight.shape
+                param_data.copy_(loaded_weight)
+                return
+            self._load_no_shard_id(param)
+            return
+        
+        assert loaded_shard_id < len(self.output_sizes)
+
+        if param.use_default_loading:
+            param, loaded_weight = self._default_loading(
+                param=param,
+                loaded_weight=loaded_weight,
+                loaded_shard_id=loaded_shard_id
+            )
+        elif param.is_metadata: # What case is this?
+            shard_size = loaded_weight.shape[0]
+            shard_offset = loaded_shard_id * shard_size
+            param_data = param_data.narrow(0, shard_offset, shard_size)
+
+        elif param.use_shard_splitting:
+            param_data, loaded_weight = param.shard_splitter(
+                param_data=param_data,
+                loaded_weight=loaded_weight,
+                loaded_shard_id=loaded_shard_id
+            )
+
+        assert param_data.shape == loaded_weight.shape
+        param_data.copy_(loaded_weight)
+
 
 
 class QKVParallelLinear(ColumnParallelLinear):
