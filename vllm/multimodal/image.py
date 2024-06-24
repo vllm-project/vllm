@@ -7,8 +7,8 @@ from transformers import CLIPVisionConfig
 
 from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
-from vllm.model_executor.models.clip import get_clip_num_patches
 from vllm.logger import init_logger
+from vllm.model_executor.models.clip import get_clip_num_patches
 from vllm.sequence import SequenceData
 from vllm.transformers_utils.image_processor import get_image_processor
 
