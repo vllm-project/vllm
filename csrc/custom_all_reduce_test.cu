@@ -20,9 +20,16 @@
 #include <vector>
 
 #include "cuda_profiler_api.h"
-#include "custom_all_reduce.cuh"
 #include "mpi.h"
-#include "nccl.h"
+#ifdef USE_ROCM
+  #include <hip/hip_bf16.h>
+typedef __hip_bfloat16 nv_bfloat16;
+  #include "rccl/rccl.h"
+  #include "custom_all_reduce_hip.cuh"
+#else
+  #include "nccl.h"
+  #include "custom_all_reduce.cuh"
+#endif
 
 #define MPICHECK(cmd)                                                  \
   do {                                                                 \
@@ -44,7 +51,17 @@
   } while (0)
 
 __global__ void dummy_kernel() {
+#ifdef USE_ROCM
+  for (int i = 0; i < 100; i++) {
+    uint64_t start = wall_clock64();
+    uint64_t cycles_elapsed;
+    do {
+      cycles_elapsed = wall_clock64() - start;
+    } while (cycles_elapsed < 100);
+  }
+#else
   for (int i = 0; i < 100; i++) __nanosleep(1000000);  // 100ms
+#endif
 }
 
 template <typename T>
@@ -114,8 +131,14 @@ void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit,
    * registration, they are allocated and registered together in the test for
    * convenience.
    */
+#ifdef USE_ROCM
+  CUDACHECK(hipExtMallocWithFlags(
+      (void**)&buffer, 2 * data_size * sizeof(T) + sizeof(vllm::Signal),
+      hipDeviceMallocUncached));
+#else
   CUDACHECK(
       cudaMalloc(&buffer, 2 * data_size * sizeof(T) + sizeof(vllm::Signal)));
+#endif
   CUDACHECK(
       cudaMemset(buffer, 0, 2 * data_size * sizeof(T) + sizeof(vllm::Signal)));
   CUDACHECK(cudaMalloc(&self_data_copy, data_size * sizeof(T)));

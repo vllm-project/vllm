@@ -1,7 +1,12 @@
 #pragma once
 
 #include <cuda.h>
-#include <cuda_bf16.h>
+#ifdef USE_ROCM
+  #include <hip/hip_bf16.h>
+typedef __hip_bfloat16 nv_bfloat16;
+#else
+  #include <cuda_bf16.h>
+#endif
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -29,9 +34,14 @@ constexpr int kMaxBlocks = 64;
 struct Signal {
   alignas(128) uint32_t start[kMaxBlocks][8];
   alignas(128) uint32_t end[kMaxBlocks][8];
+  alignas(128) uint32_t _flag[kMaxBlocks];  // incremental flags for each rank
 };
 
+#ifdef USE_ROCM
+struct __align__(16) RankData { const void* ptrs[8]; };
+#else
 struct __align__(16) RankData { const void* __restrict__ ptrs[8]; };
+#endif
 
 struct __align__(16) RankSignals { volatile Signal* signals[8]; };
 
@@ -130,6 +140,21 @@ DINLINE O downcast(array_t<float, O::size> val) {
 template <int ngpus>
 DINLINE void start_sync(const RankSignals& sg, volatile Signal* self_sg,
                         int rank) {
+#ifdef USE_ROCM
+  uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
+  if (threadIdx.x < ngpus) {
+    // simultaneously write to the corresponding flag of all ranks.
+    // Latency = 1 p2p write
+    __atomic_store_n(&sg.signals[threadIdx.x]->start[blockIdx.x][rank], flag,
+                     __ATOMIC_RELAXED);
+    // wait until we got true from all ranks
+    while (__atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
+                           __ATOMIC_RELAXED) < flag);
+  }
+  __syncthreads();
+  // use one thread to update flag
+  if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
+#else
   if (threadIdx.x < ngpus) {
     // reset flag for next time
     self_sg->end[blockIdx.x][threadIdx.x] = 0;
@@ -140,6 +165,7 @@ DINLINE void start_sync(const RankSignals& sg, volatile Signal* self_sg,
     while (!self_sg->start[blockIdx.x][threadIdx.x]);
   }
   __syncthreads();
+#endif
 }
 
 // This function is meant to be used as the second or the final synchronization
@@ -148,6 +174,27 @@ DINLINE void start_sync(const RankSignals& sg, volatile Signal* self_sg,
 template <int ngpus, bool final_sync = false>
 DINLINE void end_sync(const RankSignals& sg, volatile Signal* self_sg,
                       int rank) {
+#ifdef USE_ROCM
+  __syncthreads();
+  // eliminate the case that prior writes are not visible after signals become
+  // visible. Note that I did not managed to make this happen through a lot of
+  // testing. Might be the case that hardware provides stronger guarantee than
+  // the memory model.
+  uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
+  if (threadIdx.x < ngpus) {
+    // simultaneously write to the corresponding flag of all ranks.
+    // Latency = 1 p2p write
+    __atomic_store_n(&sg.signals[threadIdx.x]->end[blockIdx.x][rank], flag,
+                     final_sync ? __ATOMIC_RELAXED : __ATOMIC_RELEASE);
+    // wait until we got true from all ranks
+    while (__atomic_load_n(&self_sg->end[blockIdx.x][threadIdx.x],
+                           final_sync ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE) <
+           flag);
+  }
+  __syncthreads();
+  // use one thread to update flag
+  if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
+#else
   __syncthreads();
   // eliminate the case that prior writes are not visible after signals become
   // visible. Note that I did not managed to make this happen through a lot of
@@ -164,6 +211,7 @@ DINLINE void end_sync(const RankSignals& sg, volatile Signal* self_sg,
     while (!self_sg->end[blockIdx.x][threadIdx.x]);
   }
   if constexpr (!final_sync) __syncthreads();
+#endif
 }
 
 template <typename P, int ngpus, typename A>
@@ -324,7 +372,11 @@ class CustomAllreduce {
       // note: must share the base address of each allocation, or we get wrong
       // address
       if (cuPointerGetAttribute(&base_ptr,
+#ifdef USE_ROCM
+                                HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
+#else
                                 CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
+#endif
                                 (CUdeviceptr)ptr) != CUDA_SUCCESS)
         throw std::runtime_error("failed to get pointer attr");
       CUDACHECK(cudaIpcGetMemHandle(

@@ -11,19 +11,32 @@ from vllm.distributed.device_communicators.custom_all_reduce_utils import (
 from vllm.distributed.parallel_state import (
     get_local_rank, get_tensor_model_parallel_cpu_group)
 from vllm.logger import init_logger
+from vllm.utils import is_hip
 
 try:
-    import pynvml
+    if is_hip():
+        from amdsmi import (AmdSmiException,
+                            amdsmi_get_processor_handle_from_bdf, amdsmi_init,
+                            amdsmi_shut_down, amdsmi_topo_get_link_type)
+    else:
+        import pynvml
 
     from vllm._C import custom_ar
 
     @contextmanager
     def _nvml():
-        try:
-            pynvml.nvmlInit()
-            yield
-        finally:
-            pynvml.nvmlShutdown()
+        if torch.version.hip:
+            try:
+                amdsmi_init()
+                yield
+            finally:
+                amdsmi_shut_down()
+        else:
+            try:
+                pynvml.nvmlInit()
+                yield
+            finally:
+                pynvml.nvmlShutdown()
 
 except ImportError:
     # For AMD GPUs
@@ -42,27 +55,49 @@ logger = init_logger(__name__)
 
 
 @_nvml()
-def _is_full_nvlink(device_ids: List[int]) -> bool:
+def _is_full_nvlink(device_ids: List[int], world_size) -> bool:
     """
     query if the set of gpus are fully connected by nvlink (1 hop)
     Note that `pynvml` is not affected by `CUDA_VISIBLE_DEVICES`,
     so it works on real physical device ids.
     """
-    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
-    for i, handle in enumerate(handles):
-        for j, peer_handle in enumerate(handles):
-            if i < j:
-                try:
-                    p2p_status = pynvml.nvmlDeviceGetP2PStatus(
-                        handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
-                    if p2p_status != pynvml.NVML_P2P_STATUS_OK:
+    if is_hip():
+        # get devices' BDF in order to get XGMI link info from  amdsmi
+        bdf = custom_ar.get_device_bdf(torch.cuda.current_device())
+        all_bdf = [0] * world_size
+        dist.all_gather_object(all_bdf, bdf)
+        hsmi = [None] * world_size
+        try:
+            for i in range(world_size):
+                bdf_str = str(bytes(all_bdf[i]).decode("utf-8"))
+                hsmi[i] = amdsmi_get_processor_handle_from_bdf(bdf_str)
+            for i in range(world_size):
+                if i != 0:
+                    link_type = amdsmi_topo_get_link_type(hsmi[0], hsmi[i])
+                    # type is 2 for XGMI
+                    if link_type['hops'] != 1 or link_type['type'] != 2:
                         return False
-                except pynvml.NVMLError as error:
-                    logger.error(
-                        "NVLink detection failed. This is normal if your"
-                        " machine has no NVLink equipped.",
-                        exc_info=error)
-                    return False
+        except AmdSmiException as e:
+            logger.warning(e)
+            return False
+        return True
+    else:
+        handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i < j:
+                    try:
+                        p2p_status = pynvml.nvmlDeviceGetP2PStatus(
+                            handle, peer_handle,
+                            pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+                        if p2p_status != pynvml.NVML_P2P_STATUS_OK:
+                            return False
+                    except pynvml.NVMLError as error:
+                        logger.error(
+                            "NVLink detection failed. This is normal if your"
+                            " machine has no NVLink equipped.",
+                            exc_info=error)
+                        return False
     return True
 
 
@@ -153,7 +188,7 @@ class CustomAllreduce:
         # test nvlink first, this will filter out most of the cases
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-        full_nvlink = _is_full_nvlink(physical_device_ids)
+        full_nvlink = _is_full_nvlink(physical_device_ids, world_size)
         if world_size > 2 and not full_nvlink:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
@@ -163,7 +198,8 @@ class CustomAllreduce:
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
-        if not _can_p2p(rank, world_size):
+        # On AMD GPU, p2p is always enabled between XGMI connected GPUs
+        if not is_hip() and not _can_p2p(rank, world_size):
             logger.warning(
                 "Custom allreduce is disabled because your platform lacks "
                 "GPU P2P capability or P2P test failed. To silence this "
@@ -175,9 +211,14 @@ class CustomAllreduce:
         # meta data composes of two parts: meta data for synchronization
         # (256 bytes) and a temporary buffer for storing intermediate
         # allreduce results.
-        self.meta = torch.zeros(custom_ar.meta_size() + max_size,
-                                dtype=torch.uint8,
-                                device=self.device)
+        if is_hip():
+            # meta data buffers need to be "uncached" for signal on MI200
+            self.meta = custom_ar.allocate_meta_buffer(custom_ar.meta_size() +
+                                                       max_size)
+        else:
+            self.meta = torch.zeros(custom_ar.meta_size() + max_size,
+                                    dtype=torch.uint8,
+                                    device=self.device)
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allreduce is performed
         self.buffer = torch.empty(max_size,
@@ -194,7 +235,17 @@ class CustomAllreduce:
         self.max_size = max_size
         self.rank = rank
         self.world_size = world_size
-        handles, offsets = self._get_ipc_meta(self.meta)
+        if is_hip():
+            # _share_cuda_() doesn't accept meta buffer not allocated from
+            # PyTorch cache allocator, use direct HIP call to get IPC handle
+            handle = custom_ar.get_meta_buffer_ipc_handle(self.meta)
+            shard_data = (
+                bytes(handle),  # ipc handle to base ptr
+                0,  # offset of base ptr
+            )
+            handles, offsets = self._gather_ipc_meta(shard_data)
+        else:
+            handles, offsets = self._get_ipc_meta(self.meta)
         self.full_nvlink = full_nvlink
         self._ptr = custom_ar.init_custom_ar(self.meta, self.rank_data,
                                              handles, offsets, rank,

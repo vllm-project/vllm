@@ -38,6 +38,7 @@ def main(args: argparse.Namespace):
               enable_chunked_prefill=args.enable_chunked_prefill,
               download_dir=args.download_dir,
               block_size=args.block_size,
+              disable_custom_all_reduce=args.disable_custom_all_reduce,
               gpu_memory_utilization=args.gpu_memory_utilization)
 
     sampling_params = SamplingParams(
@@ -229,6 +230,7 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help='Path to save the latency results in JSON format.')
+    parser.add_argument('--disable_custom_all_reduce', action='store_true')
     parser.add_argument('--gpu-memory-utilization',
                         type=float,
                         default=0.9,

@@ -623,17 +623,12 @@ class ParallelConfig:
             raise ValueError(
                 "Unrecognized distributed executor backend. Supported values "
                 "are 'ray' or 'mp' or 'torchrun'.")
-        if not self.disable_custom_all_reduce and self.world_size > 1:
-            if is_hip():
-                self.disable_custom_all_reduce = True
-                logger.info(
-                    "Disabled the custom all-reduce kernel because it is not "
-                    "supported on AMD GPUs.")
-            elif self.pipeline_parallel_size > 1:
-                self.disable_custom_all_reduce = True
-                logger.info(
-                    "Disabled the custom all-reduce kernel because it is not "
-                    "supported with pipeline parallelism.")
+        if (not self.disable_custom_all_reduce and self.world_size > 1
+                and self.pipeline_parallel_size > 1):
+            self.disable_custom_all_reduce = True
+            logger.info(
+                "Disabled the custom all-reduce kernel because it is not "
+                "supported with pipeline parallelism.")
         if self.ray_workers_use_nsight and (
                 not self.distributed_executor_backend == "ray"):
             raise ValueError("Unable to use nsight profiling unless workers "

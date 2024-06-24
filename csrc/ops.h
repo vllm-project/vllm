@@ -131,7 +131,6 @@ void moe_align_block_size(torch::Tensor topk_ids, int num_experts,
                           torch::Tensor experts_ids,
                           torch::Tensor num_tokens_post_pad);
 
-#ifndef USE_ROCM
 using fptr_t = uint64_t;
 fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
                       const std::vector<std::string>& handles,
@@ -151,4 +150,8 @@ std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
     fptr_t _fa);
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
+#ifdef USE_ROCM
+torch::Tensor allocate_meta_buffer(int size);
+std::vector<uint8_t> get_meta_buffer_ipc_handle(torch::Tensor inp);
+std::vector<uint8_t> get_device_bdf(int dev);
 #endif
