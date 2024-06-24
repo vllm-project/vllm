@@ -10,7 +10,7 @@
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git
+    && apt-get install -y python3-pip git curl sudo
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -27,6 +27,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-cuda.txt
 
 # install development dependencies
+COPY requirements-lint.txt requirements-lint.txt
+COPY requirements-test.txt requirements-test.txt
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-dev.txt
@@ -70,39 +72,34 @@ ENV NVCC_THREADS=$nvcc_threads
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
+ARG USE_SCCACHE
+# if USE_SCCACHE is set, use sccache to speed up compilation
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Installing sccache..." \
+        && curl -L -o sccache.tar.gz https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-x86_64-unknown-linux-musl.tar.gz \
+        && tar -xzf sccache.tar.gz \
+        && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
+        && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
+        && export SCCACHE_BUCKET=vllm-build-sccache \
+        && export SCCACHE_REGION=us-west-2 \
+        && sccache --show-stats \
+        && python3 setup.py bdist_wheel --dist-dir=dist \
+        && sccache --show-stats; \
+    fi
+
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
-    python3 setup.py bdist_wheel --dist-dir=dist
+    if [ "$USE_SCCACHE" != "1" ]; then \
+        python3 setup.py bdist_wheel --dist-dir=dist; \
+    fi
 
 # check the size of the wheel, we cannot upload wheels larger than 100MB
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 RUN python3 check-wheel-size.py dist
 
-# the `vllm_nccl` package must be installed from source distribution
-# pip is too smart to store a wheel in the cache, and other CI jobs
-# will directly use the wheel from the cache, which is not what we want.
-# we need to remove it manually
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip cache remove vllm_nccl*
 #################### EXTENSION Build IMAGE ####################
-
-#################### FLASH_ATTENTION Build IMAGE ####################
-FROM dev as flash-attn-builder
-# max jobs used for build
-ARG max_jobs=2
-ENV MAX_JOBS=${max_jobs}
-# flash attention version
-ARG flash_attn_version=v2.5.8
-ENV FLASH_ATTN_VERSION=${flash_attn_version}
-
-WORKDIR /usr/src/flash-attention-v2
-
-# Download the wheel or build it if a pre-compiled release doesn't exist
-RUN pip --verbose wheel flash-attn==${FLASH_ATTN_VERSION} \
-    --no-build-isolation --no-deps --no-cache-dir
-
-#################### FLASH_ATTENTION Build IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
@@ -122,10 +119,6 @@ RUN ldconfig /usr/local/cuda-12.4/compat/
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     pip install dist/*.whl --verbose
-
-RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
-    --mount=type=cache,target=/root/.cache/pip \
-    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
 #################### vLLM installation IMAGE ####################
 
 

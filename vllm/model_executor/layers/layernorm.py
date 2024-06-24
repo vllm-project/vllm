@@ -4,9 +4,8 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm import _custom_ops as ops
+from vllm.model_executor.custom_op import CustomOp
 from vllm.utils import is_hpu
-
 if is_hpu():
     try:
         from habana_frameworks.torch.hpex.normalization import FusedRMSNorm as FusedRMSNorm
@@ -14,7 +13,7 @@ if is_hpu():
         print("Not using HPU fused kernel for RMSNorm")
         FusedRMSNorm = None
 
-class RMSNorm(nn.Module):
+class RMSNorm(CustomOp):
     """Root mean square normalization.
 
     Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
@@ -30,7 +29,7 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
-    def _forward(
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
@@ -50,11 +49,37 @@ class RMSNorm(nn.Module):
         else:
             return x, residual
 
-    def forward(
+    def forward_cuda(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from vllm import _custom_ops as ops
+
+        if residual is not None:
+            ops.fused_add_rms_norm(
+                x,
+                residual,
+                self.weight.data,
+                self.variance_epsilon,
+            )
+            return x, residual
+        out = torch.empty_like(x)
+        ops.rms_norm(
+            out,
+            x,
+            self.weight.data,
+            self.variance_epsilon,
+        )
+        return out
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from vllm._ipex_ops import ipex_ops as ops
+
         if residual is not None:
             if x.device.type == "hpu" and FusedRMSNorm:
                 orig_dtype = x.dtype

@@ -4,6 +4,7 @@ Run `pytest tests/quantization/test_configs.py --forked`.
 """
 
 from dataclasses import dataclass
+from typing import Tuple
 
 import pytest
 
@@ -51,7 +52,7 @@ MODEL_ARG_EXPTYPES = [
 
 
 @pytest.mark.parametrize("model_arg_exptype", MODEL_ARG_EXPTYPES)
-def test_auto_gptq(model_arg_exptype: str) -> None:
+def test_auto_gptq(model_arg_exptype: Tuple[str, None, str]) -> None:
     model_path, quantization_arg, expected_type = model_arg_exptype
     if is_hpu() and model_path in ('TheBloke/Llama-2-7B-Chat-GPTQ', 'LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit'):
         pytest.skip("Skipping test on HPU")

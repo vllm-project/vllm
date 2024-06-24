@@ -13,7 +13,8 @@ MAX_TOKENS = 200
 def vllm_model(vllm_runner):
     if is_hpu():
         pytest.skip("Skipping test on HPU")
-    return vllm_runner(MODEL)
+    with vllm_runner(MODEL) as vllm_model:
+        yield vllm_model
 
 
 @pytest.mark.skip_global_cleanup

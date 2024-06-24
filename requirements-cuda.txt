@@ -4,6 +4,6 @@
 # Dependencies for NVIDIA GPUs
 ray >= 2.9
 nvidia-ml-py # for pynvml package
-vllm-nccl-cu12>=2.18,<2.19  # for downloading nccl library
 torch == 2.3.0
 xformers == 0.0.26.post1  # Requires PyTorch 2.3.0
+vllm-flash-attn == 2.5.9  # Requires PyTorch 2.3.0
