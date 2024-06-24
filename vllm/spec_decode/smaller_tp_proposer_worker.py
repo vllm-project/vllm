@@ -138,6 +138,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
     def get_cache_block_size_bytes(self) -> int:
         if self._is_dummy:
+            # by returning zero, target worker can use the entire kv cache space
             return 0
 
         return self._worker.get_cache_block_size_bytes()
