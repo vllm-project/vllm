@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-
+from typing import Optional
 import torch
 
 from vllm.sequence import ExecuteModelRequest
@@ -58,7 +58,9 @@ class SpeculativeProposer(ABC):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
-        seq_ids_with_bonus_token_in_last_step: set=set(),
+        # If set, this contains all sequence IDs that were assigned
+        # bonus tokens in their last forward pass.        
+        seq_ids_with_bonus_token_in_last_step: set,
     ) -> SpeculativeProposals:
         raise NotImplementedError
 

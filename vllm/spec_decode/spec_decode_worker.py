@@ -54,7 +54,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         disable_by_batch_size=speculative_config.
         speculative_disable_by_batch_size,
         disable_bonus_tokens_in_kv_cache=speculative_config.
-        disable_bonus_tokens_in_kv_cache
+        disable_bonus_tokens_in_kv_cache,
     )
 
     return spec_decode_worker
@@ -118,7 +118,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                 scorer_worker,
                                 disable_by_batch_size=disable_by_batch_size,
                                 rejection_sampler=RejectionSampler(
-                                    disable_bonus_tokens=disable_bonus_tokens))
+                                    disable_bonus_tokens=disable_bonus_tokens),
+                                disable_bonus_tokens_in_kv_cache=\
+                                    disable_bonus_tokens_in_kv_cache)
 
     def __init__(
         self,
@@ -127,6 +129,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         rejection_sampler: RejectionSampler,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
+        disable_bonus_tokens_in_kv_cache: bool = True,
     ):
         """
         Create a SpecDecodeWorker.
@@ -143,6 +146,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 disable speculative decoding for new incoming requests.
             metrics_collector: Helper class for collecting metrics; can be set
                 for testing purposes.
+            disable_bonus_tokens_in_kv_cache:
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
@@ -155,9 +159,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         self.probs_dtype = self.rejection_sampler.probs_dtype
         self.token_id_dtype = self.rejection_sampler.token_id_dtype
+        print(isinstance(self.proposer_worker, MultiStepWorker))
+        print(isinstance(self.proposer_worker, NGramWorker))
         # Tracks the sequence IDs that received a bonus token ID in
-        # their last forward pass.
-        self.seq_with_bonus_token_in_last_step = set()
+        # their last forward pass. Needed only if the  
+        if (isinstance(self.proposer_worker, MultiStepWorker) 
+           and not disable_bonus_tokens_in_kv_cache):
+           self.seq_with_bonus_token_in_last_step = set()
+        else:
+            self.seq_with_bonus_token_in_last_step = None
 
         # Lazy initiazliation.
         self.scorer: SpeculativeScorer
@@ -552,14 +562,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     ))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
-        
-        
-        for seq_index, seq_id in enumerate(seq_ids):
-            last_token_id = accepted_token_ids_by_step[-1][seq_index]
-            if last_token_id == -1:
-                self.seq_with_bonus_token_in_last_step.discard(seq_id)
-            else:
-                self.seq_with_bonus_token_in_last_step.add(seq_id)
+        if self.seq_with_bonus_token_in_last_step is not None:
+            for seq_index, seq_id in enumerate(seq_ids):
+                last_token_id = accepted_token_ids_by_step[-1][seq_index]
+                if last_token_id == -1:
+                    self.seq_with_bonus_token_in_last_step.discard(seq_id)
+                else:
+                    self.seq_with_bonus_token_in_last_step.add(seq_id)
         
         maybe_rejsample_metrics = (
             self._metrics.maybe_collect_rejsample_metrics(k))

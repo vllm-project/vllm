@@ -12,6 +12,7 @@ from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.metrics import (AsyncMetricsCollector,
                                       SpecDecodeWorkerMetrics)
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
+from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.spec_decode_worker import (SpecDecodeWorker,
                                                  split_num_cache_blocks_evenly)
 
@@ -516,6 +517,148 @@ def test_empty_input_batch(k: int, batch_size: int):
     draft_worker.execute_model.assert_called_once_with(execute_model_req)
     target_worker.execute_model.assert_called_once_with(execute_model_req)
 
+@torch.inference_mode()
+def test_populate_seq_ids_with_bonus_tokens():
+    """
+    Verify that a call to _create_output_sampler_list correctly updates
+    seq_with_bonus_token_in_last_step.
+
+    seq_with_bonus_token_in_last_step is an internal data structure in SpecDecodeWorker
+    that tracks the sequence IDs assigned bonus tokens by the target model in their
+    last forward pass. This state is maintained only for models relying on the KV cache,
+    such as those using the MultiStepWorker.
+    """
+    batch_size = 10
+    k = 5
+    vocab_size = 10000
+    num_sequences_with_bonus_tokens = 5
+    target_worker = mock_worker(vocab_size=vocab_size, use_spec=False)
+    rejection_sampler = MagicMock(spec=RejectionSampler)
+    rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
+    target_worker.execute_model.return_value = [MagicMock(spec=SamplerOutput)]
+    target_worker.device = 'cuda'
+
+    set_random_seed(1)
+    draft_worker = mock_worker(cls=MultiStepWorker)
+    draft_worker.device = 'cuda'
+    # The sequence_ids attached to each sequence in the batch.
+    # The sequence at index i has seq_id assigned_seq_ids[i]
+    assigned_seq_ids = list(range(batch_size))
+    seq_group_metadata_list, _, _ = create_batch(batch_size,
+                                                 k,
+                                                 seq_ids=assigned_seq_ids,
+                                                 prev_output_token_len=10)
+    target_token_logprobs = torch.rand(batch_size,
+                                       (k + 1),
+                                       vocab_size,
+                                       dtype=torch.float32,
+                                       device='cuda')
+    accepted_token_ids = torch.randint(low=0,
+                                       high=vocab_size,
+                                       size=(batch_size, (k + 1)),
+                                       dtype=torch.int64,
+                                       device='cuda')
+    # Generate a random sample of sequence indexes with bonus tokens
+    seq_indexes_with_bonus_tokens= random.sample(
+        range(batch_size), num_sequences_with_bonus_tokens)
+    # Create a mask that is True for indices in seq_indexes_with_bonus_tokens
+    mask = torch.ones(batch_size, dtype=torch.bool, device='cuda')
+    mask[seq_indexes_with_bonus_tokens] = False
+    # Set the last token ID to -1 for all indices not in seq_indexes_with_bonus_tokens
+    # to indicate the lack of bonus token in those indices.
+    accepted_token_ids[mask, -1:] = -1
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
+                              metrics_collector, disable_bonus_tokens_in_kv_cache=False)
+
+    worker._create_output_sampler_list(
+        seq_group_metadata_list=seq_group_metadata_list,
+        accepted_token_ids=accepted_token_ids,
+        target_logprobs=target_token_logprobs, k = k)
+    expected_seq_ids_with_bonus_tokens = \
+        [assigned_seq_ids[i] for i in seq_indexes_with_bonus_tokens]
+    assert worker.seq_with_bonus_token_in_last_step == \
+        set(expected_seq_ids_with_bonus_tokens)
+    
+    # In the next iteration, add a new seq_id with a bonus token that did not have one
+    # in the previous iteration. Also, ensure that 2 of the seq_ids which had bonus tokens
+    # in the previous iteration no longer have bonus tokens in this iteration.
+    while len(seq_indexes_with_bonus_tokens) < num_sequences_with_bonus_tokens + 1:
+        new_index = random.randint(0, batch_size - 1)
+        if new_index not in seq_indexes_with_bonus_tokens:
+            seq_indexes_with_bonus_tokens.append(new_index)
+    # Generate random accepted token IDs
+    accepted_token_ids = torch.randint(low=0,
+                                    high=vocab_size,
+                                    size=(batch_size, (k + 1)),
+                                    dtype=torch.int64,
+                                    device='cuda')
+    # Create a mask for indices not in seq_indexes_with_bonus_tokens[2:]
+    mask = torch.ones(batch_size, dtype=torch.bool, device='cuda')
+    mask[seq_indexes_with_bonus_tokens[2:]] = False
+    # Set last token_id to -1 to indicate lack of bonus token.
+    accepted_token_ids[mask, -1:] = -1
+    worker._create_output_sampler_list(
+        seq_group_metadata_list=seq_group_metadata_list,
+        accepted_token_ids=accepted_token_ids,
+        target_logprobs=target_token_logprobs, k = k)
+    expected_seq_ids_with_bonus_tokens = \
+        [assigned_seq_ids[i] for i in seq_indexes_with_bonus_tokens[2:]]
+    print(expected_seq_ids_with_bonus_tokens)
+    assert worker.seq_with_bonus_token_in_last_step == \
+        set(expected_seq_ids_with_bonus_tokens)
+
+
+@torch.inference_mode()
+def test_seq_ids_with_bonus_tokens_not_needed():
+    """
+
+    """
+    batch_size = 10
+    k = 5
+    vocab_size = 10000
+    target_worker = mock_worker(vocab_size=vocab_size, use_spec=False)
+    rejection_sampler = MagicMock(spec=RejectionSampler)
+    rejection_sampler.token_id_dtype = torch.int64
+    metrics_collector = MagicMock(spec=AsyncMetricsCollector)
+    target_worker.execute_model.return_value = [MagicMock(spec=SamplerOutput)]
+    target_worker.device = 'cuda'
+    set_random_seed(1)
+    seq_group_metadata_list, _, _ = create_batch(batch_size,
+                                                 k,
+                                                 prev_output_token_len=10)
+    target_token_logprobs = torch.rand(batch_size,
+                                       (k + 1),
+                                       vocab_size,
+                                       dtype=torch.float32,
+                                       device='cuda')
+    accepted_token_ids = torch.randint(low=0,
+                                       high=vocab_size,
+                                       size=(batch_size, (k + 1)),
+                                       dtype=torch.int64,
+                                       device='cuda')
+    draft_worker = mock_worker(cls=MultiStepWorker)
+    draft_worker.device = 'cuda'
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
+                              metrics_collector, disable_bonus_tokens_in_kv_cache=True)
+    worker._create_output_sampler_list(
+        seq_group_metadata_list=seq_group_metadata_list,
+        accepted_token_ids=accepted_token_ids,
+        target_logprobs=target_token_logprobs, k = k)
+
+
+    draft_worker = mock_worker(cls=NGramWorker)
+    draft_worker.device = 'cuda'
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
+                              metrics_collector, disable_bonus_tokens_in_kv_cache=True)
+
+
+    #draft_worker = mock_worker(cls=ML)
+    #draft_worker.device = 'cuda'
+    #worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
+    #                          metrics_collector, disable_bonus_tokens_in_kv_cache=True)
+
+
 
 @pytest.mark.skip_global_cleanup
 def test_init_device():
@@ -618,3 +761,5 @@ def test_split_num_cache_blocks_evenly(available_gpu_blocks: int,
     assert (num_blocks * target_cache_block_size_bytes) + (
         num_blocks * draft_kv_size_bytes) <= (available_gpu_blocks *
                                               target_cache_block_size_bytes)
+
+

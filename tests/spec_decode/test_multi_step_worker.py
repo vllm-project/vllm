@@ -115,7 +115,8 @@ def test_same_output_for_single_step():
     actual_output, _ = multi_step_worker.sampler_output(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=multi_step_seq_group),
-        sample_len=num_steps)
+        sample_len=num_steps,
+        seq_ids_with_bonus_token_in_last_step=None)
     assert len(actual_output) == num_steps
     actual_output = actual_output[0]
 
@@ -149,9 +150,9 @@ def test_same_output_for_single_step():
     print(f'{expected_logprobs=}')
     assert_logprobs_dict_allclose(actual_logprobs, expected_logprobs)
 
-@pytest.mark.parametrize("bonus_tokens", [True, False])
+@pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @torch.inference_mode()
-def test_same_output_for_multi_step(bonus_tokens:bool):
+def test_same_output_for_multi_step(disable_bonus_tokens:bool):
     """Verify the multi-step worker produces the same output as the normal
     worker when num_steps > 1. This test runs the multi-step worker once, and
     then runs the worker num_steps times, and compares the output.
@@ -183,6 +184,8 @@ def test_same_output_for_multi_step(bonus_tokens:bool):
         random.randint(0, 1000) for _ in range(random.randint(10, 20))
     ] for _ in range(10)]
 
+    # For the case of disable_bonus_tokens = False we execute (num_steps + 1)
+    # iterations in order to accomodate the draft token. 
     final_prompt_lens = [len(prompt) + num_steps + 1 for prompt in prompts]
 
     rand_seeds = list(random.randint(0, 100) for _ in range(num_steps + 1))
@@ -190,10 +193,16 @@ def test_same_output_for_multi_step(bonus_tokens:bool):
         multi_step_worker, rand_seeds)
     worker.execute_model = patch_execute_model_with_seeds(worker, rand_seeds)
 
+    # Continuations to use for the single step worker.
     continuations = [[1] for _ in prompts]
+    # Continuations to use for the multi step step worker.
     multi_step_worker_continuations = [[1] for _ in prompts]
     indices_of_seq_with_bonus_tokens = []
-    if bonus_tokens:
+    if not disable_bonus_tokens:
+        # Bonus tokens are enabled. For half of the sequences, add bonus
+        # tokens. Make one forward pass of the model and add the generated
+        # tokens to the continuations of the sequences selected for bonus tokens.
+        # Do nothing for other sequences.
         num_sequences_with_bonus_tokens = len(prompts) // 2 
         indices_of_seq_with_bonus_tokens= random.sample(
             range(len(prompts)), num_sequences_with_bonus_tokens)
@@ -206,6 +215,8 @@ def test_same_output_for_multi_step(bonus_tokens:bool):
         step_output = (
             worker.execute_model(execute_model_req=ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list)))
+        # Add generated tokens to the continuations for both single-step
+        # and multi-step workers for the sequences selected for bonus tokens.
         for i, seq_group_output in enumerate(step_output[0].outputs):
             if i in indices_of_seq_with_bonus_tokens:
                 multi_step_worker_continuations[i].append(

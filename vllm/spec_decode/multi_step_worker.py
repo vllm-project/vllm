@@ -49,7 +49,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
-        seq_ids_with_bonus_token_in_last_step: set=set(),
+        seq_ids_with_bonus_token_in_last_step: set,
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass sample_len times. Returns the list of
         sampler output, one per model forward pass, along with indicator of
@@ -73,7 +73,10 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         # Run model sample_len times.
         model_outputs = []
         for step in range(sample_len):
-            if step == 0:
+            if step == 0 and seq_ids_with_bonus_token_in_last_step is not None:
+                # Step 0: Expand the batch for sequences with a bonus token.
+                # Perform a forward pass on the expanded batch and filter the 
+                # response to retain only the original sequences' responses.
                 expanded_request, indices_of_seq_with_bonus_tokens =\
                     self._expand_execute_model_request(
                         copied_execute_model_req, seq_ids_with_bonus_token_in_last_step)
@@ -82,6 +85,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 model_output = self._filter_model_output(
                     model_output[0], indices_of_seq_with_bonus_tokens)
             else:
+                # For subsequent steps, perform a forward pass on the
+                # original request.
                 model_output = super().execute_model(
                     execute_model_req=copied_execute_model_req)
             assert (len(model_output) == 1
