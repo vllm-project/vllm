@@ -4,9 +4,7 @@ from typing import (Dict, Iterable, List, Literal, Optional, Tuple, TypedDict,
 import torch
 import torch.nn as nn
 from PIL import Image
-# TODO(xwjiang): We should port CLIPVisionModel's code over to not depend on
-# transformers' impl.
-from transformers import CLIPVisionModel, LlavaNextConfig
+from transformers import LlavaNextConfig
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 from typing_extensions import NotRequired
@@ -20,6 +18,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
@@ -108,15 +107,6 @@ def _image_pixel_processor(
 @MULTIMODAL_REGISTRY.register_image_pixel_input(_image_pixel_processor)
 @MULTIMODAL_REGISTRY.register_dummy_data(_get_dummy_image_data)
 class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
-    """
-    Args to `forward()`:
-        input_ids: Flattened (concatenated) input_ids corresponding to a
-            batch.
-        pixel_values: For PIXEL_VALUES, expects a batch with shape
-            [1, num_patches, 3, 336, 336].
-        image_features: For IMAGE_FEATURES, expects a batch with shape
-            [1, num_patches, 1176, 1024].
-    """
 
     def __init__(self,
                  config: LlavaNextConfig,
@@ -130,7 +120,7 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_tower = CLIPVisionModel(config.vision_config)
+            self.vision_tower = CLIPVisionModel(config=config.vision_config)
         else:
             raise TypeError("Image features are not supported by LLaVA-NeXT")
 
@@ -228,12 +218,11 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
 
     def _image_pixels_to_features(self, vision_tower: CLIPVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
-        # TODO(xwjiang): Maybe port minimal CLIPVisionModel over.
-        image_outputs = vision_tower(pixel_values.to(vision_tower.device),
-                                     output_hidden_states=True)
 
-        image_features = image_outputs.hidden_states[
-            self.config.vision_feature_layer]
+        # NOTE: we skip the step to select the vision feature layer since
+        # this is already done inside the vision tower
+        image_features = vision_tower(pixel_values.to(vision_tower.device),
+                                      self.config.vision_feature_layer)
 
         return self._select_image_features(
             image_features,
@@ -355,7 +344,7 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         attn_metadata: AttentionMetadata,
         **kwargs: object,
     ) -> SamplerOutput:
-        """Run forward pass for Llava 1.5.
+        """Run forward pass for LlaVA-NeXT.
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted image embeddings.
@@ -375,22 +364,19 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
 
-        The model takes two types of image inputs:
-        PIXEL_VALUES and IMAGE_FEATURES.
-        The following shows how each maps to huggingface implementation.
-        PIXEL_VALUES:
-        - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L353
-        IMAGE_FEATURES:
-        - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L430
-        before going through the multi modal projector.
-
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
-            pixel_values: For PIXEL_VALUES, expects a batch with shape
-                [1, 3, 336, 336].
-            image_features: For IMAGE_FEATURES, expects a batch with shape
-                [1, 576, 1024].
+            pixel_values: The pixels in each grid patch for each input image.
+                Expects a batch with shape `[1, num_patches, 3, 336, 336]`.
+            image_sizes: The original `(width, height)` for each input image.
+                Expects a batch with shape `[1, 2]`.
+
+        See also:
+            Each input maps to huggingface implementation, as follows:
+
+            - `pixel_values`: https://github.com/huggingface/transformers/blob/v4.41.1/src/transformers/models/llava_next/modeling_llava_next.py#L690
+            - `image_sizes`: https://github.com/huggingface/transformers/blob/v4.41.1/src/transformers/models/llava_next/modeling_llava_next.py#L691
         """
         image_input = self._parse_and_validate_image_input(**kwargs)
 
@@ -441,6 +427,9 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            # post_layernorm is not needed in CLIPVisionModel
+            if "vision_model.post_layernorm" in name:
                 continue
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:

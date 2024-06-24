@@ -68,6 +68,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_fast", torch::kCUDA, &gelu_fast);
 
+  // Quick GELU implementation.
+  ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
+  ops.impl("gelu_quick", torch::kCUDA, &gelu_quick);
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
@@ -136,10 +140,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization.
   ops.def(
-      "cutlass_scaled_mm_dq(Tensor! out, Tensor a,"
-      "                     Tensor b, Tensor a_scales,"
-      "                     Tensor b_scales) -> ()");
-  ops.impl("cutlass_scaled_mm_dq", torch::kCUDA, &cutlass_scaled_mm_dq);
+      "cutlass_scaled_mm(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales) -> ()");
+  ops.impl("cutlass_scaled_mm", torch::kCUDA, &cutlass_scaled_mm);
+
+  // Check if cutlass scaled_mm is supported for CUDA devices of the given
+  // capability
+  ops.def("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
+  ops.impl("cutlass_scaled_mm_supports_fp8", torch::kCUDA,
+           &cutlass_scaled_mm_supports_fp8);
 #endif
 
   // Quantized GEMM for GPTQ.

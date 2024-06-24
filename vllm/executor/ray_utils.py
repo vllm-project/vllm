@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import get_ip, is_hip
+from vllm.utils import get_ip, is_hip, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -71,7 +71,7 @@ def initialize_ray_cluster(
             "serving.")
 
     # Connect to a ray cluster.
-    if is_hip():
+    if is_hip() or is_xpu():
         ray.init(address=ray_address,
                  ignore_reinit_error=True,
                  num_gpus=parallel_config.world_size)

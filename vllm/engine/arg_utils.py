@@ -7,10 +7,11 @@ from typing import List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         TokenizerPoolConfig, VisionLanguageConfig)
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                         SpeculativeConfig, TokenizerPoolConfig,
+                         VisionLanguageConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.utils import str_to_int_tuple
+from vllm.utils import FlexibleArgumentParser, str_to_int_tuple
 
 
 def nullable_str(val: str):
@@ -101,13 +102,15 @@ class EngineArgs:
 
     qlora_adapter_name_or_path: Optional[str] = None
 
+    otlp_traces_endpoint: Optional[str] = None
+
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
 
     @staticmethod
     def add_cli_args_for_vlm(
-            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+            parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         parser.add_argument('--image-input-type',
                             type=nullable_str,
                             default=None,
@@ -153,8 +156,7 @@ class EngineArgs:
         return parser
 
     @staticmethod
-    def add_cli_args(
-            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
         # Model arguments
@@ -230,7 +232,7 @@ class EngineArgs:
             '* "dummy" will initialize the weights with random values, '
             'which is mainly for profiling.\n'
             '* "tensorizer" will load the weights using tensorizer from '
-            'CoreWeave. See the Tensorize vLLM Model script in the Examples'
+            'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
@@ -501,11 +503,12 @@ class EngineArgs:
                   'Enabling this will use the fully sharded layers. '
                   'At high sequence length, max rank or '
                   'tensor parallel size, this is likely faster.'))
-        parser.add_argument("--device",
-                            type=str,
-                            default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron", "cpu"],
-                            help='Device type for vLLM execution.')
+        parser.add_argument(
+            "--device",
+            type=str,
+            default=EngineArgs.device,
+            choices=["auto", "cuda", "neuron", "cpu", "tpu", "xpu"],
+            help='Device type for vLLM execution.')
 
         # Related to Vision-language models such as llava
         parser = EngineArgs.add_cli_args_for_vlm(parser)
@@ -573,7 +576,7 @@ class EngineArgs:
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
         parser.add_argument(
-            '--preemption_mode',
+            '--preemption-mode',
             type=str,
             default=None,
             help='If \'recompute\', the engine performs preemption by block '
@@ -598,6 +601,13 @@ class EngineArgs:
                             type=str,
                             default=None,
                             help='Name or path of the QLoRA adapter.')
+
+        parser.add_argument(
+            '--otlp-traces-endpoint',
+            type=str,
+            default=None,
+            help='Target URL to which OpenTelemetry traces will be sent.')
+
         return parser
 
     @classmethod
@@ -756,6 +766,9 @@ class EngineArgs:
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
 
+        observability_config = ObservabilityConfig(
+            otlp_traces_endpoint=self.otlp_traces_endpoint)
+
         if (model_config.get_sliding_window() is not None
                 and scheduler_config.chunked_prefill_enabled
                 and not scheduler_config.use_v2_block_manager):
@@ -763,16 +776,19 @@ class EngineArgs:
                 "Chunked prefill is not supported with sliding window. "
                 "Set --disable-sliding-window to disable sliding window.")
 
-        return EngineConfig(model_config=model_config,
-                            cache_config=cache_config,
-                            parallel_config=parallel_config,
-                            scheduler_config=scheduler_config,
-                            device_config=device_config,
-                            lora_config=lora_config,
-                            vision_language_config=vision_language_config,
-                            speculative_config=speculative_config,
-                            load_config=load_config,
-                            decoding_config=decoding_config)
+        return EngineConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            lora_config=lora_config,
+            vision_language_config=vision_language_config,
+            speculative_config=speculative_config,
+            load_config=load_config,
+            decoding_config=decoding_config,
+            observability_config=observability_config,
+        )
 
 
 @dataclass
@@ -783,8 +799,8 @@ class AsyncEngineArgs(EngineArgs):
     max_log_len: Optional[int] = None
 
     @staticmethod
-    def add_cli_args(parser: argparse.ArgumentParser,
-                     async_args_only: bool = False) -> argparse.ArgumentParser:
+    def add_cli_args(parser: FlexibleArgumentParser,
+                     async_args_only: bool = False) -> FlexibleArgumentParser:
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
         parser.add_argument('--engine-use-ray',
@@ -805,13 +821,13 @@ class AsyncEngineArgs(EngineArgs):
 
 # These functions are used by sphinx to build the documentation
 def _engine_args_parser():
-    return EngineArgs.add_cli_args(argparse.ArgumentParser())
+    return EngineArgs.add_cli_args(FlexibleArgumentParser())
 
 
 def _async_engine_args_parser():
-    return AsyncEngineArgs.add_cli_args(argparse.ArgumentParser(),
+    return AsyncEngineArgs.add_cli_args(FlexibleArgumentParser(),
                                         async_args_only=True)
 
 
 def _vlm_engine_args_parser():
-    return EngineArgs.add_cli_args_for_vlm(argparse.ArgumentParser())
+    return EngineArgs.add_cli_args_for_vlm(FlexibleArgumentParser())

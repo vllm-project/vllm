@@ -1,13 +1,16 @@
 import contextlib
+import functools
 from typing import List, Optional, Tuple, Type
 
 import torch
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 try:
     import vllm._C
 except ImportError as e:
-    from vllm.logger import init_logger
-    logger = init_logger(__name__)
     logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
@@ -21,6 +24,25 @@ with contextlib.suppress(ImportError):
 def is_custom_op_supported(op_name: str) -> bool:
     op, overloads = torch._C._jit_get_operation(op_name)
     return op is not None
+
+
+def hint_on_error(fn):
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except AttributeError as e:
+            msg = (
+                "Error in calling custom op %s: %s\n"
+                "Possibly you have built or installed an obsolete version of vllm.\n"
+                "Please try a clean build and install of vllm,"
+                "or remove old built files such as vllm/*cpython*.so and build/ ."
+            )
+            logger.error(msg, fn.__name__, e)
+            raise e
+
+    return wrapper
 
 
 # activation ops
@@ -42,6 +64,10 @@ def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
 
 def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
     torch.ops._C.gelu_new(out, x)
+
+
+def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
+    torch.ops._C.gelu_quick(out, x)
 
 
 # page attention ops
@@ -190,9 +216,13 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # cutlass
-def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
-                         scale_a: torch.Tensor, scale_b: torch.Tensor,
-                         out_dtype: Type[torch.dtype]) -> torch.Tensor:
+def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
+
+
+def cutlass_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor,
+                      scale_b: torch.Tensor,
+                      out_dtype: Type[torch.dtype]) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
 
@@ -200,8 +230,7 @@ def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.ops._C.cutlass_scaled_mm_dq(out, a, b, scale_a, scale_b)
-
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b)
     return out
 
 
@@ -352,7 +381,8 @@ def reshape_and_cache_flash(
                                                    kv_cache_dtype)
 
 
-def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
+def copy_blocks(key_caches: List[torch.Tensor],
+                value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
@@ -459,3 +489,25 @@ def dispatch_bgmv_low_level(
         h_out,
         y_offset,
     )
+
+
+# temporary fix for https://github.com/vllm-project/vllm/issues/5456
+# TODO: remove this in v0.6.0
+names_and_values = globals()
+names_and_values_to_update = {}
+# prepare variables to avoid dict size change during iteration
+k, v, arg = None, None, None
+fn_type = type(lambda x: x)
+for k, v in names_and_values.items():
+    # find functions that are defined in this file and have torch.Tensor
+    # in their annotations. `arg == "torch.Tensor"` is used to handle
+    # the case when users use `import __annotations__` to turn type
+    # hints into strings.
+    if isinstance(v, fn_type) \
+        and v.__code__.co_filename == __file__ \
+        and any(arg is torch.Tensor or arg == "torch.Tensor"
+                   for arg in v.__annotations__.values()):
+        names_and_values_to_update[k] = hint_on_error(v)
+
+names_and_values.update(names_and_values_to_update)
+del names_and_values_to_update, names_and_values, v, k, fn_type

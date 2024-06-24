@@ -10,8 +10,10 @@ import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
+from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptStrictInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.utils import FlexibleArgumentParser
 
 
 def main(args: argparse.Namespace):
@@ -19,25 +21,30 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(model=args.model,
-              speculative_model=args.speculative_model,
-              num_speculative_tokens=args.num_speculative_tokens,
-              tokenizer=args.tokenizer,
-              quantization=args.quantization,
-              tensor_parallel_size=args.tensor_parallel_size,
-              trust_remote_code=args.trust_remote_code,
-              dtype=args.dtype,
-              enforce_eager=args.enforce_eager,
-              kv_cache_dtype=args.kv_cache_dtype,
-              quantization_param_path=args.quantization_param_path,
-              device=args.device,
-              ray_workers_use_nsight=args.ray_workers_use_nsight,
-              use_v2_block_manager=args.use_v2_block_manager,
-              enable_chunked_prefill=args.enable_chunked_prefill,
-              download_dir=args.download_dir,
-              block_size=args.block_size,
-              gpu_memory_utilization=args.gpu_memory_utilization,
-              distributed_executor_backend=args.distributed_executor_backend)
+    llm = LLM(
+        model=args.model,
+        speculative_model=args.speculative_model,
+        num_speculative_tokens=args.num_speculative_tokens,
+        tokenizer=args.tokenizer,
+        quantization=args.quantization,
+        tensor_parallel_size=args.tensor_parallel_size,
+        trust_remote_code=args.trust_remote_code,
+        dtype=args.dtype,
+        max_model_len=args.max_model_len,
+        enforce_eager=args.enforce_eager,
+        kv_cache_dtype=args.kv_cache_dtype,
+        quantization_param_path=args.quantization_param_path,
+        device=args.device,
+        ray_workers_use_nsight=args.ray_workers_use_nsight,
+        use_v2_block_manager=args.use_v2_block_manager,
+        enable_chunked_prefill=args.enable_chunked_prefill,
+        download_dir=args.download_dir,
+        block_size=args.block_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        load_format=args.load_format,
+        distributed_executor_backend=args.distributed_executor_backend,
+        otlp_traces_endpoint=args.otlp_traces_endpoint,
+    )
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -96,7 +103,7 @@ def main(args: argparse.Namespace):
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
         latencies.append(run_to_completion(profile_dir=None))
     latencies = np.array(latencies)
-    percentages = [10, 25, 50, 75, 90]
+    percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)
     print(f'Avg latency: {np.mean(latencies)} seconds')
     for percentage, percentile in zip(percentages, percentiles):
@@ -114,7 +121,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
@@ -145,6 +152,12 @@ if __name__ == '__main__':
     parser.add_argument('--trust-remote-code',
                         action='store_true',
                         help='trust remote code from huggingface')
+    parser.add_argument(
+        '--max-model-len',
+        type=int,
+        default=None,
+        help='Maximum length of a sequence (including prompt and output). '
+        'If None, will be derived from the model.')
     parser.add_argument(
         '--dtype',
         type=str,
@@ -189,7 +202,7 @@ if __name__ == '__main__':
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda", "cpu"],
+        choices=["cuda", "cpu", "tpu", "xpu"],
         help='device type for vLLM execution, supporting CUDA and CPU.')
     parser.add_argument('--block-size',
                         type=int,
@@ -223,11 +236,39 @@ if __name__ == '__main__':
                         'the model executor, which can range from 0 to 1.'
                         'If unspecified, will use the default value of 0.9.')
     parser.add_argument(
+        '--load-format',
+        type=str,
+        default=EngineArgs.load_format,
+        choices=[
+            'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer',
+            'bitsandbytes'
+        ],
+        help='The format of the model weights to load.\n\n'
+        '* "auto" will try to load the weights in the safetensors format '
+        'and fall back to the pytorch bin format if safetensors format '
+        'is not available.\n'
+        '* "pt" will load the weights in the pytorch bin format.\n'
+        '* "safetensors" will load the weights in the safetensors format.\n'
+        '* "npcache" will load the weights in pytorch format and store '
+        'a numpy cache to speed up the loading.\n'
+        '* "dummy" will initialize the weights with random values, '
+        'which is mainly for profiling.\n'
+        '* "tensorizer" will load the weights using tensorizer from '
+        'CoreWeave. See the Tensorize vLLM Model script in the Examples'
+        'section for more information.\n'
+        '* "bitsandbytes" will load the weights using bitsandbytes '
+        'quantization.\n')
+    parser.add_argument(
         '--distributed-executor-backend',
         choices=['ray', 'mp'],
         default=None,
         help='Backend to use for distributed serving. When more than 1 GPU '
         'is used, will be automatically set to "ray" if installed '
         'or "mp" (multiprocessing) otherwise.')
+    parser.add_argument(
+        '--otlp-traces-endpoint',
+        type=str,
+        default=None,
+        help='Target URL to which OpenTelemetry traces will be sent.')
     args = parser.parse_args()
     main(args)

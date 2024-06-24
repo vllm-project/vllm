@@ -31,7 +31,7 @@ import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncGenerator, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
@@ -39,7 +39,15 @@ from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
+try:
+    from vllm.transformers_utils.tokenizer import get_tokenizer
+except ImportError:
+    from backend_request_func import get_tokenizer
+
+try:
+    from vllm.utils import FlexibleArgumentParser
+except ImportError:
+    from argparse import ArgumentParser as FlexibleArgumentParser
 
 
 @dataclass
@@ -200,12 +208,12 @@ def calculate_metrics(
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
 ) -> Tuple[BenchmarkMetrics, List[int]]:
-    actual_output_lens = []
+    actual_output_lens: List[int] = []
     total_input = 0
     completed = 0
-    itls = []
-    tpots = []
-    ttfts = []
+    itls: List[float] = []
+    tpots: List[float] = []
+    ttfts: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             # We use the tokenizer to count the number of output tokens for all
@@ -265,7 +273,7 @@ async def benchmark(
     disable_tqdm: bool,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
-        request_func = ASYNC_REQUEST_FUNCS.get(backend)
+        request_func = ASYNC_REQUEST_FUNCS[backend]
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -292,7 +300,7 @@ async def benchmark(
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     benchmark_start_time = time.perf_counter()
-    tasks = []
+    tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len = request
         request_func_input = RequestFuncInput(
@@ -310,7 +318,7 @@ async def benchmark(
                              pbar=pbar)))
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if not disable_tqdm:
+    if pbar is not None:
         pbar.close()
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
@@ -466,7 +474,7 @@ def main(args: argparse.Namespace):
 
     # Save config and results to json
     if args.save_result:
-        result_json = {}
+        result_json: Dict[str, Any] = {}
 
         # Setup
         current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -499,6 +507,8 @@ def main(args: argparse.Namespace):
         # Save to file
         base_model_id = model_id.split("/")[-1]
         file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"  #noqa
+        if args.result_filename:
+            file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
         with open(file_name, "w") as outfile:
@@ -506,7 +516,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Benchmark the online serving throughput.")
     parser.add_argument(
         "--backend",
@@ -638,6 +648,15 @@ if __name__ == "__main__":
         default=None,
         help="Specify directory to save benchmark json results."
         "If not specified, results are saved in the current directory.",
+    )
+    parser.add_argument(
+        "--result-filename",
+        type=str,
+        default=None,
+        help="Specify the filename to save benchmark json results."
+        "If not specified, results will be saved in "
+        "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
+        " format.",
     )
 
     args = parser.parse_args()

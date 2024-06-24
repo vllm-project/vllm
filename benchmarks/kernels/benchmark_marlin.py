@@ -1,4 +1,4 @@
-import argparse
+from typing import List
 
 import torch
 import torch.utils.benchmark as benchmark
@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MarlinWorkspace, marlin_24_quantize, marlin_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, quantize_weights, sort_weights)
+from vllm.utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = ["meta-llama/Llama-2-7b-hf/TP1"]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
@@ -23,8 +24,9 @@ ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 
 
-def bench_run(results, model, act_order, is_k_full, num_bits, group_size,
-              size_m, size_k, size_n):
+def bench_run(results: List[benchmark.Measurement], model: str,
+              act_order: bool, is_k_full: bool, num_bits: int, group_size: int,
+              size_m: int, size_k: int, size_n: int):
     label = "Quant Matmul"
 
     sub_label = ("{}, act={} k_full={}, b={}, g={}, "
@@ -156,7 +158,7 @@ def main(args):
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
 
-    results = []
+    results: List[benchmark.Measurement] = []
 
     for model in args.models:
         for layer in WEIGHT_SHAPES[model]:
@@ -209,7 +211,7 @@ def main(args):
 #   python benchmark_marlin.py --batch-sizes 1 16 32 --limit-k 4096 --limit-n 4096 --limit-group-size 128 --limit-num-bits 4 --limit-act-order 0 --limit-k-full 1 # noqa E501
 #
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Benchmark Marlin across specified models/shapes/batches")
     parser.add_argument(
         "--models",
