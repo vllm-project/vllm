@@ -177,7 +177,7 @@ def build_app(args):
     return app
 
 
-def run_server(args):
+def run_server(args, llm_engine=None):
     app = build_app(args)
 
     logger.info("vLLM API server version %s", vllm.__version__)
@@ -201,8 +201,11 @@ def run_server(args):
             "Only --image-input-type 'pixel_values' is supported for serving "
             "vision language models with the vLLM API server.")
 
-    engine = AsyncLLMEngine.from_engine_args(
-        engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
+    engine = (llm_engine
+                if llm_engine is not None
+                else AsyncLLMEngine.from_engine_args(
+                    engine_args, usage_context=UsageContext.OPENAI_API_SERVER))
+
 
     event_loop: Optional[asyncio.AbstractEventLoop]
     try:
