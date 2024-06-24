@@ -247,8 +247,9 @@ class RayTPUExecutor(TPUExecutor):
                           num_cpu_blocks=num_cpu_blocks)
 
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self,
+        execute_model_req: ExecuteModelRequest,
+    ) -> List[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
