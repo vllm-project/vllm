@@ -9,6 +9,7 @@ from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
 
 SeqId = int
 
+
 def get_all_num_logprobs(
         seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
     """Given a list of SequenceGroupMetadata, create a list of all num_logprobs.
@@ -134,6 +135,8 @@ def sampler_output_to_torch(
             sampled_token_probs: torch.Tensor
                 shape: [batch_size, len(sampler_output_list), vocab_size]
         """
+    
+    # shape: [batch_size, num_sampler_output, vocab_size]
     sampled_token_probs = torch.stack(
         [
             sampler_output.sampled_token_probs
