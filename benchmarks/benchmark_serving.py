@@ -44,6 +44,11 @@ try:
 except ImportError:
     from backend_request_func import get_tokenizer
 
+try:
+    from vllm.utils import FlexibleArgumentParser
+except ImportError:
+    from argparse import ArgumentParser as FlexibleArgumentParser
+
 
 @dataclass
 class BenchmarkMetrics:
@@ -511,7 +516,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Benchmark the online serving throughput.")
     parser.add_argument(
         "--backend",
