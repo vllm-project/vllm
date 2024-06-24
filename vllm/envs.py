@@ -38,6 +38,9 @@ if TYPE_CHECKING:
     VLLM_INSTALL_PUNICA_KERNELS: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
+    VLLM_TUNE_FP8: bool = False
+    VLLM_FP8_UNTUNED_FILE: str = "~/.vllm/untuned_fp8.csv"
+    VLLM_FP8_TUNED_FILE: str = "~/.vllm/tuned_fp8.csv"
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -227,20 +230,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Whether to tune fp8 gemm or not.
     # Will record all shapes of fp8 gemm.
     "VLLM_TUNE_FP8":
-    lambda: os.getenv("VLLM_TUNE_FP8", "0"),
+    lambda: bool(os.getenv("VLLM_TUNE_FP8", 0)),
     
     # The file storing the all fp8 gemm shapes.
     "VLLM_FP8_UNTUNED_FILE":
-    lambda: os.getenv("VLLM_FP8_UNTUNED_FILE", "/tmp/untuned_fp8.csv"),
+    lambda: os.getenv("VLLM_FP8_UNTUNED_FILE", "~/.vllm/untuned_fp8.csv"),
 
     # The file storing the tuned result for fp8 gemm.
     "VLLM_FP8_TUNED_FILE":
-    lambda: os.getenv("VLLM_FP8_TUNED_FILE", "/tmp/tuned_fp8.csv"),
-    
-    # The output dtype used for fp8 gemm.
-    # Only float16 and float8_e4m3fnuz supported.
-    "VLLM_FP8_GEMM_OUTPUT_TYPE":
-    lambda: os.getenv("VLLM_FP8_GEMM_OUTPUT_TYPE", "float16")
+    lambda: os.getenv("VLLM_FP8_TUNED_FILE", "~/.vllm/tuned_fp8.csv"),
 }
 
 # end-env-vars-definition
