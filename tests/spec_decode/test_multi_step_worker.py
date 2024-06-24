@@ -116,8 +116,7 @@ def test_same_output_for_single_step():
     actual_output, _ = multi_step_worker.sampler_output(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=multi_step_seq_group),
-        sample_len=num_steps,
-        seq_ids_with_bonus_token_in_last_step=None)
+        sample_len=num_steps)
     assert len(actual_output) == num_steps
     actual_output = actual_output[0]
 
@@ -236,12 +235,11 @@ def test_same_output_for_multi_step(disable_bonus_tokens:bool):
             block_size,
             continuations=continuations,
             final_prompt_lens=final_prompt_lens)
-        step_output = (
+        single_step_output.extend(
             worker.execute_model(execute_model_req=ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list)))
-        single_step_output.extend(step_output)
         # Append output tokens to new sequence data.
-        for i, seq_group_output in enumerate(step_output[0].outputs):
+        for i, seq_group_output in enumerate(single_step_output[-1]):
             continuations[i].append(seq_group_output.samples[0].output_token)
     random.seed(seed)
     # Run multi-step.
@@ -343,7 +341,7 @@ def test_draft_proposals_full_speculation_len():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=k),)
+            num_lookahead_slots=k), )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)

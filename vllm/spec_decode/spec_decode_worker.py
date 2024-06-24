@@ -151,7 +151,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 disable speculative decoding for new incoming requests.
             metrics_collector: Helper class for collecting metrics; can be set
                 for testing purposes.
-            disable_bonus_tokens_in_kv_cache:
+            disable_bonus_tokens_in_kv_cache: A boolean flag to control the use 
+            of bonus tokens during speculative decoding in models that rely on KV 
+            cache. If set to True, bonus tokens will be disabled and if set to False,
+            bonus tokens will be enabled.
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
@@ -165,7 +168,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.probs_dtype = self.rejection_sampler.probs_dtype
         self.token_id_dtype = self.rejection_sampler.token_id_dtype
         # Tracks the sequence IDs that received a bonus token ID in
-        # their last forward pass. Needed only if the  
+        # their last forward pass. Needed only if KV cache is being
+        # used for token generation such as in the case of MultiStepWorker.
         if (isinstance(self.proposer_worker, MultiStepWorker) 
            and not disable_bonus_tokens_in_kv_cache):
            self.seq_with_bonus_token_in_last_step = set()

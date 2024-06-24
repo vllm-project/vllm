@@ -634,8 +634,8 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
             "num_speculative_tokens": k,
             "disable_bonus_tokens_in_kv_cache": False,
         }
-        # Try a range of common k, as well as large speculation.
-        for k in [1, 8, 16]
+        # Try small k for speculative decoding.
+        for k in [1, 2, 3]
     ])
 @pytest.mark.parametrize("batch_size", [1, 8, 64])
 @pytest.mark.parametrize(

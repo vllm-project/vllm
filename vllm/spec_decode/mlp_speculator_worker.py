@@ -21,6 +21,8 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
+        # Unused parameter. MLPSpeculatorWorker does not use the KV Cache and
+        # therefore does not need this parameter.
         seq_ids_with_bonus_token_in_last_step:set=set(),
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass to generate sample_len future tokens.

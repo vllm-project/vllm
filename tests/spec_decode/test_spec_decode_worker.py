@@ -535,10 +535,11 @@ def test_populate_seq_ids_with_bonus_tokens():
     Verify that a call to _create_output_sampler_list correctly updates
     seq_with_bonus_token_in_last_step.
 
-    seq_with_bonus_token_in_last_step is an internal data structure in SpecDecodeWorker
-    that tracks the sequence IDs assigned bonus tokens by the target model in their
-    last forward pass. This state is maintained only for models relying on the KV cache,
-    such as those using the MultiStepWorker.
+    seq_with_bonus_token_in_last_step is an internal data structure in
+    SpecDecodeWorker that tracks the sequence IDs which are assigned bonus
+    tokens by the target model in their last forward pass. This state is
+    maintained only for models relying on the KV cache, such as those using
+    the MultiStepWorker.
     """
     batch_size = 10
     k = 5
@@ -785,5 +786,3 @@ def test_split_num_cache_blocks_evenly(available_gpu_blocks: int,
     assert (num_blocks * target_cache_block_size_bytes) + (
         num_blocks * draft_kv_size_bytes) <= (available_gpu_blocks *
                                               target_cache_block_size_bytes)
-
-
