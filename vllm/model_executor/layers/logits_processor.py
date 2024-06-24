@@ -5,8 +5,9 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from vllm.distributed import tensor_model_parallel_gather
+from vllm.distributed import (tensor_model_parallel_gather, tensor_model_parallel_all_gather)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.utils import is_tpu
 
 
 class LogitsProcessor(nn.Module):
@@ -34,6 +35,7 @@ class LogitsProcessor(nn.Module):
         self.logits_as_input = logits_as_input
         # original vocabulary size (without LoRA).
         self.org_vocab_size = org_vocab_size or vocab_size
+        self.use_all_gather = is_tpu()
 
     def forward(
         self,
@@ -66,7 +68,12 @@ class LogitsProcessor(nn.Module):
         logits = torch.matmul(hidden_states, embedding.t())
         if embedding_bias is not None:
             logits += embedding_bias
-        logits = tensor_model_parallel_gather(logits)
+        if self.use_all_gather:
+            # Gather might not be supported for some devices such as TPUs.
+            # Use all-gather instead.
+            logits = tensor_model_parallel_all_gather(logits)
+        else:
+            logits = tensor_model_parallel_gather(logits)
         # Remove paddings in vocab (if any).
         if logits is not None:
             logits = logits[:, :self.org_vocab_size]
