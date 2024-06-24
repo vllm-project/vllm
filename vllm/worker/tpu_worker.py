@@ -182,16 +182,13 @@ class TPUWorker(LoraNotSupportedWorkerBase):
 
     def execute_model(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> List[SamplerOutput]:
-        if execute_model_req is None:
+        if not self.is_driver_worker:
+            self._execute_model_non_driver()
             return []
 
-        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-        num_seq_groups = len(seq_group_metadata_list)
-        if num_seq_groups == 0:
-            return []
-
+        assert execute_model_req is not None
         # Currently, TPUWorker does not support swapping.
         # TODO(woosuk): Support block copying.
         assert len(execute_model_req.blocks_to_swap_in) == 0, (
@@ -200,6 +197,16 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             "Swapping is not supported for the TPU backend.")
         assert len(execute_model_req.blocks_to_copy) == 0
 
+        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+        assert len(seq_group_metadata_list) > 0
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.tpu_cache)
         return [output]
+
+    def start_worker_execution_loop(self) -> None:
+        while self._execute_model_non_driver():
+            pass
+
+    def _execute_model_non_driver(self) -> bool:
+        self.model_runner.execute_model(None, self.tpu_cache)
+        return True
