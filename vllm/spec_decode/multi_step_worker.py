@@ -19,12 +19,6 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     allocated enough space to store the additional KV. This reduces overhead
     by invoking the scheduler less.
 
-    In addition, it allows a speculative draft model to run with smaller tensor
-    parallel degree than target model. This is implemented by changing vLLM's
-    tensor parallel group to a group of the small size temporarily during
-    forward passes of draft models. This reduces the communication overhead of
-    small draft models. 
-
     The MultiStepWorker does not support cache swap operations, or beam search.
     Cache swap operations do not require large modifications. On the other hand,
     beam search requires memory allocations during sequence forks and thus
