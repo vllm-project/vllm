@@ -15,12 +15,11 @@ import operator
 import torch
 import habana_frameworks.torch as htorch
 
-from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
-                            get_attn_backend)
+from vllm.attention import (AttentionMetadata, get_attn_backend)
 from vllm.config import (DeviceConfig, LoadConfig, CacheConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
-from vllm.distributed.parallel_state import get_cpu_world_group
+#from vllm.distributed.parallel_state import get_cpu_world_group
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -98,13 +97,14 @@ def subtuple(obj: object, typename: str, to_copy: List[str], to_override: Dict[s
 
 
 def align_workers(value, op):
-    group = get_cpu_world_group()
-    world_size = torch.distributed.get_world_size()
-    if world_size <= 1:
-        return value
-    value_t = torch.tensor(value, device='cpu')
-    torch.distributed.all_reduce(value_t, op=op, group=group)
-    return value_t.item()
+    #group = get_cpu_world_group()
+    #world_size = torch.distributed.get_world_size()
+    #if world_size <= 1:
+    #    return value
+    #value_t = torch.tensor(value, device='cpu')
+    #torch.distributed.all_reduce(value_t, op=op, group=group)
+    #return value_t.item()
+    return 0
 
 
 class HpuModelAdapter():
@@ -112,7 +112,7 @@ class HpuModelAdapter():
         self.model = model
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device, dtype):
-        prefill_metadata = attn_metadata.prefill_metadata
+        prefill_metadata = attn_metadata
         if prefill_metadata is None:
             return attn_metadata
         #FIXME: Restore alibi support
@@ -132,8 +132,9 @@ class HpuModelAdapter():
                          .masked_fill_(mask, -math.inf))
             #FIXME: Restore sliding window support
             #if self.sliding_window is not None:
-            prefill_metadata = prefill_metadata._replace(attn_bias=attn_bias)
-            attn_metadata = attn_metadata._replace(prefill_metadata=prefill_metadata)
+            #prefill_metadata = prefill_metadata._replace(attn_bias=attn_bias)
+#            attn_metadata = attn_metadata._replace(prefill_metadata=prefill_metadata)
+            attn_metadata.attn_bias = attn_bias
             return attn_metadata
         else:
             # FIXME: This needs updating...
@@ -149,6 +150,7 @@ class HpuModelAdapter():
             kwargs.pop('bypass_hpu_graphs') # required for PT eager
         input_ids = kwargs['input_ids']
         kwargs['attn_metadata'] = self._set_attn_bias(kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1), input_ids.device, torch.bfloat16)
+        import pdb; pdb.set_trace()
         hidden_states = self.model(*args, **kwargs)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         hidden_states = hidden_states.index_select(0, selected_token_indices)
@@ -164,7 +166,7 @@ class HpuModelAdapter():
 class PreparePromptMetadata(NamedTuple):
     input_tokens: List[int]
     input_positions: List[int]
-    attn_metadata: Optional[AttentionMetadataPerStage]
+    attn_metadata: Optional[AttentionMetadata]
     seq_lens: List[int]
     query_lens: List[int]
     lora_index_mapping: List[int]
@@ -241,6 +243,7 @@ class HabanaModelRunner:
         self.scheduler_config = scheduler_config
         self.lora_config = lora_config
         self.load_config = load_config
+        self.cache_config = cache_config
         self.is_driver_worker = is_driver_worker
         self.profiler = Profiler()
 
@@ -261,7 +264,14 @@ class HabanaModelRunner:
         self.vision_language_config = vision_language_config
 
         self.attn_backend = get_attn_backend(
-            self.model_config.dtype if model_config is not None else None)
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
 
         # Lazy initialization
         self.lora_manager: LRUCacheWorkerLoRAManager = None
@@ -280,6 +290,7 @@ class HabanaModelRunner:
                     vision_language_config=self.vision_language_config,
                     parallel_config=self.parallel_config,
                     scheduler_config=self.scheduler_config,
+                    cache_config=self.cache_config
                 )
             logger.info(f"Pre-loading model weights on {next(self.model.parameters()).device} took {m_getmodel.get_summary_string()}")
 
@@ -447,6 +458,8 @@ class HabanaModelRunner:
                 slot_mapping[-1].append(slot)
 
         max_query_len = max(query_lens)
+        sum_query_len = sum(query_lens)
+        real_num_seqs = len(query_lens) 
         assert max_query_len > 0
 
         context_lens_tensor = torch.tensor(context_lens,
@@ -514,6 +527,10 @@ class HabanaModelRunner:
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
+            num_prefills=real_num_seqs,
+            num_prefill_tokens=sum_query_len,
+            num_decode_tokens=0, 
+            slot_mapping=slot_mapping
         )
         return PreparePromptMetadata(
             input_tokens=input_tokens,
@@ -593,7 +610,7 @@ class HabanaModelRunner:
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.int,
                                        device=self.device)
-
+        num_decode_tokens = sum(seq_lens)
         max_block_table_len = max(
             len(block_table) for block_table in block_tables)
         block_tables = make_tensor_with_pad(
@@ -613,6 +630,10 @@ class HabanaModelRunner:
             context_lens_tensor=None,
             block_tables=block_tables,
             use_cuda_graph=False,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=num_decode_tokens,
+            slot_mapping=slot_mapping
         )
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
@@ -772,25 +793,26 @@ class HabanaModelRunner:
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
 
-        attn_metadata = AttentionMetadata(
-            num_prefills=num_prefills,
-            slot_mapping=slot_mapping,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            prefill_metadata=prefill_attn_metadata,
-            decode_metadata=decode_attn_metadata,
-            kv_cache_dtype=self.kv_cache_dtype,
-        )
+        attn_metadata = prefill_attn_metadata if prefill_attn_metadata is not None else decode_attn_metadata
+#        attn_metadata = AttentionMetadata(
+#            num_prefills=num_prefills,
+#            slot_mapping=slot_mapping,
+#            num_prefill_tokens=num_prefill_tokens,
+#            num_decode_tokens=num_decode_tokens,
+#            prefill_metadata=prefill_attn_metadata,
+#            decode_metadata=decode_attn_metadata,
+#            kv_cache_dtype=self.kv_cache_dtype,
+#        )
 
         return (input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
                 multi_modal_input)
 
     def _seq_len(self, attn_metadata):
-        if attn_metadata.prefill_metadata:
+        if attn_metadata.num_prefills != 0:
             return attn_metadata.slot_mapping.size(1)
         else:
-            return attn_metadata.decode_metadata.block_tables.size(1) * self.block_size
+            return attn_metadata.block_tables.size(1) * self.block_size
 
     def trim_attn_metadata(self, metadata: AttentionMetadata) -> object:
         prefill_metadata = subtuple(metadata.prefill_metadata,
@@ -844,7 +866,7 @@ class HabanaModelRunner:
             "input_ids": input_tokens,
             "positions": input_positions,
             "kv_caches": kv_caches,
-            "attn_metadata": self.trim_attn_metadata(attn_metadata),
+            "attn_metadata": attn_metadata,
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})

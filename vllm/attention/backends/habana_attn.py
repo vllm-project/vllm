@@ -3,7 +3,7 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 import math
@@ -12,8 +12,7 @@ from vllm.hpu.attn_bias import (AttentionBias,
                                 LowerTriangularMaskWithTensorBias)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataPerStage)
+                                              AttentionMetadata)
 from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,
                                                   HabanaPagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -58,7 +57,7 @@ class HabanaAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class HabanaAttentionMetadata(AttentionMetadataPerStage, HabanaPagedAttentionMetadata):
+class HabanaAttentionMetadata(AttentionMetadata, HabanaPagedAttentionMetadata):
     """Metadata for HabanaAttentionbackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -133,10 +132,13 @@ class HabanaAttentionImpl(AttentionImpl):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
+        self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -161,7 +163,7 @@ class HabanaAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata[HabanaAttentionMetadata],
+        attn_metadata: HabanaAttentionMetadata,
         kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
@@ -191,10 +193,11 @@ class HabanaAttentionImpl(AttentionImpl):
             HabanaPagedAttention.write_to_paged_cache(key, value, key_cache,
                                                       value_cache,
                                                       attn_metadata.slot_mapping,
-                                                      attn_metadata.kv_cache_dtype,
+                                                      self.kv_cache_dtype,
                                                       attn_metadata.prefill_metadata is not None)
 
-        if prefill_meta := attn_metadata.prefill_metadata:
+        if attn_metadata.num_prefills > 0:
+            prefill_meta = attn_metadata
             # Prompt run.
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 # TODO: move this outside of model
@@ -225,7 +228,8 @@ class HabanaAttentionImpl(AttentionImpl):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                 )
-        if decode_meta := attn_metadata.decode_metadata:
+        if attn_metadata.num_decode_tokens > 0:
+            decode_meta = attn_metadata
             # Decoding run.
             output = HabanaPagedAttention.forward_decode(
                 query,
@@ -233,7 +237,7 @@ class HabanaAttentionImpl(AttentionImpl):
                 value_cache,
                 decode_meta.block_tables,
                 decode_meta.seq_lens_tensor,
-                attn_metadata.kv_cache_dtype,
+                self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,

@@ -348,7 +348,7 @@ class LLMEngine:
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor
         elif engine_config.device_config.device_type == "hpu":
-            if engine_config.parallel_config.worker_use_ray:
+            if distributed_executor_backend == "ray":
                 initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_habana_executor import RayHabanaExecutor
                 executor_class = RayHabanaExecutor
@@ -796,7 +796,6 @@ class LLMEngine:
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
             scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
-
         # Log stats.
         self.do_log_stats(scheduler_outputs, output)
 
@@ -808,6 +807,14 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             self.model_executor.stop_remote_worker_execution_loop()
 
+        out_prompt = [ro.prompt for ro in request_outputs]
+        out_indices =  [ro.outputs[-1].index for ro in request_outputs]
+        out_text =  [f'{ro.outputs[-1].text!r}' for ro in request_outputs]
+        for idx, (p, i, t) in enumerate(zip(out_prompt, out_indices, out_text)):
+            logger.info(f'\tPROMPT ({idx}): {p}')            
+            logger.info(f'\tGEN IDX ({idx}): {i}')            
+            logger.info(f'\tGEN TXT ({idx}): {t}')            
+            logger.info('')            
         return request_outputs
 
     def do_log_stats(

@@ -15,7 +15,6 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
-                              get_tensor_model_parallel_cpu_group,
                               init_distributed_environment)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -159,7 +158,7 @@ class HabanaWorker(WorkerBase):
     def _init_cache_engine(self) -> None:
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
+                                        self.parallel_config, self.device_config)
         self.hpu_cache = self.cache_engine.gpu_cache
         htorch.hpu.synchronize() # we want to materialize cache tensors before we proceed with graph capture/execution
 
