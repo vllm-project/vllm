@@ -461,7 +461,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
-        control_vector_request: Optional[ControlVectorRequest]
+        control_vector_request: Optional[ControlVectorRequest],
         trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         # Create the sequences.
@@ -480,8 +480,8 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
-                control_vector_request=control_vector_request
-                trace_headers=trace_headers,
+                control_vector_request=control_vector_request,
+                trace_headers=trace_headers
             )
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
@@ -589,7 +589,7 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            control_vector_request=control_vector_request
+            control_vector_request=control_vector_request,
             trace_headers=trace_headers,
         )
 
@@ -600,7 +600,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
-        control_vector_request: Optional[ControlVectorRequest]
+        control_vector_request: Optional[ControlVectorRequest],
         trace_headers: Optional[Dict[str, str]] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
