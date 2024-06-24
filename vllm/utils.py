@@ -748,7 +748,8 @@ def deprecate_kwargs(
 
 
 @lru_cache(maxsize=8)
-def _cuda_device_count_stateless() -> int:
+def _cuda_device_count_stateless(
+        cuda_visible_devices: Optional[str] = None) -> int:
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
 
@@ -763,11 +764,9 @@ def _cuda_device_count_stateless() -> int:
         return 0
 
     # for rocm torch 2.4 or later, torch.cuda.device_count() calls
-    # _device_count_amdsmi, equivalent to _device_count_nvml().
-    # Requires amdsmi installed
+    # _device_count_amdsmi, equivalent to _device_count_nvml()
     if is_hip():
-        if hasattr(torch.cuda,
-                   "_device_count_amdsmi") and torch.cuda._HAS_PYNVML:
+        if hasattr(torch.cuda, "_device_count_amdsmi"):
             return torch.cuda._device_count_amdsmi()
         else:
             return torch._C._cuda_getDeviceCount()
@@ -785,7 +784,7 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
 
-    return _cuda_device_count_stateless()
+    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
