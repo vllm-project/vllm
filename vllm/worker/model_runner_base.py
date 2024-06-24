@@ -77,6 +77,19 @@ def _add_sampling_metadata_broadcastable_dict(
             sampling_metadata.selected_token_indices)
 
 
+def _filter_valid_kwargs(cls, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Helper method to filter the given kwargs to kwargs that
+    are valid for the given dataclass `cls`.
+    """
+    init_kwargs = {}
+    for field in dataclasses.fields(cls):
+        val = kwargs.get(field.name, None)
+        if val is not None:
+            init_kwargs[field.name] = val
+    return init_kwargs
+
+
 @dataclasses.dataclass(frozen=True)
 class ModelRunnerInputBase(ABC):
     """Local inputs to each worker's model runner. May contain

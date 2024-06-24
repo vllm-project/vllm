@@ -30,8 +30,8 @@ from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
-    _add_sampling_metadata_broadcastable_dict, _init_attn_metadata_from_kwargs,
-    _init_sampling_metadata_from_kwargs)
+    _add_sampling_metadata_broadcastable_dict, _filter_valid_kwargs,
+    _init_attn_metadata_from_kwargs, _init_sampling_metadata_from_kwargs)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -86,6 +86,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
             **kwargs) -> TModelInputForGPU:
         if attn_backend is not None:
             kwargs = _init_attn_metadata_from_kwargs(attn_backend, **kwargs)
+        kwargs = _filter_valid_kwargs(cls, kwargs)
         return cls(**kwargs)
 
 

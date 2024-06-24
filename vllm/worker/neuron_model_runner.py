@@ -11,7 +11,9 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
+from vllm.worker.model_runner_base import (ModelRunnerBase,
+                                           ModelRunnerInputBase,
+                                           _filter_valid_kwargs)
 
 logger = init_logger(__name__)
 
@@ -32,6 +34,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
 
     @classmethod
     def new(cls, **kwargs) -> "ModelInputForNeuron":
+        kwargs = _filter_valid_kwargs(cls, kwargs)
         return cls(**kwargs)
 
 

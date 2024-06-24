@@ -129,11 +129,11 @@ class WorkerInput:
     def new(cls: Type["WorkerInput"], **kwargs) -> "WorkerInput":
         """
         Create a new instance of this class. Populate the new instance with
-        fields popped from the given kwargs.
+        fields from the given kwargs.
         """
         init_kwargs = {}
         for field in dataclasses.fields(cls):
-            val = kwargs.pop(field.name, None)
+            val = kwargs.get(field.name, None)
             if val is not None:
                 init_kwargs[field.name] = val
         return cls(**init_kwargs)
