@@ -9,28 +9,32 @@ distribution matches the target model's output distribution (up to hardware
 numerics, see https://arxiv.org/pdf/2302.01318.pdf), we can expect greedy
 equality.
 
-For ngram lookup, its idea comes from https://github.com/apoorvumang/prompt-lookup-decoding,
-and is merged into transform code base: https://github.com/huggingface/transformers/pull/27775.
-Since there is no model is needed for generate the proposal, we could make
-the testcase much simpler than drafter multi-step one.
-
 However, we still need to verify below scenario could be passed:
     * Batch size 1 greedy equality
     * Batch size >1 greedy equality
     * Test greedy equality under preemption
-    * Test greedy equality under various ngram sizes / speculative sizes
+    * Test greedy equality under various number of speculative tokens.
 
-With those tests, we can say at least, ngram spec would not break the correctess
-for the target model outputs.
+With those tests, we can say at least, MLPSpeculator would not break the
+correctess for the target model outputs.
 """
 
 import pytest
 
 from .conftest import run_greedy_equality_correctness_test
 
-MAIN_MODEL="meta-llama/Llama-2-13b-chat-hf"
-SPEC_MODEL="ibm-fms/llama-13b-accelerator"
-MAX_SPEC_TOKENS=3
+# main model
+MAIN_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+# speculative model
+SPEC_MODEL = "ibm-fms/llama3-8b-accelerator"
+
+# max. number of speculative tokens
+MAX_SPEC_TOKENS = 4
+
+# precision
+PRECISION = "float32"
+
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
@@ -44,7 +48,8 @@ MAX_SPEC_TOKENS=3
         # Print spec metrics.
         "disable_log_stats": False,
 
-        "dtype": "float16",
+        # Precision
+        "dtype": PRECISION,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -63,10 +68,9 @@ MAX_SPEC_TOKENS=3
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
-                                      test_llm_generator, batch_size: int,
-                                      output_len: int):
-    """Verify greedy equality on a tiny model with different batch size."""
+def test_mlp_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator,
+                                    batch_size: int, output_len: int):
+    """Verify greedy equality with different batch size."""
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
@@ -86,7 +90,10 @@ def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True
+        "use_v2_block_manager": True,
+
+        # Precision
+        "dtype": PRECISION,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -108,10 +115,10 @@ def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
-                                                      test_llm_generator,
-                                                      batch_size: int,
-                                                      output_len: int):
+def test_mlp_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
+                                                    test_llm_generator,
+                                                    batch_size: int,
+                                                    output_len: int):
     """Verify greedy equality, even when some sequences are preempted mid-
     generation.
     """
@@ -131,7 +138,10 @@ def test_ngram_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True
+        "use_v2_block_manager": True,
+
+        # Precision
+        "dtype": PRECISION,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -142,8 +152,8 @@ def test_ngram_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
             "speculative_model": SPEC_MODEL,
             "num_speculative_tokens": k,
         }
-        # Try a range of common k, as well as large speculation.
-        for k in range(1, 1+MAX_SPEC_TOKENS)
+        # Try a range of num. speculative tokens
+        for k in range(1, 1 + MAX_SPEC_TOKENS)
     ])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
@@ -153,11 +163,10 @@ def test_ngram_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_different_k(baseline_llm_generator, test_llm_generator,
-                           batch_size: int, output_len: int):
-    """Verify that ngram speculative decoding produces exact equality
-    to without spec decode with many different values of k and
-    different ngram_prompt_lookup_max.
+def test_mlp_different_k(baseline_llm_generator, test_llm_generator,
+                         batch_size: int, output_len: int):
+    """Verify that mlp speculative decoding produces exact equality
+    to without spec decode with different values of num_speculative_tokens.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
@@ -175,7 +184,10 @@ def test_ngram_different_k(baseline_llm_generator, test_llm_generator,
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True
+        "use_v2_block_manager": True,
+
+        # Precision
+        "dtype": PRECISION,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -193,11 +205,11 @@ def test_ngram_different_k(baseline_llm_generator, test_llm_generator,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_disable_queue(baseline_llm_generator, test_llm_generator,
-                             batch_size: int, output_len: int):
-    """Verify that ngram speculative decoding produces exact equality
-    to without spec decode with many different values of k and
-    different ngram_prompt_lookup_max.
+def test_mlp_disable_queue(baseline_llm_generator, test_llm_generator,
+                           batch_size: int, output_len: int):
+    """Verify that mlp speculative decoding produces exact equality
+    to without spec decode when speculation is disabled for large
+    batch sizes.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
