@@ -230,9 +230,11 @@ def _apply_top_k_top_p(
 ) -> torch.Tensor:
     if not do_top_p:
         topk = torch.topk(logits, max_k)
-        indices_to_remove = logits < topk[0].gather(1, (k - 1).unsqueeze(1).to(
-            torch.int64))
-        return logits.masked_fill_(indices_to_remove, -float("inf"))
+        mask = torch.clamp(k, max=max_k)  # k=vocab_size if not set
+        mask = topk[0].gather(1, (mask - 1).unsqueeze(1).to(torch.long))
+        mask[k > max_k] = float('-inf')
+        mask = logits < mask
+        return logits.masked_fill_(mask, -float("inf"))
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     # Apply top-k.
