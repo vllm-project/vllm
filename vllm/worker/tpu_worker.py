@@ -69,14 +69,17 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             # parallel_config.world_size.
             pjrt.initialize_multiprocess(self.local_rank,
                                          self.parallel_config.world_size)
+            xm._init_world_size_ordinal()
 
         self.device = xm.xla_device()
         self.device_config.device = self.device
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
-        # NOTE(woosuk): This is just a hack to initialize the TP group.
-        # This cannot perform the actual communication ops.
+        # NOTE(woosuk): This is just to initialize the TP group and broadcast
+        # the input objects on CPU. The all-reduce and all-gather ops on TPU
+        # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
+        # own context.
         init_distributed_environment(
             world_size=self.parallel_config.world_size,
             rank=self.rank,
