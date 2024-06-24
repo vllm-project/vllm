@@ -137,10 +137,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("ggml_dequantize", &ggml_dequantize);
   ops.impl("ggml_dequantize", torch::kCUDA, &ggml_dequantize);
 
-  // dmmv kernel for GGML.
-  ops.def("ggml_mul_mat_vec", &ggml_mul_mat_vec);
-  ops.impl("ggml_mul_mat_vec", torch::kCUDA, &ggml_mul_mat_vec);
-
   // mmvq kernel for GGML.
   ops.def("ggml_mul_mat_vec_a8", &ggml_mul_mat_vec_a8);
   ops.impl("ggml_mul_mat_vec_a8", torch::kCUDA, &ggml_mul_mat_vec_a8);
