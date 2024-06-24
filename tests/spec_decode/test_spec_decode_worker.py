@@ -12,6 +12,7 @@ from vllm.sequence import ExecuteModelRequest, SamplerOutput, SequenceOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.metrics import (AsyncMetricsCollector,
                                       SpecDecodeWorkerMetrics)
+from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.spec_decode_worker import (SpecDecodeWorker,
@@ -615,7 +616,6 @@ def test_populate_seq_ids_with_bonus_tokens():
         target_logprobs=target_token_logprobs, k = k)
     expected_seq_ids_with_bonus_tokens = \
         [assigned_seq_ids[i] for i in seq_indexes_with_bonus_tokens[2:]]
-    print(expected_seq_ids_with_bonus_tokens)
     assert worker.seq_with_bonus_token_in_last_step == \
         set(expected_seq_ids_with_bonus_tokens)
 
@@ -623,7 +623,11 @@ def test_populate_seq_ids_with_bonus_tokens():
 @torch.inference_mode()
 def test_seq_ids_with_bonus_tokens_not_needed():
     """
-
+    Test that `seq_with_bonus_token_in_last_step` is not populated under specific conditions.
+    - For `MultiStepWorker`, verify that `seq_with_bonus_token_in_last_step` is not populated 
+      when `disable_bonus_tokens_in_kv_cache` is set to True.
+    - For `NGramWorker` and `MLPSpeculatorWorker`, which do not use the KV cache, 
+      `seq_with_bonus_token_in_last_step` should remain empty.
     """
     batch_size = 10
     k = 5
@@ -656,18 +660,27 @@ def test_seq_ids_with_bonus_tokens_not_needed():
         seq_group_metadata_list=seq_group_metadata_list,
         accepted_token_ids=accepted_token_ids,
         target_logprobs=target_token_logprobs, k = k)
-
+    assert worker.seq_with_bonus_token_in_last_step == None
 
     draft_worker = mock_worker(cls=NGramWorker)
     draft_worker.device = 'cuda'
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector, disable_bonus_tokens_in_kv_cache=True)
+    worker._create_output_sampler_list(
+        seq_group_metadata_list=seq_group_metadata_list,
+        accepted_token_ids=accepted_token_ids,
+        target_logprobs=target_token_logprobs, k = k)    
+    assert worker.seq_with_bonus_token_in_last_step == None
 
-
-    #draft_worker = mock_worker(cls=ML)
-    #draft_worker.device = 'cuda'
-    #worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-    #                          metrics_collector, disable_bonus_tokens_in_kv_cache=True)
+    draft_worker = mock_worker(cls=MLPSpeculatorWorker)
+    draft_worker.device = 'cuda'
+    worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
+                              metrics_collector, disable_bonus_tokens_in_kv_cache=True)
+    worker._create_output_sampler_list(
+        seq_group_metadata_list=seq_group_metadata_list,
+        accepted_token_ids=accepted_token_ids,
+        target_logprobs=target_token_logprobs, k = k)    
+    assert worker.seq_with_bonus_token_in_last_step == None
 
 
 

@@ -19,7 +19,7 @@ from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.util import (create_sequence_group_output,
-                                   get_all_num_logprobs, get_all_seq_ids,
+                                   get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker import Worker
@@ -164,8 +164,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         self.probs_dtype = self.rejection_sampler.probs_dtype
         self.token_id_dtype = self.rejection_sampler.token_id_dtype
-        print(isinstance(self.proposer_worker, MultiStepWorker))
-        print(isinstance(self.proposer_worker, NGramWorker))
         # Tracks the sequence IDs that received a bonus token ID in
         # their last forward pass. Needed only if the  
         if (isinstance(self.proposer_worker, MultiStepWorker) 
@@ -418,6 +416,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sequence.
         """
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
+
+        # Pass last hidden states from target model to proposer
+        execute_model_req.previous_hidden_states = self.previous_hidden_states
+        self.previous_hidden_states = None
+        
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(
             execute_model_req, self.seq_with_bonus_token_in_last_step)

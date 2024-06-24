@@ -217,12 +217,9 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         sequences. This is normally done outside of the worker, but it is
         required if the worker is to perform multiple forward passes.
         """
-        #print('len(seq_group_metadata_list) ' + str(len(seq_group_metadata_list)))
         for seq_group_metadata, sequence_group_outputs in zip(
                 seq_group_metadata_list, model_output):
             seq_group_metadata.is_prompt = False
-            #print('seq_group_metadata.seq_data ' + str(seq_group_metadata.seq_data))
-            #print('sequence_group_outputs ' + str(sequence_group_outputs))
 
             for seq_output in sequence_group_outputs.samples:
                 # NOTE: Beam search is not supported, so we can assume that

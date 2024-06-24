@@ -48,7 +48,7 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
-        seq_ids_with_bonus_token_in_last_step: set = set(),
+        seq_ids_with_bonus_token_in_last_step: set,
     ) -> Tuple[Optional[List[Optional[SamplerOutput]]], bool]:
         """NGram match algo to pick proposal candidate. Returns the list of
         sampler output, one per SequenceGroupMetadata.
@@ -134,12 +134,13 @@ class NGramWorker(NonLLMProposerWorkerBase, LoraNotSupportedWorkerBase):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
-        seq_ids_with_bonus_token_in_last_step: set = set(),
+        seq_ids_with_bonus_token_in_last_step: set,
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
-        return self._proposer.get_spec_proposals(execute_model_req)
+        return self._proposer.get_spec_proposals(
+            execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
     def _raise_if_unsupported(
         self,

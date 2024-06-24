@@ -21,6 +21,7 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
+        seq_ids_with_bonus_token_in_last_step:set,
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass to generate sample_len future tokens.
         Returns the list of sampler output, one per layer, along with indicator
