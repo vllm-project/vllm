@@ -17,7 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only LLaMA model compatible with HuggingFace weights."""
+"""Inference-only TeleChat-52B model compatible with HuggingFace weights."""
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
+
 
 class TELECHATMLP(nn.Module):
     def __init__(
