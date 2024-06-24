@@ -16,6 +16,7 @@ global_thread_pool = None
 async def get_guided_decoding_logits_processor_async(
         request: GuidedDecodingFields, tokenizer) -> Optional[LogitsProcessor]:
     global global_thread_pool
+   
     if global_thread_pool is None:
         global_thread_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=4)
@@ -27,6 +28,23 @@ async def get_guided_decoding_logits_processor_async(
         request,
         tokenizer,
     )
+
+# async def get_guided_decoding_logits_processor(
+#         guided_decoding_backend: str, request: Union[CompletionRequest,
+#                                                      ChatCompletionRequest],
+#         tokenizer) -> Optional[LogitsProcessor]:
+#     request = _adapt_request_for_tool_use(request)
+
+#     if guided_decoding_backend == 'outlines':
+#         return await get_outlines_guided_decoding_logits_processor(
+#             request, tokenizer)
+#     if guided_decoding_backend == 'lm-format-enforcer':
+#         return await get_lm_format_enforcer_guided_decoding_logits_processor(
+#             request, tokenizer)
+
+#     raise ValueError(
+#         f"Unknown guided decoding backend '{guided_decoding_backend}'. "
+#         "Must be one of 'outlines, 'lm-format-enforcer'")
 
 
 def get_guided_decoding_logits_processor(
@@ -51,7 +69,7 @@ def get_guided_decoding_logits_processor(
 __all__ = ['get_guided_decoding_logits_processor', 'GuidedDecodingFields']
 
 
-def _adapt_request_for_tool_use(request: Union[CompletionRequest,
+def adapt_request_for_tool_use(request: Union[CompletionRequest,
                                                ChatCompletionRequest]):
     # the legacy completion API does not support tool use
     if type(request) is CompletionRequest:
