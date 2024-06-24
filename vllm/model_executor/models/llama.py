@@ -572,7 +572,7 @@ class LlamaForCausalLM(nn.Module):
                 # which is consistent with the practice of setting
                 # scaling_factor = tensor_amax / FPtype_max
                 scaling_factor *= 2
-            if hasattr(layer_self_attn, "kv_scale"):
+            if hasattr(layer_self_attn.attn, "_kv_scale"):
                 layer_self_attn.attn._kv_scale = scaling_factor
             else:
                 raise RuntimeError("Self attention has no KV cache scaling "
