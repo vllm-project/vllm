@@ -102,7 +102,14 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
-        tensor_dict = super().as_broadcastable_tensor_dict()
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+            "lora_requests": self.lora_requests,
+            "lora_mapping": self.lora_mapping,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+        }
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
                                                   self.sampling_metadata)
         return tensor_dict
@@ -115,7 +122,10 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
         if selected_token_indices is not None:
             kwargs = _init_sampling_metadata_from_kwargs(
                 selected_token_indices, **kwargs)
-        return super().new(attn_backend, **kwargs)
+        if attn_backend is not None:
+            kwargs = _init_attn_metadata_from_kwargs(attn_backend, **kwargs)
+        kwargs = _filter_valid_kwargs(cls, kwargs)
+        return cls(**kwargs)
 
 
 class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
