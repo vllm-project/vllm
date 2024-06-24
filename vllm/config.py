@@ -10,6 +10,7 @@ from transformers import PretrainedConfig, PreTrainedTokenizerBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
+from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
                         is_hip, is_neuron, is_tpu, is_xpu)
@@ -232,7 +233,8 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        total_num_attention_heads = self.hf_text_config.num_attention_heads
+        total_num_attention_heads = getattr(self.hf_text_config,
+                                            "num_attention_heads", 0)
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
@@ -240,7 +242,8 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
-        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
+        total_num_hidden_layers = getattr(self.hf_text_config,
+                                          "num_hidden_layers", 0)
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if total_num_hidden_layers % pipeline_parallel_size != 0:
             raise ValueError(
@@ -343,8 +346,8 @@ class ModelConfig:
 
     def get_num_attention_heads(self,
                                 parallel_config: "ParallelConfig") -> int:
-        return self.hf_text_config.num_attention_heads // \
-            parallel_config.tensor_parallel_size
+        num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
+        return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
@@ -820,7 +823,8 @@ class SpeculativeConfig:
             speculative_model (Optional[str]): The name of the speculative
                 model, if provided.
             num_speculative_tokens (Optional[int]): The number of speculative
-                tokens, if provided.
+                tokens, if provided. Will default to the number in the draft
+                model config if present, otherwise is required.
             speculative_max_model_len (Optional[int]): The maximum model len of
                 the speculative model. Used when testing the ability to skip
                 speculation for some sequences.
@@ -843,23 +847,17 @@ class SpeculativeConfig:
                 the necessary conditions are met, else None.
         """
 
-        if speculative_model is None and num_speculative_tokens is None:
+        if speculative_model is None:
+            if num_speculative_tokens is not None:
+                raise ValueError("num_speculative_tokens was provided without "
+                                 "speculative_model.")
             return None
-
-        if speculative_model is not None and num_speculative_tokens is None:
-            raise ValueError(
-                "Expected both speculative_model and "
-                "num_speculative_tokens to be provided, but found "
-                f"{speculative_model=} and {num_speculative_tokens=}.")
 
         if (speculative_disable_by_batch_size is not None
                 and speculative_disable_by_batch_size < 2):
             raise ValueError("Expect the batch size threshold of disabling "
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
-
-        assert (speculative_model is not None
-                and num_speculative_tokens is not None)
 
         if enable_chunked_prefill:
             raise ValueError(
@@ -914,6 +912,27 @@ class SpeculativeConfig:
                 max_logprobs=target_model_config.max_logprobs,
             )
 
+            if (draft_model_config.hf_config.model_type == "mlp_speculator"
+                    and target_parallel_config.world_size != 1):
+                # MLPSpeculator TP support will be added very soon
+                raise ValueError(
+                    "Speculative decoding with mlp_speculator models does not "
+                    "yet support distributed inferencing (TP > 1).")
+
+            n_predict = getattr(draft_model_config.hf_config, "n_predict",
+                                None)
+            if n_predict is not None:
+                if num_speculative_tokens is None:
+                    # Default to max value defined in draft model config.
+                    num_speculative_tokens = n_predict
+                elif num_speculative_tokens > n_predict:
+                    # Verify provided value doesn't exceed the maximum
+                    # supported by the draft model.
+                    raise ValueError(
+                        "Expected both speculative_model and "
+                        "num_speculative_tokens to be provided, but found "
+                        f"{speculative_model=} and {num_speculative_tokens=}.")
+
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
                     speculative_max_model_len,
@@ -924,6 +943,12 @@ class SpeculativeConfig:
             draft_parallel_config = (
                 SpeculativeConfig.create_draft_parallel_config(
                     target_parallel_config))
+
+        if num_speculative_tokens is None:
+            raise ValueError(
+                "num_speculative_tokens must be provided with "
+                "speculative_model unless the draft model config contains an "
+                "n_predict parameter.")
 
         return SpeculativeConfig(
             draft_model_config,
@@ -1374,6 +1399,17 @@ class DecodingConfig:
                              f"must be one of {valid_guided_backends}")
 
 
+@dataclass
+class ObservabilityConfig:
+    """Configuration for observability."""
+    otlp_traces_endpoint: Optional[str] = None
+
+    def __post_init__(self):
+        if not is_otel_installed() and self.otlp_traces_endpoint is not None:
+            raise ValueError("OpenTelemetry packages must be installed before "
+                             "configuring 'otlp_traces_endpoint'")
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     """Dataclass which contains all engine-related configuration. This
@@ -1390,6 +1426,7 @@ class EngineConfig:
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
+    observability_config: Optional[ObservabilityConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.

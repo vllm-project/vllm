@@ -58,6 +58,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_fast", torch::kCPU, &gelu_fast);
 
+  // Quick GELU implementation.
+  ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
+  ops.impl("gelu_quick", torch::kCPU, &gelu_quick);
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(

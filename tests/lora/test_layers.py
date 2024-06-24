@@ -12,7 +12,8 @@ from vllm.config import LoRAConfig
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA)
+    MergedQKVParallelLinearWithShardedLora, QKVParallelLinearWithShardedLora,
+    RowParallelLinearWithShardedLoRA)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
@@ -684,7 +685,9 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                        bias=False,
                                        params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = QKVParallelLinearWithLora(linear)
+            lora_linear = QKVParallelLinearWithLora(
+                linear
+            ) if not fully_shard else QKVParallelLinearWithShardedLora(linear)
 
         @dataclass
         class FakeConfig:
