@@ -30,6 +30,7 @@ def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int):
     worker = SpecDecodeWorker(proposer_worker=draft_worker,
                               scorer_worker=target_worker,
                               rejection_sampler=rejection_sampler,
+                              disable_bonus_tokens_in_kv_cache=True,
                               metrics_collector=metrics_collector,
                               disable_by_batch_size=disable_by_batch_size)
 
@@ -70,12 +71,12 @@ def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int):
         with pytest.raises(ValueError, match=exception_secret):
             proposer.get_spec_proposals(execute_model_req=ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
-                num_lookahead_slots=k), )
+                num_lookahead_slots=k), seq_ids_with_bonus_token_in_last_step=set())
     else:
         # Should not execute the draft model because spec decode is disabled
         # for all requests. Accordingly, the proposal length should be 0.
         proposals = proposer.get_spec_proposals(
             execute_model_req=ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
-                num_lookahead_slots=k), )
+                num_lookahead_slots=k), seq_ids_with_bonus_token_in_last_step=set())
         assert proposals.proposal_lens.tolist() == [0] * batch_size
