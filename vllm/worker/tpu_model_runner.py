@@ -137,10 +137,11 @@ class TPUModelRunner:
             )
         t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
         p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
+        n = torch.ones((batch_size, ), dtype=torch.int32, device=self.device)
 
         # Dummy run.
         self.model(token_ids, position_ids, kv_caches, attn_metadata,
-                   input_lens, t, p)
+                   input_lens, t, p, n)
 
     def warmup_model(
         self,
