@@ -132,9 +132,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer_worker: ProposerWorkerBase,
         scorer_worker: WorkerBase,
         rejection_sampler: RejectionSampler,
+        disable_bonus_tokens_in_kv_cache: bool,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
-        disable_bonus_tokens_in_kv_cache: bool = True,
     ):
         """
         Create a SpecDecodeWorker.
@@ -147,14 +147,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 Worker.
             rejection_sampler: A Torch module used to perform modified rejection
                 sampling for speculative decoding.
-            disable_by_batch_size: If the batch size is larger than this,
-                disable speculative decoding for new incoming requests.
-            metrics_collector: Helper class for collecting metrics; can be set
-                for testing purposes.
             disable_bonus_tokens_in_kv_cache: A boolean flag to control the use 
             of bonus tokens during speculative decoding in models that rely on KV 
             cache. If set to True, bonus tokens will be disabled and if set to False,
             bonus tokens will be enabled.
+            disable_by_batch_size: If the batch size is larger than this,
+                disable speculative decoding for new incoming requests.
+            metrics_collector: Helper class for collecting metrics; can be set
+                for testing purposes.
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
@@ -603,6 +603,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
         if self.seq_with_bonus_token_in_last_step is not None:
+            # TODO (sroy) - Remove sequence ids from
+            # seq_with_bonus_token_in_last_step when a sequence terminates.
             for seq_index, seq_id in enumerate(seq_ids):
                 last_token_id = accepted_token_ids_by_step[-1][seq_index]
                 if last_token_id == -1:

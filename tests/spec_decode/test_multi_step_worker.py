@@ -116,7 +116,7 @@ def test_same_output_for_single_step():
     actual_output, _ = multi_step_worker.sampler_output(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=multi_step_seq_group),
-        sample_len=num_steps)
+        sample_len=num_steps, seq_ids_with_bonus_token_in_last_step=set())
     assert len(actual_output) == num_steps
     actual_output = actual_output[0]
 
@@ -341,7 +341,8 @@ def test_draft_proposals_full_speculation_len():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=k), )
+            num_lookahead_slots=k),
+        seq_ids_with_bonus_token_in_last_step=set())
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -379,7 +380,8 @@ def test_draft_proposals_no_speculations():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=k), )
+            num_lookahead_slots=k),
+        seq_ids_with_bonus_token_in_last_step=set())
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -451,7 +453,8 @@ def test_draft_proposals_mixed_k():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=k), )
+            num_lookahead_slots=k),
+        seq_ids_with_bonus_token_in_last_step=set())
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)

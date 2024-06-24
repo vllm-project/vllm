@@ -371,7 +371,8 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
     set_random_seed(1)
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                              metrics_collector)
+                              disable_bonus_tokens_in_kv_cache=True,
+                              metrics_collector=metrics_collector)
     worker.init_device()
 
     proposal_token_ids = torch.randint(low=0,
@@ -582,7 +583,8 @@ def test_populate_seq_ids_with_bonus_tokens():
     # to indicate the lack of bonus token in those indices.
     accepted_token_ids[mask, -1:] = -1
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                              metrics_collector, disable_bonus_tokens_in_kv_cache=False)
+                              metrics_collector=metrics_collector,
+                              disable_bonus_tokens_in_kv_cache=False)
 
     worker._create_output_sampler_list(
         seq_group_metadata_list=seq_group_metadata_list,
@@ -656,7 +658,8 @@ def test_seq_ids_with_bonus_tokens_not_needed():
     draft_worker = mock_worker(cls=MultiStepWorker)
     draft_worker.device = 'cuda'
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                              metrics_collector, disable_bonus_tokens_in_kv_cache=True)
+                              disable_bonus_tokens_in_kv_cache=True,
+                              metrics_collector=metrics_collector)
     worker._create_output_sampler_list(
         seq_group_metadata_list=seq_group_metadata_list,
         accepted_token_ids=accepted_token_ids,
@@ -666,7 +669,8 @@ def test_seq_ids_with_bonus_tokens_not_needed():
     draft_worker = mock_worker(cls=NGramWorker)
     draft_worker.device = 'cuda'
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                              metrics_collector, disable_bonus_tokens_in_kv_cache=True)
+                              disable_bonus_tokens_in_kv_cache=True,
+                              metrics_collector=metrics_collector)
     worker._create_output_sampler_list(
         seq_group_metadata_list=seq_group_metadata_list,
         accepted_token_ids=accepted_token_ids,
@@ -676,7 +680,8 @@ def test_seq_ids_with_bonus_tokens_not_needed():
     draft_worker = mock_worker(cls=MLPSpeculatorWorker)
     draft_worker.device = 'cuda'
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                              metrics_collector, disable_bonus_tokens_in_kv_cache=True)
+                              disable_bonus_tokens_in_kv_cache=True,
+                              metrics_collector=metrics_collector)
     worker._create_output_sampler_list(
         seq_group_metadata_list=seq_group_metadata_list,
         accepted_token_ids=accepted_token_ids,
@@ -697,7 +702,8 @@ def test_init_device():
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
-                              metrics_collector)
+                              disable_bonus_tokens_in_kv_cache=True,
+                              metrics_collector=metrics_collector)
 
     worker.init_device()
 

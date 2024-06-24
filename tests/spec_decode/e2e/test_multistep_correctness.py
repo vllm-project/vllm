@@ -616,7 +616,7 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "model": "JackFram/llama-68m",
+        "model": "JackFram/llama-160m",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
