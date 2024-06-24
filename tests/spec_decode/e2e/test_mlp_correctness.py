@@ -24,16 +24,16 @@ import pytest
 from .conftest import run_greedy_equality_correctness_test
 
 # main model
-MAIN_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+MAIN_MODEL = "ibm-granite/granite-3b-code-instruct"
 
 # speculative model
-SPEC_MODEL = "ibm-fms/llama3-8b-accelerator"
+SPEC_MODEL = "ibm-granite/granite-3b-code-instruct-accelerator"
 
 # max. number of speculative tokens
-MAX_SPEC_TOKENS = 4
+MAX_SPEC_TOKENS = 5
 
 # precision
-PRECISION = "float32"
+PRECISION = "float16"
 
 
 @pytest.mark.parametrize(
