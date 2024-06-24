@@ -14,6 +14,7 @@ from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
+
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -131,6 +132,17 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 "Ray does not allocate any GPUs on the driver node. Consider "
                 "adjusting the Ray placement group or running the driver on a "
                 "GPU node.")
+
+        driver_ip = ray.get(self.driver_dummy_worker.get_node_ip.remote())
+        worker_ips = [ray.get(worker.get_node_ip.remote()) for worker in self.workers]
+        ip_counts = {}
+        for ip in worker_ips:
+            ip_counts[ip] = ip_counts.get(ip, 0) + 1
+
+        def sort_by_driver_then_worker_ip(worker):
+            ip = ray.get(worker.get_node_ip.remote())
+            return (ip != driver_ip, ip_counts[ip], ip)
+        self.workers = sorted(self.workers, key=sort_by_driver_then_worker_ip)
 
         # Get the set of GPU IDs used on each node.
         worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
@@ -302,10 +314,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
     def _compiled_ray_dag(self):
         import pkg_resources
         required_version = "2.9"
-        current_version = pkg_resources.get_distribution("ray").version
-        if current_version < required_version:
-            raise ValueError(f"Ray version {required_version} or greater is "
-                             f"required, but found {current_version}")
+        # current_version = pkg_resources.get_distribution("ray").version
+        # if current_version < required_version:
+        #     raise ValueError(f"Ray version {required_version} or greater is "
+        #                      f"required, but found {current_version}")
 
         from ray.dag import InputNode, MultiOutputNode
         assert self.parallel_config.distributed_executor_backend == "ray"
@@ -330,10 +342,10 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
     def _compiled_ray_dag(self):
         import pkg_resources
         required_version = "2.9"
-        current_version = pkg_resources.get_distribution("ray").version
-        if current_version < required_version:
-            raise ValueError(f"Ray version {required_version} or greater is "
-                             f"required, but found {current_version}")
+        # current_version = pkg_resources.get_distribution("ray").version
+        # if current_version < required_version:
+        #     raise ValueError(f"Ray version {required_version} or greater is "
+        #                      f"required, but found {current_version}")
 
         from ray.dag import InputNode, MultiOutputNode
         from ray.experimental.channel.torch_tensor_type import TorchTensorType
@@ -379,6 +391,9 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
             self.forward_dag = self._compiled_ray_dag()
         val = await self.forward_dag.execute_async((execute_model_req, None))
         outputs = await val.get()
+        # from ray.experimental.compiled_dag_ref import RayDAGTaskError
+        # if isinstance(outputs[0], RayDAGTaskError):
+        #     print(outputs[0])
         # Only the first driver returns sampler output.
         return outputs[0]
 

@@ -291,6 +291,7 @@ class LlamaModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         prev_layer_output=None,
     ) -> torch.Tensor:
+        # print(f"my pp rank {get_pipeline_model_parallel_rank()}, my tp rank {get_tensor_model_parallel_rank()}.")
         if is_pipeline_model_parallel_first_rank():
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
