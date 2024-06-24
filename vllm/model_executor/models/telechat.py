@@ -48,12 +48,13 @@ from vllm.utils import is_hip, print_warning_once
 
 
 class TELECHATMLP(nn.Module):
+
     def __init__(
-        self, 
-        intermediate_size, 
-        config, 
+        self,
+        intermediate_size,
+        config,
         quant_config: Optional[QuantizationConfig] = None,
-        ):
+    ):
         super().__init__()
         hidden_size = config.hidden_size
         bias = config.add_bias_linear
@@ -61,13 +62,11 @@ class TELECHATMLP(nn.Module):
             input_size=hidden_size,
             output_sizes=[intermediate_size] * 2,
             bias=bias,
-            quant_config=quant_config
-            )
+            quant_config=quant_config)
         self.c_proj = RowParallelLinear(input_size=intermediate_size,
-                                           output_size=hidden_size,
-                                           bias=bias,
-                                           quant_config=quant_config
-                                           )
+                                        output_size=hidden_size,
+                                        bias=bias,
+                                        quant_config=quant_config)
 
         self.act_fn = SiluAndMul()
 
@@ -79,19 +78,19 @@ class TELECHATMLP(nn.Module):
 
 
 class TELECHATAttention(nn.Module):
+
     def __init__(
-        self, 
-        config, 
+        self,
+        config,
         rope_theta=10000,
         rope_scaling=None,
         quant_config: Optional[QuantizationConfig] = None,
         bias=False,
         cache_config=None,
-
     ):
         super().__init__()
 
-        self.max_position_embeddings = config.max_position_embeddings 
+        self.max_position_embeddings = config.max_position_embeddings
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
         self.num_heads = self.total_num_heads // tp_size
@@ -123,8 +122,8 @@ class TELECHATAttention(nn.Module):
             bias=config.add_bias_linear,
             quant_config=quant_config,
         )
-        
-        #this params block in telechatBlock 
+
+        #this params block in telechatBlock
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -140,7 +139,6 @@ class TELECHATAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
 
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -155,42 +153,33 @@ class TELECHATAttention(nn.Module):
         output, _ = self.c_proj(attn_output)
         return output
 
+
 class TELECHATBlock(nn.Module):
-    def __init__(
-            self, 
-            config,
-            cache_config=None,
-            quant_config=None
-            ):
+
+    def __init__(self, config, cache_config=None, quant_config=None):
         super().__init__()
         hidden_size = config.hidden_size
-        inner_dim = (
-            config.n_inner
-            if config.n_inner is not None
-            else 4 * hidden_size
-        )
+        inner_dim = (config.n_inner if config.n_inner is not None else 4 *
+                     hidden_size)
         self.attn = TELECHATAttention(config, quant_config=quant_config)
         self.mlp = TELECHATMLP(inner_dim, config, quant_config=quant_config)
 
-        self.ln_1 = RMSNorm(hidden_size,
-                                       eps=config.layer_norm_epsilon)
-        self.ln_2 = RMSNorm(hidden_size,
-                                       eps=config.layer_norm_epsilon)
+        self.ln_1 = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_2 = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: Optional[Tuple[torch.FloatTensor]],
-            kv_cache: torch.Tensor,
-            attn_metadata: AttentionMetadata,
-            residual: Optional[torch.Tensor],
+        self,
+        positions: torch.Tensor,
+        hidden_states: Optional[Tuple[torch.FloatTensor]],
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
             hidden_states = self.ln_1(hidden_states)
         else:
-            hidden_states, residual = self.ln_1(
-                hidden_states, residual)
+            hidden_states, residual = self.ln_1(hidden_states, residual)
         hidden_states = self.attn(
             positions,
             hidden_states,
@@ -199,13 +188,13 @@ class TELECHATBlock(nn.Module):
         )
 
         # Fully Connected
-        hidden_states, residual = self.ln_2(
-            hidden_states, residual)
+        hidden_states, residual = self.ln_2(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
 class TELECHATModel(nn.Module):
+
     def __init__(
         self,
         config,
@@ -227,8 +216,8 @@ class TELECHATModel(nn.Module):
         )
         self.h = nn.ModuleList([
             TELECHATBlock(config=config,
-                            cache_config=cache_config,
-                            quant_config=quant_config)
+                          cache_config=cache_config,
+                          quant_config=quant_config)
             for idx in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -274,9 +263,9 @@ class TeleChatForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.transformer = TELECHATModel(config,
-                                cache_config,
-                                quant_config,
-                                lora_config=lora_config)
+                                         cache_config,
+                                         quant_config,
+                                         lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -305,7 +294,7 @@ class TeleChatForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                   attn_metadata)
+                                         attn_metadata)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -340,8 +329,8 @@ class TeleChatForCausalLM(nn.Module):
                 continue
             # Remapping the name of FP8 kv-scale.
             if name.endswith("kv_scale"):
-                remapped_kv_scale_name = name.replace(
-                    ".kv_scale", ".attn.kv_scale")
+                remapped_kv_scale_name = name.replace(".kv_scale",
+                                                      ".attn.kv_scale")
                 if remapped_kv_scale_name not in params_dict:
                     print_warning_once(
                         f"Found kv scale in the checkpoint (e.g. {name}), "
@@ -367,8 +356,6 @@ class TeleChatForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
-
-
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
