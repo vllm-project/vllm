@@ -5,6 +5,7 @@ from transformers import CLIPImageProcessor, LlavaNextImageProcessor
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import ImagePixelData
+from vllm.utils import is_hip
 
 from ..conftest import _STR_DTYPE_TO_TORCH_DTYPE
 
@@ -55,6 +56,8 @@ def test_clip_image_processor(hf_images, dtype):
             assert np.allclose(hf_arr, vllm_arr), f"Failed for key={key}"
 
 
+@pytest.mark.skipif(
+    is_hip(), reason="ROCm is skipping xfail tests to conserve CI resources")
 @pytest.mark.xfail(
     reason="Inconsistent image processor being used due to lack "
     "of support for dynamic image token replacement")
@@ -104,6 +107,8 @@ def test_llava_next_image_processor(hf_images, dtype):
             assert np.allclose(hf_arr, vllm_arr), f"Failed for key={key}"
 
 
+@pytest.mark.skipif(
+    is_hip(), reason="ROCm is skipping xfail tests to conserve CI resources")
 @pytest.mark.xfail(
     reason="Example image pixels were not processed using HuggingFace")
 @pytest.mark.parametrize("dtype", ["float"])
