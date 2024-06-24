@@ -712,7 +712,7 @@ class EngineArgs:
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
         
-        control_vector_config = ControlVectorConfig()
+        control_vector_config = ControlVectorConfig() if self.enable_cv else None
 
         if self.qlora_adapter_name_or_path is not None and \
             self.qlora_adapter_name_or_path != "":

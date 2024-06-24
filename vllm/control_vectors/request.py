@@ -31,3 +31,11 @@ class ControlVectorRequest:
             raise TypeError("New coefficient is not a float")
 
         self.coefficient = new_coefficient
+    
+    def __eq__(self, other):
+        if isinstance(other, ControlVectorRequest):
+            return self.name == other.name
+        return False
+
+    def __hash__(self):
+        return hash(self.name)

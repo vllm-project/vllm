@@ -107,6 +107,8 @@ class GPUExecutor(ExecutorBase):
     def add_control_vector(self, control_vector_request: ControlVectorRequest) -> None:
         return self.driver_worker.add_control_vector(control_vector_request)
     
+    #TODO: add a remove control vector function
+    
     def check_health(self) -> None:
         # GPUExecutor will always be healthy as long as
         # it's running.

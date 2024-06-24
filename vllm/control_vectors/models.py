@@ -32,12 +32,15 @@ class ControlVectorModel:
     def _create_cv_modules(self):
         for module_name, module in self.model.named_modules():
             for key in _all_cv_classes:
-                if key not in module_name:
+                if not module_name.endswith(key):
                     continue
                 if isinstance(module, _all_cv_classes[key]):
                     continue
                 new_module = replace_submodule(self.model, module_name, _all_cv_classes[key](module))
                 self.register_module(module_name, new_module)
+        
+        print("HERE")
+
     
     def set_control_vector(self):
         for module_name, module in self.model.named_modules():

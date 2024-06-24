@@ -55,7 +55,7 @@ class ModelInput(NamedTuple):
     num_prefill_tokens: int
     num_decode_tokens: int
     num_prefills: int
-    control_vector_request: Optional[ControlVectorRequest]
+    control_vector_requests: Set[ControlVectorRequest]
 
     @classmethod
     def empty(cls, device):
@@ -269,7 +269,7 @@ class ModelRunner:
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
-        control_vector_request = None
+        control_vector_requests: Set[ControlVectorRequest] = set()
         
         seq_lens: List[int] = []
         prefill_seq_lens: List[int] = []
@@ -445,7 +445,6 @@ class ModelRunner:
 
                 if lora_id > 0:
                     lora_requests.add(seq_group_metadata.lora_request)
-
                 lora_index_mapping += [lora_id] * query_len
                 lora_prompt_mapping.extend(
                     [lora_id] *
@@ -453,6 +452,9 @@ class ModelRunner:
                      and seq_group_metadata.sampling_params.prompt_logprobs
                      is not None else 1))
 
+                if seq_group_metadata.control_vector_request:
+                    control_vector_requests.add(seq_group_metadata.control_vector_request)
+                
                 mm_data = seq_group_metadata.multi_modal_data
                 if mm_data is not None:
                     # Process multi-modal data
@@ -666,7 +668,7 @@ class ModelRunner:
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
-            control_vector_request=control_vector_request
+            control_vector_requests=control_vector_requests
         )
 
     def prepare_input_tensors(
@@ -690,7 +692,7 @@ class ModelRunner:
                 num_prefill_tokens,
                 num_decode_tokens,
                 num_prefills,
-                control_vector_request
+                control_vector_requests
             ) = self._prepare_model_input(seq_group_metadata_list)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
@@ -708,7 +710,7 @@ class ModelRunner:
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
-                "control_vector_request": control_vector_request
+                "control_vector_requests": control_vector_requests
             }
             if attn_metadata:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
@@ -722,7 +724,7 @@ class ModelRunner:
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
             multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
-            control_vector_request = metadata_dict.pop("control_vector_request")
+            control_vector_requests = metadata_dict.pop("control_vector_requests")
             if metadata_dict:
                 attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
@@ -737,7 +739,7 @@ class ModelRunner:
 
         return (input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_kwargs, control_vector_request)
+                multi_modal_kwargs, control_vector_requests)
 
     @torch.inference_mode()
     def execute_model(
@@ -746,16 +748,19 @@ class ModelRunner:
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_kwargs, control_vector_request
+         lora_requests, lora_mapping, multi_modal_kwargs, control_vector_requests
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
 
         if self.control_vector_config:
-            if control_vector_request:
-                self.model.add_control_vector_request(control_vector_request)
-                self.model.set_active_control_vector_request(control_vector_request)
+            if control_vector_requests:
+                #we are directly changing the model
+                for cv_request in control_vector_requests:
+                    self.model.add_control_vector_request(cv_request)
+                    self.model.set_active_control_vector_request(cv_request)
+
         # Currently cuda graph is only supported by the decode phase.
         prefill_meta = attn_metadata.prefill_metadata
         decode_meta = attn_metadata.decode_metadata

@@ -440,6 +440,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        control_vector_request: Optional[ControlVectorRequest]
     ) -> None:
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -457,6 +458,7 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
+                control_vector_request=control_vector_request
             )
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
@@ -562,6 +564,7 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            control_vector_request=control_vector_request
         )
 
     def _create_sequence_group_with_sampling(
@@ -571,6 +574,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        control_vector_request: Optional[ControlVectorRequest]
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -596,7 +600,8 @@ class LLMEngine:
                                   seqs=[seq],
                                   arrival_time=arrival_time,
                                   sampling_params=sampling_params,
-                                  lora_request=lora_request)
+                                  lora_request=lora_request,
+                                  control_vector_request=control_vector_request)
 
         return seq_group
 
