@@ -424,7 +424,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Pass last hidden states from target model to proposer
         execute_model_req.previous_hidden_states = self.previous_hidden_states
         self.previous_hidden_states = None
-        
+    
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(
             execute_model_req, self.seq_with_bonus_token_in_last_step)
