@@ -344,23 +344,51 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         super().__init__(*args, **kwargs)
         self.driver_exec_method = make_async(self.driver_worker.execute_method)
 
+    def _run_worker(self, driver_rank: int, method: str, *args, **kwargs):
+        if driver_rank == 0:
+            output = self.driver_worker.execute_method(method, *args, **kwargs)
+        else:
+            output = ray.get(self.tp_driver_workers[-1].execute_method.remote(
+                method, *args, **kwargs))
+            
+        return output
+
     async def _driver_execute_model_async(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
+        coros = []
         async with self.pp_locks[0]:
-            output = await self.driver_exec_method("execute_model",
-                                                   execute_model_req)
+            # print('euqneue first ')
+            # output = await self.driver_exec_method("enqueue", execute_model_req)
+            coros.append(self.driver_exec_method("enqueue", execute_model_req))
+            # print('after euqneue first ')
         for pp_rank, driver_worker in enumerate(self.tp_driver_workers,
                                                 start=1):
             async with self.pp_locks[pp_rank]:
-                output = await driver_worker.execute_method.remote(
-                    "execute_model", execute_model_req)
-        return output
+                # print('euqneue second ')
+                # output = await driver_worker.execute_method.remote( "enqueue", execute_model_req)
+                coros.append(driver_worker.execute_method.remote( "enqueue", execute_model_req))
+                # print('after euqneue second ')
+        # print('before gather')
+        await asyncio.gather(*coros)
+        # print('after gather')
+        return []
 
     async def _start_worker_execution_loop(self):
         coros = [
             worker.execute_method.remote("start_worker_execution_loop")
             for worker in self.tp_parallel_workers
+        ]
+        return await asyncio.gather(*coros)
+    # async def driver_loop(self):
+    #     while True:
+            
+
+    async def _start_driver_execution_loop(self):
+        self.driver_worker.execute_method("start_driver_threads")
+        coros = [
+            worker.execute_method.remote("start_driver_threads")
+            for worker in self.tp_driver_workers
         ]
         return await asyncio.gather(*coros)

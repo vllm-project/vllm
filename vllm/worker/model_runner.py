@@ -26,6 +26,7 @@ from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
+import nvtx
 
 logger = init_logger(__name__)
 

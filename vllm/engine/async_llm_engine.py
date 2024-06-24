@@ -19,6 +19,11 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, MultiModalData, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
+# from threading import Event
+# from queue import Queue
+from functools import wraps
+import traceback
+import os
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -27,6 +32,17 @@ ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
 class AsyncEngineDeadError(RuntimeError):
     pass
 
+def exit_on_error(func):
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception:
+            traceback.print_exc()
+            os._exit(1)
+
+    return wrapper
 
 def _raise_exception_on_finish(
         task: asyncio.Task, error_callback: Callable[[Exception],
@@ -345,6 +361,10 @@ class AsyncLLMEngine:
         # Lazy initialized fields
         self._request_tracker: RequestTracker
 
+        self.mb_event = asyncio.Event()
+        self.sched_event = asyncio.Event()
+        self.sched_queue = asyncio.Queue()
+
     @classmethod
     def from_engine_args(
         cls,
@@ -502,73 +522,230 @@ class AsyncLLMEngine:
             await self.engine.abort_request.remote(request_ids)  # type: ignore
         else:
             self.engine.abort_request(request_ids)
+    
+    async def sched_timer_thread(self):
+        while True:
+        #     await self._request_tracker.wait_for_new_requests()
+            await asyncio.sleep(0.01)
+            self.sched_event.set()
+        # print('ahhh')
+        # await asyncio.sleep(5)
+
+    async def mb_watch_thread(self):
+        print('starting mb watch')
+        while True:
+            await self.mb_event.wait()
+            self.mb_event.clear()
+
+            # print('waiting on mb watch get_output')
+            output = self.engine.model_executor._run_worker(0, 'get_output')
+            # print('after mb watch get_output=====================')
+
+            self.sched_event.set()
+
+    async def sched_thread(self):
+        virtual_engine = 0
+        print('starting sched thread')
+        while True:
+            # print('waiting on sched event')
+            await self.sched_event.wait()
+            self.sched_event.clear()
+            # print('after watiing sched event')
+
+            new_requests, finished_requests = (
+                self._request_tracker.get_new_and_finished_requests())
+
+            for new_request in new_requests:
+                # Add the request into the vLLM engine's waiting queue.
+                # TODO: Maybe add add_request_batch to reduce Ray overhead
+                try:
+                    if self.engine_use_ray:
+                        await self.engine.add_request.remote(  # type: ignore
+                            **new_request)
+                    else:
+                        await self.engine.add_request_async(**new_request)
+                except ValueError as e:
+                    # TODO: use a vLLM specific error for failed validation
+                    self._request_tracker.process_exception(
+                        new_request["request_id"],
+                        e,
+                        verbose=self.log_requests,
+                    )
+
+            if finished_requests:
+                await self._engine_abort(finished_requests)
+
+                
+
+
+            seq_group_metadata_list, scheduler_outputs = self.engine.scheduler[
+                virtual_engine].schedule()
+            # if scheduler_outputs.is_empty():
+            #     continue
+
+            await self.sched_queue.put((seq_group_metadata_list, scheduler_outputs, virtual_engine))
+
+            if not scheduler_outputs.is_empty():
+                # Execute the model.
+                execute_model_req = ExecuteModelRequest(
+                    seq_group_metadata_list=seq_group_metadata_list,
+                    blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+                    blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+                    blocks_to_copy=scheduler_outputs.blocks_to_copy,
+                    virtual_engine=virtual_engine,
+                    num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
+                    running_queue_size=scheduler_outputs.running_queue_size,
+                )
+                self.mb_event.set()
+                # print('enqueue')
+                # self.engine.model_executor._run_workers('enqueue', execute_model_req)
+                output = await self.engine.model_executor.execute_model_async(
+                    execute_model_req)
+                # print('after enqueue')
+            virtual_engine = (virtual_engine + 1) % 2
+
+    async def output_loop(self):
+        print('output_loop')
+        while True:
+            # print('sched wait output_loop')
+            # await self.sched_event.wait()
+            # self.sched_event.clear()
+            seq_group_metadata_list, scheduler_outputs, virtual_engine = await self.sched_queue.get()
+            # print('|||||||||||sched wait output_loop')
+
+            if not scheduler_outputs.is_empty():
+                output = self.engine.model_executor._run_worker(1, 'get_output')
+                # print('|||||||||||| after get_output')
+            else:
+                output = []
+
+
+            # print(output)
+            # import pdb; pdb.set_trace()
+            request_outputs = self.engine._process_model_outputs(
+                output, scheduler_outputs.scheduled_seq_groups,
+                scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
+            # print('|||||||||||| after process model') 
+
+            # Log stats.
+            await self.do_log_stats(scheduler_outputs, output)
+            # print('|||||||||||| after log stats') 
+
+            # return request_outputs
+
+
+            # Put the outputs into the corresponding streams.
+            for request_output in request_outputs:
+                self._request_tracker.process_request_output(
+                    request_output, verbose=self.log_requests)
+            # print("DONEEEEEEEEEEEEEEEE")
+            self.sched_event.set()
+
+            # return len(request_outputs) > 0
 
     async def run_engine_loop(self):
-        if self.engine_use_ray:
-            pipeline_parallel_size = 1  # type: ignore
-        else:
-            pipeline_parallel_size = \
-                self.engine.parallel_config.pipeline_parallel_size
-        has_requests_in_progress = [False] * pipeline_parallel_size
-        while True:
-            if not any(has_requests_in_progress):
-                logger.debug("Waiting for new requests...")
-                # Stop the execute model loop in parallel workers until there
-                # are more requests to process. This avoids waiting
-                # indefinitely in torch.distributed ops which may otherwise
-                # timeout, and unblocks the RPC thread in the workers so that
-                # they can process any other queued control plane messages,
-                # such as add/remove lora adapters.
-                if self.engine_use_ray:
-                    await (self.engine.stop_remote_worker_execution_loop.
-                           remote()  # type: ignore
-                           )
-                else:
-                    await self.engine.stop_remote_worker_execution_loop_async()
-                await self._request_tracker.wait_for_new_requests()
-                logger.debug("Got new requests!")
-                requests_in_progress = [
-                    asyncio.create_task(
-                        asyncio.wait_for(self.engine_step(ve),
-                                         ENGINE_ITERATION_TIMEOUT_S))
-                    for ve in range(pipeline_parallel_size)
-                ]
-                has_requests_in_progress = [True] * pipeline_parallel_size
+        # loop = asyncio.get_event_loop()
+        # import pdb; pdb.set_trace()
+        # print('starting driver threads in loop')
+        # await self.engine.model_executor._start_driver_execution_loop()
+        # print('done starting driver threads in loop')
 
-            # Abort if iteration takes too long due to unrecoverable errors
-            # (eg. NCCL timeouts).
-            try:
-                done, _ = await asyncio.wait(
-                    requests_in_progress, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    result = task.result()
-                    virtual_engine = requests_in_progress.index(task)
-                    if self.engine_use_ray:
-                        has_unfinished_requests = (
-                            await (self.engine.
-                                   has_unfinished_requests_for_virtual_engine.
-                                   remote(  # type: ignore
-                                       virtual_engine)))
-                    else:
-                        has_unfinished_requests = (
-                            self.engine.
-                            has_unfinished_requests_for_virtual_engine(
-                                virtual_engine))
-                    if result or has_unfinished_requests:
-                        requests_in_progress[
-                            virtual_engine] = asyncio.create_task(
-                                asyncio.wait_for(
-                                    self.engine_step(virtual_engine),
-                                    ENGINE_ITERATION_TIMEOUT_S))
-                        has_requests_in_progress[virtual_engine] = True
-                    else:
-                        has_requests_in_progress[virtual_engine] = False
-            except asyncio.TimeoutError as exc:
-                logger.error(
-                    "Engine iteration timed out. This should never happen!")
-                self.set_errored(exc)
-                raise
-            await asyncio.sleep(0)
+        # sched_task = asyncio.create_task(self.sched_thread())
+        # output_task = asyncio.create_task(self.output_loop())
+        # timer_task = asyncio.create_task(self.sched_timer_thread())
+        # mb_task = asyncio.create_task(self.mb_watch_thread())
+        sched_task = self.sched_thread()
+        output_task = self.output_loop()
+        timer_task = self.sched_timer_thread()
+        mb_task = self.mb_watch_thread()
+        # print('before gather')
+        await asyncio.gather(sched_task, output_task, timer_task, mb_task)
+        assert False
+        print('after gather')
+        while True:
+            print('watig new req    ')
+            await self._request_tracker.wait_for_new_requests()
+            print('got watig new req    ')
+            await asyncio.sleep(5)
+            self.sched_event.set()
+            # await 
+
+        
+        return 
+        output_task = self.output_loop()
+        print('running ofreve')
+        # loop.run_forever()
+        await asyncio.gather(sched_task, timer_task, output_task)
+        # while True: # print('hi')
+        #     pass
+        print('wtf')
+        return
+
+        # if self.engine_use_ray:
+        #     pipeline_parallel_size = 1  # type: ignore
+        # else:
+        #     pipeline_parallel_size = \
+        #         self.engine.parallel_config.pipeline_parallel_size
+        # has_requests_in_progress = [False] * pipeline_parallel_size
+        # while True:
+        #     if not any(has_requests_in_progress):
+        #         logger.debug("Waiting for new requests...")
+        #         # Stop the execute model loop in parallel workers until there
+        #         # are more requests to process. This avoids waiting
+        #         # indefinitely in torch.distributed ops which may otherwise
+        #         # timeout, and unblocks the RPC thread in the workers so that
+        #         # they can process any other queued control plane messages,
+        #         # such as add/remove lora adapters.
+        #         if self.engine_use_ray:
+        #             await (self.engine.stop_remote_worker_execution_loop.
+        #                    remote()  # type: ignore
+        #                    )
+        #         else:
+        #             await self.engine.stop_remote_worker_execution_loop_async()
+        #         await self._request_tracker.wait_for_new_requests()
+        #         logger.debug("Got new requests!")
+        #         requests_in_progress = [
+        #             asyncio.create_task(
+        #                 asyncio.wait_for(self.engine_step(ve),
+        #                                  ENGINE_ITERATION_TIMEOUT_S))
+        #             for ve in range(pipeline_parallel_size)
+        #         ]
+        #         has_requests_in_progress = [True] * pipeline_parallel_size
+
+        #     # Abort if iteration takes too long due to unrecoverable errors
+        #     # (eg. NCCL timeouts).
+        #     try:
+        #         done, _ = await asyncio.wait(
+        #             requests_in_progress, return_when=asyncio.FIRST_COMPLETED)
+        #         for task in done:
+        #             result = task.result()
+        #             virtual_engine = requests_in_progress.index(task)
+        #             if self.engine_use_ray:
+        #                 has_unfinished_requests = (
+        #                     await (self.engine.
+        #                            has_unfinished_requests_for_virtual_engine.
+        #                            remote(  # type: ignore
+        #                                virtual_engine)))
+        #             else:
+        #                 has_unfinished_requests = (
+        #                     self.engine.
+        #                     has_unfinished_requests_for_virtual_engine(
+        #                         virtual_engine))
+        #             if result or has_unfinished_requests:
+        #                 requests_in_progress[
+        #                     virtual_engine] = asyncio.create_task(
+        #                         asyncio.wait_for(
+        #                             self.engine_step(virtual_engine),
+        #                             ENGINE_ITERATION_TIMEOUT_S))
+        #                 has_requests_in_progress[virtual_engine] = True
+        #             else:
+        #                 has_requests_in_progress[virtual_engine] = False
+        #     except asyncio.TimeoutError as exc:
+        #         logger.error(
+        #             "Engine iteration timed out. This should never happen!")
+        #         self.set_errored(exc)
+        #         raise
+        #     await asyncio.sleep(0)
 
     async def add_request(
         self,

@@ -1,4 +1,5 @@
 """A GPU worker class."""
+import nvtx
 import gc
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -13,7 +14,8 @@ from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               get_tensor_model_parallel_src_rank_and_group,
                               init_distributed_environment,
-                              set_custom_all_reduce)
+                              set_custom_all_reduce,
+                              is_pipeline_model_parallel_last_rank)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
@@ -21,6 +23,8 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
+from queue import Queue
+import threading
 
 
 class Worker(WorkerBase):
@@ -91,6 +95,9 @@ class Worker(WorkerBase):
         self.gpu_cache: List[Optional[List[torch.tensor]]] = [
             None for _ in range(parallel_config.pipeline_parallel_size)
         ]
+        self.execution_queue = Queue()
+        self.output_queue = Queue()
+        self.driver_thread = threading.Thread(target=self.driver_execution_loop, daemon=True)
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -208,6 +215,7 @@ class Worker(WorkerBase):
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
+        self.driver_thread.start()
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -236,6 +244,7 @@ class Worker(WorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
+        # assert execute_model_req.virtual_engine == 0
         if not self.is_driver_worker:
             self._execute_model_non_driver()
             return []
@@ -253,6 +262,7 @@ class Worker(WorkerBase):
                                   group=tp_group,
                                   metadata_group=cpu_tp_group)
             return []
+        nvtx.push_range('execute_model', domain=f've_{execute_model_req.virtual_engine}')
 
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         num_seq_groups = len(seq_group_metadata_list)
@@ -298,10 +308,36 @@ class Worker(WorkerBase):
         output = self.model_runner.execute_model(
             seq_group_metadata_list, self.gpu_cache[virtual_engine],
             virtual_engine)
+        # if is_pipeline_model_parallel_last_rank():
+        self.output_queue.put([output])
+        nvtx.pop_range(domain=f've_{execute_model_req.virtual_engine}')
 
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.
         return [output]
+    
+    def start_driver_threads(self) ->None:
+        # self.execution_queue = Queue()
+        print('start driver threads')
+        self.driver_thread = threading.Thread(target=self.driver_execution_loop, daemon=True)
+        self.driver_thread.start()
+        print('done start driver threads')
+    
+    def enqueue(self, req: ExecuteModelRequest) -> None:
+        self.execution_queue.put(req)
+
+    def get_output(self) -> Union[SamplerOutput, PoolerOutput]:
+        return self.output_queue.get()
+
+    @torch.inference_mode()
+    def driver_execution_loop(self)->None:
+        torch.cuda.set_device(self.device)
+        while True:
+            # print('waiting for exec queue')
+            req = self.execution_queue.get()
+            # print('========after for exec queue', torch.distributed.get_rank())
+            self.execute_model(req)
+            # print('========after for exec queue exec model', torch.distributed.get_rank())
 
     @torch.inference_mode()
     def start_worker_execution_loop(self) -> None:
