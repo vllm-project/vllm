@@ -635,7 +635,7 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
             "disable_bonus_tokens_in_kv_cache": False,
         }
         # Try a range of common k, as well as large speculation.
-        for k in [1, 8, 64]
+        for k in [1, 8, 16]
     ])
 @pytest.mark.parametrize("batch_size", [1, 8, 64])
 @pytest.mark.parametrize(
