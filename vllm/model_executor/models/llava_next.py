@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
@@ -44,19 +44,6 @@ class LlavaNextImagePixelInputs(TypedDict):
 
     image_sizes: NotRequired[torch.Tensor]
     """Shape: (batch_size, 2)"""
-
-
-class LlavaNextImageFeatureInputs(TypedDict):
-    type: Literal["image_features"]
-    data: torch.Tensor
-    """Shape: (batch_size, 1 + num_patches, image_feature_size, hidden_size)"""
-
-    image_sizes: NotRequired[torch.Tensor]
-    """Shape: (batch_size, 2)"""
-
-
-LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
-                             LlavaNextImageFeatureInputs]
 
 
 def _get_llava_next_num_unpadded_features(
@@ -208,7 +195,6 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__(vision_language_config)
 
-        # Update the type annotation from that of its superclass
         self.config = config
 
         if self.vision_language_config.image_input_type == (
@@ -265,18 +251,14 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         return data
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[LlavaNextImageInputs]:
+            self, **kwargs: object) -> Optional[LlavaNextImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
-        image_features = kwargs.pop("image_features", None)
 
         expected_input_type = self.vision_language_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
         if expected_input_type == ImageInputType.PIXEL_VALUES:
-            if image_features is not None:
-                raise ValueError(
-                    "Expected pixel values but got image features")
             if pixel_values is None:
                 return None
 
@@ -403,12 +385,8 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
                                            *stacked_image_features.shape[-2:])
 
     def _process_image_input(
-            self, image_input: LlavaNextImageInputs) -> torch.Tensor:
-        if image_input["type"] == "pixel_values":
-            assert self.vision_tower is not None
-            image_features = self._process_image_pixels(image_input)
-        else:
-            image_features = image_input["data"]
+            self, image_input: LlavaNextImagePixelInputs) -> torch.Tensor:
+        image_features = self._process_image_pixels(image_input)
 
         patch_embeddings = self.multi_modal_projector(image_features)
 

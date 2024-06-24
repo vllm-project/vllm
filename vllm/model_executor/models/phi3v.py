@@ -353,10 +353,18 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__(vision_language_config)
+
         self.config = config
+
         self.model = LlamaModel(config, cache_config, quant_config)
-        self.vision_embed_tokens = Phi3HDImageEmbedding(
-            vision_language_config, config, self.model.embed_tokens)
+
+        if self.vision_language_config.image_input_type == (
+                VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
+            self.vision_embed_tokens = Phi3HDImageEmbedding(
+                vision_language_config, config, self.model.embed_tokens)
+        else:
+            raise TypeError("Image features are not supported by LLaVA-NeXT")
+
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -369,15 +377,24 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
         expected_input_type = self.vision_language_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
-        if expected_input_type != ImageInputType.PIXEL_VALUES:
-            raise ValueError(
-                f"Unexpected image input type: {expected_input_type}."
-                "Phi3v only support pixel_values input currently.")
+        if expected_input_type == ImageInputType.PIXEL_VALUES:
+            if pixel_values is None:
+                return None
 
-        if pixel_values is not None and image_sizes is not None:
+            if not isinstance(pixel_values, torch.Tensor):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+
+            if not isinstance(image_sizes, torch.Tensor):
+                raise ValueError("Incorrect type of image sizes. "
+                                 f"Got type: {type(image_sizes)}")
+
             return Phi3VImagePixelInputs(type="pixel_values",
                                          data=pixel_values,
                                          image_sizes=image_sizes)
+
+        assert expected_input_type != ImageInputType.IMAGE_FEATURES, (
+            "Failed to validate this at initialization time")
 
         return None
 
