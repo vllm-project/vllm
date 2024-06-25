@@ -138,10 +138,12 @@ def create_dummy_logprobs(
         token_id + 1: Logprob(logprob=0.1)
     } for token_id in complete_sequence_token_ids]
 
+
 def create_dummy_prompt_logprobs(
         complete_sequence_token_ids: List[int]) -> List[Dict[int, Logprob]]:
     # logprob for the first prompt token is not defined.
     return create_dummy_logprobs(complete_sequence_token_ids)[1:]
+
 
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
@@ -204,15 +206,16 @@ def test_decode_prompt_logprobs(complete_sequence: str,
         # decoded_prompt_logprobs doesn't contain the first token.
         token_ids = complete_sequence_token_ids[1:]
         tokenzier = detokenizer.get_tokenizer_for_seq(seq)
-        text = tokenzier.decode(token_ids, skip_special_tokens=skip_special_tokens)
+        text = tokenzier.decode(token_ids,
+                                skip_special_tokens=skip_special_tokens)
         # Text for logprobs for the chosen token should be the same as the
         # prompt text. Note that this will only be true if we skip
         # special tokens.
         assert text == "".join([
-            logprobs[token_id].decoded_token for token_id, logprobs in zip(
-                token_ids, decoded_prompt_logprobs)
+            logprobs[token_id].decoded_token
+            for token_id, logprobs in zip(token_ids, decoded_prompt_logprobs)
         ])
         assert text != "".join([
-            logprobs[token_id + 1].decoded_token for token_id, logprobs in zip(
-                token_ids, decoded_prompt_logprobs)
+            logprobs[token_id + 1].decoded_token
+            for token_id, logprobs in zip(token_ids, decoded_prompt_logprobs)
         ])
