@@ -56,9 +56,9 @@ if __name__ == "__main__":
                 columns=serving_column_mapping)
 
     serving_md_table_with_headers = tabulate(serving_results,
-                                headers='keys',
-                                tablefmt='pipe',
-                                showindex=False)
+                                             headers='keys',
+                                             tablefmt='pipe',
+                                             showindex=False)
     # remove the first line of header
     serving_md_table_lines = serving_md_table_with_headers.split('\n')
     serving_md_table_without_header = '\n'.join(serving_md_table_lines[2:])
