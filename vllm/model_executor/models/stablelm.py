@@ -26,13 +26,15 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -46,7 +48,7 @@ class StablelmMLP(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 linear_method: Optional[LinearMethodBase] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -54,7 +56,7 @@ class StablelmMLP(nn.Module):
         self.gate_up_proj = MergedColumnParallelLinear(
             config.hidden_size, [config.intermediate_size] * 2,
             bias=False,
-            linear_method=linear_method)
+            quant_config=quant_config)
         self.down_proj = RowParallelLinear(config.intermediate_size,
                                            config.hidden_size,
                                            bias=False)
@@ -71,7 +73,8 @@ class StablelmAttention(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 linear_method: Optional[LinearMethodBase] = None) -> None:
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -109,11 +112,11 @@ class StablelmAttention(nn.Module):
                                           self.total_num_heads,
                                           self.total_num_key_value_heads,
                                           self.qkv_bias,
-                                          linear_method=linear_method)
+                                          quant_config=quant_config)
         self.o_proj = RowParallelLinear(self.total_num_heads * self.head_dim,
                                         self.hidden_size,
                                         bias=False,
-                                        linear_method=linear_method)
+                                        quant_config=quant_config)
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.rotary_ndims,
@@ -123,7 +126,9 @@ class StablelmAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
-                              num_kv_heads=self.num_key_value_heads)
+                              num_kv_heads=self.num_key_value_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -145,11 +150,12 @@ class StablelmDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.self_attn = StablelmAttention(config)
-        self.mlp = StablelmMLP(config, linear_method)
+        self.self_attn = StablelmAttention(config, cache_config, quant_config)
+        self.mlp = StablelmMLP(config, quant_config)
         norm_eps = getattr(config, "norm_eps",
                            getattr(config, "layer_norm_eps", 1e-05))
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=norm_eps)
@@ -187,14 +193,15 @@ class StableLMEpochModel(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 linear_method: Optional[LinearMethodBase] = None) -> None:
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            StablelmDecoderLayer(config, linear_method)
+            StablelmDecoderLayer(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         norm_eps = getattr(config, "norm_eps",
@@ -226,12 +233,13 @@ class StablelmForCausalLM(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
-        self.model = StableLMEpochModel(config, linear_method)
+        self.quant_config = quant_config
+        self.model = StableLMEpochModel(config, cache_config, quant_config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

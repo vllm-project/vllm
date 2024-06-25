@@ -1,7 +1,7 @@
 from typing import Optional
 
 from vllm.config import TokenizerPoolConfig
-from vllm.engine.ray_utils import ray
+from vllm.executor.ray_utils import ray
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
 from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
@@ -11,7 +11,7 @@ if ray:
     from vllm.transformers_utils.tokenizer_group.ray_tokenizer_group import (
         RayTokenizerGroupPool)
 else:
-    RayTokenizerGroupPool = None
+    RayTokenizerGroupPool = None  # type: ignore
 
 
 def get_tokenizer_group(tokenizer_pool_config: Optional[TokenizerPoolConfig],

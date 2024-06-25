@@ -3,9 +3,16 @@ import pytest
 from vllm.lora.models import LoRAModel
 from vllm.model_executor.models.baichuan import BaiChuanBaseForCausalLM
 
+lora_lst = ["baichuan7B", "baichuan7B-zero", "chatglm3-6b"]
 
-@pytest.mark.parametrize("lora_name", ["baichuan7B", "chatglm3-6b"])
-def test_load_checkpoints(lora_name, chatglm3_lora_files, baichuan_lora_files):
+
+@pytest.mark.parametrize("lora_name", lora_lst)
+def test_load_checkpoints(
+    lora_name,
+    baichuan_lora_files,
+    baichuan_zero_lora_files,
+    chatglm3_lora_files,
+):
     supported_lora_modules = BaiChuanBaseForCausalLM.supported_lora_modules
     packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
     embedding_modules = BaiChuanBaseForCausalLM.embedding_modules
@@ -21,6 +28,17 @@ def test_load_checkpoints(lora_name, chatglm3_lora_files, baichuan_lora_files):
         # and the test should pass.
         LoRAModel.from_local_checkpoint(
             baichuan_lora_files,
+            expected_lora_modules,
+            lora_model_id=1,
+            device="cpu",
+            embedding_modules=embedding_modules,
+            embedding_padding_modules=embed_padding_modules)
+    elif lora_name == "baichuan7B-zero":
+        #Test that the target_modules contain prefix
+        # such as "model.layers.0.self_atten.W_pack", and
+        # the test should pass.
+        LoRAModel.from_local_checkpoint(
+            baichuan_zero_lora_files,
             expected_lora_modules,
             lora_model_id=1,
             device="cpu",

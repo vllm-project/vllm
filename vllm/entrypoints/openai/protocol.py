@@ -1,16 +1,58 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
+import openai.types.chat
 import torch
-from pydantic import BaseModel, Field, conint, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+# pydantic needs the TypedDict from typing_extensions
+from typing_extensions import Annotated, Required, TypedDict
 
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
 
-class ErrorResponse(BaseModel):
+class CustomChatCompletionContentPartParam(TypedDict, total=False):
+    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
+
+    type: Required[str]
+    """The type of the content part."""
+
+
+ChatCompletionContentPartParam = Union[
+    openai.types.chat.ChatCompletionContentPartParam,
+    CustomChatCompletionContentPartParam]
+
+
+class CustomChatCompletionMessageParam(TypedDict, total=False):
+    """Enables custom roles in the Chat Completion API."""
+    role: Required[str]
+    """The role of the message's author."""
+
+    content: Union[str, List[ChatCompletionContentPartParam]]
+    """The contents of the message."""
+
+    name: str
+    """An optional name for the participant.
+
+    Provides the model information to differentiate between participants of the
+    same role.
+    """
+
+
+ChatCompletionMessageParam = Union[
+    openai.types.chat.ChatCompletionMessageParam,
+    CustomChatCompletionMessageParam]
+
+
+class OpenAIBaseModel(BaseModel):
+    # OpenAI API does not allow extra fields
+    model_config = ConfigDict(extra="forbid")
+
+
+class ErrorResponse(OpenAIBaseModel):
     object: str = "error"
     message: str
     type: str
@@ -18,7 +60,7 @@ class ErrorResponse(BaseModel):
     code: int
 
 
-class ModelPermission(BaseModel):
+class ModelPermission(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"modelperm-{random_uuid()}")
     object: str = "model_permission"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -30,53 +72,84 @@ class ModelPermission(BaseModel):
     allow_fine_tuning: bool = False
     organization: str = "*"
     group: Optional[str] = None
-    is_blocking: str = False
+    is_blocking: bool = False
 
 
-class ModelCard(BaseModel):
+class ModelCard(OpenAIBaseModel):
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "vllm"
     root: Optional[str] = None
     parent: Optional[str] = None
+    max_model_len: Optional[int] = None
     permission: List[ModelPermission] = Field(default_factory=list)
 
 
-class ModelList(BaseModel):
+class ModelList(OpenAIBaseModel):
     object: str = "list"
     data: List[ModelCard] = Field(default_factory=list)
 
 
-class UsageInfo(BaseModel):
+class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
 
 
-class ResponseFormat(BaseModel):
+class ResponseFormat(OpenAIBaseModel):
     # type must be "json_object" or "text"
-    type: str = Literal["text", "json_object"]
+    type: Literal["text", "json_object"]
 
 
-class ChatCompletionRequest(BaseModel):
+class StreamOptions(OpenAIBaseModel):
+    include_usage: Optional[bool]
+
+
+class FunctionDefinition(OpenAIBaseModel):
+    name: str
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+class ChatCompletionToolsParam(OpenAIBaseModel):
+    type: Literal["function"] = "function"
+    function: FunctionDefinition
+
+
+class ChatCompletionNamedFunction(OpenAIBaseModel):
+    name: str
+
+
+class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
+    function: ChatCompletionNamedFunction
+    type: Literal["function"] = "function"
+
+
+class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    messages: List[Dict[str, str]]
+    messages: List[ChatCompletionMessageParam]
     model: str
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[bool] = False
-    top_logprobs: Optional[int] = None
+    top_logprobs: Optional[int] = 0
     max_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
-    seed: Optional[int] = None
+    seed: Optional[int] = Field(None,
+                                ge=torch.iinfo(torch.long).min,
+                                le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
+    tools: Optional[List[ChatCompletionToolsParam]] = None
+    tool_choice: Optional[Union[Literal["none"],
+                                ChatCompletionNamedToolChoiceParam]] = "none"
     user: Optional[str] = None
 
     # doc: begin-chat-completion-sampling-params
@@ -107,6 +180,15 @@ class ChatCompletionRequest(BaseModel):
         ("If true, the generation prompt will be added to the chat template. "
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
+    )
+    add_special_tokens: Optional[bool] = Field(
+        default=False,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to False (as is the "
+            "default)."),
     )
     include_stop_str_in_output: Optional[bool] = Field(
         default=False,
@@ -139,12 +221,16 @@ class ChatCompletionRequest(BaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be either "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default whitespace pattern "
+            "for guided json decoding."))
 
     # doc: end-chat-completion-extra-params
 
     def to_sampling_params(self) -> SamplingParams:
-        if self.logprobs and not self.top_logprobs:
-            raise ValueError("Top logprobs must be set when logprobs is.")
+        # We now allow logprobs being true without top_logrobs.
 
         logits_processors = None
         if self.logit_bias:
@@ -152,6 +238,7 @@ class ChatCompletionRequest(BaseModel):
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
+                assert self.logit_bias is not None
                 for token_id, bias in self.logit_bias.items():
                     # Clamp the bias between -100 and 100 per OpenAI API spec
                     bias = min(100, max(-100, bias))
@@ -187,6 +274,15 @@ class ChatCompletionRequest(BaseModel):
             logits_processors=logits_processors,
         )
 
+    @model_validator(mode='before')
+    @classmethod
+    def validate_stream_options(cls, values):
+        if (values.get('stream_options') is not None
+                and not values.get('stream')):
+            raise ValueError(
+                "stream_options can only be set if stream is true")
+        return values
+
     @model_validator(mode="before")
     @classmethod
     def check_guided_decoding_count(cls, data):
@@ -195,14 +291,44 @@ class ChatCompletionRequest(BaseModel):
             "guided_regex" in data and data["guided_regex"] is not None,
             "guided_choice" in data and data["guided_choice"] is not None
         ])
+        # you can only use one kind of guided decoding
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
+        # you can only either use guided decoding or tools, not both
+        if guide_count > 1 and "tool_choice" in data and data[
+                "tool_choice"] != "none":
+            raise ValueError(
+                "You can only either use guided decoding or tools, not both.")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_tool_choice(cls, data):
+        if "tool_choice" in data and data["tool_choice"] != "none":
+            if not isinstance(data["tool_choice"], dict):
+                raise ValueError("Currently only named tools are supported.")
+            if "tools" not in data or data["tools"] is None:
+                raise ValueError(
+                    "When using `tool_choice`, `tools` must be set.")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_logprobs(cls, data):
+        if "top_logprobs" in data and data["top_logprobs"] is not None:
+            if "logprobs" not in data or data["logprobs"] is False:
+                raise ValueError(
+                    "when using `top_logprobs`, `logprobs` must be set to true."
+                )
+            elif data["top_logprobs"] < 0:
+                raise ValueError(
+                    "`top_logprobs` must be a value a positive value.")
         return data
 
 
-class CompletionRequest(BaseModel):
+class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str
@@ -213,11 +339,14 @@ class CompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[int] = None
     max_tokens: Optional[int] = 16
-    n: Optional[int] = 1
+    n: int = 1
     presence_penalty: Optional[float] = 0.0
-    seed: Optional[int] = None
+    seed: Optional[int] = Field(None,
+                                ge=torch.iinfo(torch.long).min,
+                                le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     suffix: Optional[str] = None
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
@@ -235,7 +364,7 @@ class CompletionRequest(BaseModel):
     min_tokens: Optional[int] = 0
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
-    truncate_prompt_tokens: Optional[conint(ge=1)] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
@@ -277,6 +406,11 @@ class CompletionRequest(BaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be one of "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default whitespace pattern "
+            "for guided json decoding."))
 
     # doc: end-completion-extra-params
 
@@ -289,6 +423,7 @@ class CompletionRequest(BaseModel):
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
+                assert self.logit_bias is not None
                 for token_id, bias in self.logit_bias.items():
                     # Clamp the bias between -100 and 100 per OpenAI API spec
                     bias = min(100, max(-100, bias))
@@ -339,20 +474,55 @@ class CompletionRequest(BaseModel):
                 "('guided_json', 'guided_regex' or 'guided_choice').")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_logprobs(cls, data):
+        if "logprobs" in data and data[
+                "logprobs"] is not None and not data["logprobs"] >= 0:
+            raise ValueError("if passed, `logprobs` must be a positive value.")
+        return data
 
-class LogProbs(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def validate_stream_options(cls, data):
+        if data.get("stream_options") and not data.get("stream"):
+            raise ValueError(
+                "Stream options can only be defined when stream is True.")
+        return data
+
+
+class EmbeddingRequest(BaseModel):
+    # Ordered by official OpenAI API documentation
+    # https://platform.openai.com/docs/api-reference/embeddings
+    model: str
+    input: Union[List[int], List[List[int]], str, List[str]]
+    encoding_format: Optional[str] = Field('float', pattern='^(float|base64)$')
+    dimensions: Optional[int] = None
+    user: Optional[str] = None
+
+    # doc: begin-embedding-pooling-params
+    additional_data: Optional[Any] = None
+
+    # doc: end-embedding-pooling-params
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
+
+
+class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
-    top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
+    top_logprobs: List[Optional[Dict[str,
+                                     float]]] = Field(default_factory=list)
 
 
-class CompletionResponseChoice(BaseModel):
+class CompletionResponseChoice(OpenAIBaseModel):
     index: int
     text: str
-    logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
-    stop_reason: Union[None, int, str] = Field(
+    logprobs: Optional[CompletionLogProbs] = None
+    finish_reason: Optional[str] = None
+    stop_reason: Optional[Union[int, str]] = Field(
         default=None,
         description=(
             "The stop string or token id that caused the completion "
@@ -361,7 +531,7 @@ class CompletionResponseChoice(BaseModel):
     )
 
 
-class CompletionResponse(BaseModel):
+class CompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
     object: str = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -370,12 +540,12 @@ class CompletionResponse(BaseModel):
     usage: UsageInfo
 
 
-class CompletionResponseStreamChoice(BaseModel):
+class CompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     text: str
-    logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
-    stop_reason: Union[None, int, str] = Field(
+    logprobs: Optional[CompletionLogProbs] = None
+    finish_reason: Optional[str] = None
+    stop_reason: Optional[Union[int, str]] = Field(
         default=None,
         description=(
             "The stop string or token id that caused the completion "
@@ -384,7 +554,7 @@ class CompletionResponseStreamChoice(BaseModel):
     )
 
 
-class CompletionStreamResponse(BaseModel):
+class CompletionStreamResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
     object: str = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -393,45 +563,128 @@ class CompletionStreamResponse(BaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
-class ChatMessage(BaseModel):
+class EmbeddingResponseData(BaseModel):
+    index: int
+    object: str = "embedding"
+    embedding: List[float]
+
+
+class EmbeddingResponse(BaseModel):
+    id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
+    object: str = "list"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    data: List[EmbeddingResponseData]
+    usage: UsageInfo
+
+
+class FunctionCall(OpenAIBaseModel):
+    name: str
+    arguments: str
+
+
+class ToolCall(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
+
+class ChatMessage(OpenAIBaseModel):
     role: str
     content: str
+    tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
-class ChatCompletionResponseChoice(BaseModel):
+class ChatCompletionLogProb(OpenAIBaseModel):
+    token: str
+    logprob: float = -9999.0
+    bytes: Optional[List[int]] = None
+
+
+class ChatCompletionLogProbsContent(ChatCompletionLogProb):
+    top_logprobs: List[ChatCompletionLogProb] = Field(default_factory=list)
+
+
+class ChatCompletionLogProbs(OpenAIBaseModel):
+    content: Optional[List[ChatCompletionLogProbsContent]] = None
+
+
+class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
-    logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
-    stop_reason: Union[None, int, str] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None
+    finish_reason: Optional[str] = None
+    stop_reason: Optional[Union[int, str]] = None
 
 
-class ChatCompletionResponse(BaseModel):
+class ChatCompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
-    object: str = "chat.completion"
+    object: Literal["chat.completion"] = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
 
 
-class DeltaMessage(BaseModel):
+class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
-class ChatCompletionResponseStreamChoice(BaseModel):
+class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     delta: DeltaMessage
-    logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
-    stop_reason: Union[None, int, str] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None
+    finish_reason: Optional[str] = None
+    stop_reason: Optional[Union[int, str]] = None
 
 
-class ChatCompletionStreamResponse(BaseModel):
+class ChatCompletionStreamResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
-    object: str = "chat.completion.chunk"
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+
+
+class BatchRequestInput(OpenAIBaseModel):
+    """
+    The per-line object of the batch input file.
+
+    NOTE: Currently only the `/v1/chat/completions` endpoint is supported.
+    """
+
+    # A developer-provided per-request id that will be used to match outputs to
+    # inputs. Must be unique for each request in a batch.
+    custom_id: str
+
+    # The HTTP method to be used for the request. Currently only POST is
+    # supported.
+    method: str
+
+    # The OpenAI API relative URL to be used for the request. Currently
+    # /v1/chat/completions is supported.
+    url: str
+
+    # The parameteters of the request.
+    body: Union[ChatCompletionRequest, ]
+
+
+class BatchRequestOutput(OpenAIBaseModel):
+    """
+    The per-line object of the batch output and error files
+    """
+
+    id: str
+
+    # A developer-provided per-request id that will be used to match outputs to
+    # inputs.
+    custom_id: str
+
+    response: Optional[ChatCompletionResponse]
+
+    # For requests that failed with a non-HTTP error, this will contain more
+    # information on the cause of the failure.
+    error: Optional[Any]

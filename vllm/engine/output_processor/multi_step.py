@@ -1,4 +1,5 @@
-from typing import Callable, Iterable, List
+import functools
+from typing import Callable, List
 
 from transformers import PreTrainedTokenizer
 
@@ -8,9 +9,10 @@ from vllm.engine.output_processor.interfaces import (
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (Logprob, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
+                           SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.utils import Counter
 
 logger = init_logger(__name__)
 
@@ -33,7 +35,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         self,
         detokenizer: Detokenizer,
         scheduler: Scheduler,
-        seq_counter: Iterable[int],
+        seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
         stop_checker: StopChecker,
     ):
@@ -42,6 +44,19 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         self.seq_counter = seq_counter
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
         self.stop_checker = stop_checker
+
+    def process_prompt_logprob(self, seq_group: SequenceGroup,
+                               outputs: List[SequenceGroupOutput]) -> None:
+        # TODO(sang): Prompt logprob currently not implemented in multi step
+        # workers.
+        self._log_prompt_logprob_unsupported_warning_once()
+
+    @staticmethod
+    @functools.lru_cache()
+    def _log_prompt_logprob_unsupported_warning_once():
+        logger.warning(
+            "Prompt logprob is not supported by multi step workers. "
+            "(e.g., speculative decode uses multi step workers).")
 
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput]) -> None:
@@ -63,7 +78,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Since there's only one sequence per sequence group, we can take the
         # first sample.
-        samples = [outputs[step].samples[0] for step in range(len(outputs))]
+        samples = [output.samples[0] for output in outputs]
 
         # -1 means the output token is not valid (eg. due to spec decode
         # rejecting tokens).
@@ -79,6 +94,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                              valid_samples: List[SequenceOutput],
                              sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
+        output_logprobs = [sample.logprobs for sample in valid_samples]
 
         # Truncate to max_tokens if necessary.
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
@@ -103,11 +119,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
-        for output_token_id in output_token_ids:
+        for output_token_id, output_logprob in zip(output_token_ids,
+                                                   output_logprobs):
             seq.append_token_id(
                 token_id=output_token_id,
-                # TODO emit logprobs in multi-step decoding.
-                logprobs={output_token_id: Logprob(0.0)},
+                logprobs=output_logprob,
             )
 
             new_char_count = 0
@@ -115,10 +131,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, sampling_params)
 
+            # TODO(sang): Support lora.
             self.stop_checker.maybe_stop_sequence(
                 seq,
                 new_char_count=new_char_count,
-                sampling_params=sampling_params)
+                sampling_params=sampling_params,
+            )
             if seq.is_finished():
                 break
 

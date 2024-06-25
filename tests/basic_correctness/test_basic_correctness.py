@@ -2,12 +2,28 @@
 
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
+import os
+import weakref
+
 import pytest
+
+from vllm import LLM
 
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
 ]
+VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
+
+
+def test_vllm_gc_ed():
+    """Verify vllm instance is GC'ed when it is deleted"""
+    llm = LLM("facebook/opt-125m")
+    weak_llm = weakref.ref(llm)
+    del llm
+    # If there's any circular reference to vllm, this fails
+    # because llm instance is not GC'ed.
+    assert weak_llm() is None
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -23,13 +39,18 @@ def test_models(
     max_tokens: int,
     enforce_eager: bool,
 ) -> None:
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-    del hf_model
+    backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
+    if backend_by_env_var == "FLASHINFER" and enforce_eager is False:
+        pytest.skip("Skipping non-eager test for FlashInferBackend.")
 
-    vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager)
-    vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    del vllm_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+
+    with vllm_runner(model,
+                     dtype=dtype,
+                     enforce_eager=enforce_eager,
+                     gpu_memory_utilization=0.7) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]

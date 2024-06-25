@@ -34,13 +34,11 @@ def test_models(
     # To pass the small model tests, we need full precision.
     assert dtype == "float"
 
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-    del hf_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    del vllm_model
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
@@ -49,3 +47,17 @@ def test_models(
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float"])
+def test_model_print(
+    vllm_runner,
+    model: str,
+    dtype: str,
+) -> None:
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        # This test is for verifying whether the model's extra_repr
+        # can be printed correctly.
+        print(vllm_model.model.llm_engine.model_executor.driver_worker.
+              model_runner.model)

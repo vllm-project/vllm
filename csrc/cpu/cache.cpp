@@ -5,25 +5,26 @@
 
 namespace {
 template <typename scalar_t>
-void copy_blocks_cpu_impl(
-    std::vector<torch::Tensor> &key_caches,
-    std::vector<torch::Tensor> &value_caches,
-    const std::vector<std::pair<int64_t, int64_t>> mapping_pairs,
-    const int element_num_per_block, const int layer_num) {
-  const size_t pair_num = mapping_pairs.size();
+void copy_blocks_cpu_impl(std::vector<torch::Tensor> const& key_caches,
+                          std::vector<torch::Tensor> const& value_caches,
+                          const torch::Tensor& mapping_pairs,
+                          const int element_num_per_block,
+                          const int layer_num) {
+  const size_t pair_num = mapping_pairs.size(0);
   const size_t block_bytes = sizeof(scalar_t) * element_num_per_block;
 #pragma omp parallel for collapse(2)
   for (int layer = 0; layer < layer_num; ++layer) {
     for (size_t pair = 0; pair < pair_num; ++pair) {
-      int64_t source_offset = element_num_per_block * mapping_pairs[pair].first;
+      int64_t source_offset =
+          element_num_per_block * mapping_pairs[pair][0].item<int64_t>();
       int64_t target_offset =
-          element_num_per_block * mapping_pairs[pair].second;
-      scalar_t *key_cache_ptr = key_caches[layer].data_ptr<scalar_t>();
-      scalar_t *source_ptr = key_cache_ptr + source_offset;
-      scalar_t *target_ptr = key_cache_ptr + target_offset;
+          element_num_per_block * mapping_pairs[pair][1].item<int64_t>();
+      scalar_t* key_cache_ptr = key_caches[layer].data_ptr<scalar_t>();
+      scalar_t* source_ptr = key_cache_ptr + source_offset;
+      scalar_t* target_ptr = key_cache_ptr + target_offset;
       std::memcpy(target_ptr, source_ptr, block_bytes);
 
-      scalar_t *value_cache_ptr = value_caches[layer].data_ptr<scalar_t>();
+      scalar_t* value_cache_ptr = value_caches[layer].data_ptr<scalar_t>();
       source_ptr = value_cache_ptr + source_offset;
       target_ptr = value_cache_ptr + target_offset;
       std::memcpy(target_ptr, source_ptr, block_bytes);
@@ -33,9 +34,9 @@ void copy_blocks_cpu_impl(
 
 template <typename scalar_t>
 void reshape_and_cache_cpu_impl(
-    const scalar_t *__restrict__ key, const scalar_t *__restrict__ value,
-    scalar_t *__restrict__ key_cache, scalar_t *__restrict__ value_cache,
-    const int64_t *__restrict__ slot_mapping, const int num_tokens,
+    const scalar_t* __restrict__ key, const scalar_t* __restrict__ value,
+    scalar_t* __restrict__ key_cache, scalar_t* __restrict__ value_cache,
+    const int64_t* __restrict__ slot_mapping, const int num_tokens,
     const int key_stride, const int value_stride, const int num_heads,
     const int head_size, const int block_size, const int x) {
   const int block_elem_num = num_heads * head_size * block_size;
@@ -48,14 +49,14 @@ void reshape_and_cache_cpu_impl(
         int src_key_head_idx = token_idx * key_stride + head_idx * head_size;
         int src_value_head_idx =
             token_idx * value_stride + head_idx * head_size;
-        const scalar_t *src_key_head_ptr = key + src_key_head_idx;
-        const scalar_t *src_value_head_ptr = value + src_value_head_idx;
+        const scalar_t* src_key_head_ptr = key + src_key_head_idx;
+        const scalar_t* src_value_head_ptr = value + src_value_head_idx;
         const int64_t block_index = slot_idx / block_size;
         const int64_t block_offset = slot_idx % block_size;
-        scalar_t *target_key_head_ptr = key_cache +
+        scalar_t* target_key_head_ptr = key_cache +
                                         block_elem_num * block_index +
                                         head_idx * block_size * head_size;
-        scalar_t *target_value_head_ptr = value_cache +
+        scalar_t* target_value_head_ptr = value_cache +
                                           block_elem_num * block_index +
                                           head_idx * block_size * head_size;
 
@@ -79,39 +80,34 @@ void reshape_and_cache_cpu_impl(
     }
   }
 }
-}; // namespace
+};  // namespace
 
-void copy_blocks(std::vector<torch::Tensor> &key_caches,
-                 std::vector<torch::Tensor> &value_caches,
-                 const std::map<int64_t, std::vector<int64_t>> &block_mapping) {
-  int num_layers = key_caches.size();
+// Note: the key_caches and value_caches vectors are constant but
+// not the Tensors they contain. The vectors need to be const refs
+// in order to satisfy pytorch's C++ operator registration code.
+void copy_blocks(std::vector<torch::Tensor> const& key_caches,
+                 std::vector<torch::Tensor> const& value_caches,
+                 const torch::Tensor& block_mapping) {
+  unsigned num_layers = key_caches.size();
   TORCH_CHECK(num_layers == value_caches.size());
   if (num_layers == 0) {
     return;
-  }
-
-  std::vector<std::pair<int64_t, int64_t>> mapping_pairs;
-  mapping_pairs.reserve(block_mapping.size());
-  for (const auto &pair : block_mapping) {
-    for (const auto &dst : pair.second) {
-      mapping_pairs.emplace_back(pair.first, dst);
-    }
   }
 
   const int element_num_per_block = key_caches[0][0].numel();
   VLLM_DISPATCH_FLOATING_TYPES(
       key_caches[0].scalar_type(), "copy_blocks_cpu_impl", [&] {
         CPU_KERNEL_GUARD_IN(copy_blocks_cpu_impl)
-        copy_blocks_cpu_impl<scalar_t>(key_caches, value_caches, mapping_pairs,
+        copy_blocks_cpu_impl<scalar_t>(key_caches, value_caches, block_mapping,
                                        element_num_per_block, num_layers);
         CPU_KERNEL_GUARD_OUT(copy_blocks_cpu_impl)
       });
 }
 
-void reshape_and_cache(torch::Tensor &key, torch::Tensor &value,
-                       torch::Tensor &key_cache, torch::Tensor &value_cache,
-                       torch::Tensor &slot_mapping,
-                       const std::string &kv_cache_dtype, float kv_scale) {
+void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
+                       torch::Tensor& key_cache, torch::Tensor& value_cache,
+                       torch::Tensor& slot_mapping,
+                       const std::string& kv_cache_dtype, double kv_scale) {
   TORCH_CHECK(kv_scale == 1.0f);
 
   int num_tokens = key.size(0);
@@ -135,7 +131,7 @@ void reshape_and_cache(torch::Tensor &key, torch::Tensor &value,
       });
 }
 
-void swap_blocks(torch::Tensor &src, torch::Tensor &dst,
-                 const std::map<int64_t, int64_t> &block_mapping) {
+void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
+                 const torch::Tensor& block_mapping) {
   TORCH_CHECK(false, "swap_blocks is unsupported on CPU.")
 }

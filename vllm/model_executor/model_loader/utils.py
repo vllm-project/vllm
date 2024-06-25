@@ -24,6 +24,7 @@ def get_model_architecture(
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
     if (model_config.quantization is not None
+            and model_config.quantization != "fp8"
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
 

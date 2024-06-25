@@ -2,10 +2,10 @@
 
 namespace {
 template <typename scalar_t>
-void rms_norm_impl(scalar_t *__restrict__ out,
-                       const scalar_t *__restrict__ input,
-                       const scalar_t *__restrict__ weight, const float epsilon,
-                       const int num_tokens, const int hidden_size) {
+void rms_norm_impl(scalar_t* __restrict__ out,
+                   const scalar_t* __restrict__ input,
+                   const scalar_t* __restrict__ weight, const float epsilon,
+                   const int num_tokens, const int hidden_size) {
   using scalar_vec_t = vec_op::vec_t<scalar_t>;
   constexpr int VEC_ELEM_NUM = scalar_vec_t::get_elem_num();
   TORCH_CHECK(hidden_size % VEC_ELEM_NUM == 0);
@@ -41,11 +41,11 @@ void rms_norm_impl(scalar_t *__restrict__ out,
 }
 
 template <typename scalar_t>
-void fused_add_rms_norm_impl(scalar_t *__restrict__ input,
-                                 scalar_t *__restrict__ residual,
-                                 const scalar_t *__restrict__ weight,
-                                 const float epsilon, const int num_tokens,
-                                 const int hidden_size) {
+void fused_add_rms_norm_impl(scalar_t* __restrict__ input,
+                             scalar_t* __restrict__ residual,
+                             const scalar_t* __restrict__ weight,
+                             const float epsilon, const int num_tokens,
+                             const int hidden_size) {
   using scalar_vec_t = vec_op::vec_t<scalar_t>;
   constexpr int VEC_ELEM_NUM = scalar_vec_t::get_elem_num();
   TORCH_CHECK(hidden_size % VEC_ELEM_NUM == 0);
@@ -85,24 +85,24 @@ void fused_add_rms_norm_impl(scalar_t *__restrict__ input,
     }
   }
 }
-} // namespace
+}  // namespace
 
-void rms_norm(torch::Tensor &out, torch::Tensor &input,
-                  torch::Tensor &weight, float epsilon) {
+void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
+              double epsilon) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_impl", [&] {
     CPU_KERNEL_GUARD_IN(rms_norm_impl)
     rms_norm_impl(out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
-                      weight.data_ptr<scalar_t>(), epsilon, num_tokens,
-                      hidden_size);
+                  weight.data_ptr<scalar_t>(), epsilon, num_tokens,
+                  hidden_size);
     CPU_KERNEL_GUARD_OUT(rms_norm_impl)
   });
 }
 
-void fused_add_rms_norm(torch::Tensor &input, torch::Tensor &residual,
-                            torch::Tensor &weight, float epsilon) {
+void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
+                        torch::Tensor& weight, double epsilon) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
 

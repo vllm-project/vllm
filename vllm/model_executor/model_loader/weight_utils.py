@@ -12,9 +12,10 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
-from huggingface_hub import HfFileSystem, snapshot_download
+from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
@@ -120,25 +121,49 @@ def get_quant_config(model_config: ModelConfig,
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)
+    if hf_quant_config is None:
+        # compressed-tensors uses a compressions_config
+        hf_quant_config = getattr(model_config.hf_config, "compression_config",
+                                  None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
-    model_name_or_path = model_config.model
+    # In case of bitsandbytes/QLoRA, get quant config from the adapter model.
+    if model_config.quantization == "bitsandbytes":
+        if (not load_config.model_loader_extra_config
+                or "qlora_adapter_name_or_path"
+                not in load_config.model_loader_extra_config):
+            return quant_cls.from_config({"adapter_name_or_path": ""})
+        model_name_or_path = load_config.model_loader_extra_config[
+            "qlora_adapter_name_or_path"]
+
+    else:
+        model_name_or_path = model_config.model
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
         with get_lock(model_name_or_path, load_config.download_dir):
-            hf_folder = snapshot_download(model_name_or_path,
-                                          revision=model_config.revision,
-                                          allow_patterns="*.json",
-                                          cache_dir=load_config.download_dir,
-                                          tqdm_class=DisabledTqdm)
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                revision=model_config.revision,
+                allow_patterns="*.json",
+                cache_dir=load_config.download_dir,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                tqdm_class=DisabledTqdm,
+            )
     else:
         hf_folder = model_name_or_path
+
+    possible_config_filenames = quant_cls.get_config_filenames()
+
+    # If the quantization config is not found, use the default config.
+    if not possible_config_filenames:
+        return quant_cls()
+
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
 
     quant_config_files = [
         f for f in config_files if any(
-            f.endswith(x) for x in quant_cls.get_config_filenames())
+            f.endswith(x) for x in possible_config_filenames)
     ]
     if len(quant_config_files) == 0:
         raise ValueError(
@@ -151,15 +176,21 @@ def get_quant_config(model_config: ModelConfig,
     quant_config_file = quant_config_files[0]
     with open(quant_config_file, "r") as f:
         config = json.load(f)
+
+        if model_config.quantization == "bitsandbytes":
+            config["adapter_name_or_path"] = model_name_or_path
+
     return quant_cls.from_config(config)
 
 
-def download_weights_from_hf(model_name_or_path: str,
-                             cache_dir: Optional[str],
-                             allow_patterns: List[str],
-                             revision: Optional[str] = None) -> str:
+def download_weights_from_hf(
+    model_name_or_path: str,
+    cache_dir: Optional[str],
+    allow_patterns: List[str],
+    revision: Optional[str] = None,
+) -> str:
     """Download model weights from Hugging Face Hub.
-    
+
     Args:
         model_name_or_path (str): The model name or path.
         cache_dir (Optional[str]): The cache directory to store the model
@@ -172,27 +203,92 @@ def download_weights_from_hf(model_name_or_path: str,
     Returns:
         str: The path to the downloaded model weights.
     """
-    # Before we download we look at that is available:
-    fs = HfFileSystem()
-    file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+    if not huggingface_hub.constants.HF_HUB_OFFLINE:
+        # Before we download we look at that is available:
+        fs = HfFileSystem()
+        file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
 
-    # depending on what is available we download different things
-    for pattern in allow_patterns:
-        matching = fnmatch.filter(file_list, pattern)
-        if len(matching) > 0:
-            allow_patterns = [pattern]
-            break
+        # depending on what is available we download different things
+        for pattern in allow_patterns:
+            matching = fnmatch.filter(file_list, pattern)
+            if len(matching) > 0:
+                allow_patterns = [pattern]
+                break
 
-    logger.info(f"Using model weights format {allow_patterns}")
+    logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
-        hf_folder = snapshot_download(model_name_or_path,
-                                      allow_patterns=allow_patterns,
-                                      cache_dir=cache_dir,
-                                      tqdm_class=DisabledTqdm,
-                                      revision=revision)
+        hf_folder = snapshot_download(
+            model_name_or_path,
+            allow_patterns=allow_patterns,
+            cache_dir=cache_dir,
+            tqdm_class=DisabledTqdm,
+            revision=revision,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        )
     return hf_folder
+
+
+def download_safetensors_index_file_from_hf(
+    model_name_or_path: str,
+    cache_dir: Optional[str],
+    revision: Optional[str] = None,
+) -> None:
+    """Download hf safetensors index file from Hugging Face Hub.
+
+    Args:
+        model_name_or_path (str): The model name or path.
+        cache_dir (Optional[str]): The cache directory to store the model
+            weights. If None, will use HF defaults.
+        revision (Optional[str]): The revision of the model.
+    """
+    # Use file lock to prevent multiple processes from
+    # downloading the same model weights at the same time.
+    with get_lock(model_name_or_path, cache_dir):
+        try:
+            # Download the safetensors index file.
+            hf_hub_download(
+                repo_id=model_name_or_path,
+                filename=SAFE_WEIGHTS_INDEX_NAME,
+                cache_dir=cache_dir,
+                revision=revision,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            )
+        # If file not found on remote or locally, we should not fail since
+        # only some models will have SAFE_WEIGHTS_INDEX_NAME.
+        except huggingface_hub.utils.EntryNotFoundError:
+            logger.info("No %s found in remote.", SAFE_WEIGHTS_INDEX_NAME)
+        except huggingface_hub.utils.LocalEntryNotFoundError:
+            logger.info("No %s found in local cache.", SAFE_WEIGHTS_INDEX_NAME)
+
+
+# For models like Mistral-7B-v0.3, there are both sharded
+# safetensors files and a consolidated safetensors file.
+# Passing both of these to the weight loader functionality breaks.
+# So, we use the SAFE_WEIGHTS_INDEX_NAME to
+# look up which safetensors files should be used.
+def filter_duplicate_safetensors_files(hf_weights_files: List[str],
+                                       hf_folder: str) -> List[str]:
+    # model.safetensors.index.json is a mapping from keys in the
+    # torch state_dict to safetensors file holding that weight.
+    index_file_name = os.path.join(hf_folder, SAFE_WEIGHTS_INDEX_NAME)
+    if not os.path.isfile(index_file_name):
+        return hf_weights_files
+
+    # Iterate through the weight_map (weight_name: safetensors files)
+    # to identify weights that we should use.
+    with open(index_file_name) as index_file:
+        weight_map = json.load(index_file)["weight_map"]
+    weight_files_in_index = set()
+    for weight_name in weight_map:
+        weight_files_in_index.add(
+            os.path.join(hf_folder, weight_map[weight_name]))
+    # Filter out any fields that are not found in the index file.
+    hf_weights_files = [
+        f for f in hf_weights_files if f in weight_files_in_index
+    ]
+    return hf_weights_files
 
 
 def filter_files_not_needed_for_inference(
@@ -303,17 +399,17 @@ def kv_cache_scales_loader(
             return layer_scales_map.items()
 
     except FileNotFoundError:
-        logger.error(f"File or directory '{filename}' not found.")
+        logger.error("File or directory '%s' not found.", filename)
     except json.JSONDecodeError:
-        logger.error(f"Error decoding JSON in file '{filename}'.")
+        logger.error("Error decoding JSON in file '%s'.", filename)
     except Exception as e:
-        logger.error(f"An error occurred while reading '{filename}': {e}")
+        logger.error("An error occurred while reading '%s': %s", filename, e)
     # This section is reached if and only if any of the excepts are hit
     # Return an empty iterable (list) => no KV cache scales are loaded
     # which ultimately defaults to 1.0 scales
-    logger.warning("Defaulting to KV cache scaling factors = 1.0 "
-                   f"for all layers in TP rank {tp_rank} "
-                   "as an error occurred during loading.")
+    logger.warning(
+        "Defaulting to KV cache scaling factors = 1.0 for all "
+        "layers in TP rank %d as an error occurred during loading.", tp_rank)
     return []
 
 
@@ -353,4 +449,11 @@ def initialize_dummy_weights(
     """
     for param in model.state_dict().values():
         if torch.is_floating_point(param):
-            param.data.uniform_(low, high)
+            if torch.finfo(param.data.dtype).bits < 16:
+                # uniform_ doesn't support < 16-bit datatypes (FP8)
+                dtype = param.data.dtype
+                tmp_param = param.data.to(torch.float16)
+                tmp_param = tmp_param.uniform_(low, high).to(dtype)
+                param.data.copy_(tmp_param)
+            else:
+                param.uniform_(low, high)

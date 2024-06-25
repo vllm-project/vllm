@@ -1,18 +1,20 @@
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.utils import make_tensor_with_pad, maybe_expand_dim
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
 
@@ -27,8 +29,10 @@ class CPUModelRunner:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional[VisionLanguageConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         *args,
@@ -37,45 +41,66 @@ class CPUModelRunner:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        # Currently, CPU worker doesn't support chunked prefill.
+        assert self.scheduler_config.chunked_prefill_enabled is False
+        self.device_config = device_config
+        self.cache_config = cache_config
         self.lora_config = lora_config
+        self.vision_language_config = vision_language_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
 
-        # model_config can be None in tests/samplers/test_sampler.py.
-        # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
-        self.sliding_window = (model_config.get_sliding_window()
-                               if model_config is not None else None)
-        self.device_config = (device_config
-                              if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
 
         self.kv_cache_dtype = kv_cache_dtype
-
+        self.sliding_window = model_config.get_sliding_window()
+        self.block_size = cache_config.block_size
         self.attn_backend = get_attn_backend(
-            self.model_config.dtype if model_config is not None else None)
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
+
+        # Create processor for multi-modal data
+        if self.vision_language_config is not None:
+            self.multi_modal_input_processor = MULTIMODAL_REGISTRY \
+                .create_input_processor(
+                    self.model_config,
+                    self.vision_language_config,
+                )
+        else:
+            self.multi_modal_input_processor = None
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
-        self.block_size: int  # Set after initial profiling.
 
     def load_model(self) -> None:
-        self.model = get_model(model_config=self.model_config,
-                               load_config=self.load_config,
-                               device_config=self.device_config,
-                               vision_language_config=None,
-                               lora_config=self.lora_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config)
+        self.model = get_model(
+            model_config=self.model_config,
+            load_config=self.load_config,
+            device_config=self.device_config,
+            vision_language_config=self.vision_language_config,
+            lora_config=self.lora_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+            cache_config=self.cache_config)
 
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int], Dict[
+            str, torch.Tensor]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
-        prompt_lens: List[int] = []
+        seq_lens: List[int] = []
+        multi_modal_kwargs_list: Dict[str,
+                                      List[torch.Tensor]] = defaultdict(list)
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -86,28 +111,40 @@ class CPUModelRunner:
             seq_data = seq_group_metadata.seq_data[seq_id]
             prompt_tokens = seq_data.get_token_ids()
             computed_len = seq_data.get_num_computed_tokens()
-            prompt_len = len(prompt_tokens)
+            seq_len = len(prompt_tokens)
 
-            prompt_lens.append(prompt_len)  # Prompt token num
+            seq_lens.append(seq_len)  # Prompt token num
             input_tokens.extend(prompt_tokens)  # Token ids
 
             # Token position ids
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(list(range(computed_len, prompt_len)))
+            input_positions.extend(list(range(computed_len, seq_len)))
+
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data is not None:
+                # Process multi-modal data
+                if self.multi_modal_input_processor is None:
+                    raise ValueError(
+                        "Multi-modal inputs are only supported by "
+                        "vision language models.")
+
+                mm_kwargs = self.multi_modal_input_processor(mm_data)
+                for k, v in mm_kwargs.items():
+                    multi_modal_kwargs_list[k].append(v)
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
-            # where start_idx is max(0, prompt_len - sliding_window).
+            # where start_idx is max(0, seq_len - sliding_window).
             # For example, if the prompt len is 10, sliding window is 8, and
             # block size is 4, the first two tokens are masked and the slot
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
-                start_idx = max(0, prompt_len - self.sliding_window)
+                start_idx = max(0, seq_len - self.sliding_window)
 
-            for i in range(computed_len, prompt_len):
+            for i in range(computed_len, seq_len):
                 if i < start_idx:
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
@@ -117,6 +154,11 @@ class CPUModelRunner:
                 block_offset = i % self.block_size  # type: ignore
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
+
+        multi_modal_kwargs = {
+            k: torch.cat(v, dim=0).to(self.device)
+            for k, v in multi_modal_kwargs_list.items()
+        }
 
         num_prompt_tokens = len(input_tokens)
 
@@ -132,24 +174,17 @@ class CPUModelRunner:
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
-            prompt_lens=prompt_lens,
-            num_prefills=len(prompt_lens),
+            seq_lens=seq_lens,
+            seq_lens_tensor=None,
+            max_decode_seq_len=None,
+            num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
-            prefill_metadata=None,
-            decode_metadata=None,
-            max_context_len=None,
-            context_lens=None,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
-        return (
-            input_tokens,
-            input_positions,
-            attn_metadata,
-            prompt_lens,
-        )
+        return (input_tokens, input_positions, attn_metadata, seq_lens,
+                multi_modal_kwargs)
 
     def _prepare_decode(
         self,
@@ -159,7 +194,7 @@ class CPUModelRunner:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
-        context_lens: List[int] = []
+        seq_lens: List[int] = []
         block_tables: List[List[int]] = []
 
         for seq_group_metadata in seq_group_metadata_list:
@@ -177,9 +212,9 @@ class CPUModelRunner:
                 position = seq_len - 1
                 input_positions.append(position)
 
-                context_len = seq_len if self.sliding_window is None else min(
+                seq_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
-                context_lens.append(context_len)
+                seq_lens.append(seq_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
                 block_number = block_table[position // self.block_size]
@@ -193,7 +228,7 @@ class CPUModelRunner:
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
-        max_context_len = max(context_lens)
+        max_decode_seq_len = max(seq_lens)
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
@@ -204,9 +239,9 @@ class CPUModelRunner:
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
-        context_lens = torch.tensor(context_lens,
-                                    dtype=torch.int,
-                                    device=self.device)
+        seq_lens_tensor = torch.tensor(seq_lens,
+                                       dtype=torch.int,
+                                       device=self.device)
 
         max_block_table_len = max(
             len(block_table) for block_table in block_tables)
@@ -221,16 +256,13 @@ class CPUModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
-            prompt_lens=None,
+            seq_lens=seq_lens,
+            seq_lens_tensor=seq_lens_tensor,
+            max_decode_seq_len=max_decode_seq_len,
             num_prefill_tokens=0,
             num_decode_tokens=len(input_tokens),
-            max_context_len=max_context_len,
             num_prefills=0,
-            prefill_metadata=None,
-            decode_metadata=None,
-            context_lens=context_lens,
             block_tables=block_tables,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (
             input_tokens,
@@ -238,118 +270,34 @@ class CPUModelRunner:
             attn_metadata,
         )
 
-    def _prepare_sample(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        prompt_lens: List[int],
-    ) -> SamplingMetadata:
-        seq_groups: List[Tuple[List[int], SamplingParams]] = []
-        selected_token_indices: List[int] = []
-        generators: List[torch.Generator] = []
-        selected_token_start_idx = 0
-        categorized_sample_indices: Dict[SamplingType,
-                                         List[Tuple[int, int]]] = {
-                                             t: []
-                                             for t in SamplingType
-                                         }
-        categorized_sample_indices_start_idx = 0
-        categorized_sampled_token_indices_start_idx = 0
-
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            sampling_params = seq_group_metadata.sampling_params
-            seq_groups.append((seq_ids, sampling_params))
-
-            if seq_group_metadata.is_prompt:
-                assert len(seq_ids) == 1
-                subquery_len = prompt_lens[i]
-                if sampling_params.prompt_logprobs is not None:
-                    # NOTE: prompt token positions do not need sample, skip
-                    categorized_sample_indices_start_idx += subquery_len - 1
-
-                categorized_sample_indices[
-                    sampling_params.sampling_type].append(
-                        (categorized_sample_indices_start_idx,
-                         categorized_sampled_token_indices_start_idx))
-                categorized_sample_indices_start_idx += 1
-                categorized_sampled_token_indices_start_idx += 1
-
-                if sampling_params.prompt_logprobs is not None:
-                    selected_token_indices.extend(
-                        range(selected_token_start_idx,
-                              selected_token_start_idx + subquery_len - 1))
-                selected_token_indices.append(selected_token_start_idx +
-                                              subquery_len - 1)
-                selected_token_start_idx += subquery_len
-
-                if sampling_params.seed is not None:
-                    seq_group_metadata.state.generator = torch.Generator(
-                        device=self.device).manual_seed(sampling_params.seed)
-            else:
-                num_seqs = len(seq_ids)
-                selected_token_indices.extend(
-                    range(selected_token_start_idx,
-                          selected_token_start_idx + num_seqs))
-                selected_token_start_idx += num_seqs
-
-                categorized_sample_indices[
-                    sampling_params.sampling_type].extend(
-                        zip(
-                            range(
-                                categorized_sample_indices_start_idx,
-                                categorized_sample_indices_start_idx +
-                                num_seqs),
-                            range(
-                                categorized_sampled_token_indices_start_idx,
-                                categorized_sampled_token_indices_start_idx +
-                                num_seqs)))
-                categorized_sample_indices_start_idx += num_seqs
-                categorized_sampled_token_indices_start_idx += num_seqs
-
-            if sampling_params.seed is not None:
-                generators.append(seq_group_metadata.state.generator)
-
-        selected_token_indices = torch.tensor(selected_token_indices,
-                                              dtype=torch.long)
-
-        categorized_sample_indices = {
-            t: maybe_expand_dim(torch.tensor(seq_ids, dtype=torch.int), 2, 2)
-            for t, seq_ids in categorized_sample_indices.items()
-        }
-
-        seq_data: Dict[int, SequenceData] = {}
-        for seq_group_metadata in seq_group_metadata_list:
-            seq_data.update(seq_group_metadata.seq_data)
-
-        sampling_metadata = SamplingMetadata(
-            seq_groups=seq_groups,
-            seq_data=seq_data,
-            prompt_lens=prompt_lens,
-            selected_token_indices=selected_token_indices,
-            categorized_sample_indices=categorized_sample_indices,
-            generators=generators,
-        )
-        return sampling_metadata
-
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata,
-               SamplingMetadata]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
+               Optional[Dict[str, torch.Tensor]]]:
+        multi_modal_kwargs = None
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
             is_prompt = seq_group_metadata_list[0].is_prompt
             # Prepare input tensors.
             if is_prompt:
-                (input_tokens, input_positions, attn_metadata,
-                 prompt_lens) = self._prepare_prompt(seq_group_metadata_list)
+                (input_tokens, input_positions, attn_metadata, seq_lens,
+                 multi_modal_kwargs
+                 ) = self._prepare_prompt(seq_group_metadata_list)
             else:
                 (input_tokens, input_positions,
                  attn_metadata) = self._prepare_decode(seq_group_metadata_list)
-                prompt_lens = []
-            sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens)
+                seq_lens = []
+            sampling_metadata = SamplingMetadata.prepare(
+                seq_group_metadata_list,
+                seq_lens,
+                # query_lens is not needed if chunked prefill is not
+                # supported. Since CPU worker doesn't support chunked prefill
+                # just use seq_lens instead.
+                seq_lens,
+                self.device,
+                pin_memory=False)
             # Broadcast the metadata.
             metadata_dict = {
                 "input_tokens": input_tokens,
@@ -369,19 +317,14 @@ class CPUModelRunner:
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
-                prompt_lens=None,
+                seq_lens=None,
                 selected_token_indices=selected_token_indices,
                 categorized_sample_indices=None,
                 generators=None,
-                perform_sampling=False,
             )
 
-        return (
-            input_tokens,
-            input_positions,
-            attn_metadata,
-            sampling_metadata,
-        )
+        return (input_tokens, input_positions, attn_metadata,
+                sampling_metadata, multi_modal_kwargs)
 
     @torch.inference_mode()
     def execute_model(
@@ -389,7 +332,8 @@ class CPUModelRunner:
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata
+        (input_tokens, input_positions, attn_metadata, sampling_metadata,
+         multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         model_executable = self.model
@@ -399,6 +343,8 @@ class CPUModelRunner:
             "kv_caches": kv_caches,
             "attn_metadata": attn_metadata,
         }
+        if self.vision_language_config and multi_modal_input is not None:
+            execute_model_kwargs.update(multi_modal_input)
 
         hidden_states = model_executable(**execute_model_kwargs)
 
@@ -406,7 +352,7 @@ class CPUModelRunner:
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         # Only perform sampling in the driver worker.
-        if not sampling_metadata.perform_sampling:
+        if not self.is_driver_worker:
             return None
 
         # Sample the next token.

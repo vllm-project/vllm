@@ -4,10 +4,13 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
+from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.utils import set_weight_attrs
+
+logger = init_logger(__name__)
 
 
 class MarlinConfig(QuantizationConfig):
@@ -72,8 +75,30 @@ class MarlinConfig(QuantizationConfig):
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(group_size)
 
-    def get_linear_method(self) -> "MarlinLinearMethod":
-        return MarlinLinearMethod(self)
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        # compat: autogptq >=0.8.0 use checkpoint_format: str
+        # compat: autogptq <=0.7.1 is_marlin_format: bool
+        is_marlin_format = (hf_quant_cfg.get("checkpoint_format") == "marlin"
+                            or hf_quant_cfg.get("is_marlin_format", False))
+
+        is_valid_user_quant = (user_quant is None or user_quant == "gptq"
+                               or user_quant == "marlin")
+
+        if is_marlin_format and is_valid_user_quant:
+            msg = ("The model is serialized in {} format. Using {} kernel.".
+                   format(cls.get_name(), cls.get_name()))
+            logger.info(msg)
+            return cls.get_name()
+
+        return None
+
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional["MarlinLinearMethod"]:
+        if isinstance(layer, LinearBase):
+            return MarlinLinearMethod(self)
+        return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
@@ -93,7 +118,7 @@ class MarlinLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_size_per_partition: int,
+        output_partition_sizes: List[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -106,6 +131,7 @@ class MarlinLinearMethod(LinearMethodBase):
                 f"The params dtype must be float16, but got {params_dtype}")
 
         # Validate output_size_per_partition
+        output_size_per_partition = sum(output_partition_sizes)
         if output_size_per_partition % self.quant_config.min_n_threads != 0:
             raise ValueError(
                 f"Weight output_size_per_partition = "
@@ -196,7 +222,7 @@ class MarlinLinearMethod(LinearMethodBase):
         layer.register_parameter("workspace", workspace)
         set_weight_attrs(workspace, extra_weight_attrs)
 
-    def apply_weights(
+    def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,

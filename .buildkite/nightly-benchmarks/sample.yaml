@@ -1,0 +1,39 @@
+steps:
+  # NOTE(simon): You can create separate blocks for different jobs
+  - label: "A100: NVIDIA SMI"
+    agents:
+      queue: A100
+    plugins:
+    - kubernetes:
+        podSpec:
+          containers:
+          # - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT
+          # TODO(simon): check latest main branch or use the PR image.
+          - image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:45c35f0d58f4508bf43bd6af1d3d0d0ec0c915e6
+            command:
+            - bash -c 'nvidia-smi && nvidia-smi topo -m && pwd && ls'
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+            volumeMounts:
+            - name: devshm
+              mountPath: /dev/shm
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+  # TODO(simon): bring H100 online
+  # - label: "H100: NVIDIA SMI"
+  #   agents:
+  #     queue: H100
+  #   plugins:
+  #   - docker#v5.11.0:
+  #       image: us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:45c35f0d58f4508bf43bd6af1d3d0d0ec0c915e6
+  #       command:
+  #       - bash -c 'nvidia-smi && nvidia-smi topo -m'
+  #       propagate-environment: true
+  #       ipc: host
+  #       gpus: all
+

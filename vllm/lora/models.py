@@ -3,7 +3,8 @@ import json
 import math
 import os
 import re
-from typing import Callable, Dict, Hashable, List, Optional, Tuple, Type
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 
 import safetensors.torch
 import torch
@@ -11,10 +12,12 @@ from torch import nn
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping, from_layer,
-                              from_layer_logits_processor)
+from vllm.lora.layers import (BaseLayerWithLoRA,
+                              LinearScalingRotaryEmbeddingWithLora,
+                              LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
-from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
+from vllm.lora.utils import (from_layer, from_layer_logits_processor,
+                             parse_fine_tuned_lora_name, replace_submodule)
 from vllm.utils import LRUCache, is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -22,10 +25,27 @@ logger = init_logger(__name__)
 _GLOBAL_LORA_ID = 0
 
 
+@dataclass
+class LongContextLoRAContext:
+    """Context for lora adapters that support long context."""
+    # The scaling factors to support long context lora fine tuned models.
+    scaling_factors: List[float]
+    # dimension to apply rotary embedding.
+    rot_dim: int
+    # offsets to the sin_cos_cache for each lora_id loaded.
+    # This value is dynamically modified.
+    offsets_by_lora_id: Dict[int, int] = field(default_factory=dict)
+
+
 def convert_mapping(
-    mapping: LoRAMapping, lora_index_to_id: List[Optional[int]],
-    max_loras: int, vocab_size: int, extra_vocab_size: int
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, List[int]]:
+    mapping: LoRAMapping,
+    lora_index_to_id: List[Optional[int]],
+    max_loras: int,
+    vocab_size: int,
+    extra_vocab_size: int,
+    long_lora_context: Optional[LongContextLoRAContext] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+           Optional[torch.Tensor], List[int]]:
     """Converts LoRAMapping to index tensors.
 
     Args:
@@ -34,6 +54,7 @@ def convert_mapping(
         max_loras: Maximum number of LoRAs.
         vocab_size: Model vocab size.
         extra_vocab_size: Extra vocab size each LoRA can have.
+        long_lora_context: Passed if there are long context lora in a batch.
 
     Returns:
         A tuple of tensors:
@@ -51,49 +72,78 @@ def convert_mapping(
                 requests to embedding indices. First row is for embeddings
                 added by the LoRAs, second row is for the LoRA.lora_a
                 embeddings.
+            long_lora_indices: Tensor of shape [batch_size] mapping
+                requests to RoPE offsets and rot dims for long LoRAs.
+                None if long context lora doesn't exist.
             indices_len: List of lengths of the above tensors.
+                Used to index into each tensor. It contains length for
+                (base_indices, sampler_indices, sampler_indices_padded,
+                embeddings_indices, long_lora_indices). If long_lora doesn't
+                exist, it only contains first 4 entries.
     """
-    indices = list(mapping.index_mapping).copy()
-    embedding_indices = indices.copy()
-    lora_indices = indices.copy()
-    prompt_mapping = [
+    index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
+    embedding_indices = index_mapping_indices.copy()
+    lora_indices = index_mapping_indices.copy()
+    long_lora_offsets: Optional[torch.Tensor] = None
+    if long_lora_context:
+        long_lora_offsets = torch.zeros(len(index_mapping_indices),
+                                        device="cuda",
+                                        dtype=torch.long)
+    prompt_mapping: List[int] = [
         lora_index_to_id.index(x) if x > 0 else -1
         for x in mapping.prompt_mapping
     ]
     lora_idx = None
-    for i in range(len(indices)):
+    for i in range(len(index_mapping_indices)):
         # TODO index can be slow. optimize
-        lora_idx = (lora_index_to_id.index(indices[i])
-                    if indices[i] > 0 else -1)
-        embedding_indices[i] = lora_idx if indices[i] > 0 else 0
-        indices[i] = i
+        lora_idx = (lora_index_to_id.index(index_mapping_indices[i])
+                    if index_mapping_indices[i] > 0 else -1)
+        embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
         lora_indices[i] = lora_idx
+        if long_lora_context:
+            assert long_lora_offsets is not None
+            lora_offset: int = long_lora_context.offsets_by_lora_id.get(
+                index_mapping_indices[i], 0)
+            long_lora_offsets[i] = lora_offset
 
-    indices = torch.tensor([indices, lora_indices, embedding_indices],
-                           dtype=torch.long,
-                           device="cuda")
-    prompt_mapping = torch.tensor(prompt_mapping,
-                                  device="cuda",
-                                  dtype=torch.long)
+    indices_list: List[Union[List[int], torch.Tensor]] = [
+        index_mapping_indices, lora_indices, embedding_indices
+    ]
+    if long_lora_context:
+        assert long_lora_offsets is not None
+        indices_list.append(long_lora_offsets)
+    indices = torch.tensor(indices_list, dtype=torch.long, device="cuda")
+    prompt_mapping_tensor = torch.tensor(prompt_mapping,
+                                         device="cuda",
+                                         dtype=torch.long)
     embeddings_indices = torch.stack([
         indices[2] * extra_vocab_size,
         indices[2] * (vocab_size + extra_vocab_size)
     ])
     embeddings_indices[embeddings_indices == -1] = max_loras - 1
     base_indices = indices[1]
-    sampler_indices = prompt_mapping
+    sampler_indices = prompt_mapping_tensor
     sampler_indices_padded = sampler_indices.clone()
     sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
     sampler_indices_padded = (
         torch.arange(
             0, len(sampler_indices_padded), device="cuda", dtype=torch.long) +
         (sampler_indices_padded * len(sampler_indices_padded)))
-    indices_len = (base_indices.shape[-1], sampler_indices.shape[-1],
-                   sampler_indices_padded.shape[-1],
-                   embeddings_indices.shape[-1])
+    long_lora_indices = None
+    long_lora_indices_len: Optional[int] = None
+    if long_lora_context:
+        long_lora_indices = indices[3]
+        long_lora_indices_len = long_lora_indices.shape[-1]
+    # Contain length of indices tensors. Used to index into each tensor.
+    indices_len = [
+        base_indices.shape[-1], sampler_indices.shape[-1],
+        sampler_indices_padded.shape[-1], embeddings_indices.shape[-1]
+    ]
+    if long_lora_indices_len is not None:
+        indices_len.append(long_lora_indices_len)
 
     return (base_indices, sampler_indices, sampler_indices_padded,
-            embeddings_indices, indices_len)
+            embeddings_indices, long_lora_indices, indices_len)
 
 
 def get_lora_id():
@@ -110,12 +160,34 @@ class LoRAModel:
         lora_model_id: int,
         rank: int,
         loras: Dict[str, LoRALayerWeights],
+        scaling_factor: Optional[float] = None,
     ) -> None:
+        """
+        Args:
+            lora_model_id: The integer id for the lora model.
+            rank: lora rank.
+            loras: module name -> weights for lora-replaced layers.
+            scaling_factor: Scaling factor to support long context lora model.
+                None if the lora is not tuned for long context support.
+        """
         self.id = lora_model_id
+        # Scaling factor for long context lora model. None if it is not
+        # fine tuned for the long context.
+        self.scaling_factor = scaling_factor
         assert (lora_model_id >
                 0), f"a valid lora id should be greater than 0, got {self.id}"
         self.rank = rank
         self.loras: Dict[str, LoRALayerWeights] = loras
+
+    def clone(self, lora_model_id: int) -> "LoRAModel":
+        """Return a copy of the object with different ids.
+
+        Will share the underlying tensors."""
+        return self.__class__(
+            lora_model_id,
+            rank=self.rank,
+            loras=self.loras.copy(),
+        )
 
     @property
     def extra_vocab_size(self) -> int:
@@ -138,6 +210,7 @@ class LoRAModel:
         dtype: Optional[torch.dtype] = None,
         embeddings: Optional[Dict[str, torch.Tensor]] = None,
         target_embedding_padding: Optional[int] = None,
+        scaling_factor: Optional[float] = None,
         embedding_modules: Optional[Dict[str, str]] = None,
         embedding_padding_modules: Optional[List[str]] = None,
     ) -> "LoRAModel":
@@ -149,6 +222,7 @@ class LoRAModel:
             if module_name not in loras:
                 lora_embeddings_tensor = None
                 if embeddings:
+                    assert embedding_modules is not None
                     embeddings_module = next(
                         (k for k in embedding_modules if k in module_name),
                         None)
@@ -171,6 +245,7 @@ class LoRAModel:
             else:
                 loras[module_name].lora_b = tensor.to(device=device,
                                                       dtype=dtype).t()
+                assert embedding_padding_modules is not None
                 if any(name in module_name
                        for name in embedding_padding_modules
                        ) and target_embedding_padding is not None:
@@ -185,13 +260,15 @@ class LoRAModel:
 
         for lora in loras.values():
             lora.optimize()
-        return cls(lora_model_id, rank, loras)
+        return cls(lora_model_id, rank, loras, scaling_factor=scaling_factor)
 
     @classmethod
     def from_local_checkpoint(
         cls,
         lora_dir: str,
         expected_lora_modules: List[str],
+        *,
+        max_position_embeddings: Optional[int] = None,
         lora_model_id: Optional[int] = None,
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
@@ -199,7 +276,23 @@ class LoRAModel:
         embedding_modules: Optional[Dict[str, str]] = None,
         embedding_padding_modules: Optional[List[str]] = None,
     ) -> "LoRAModel":
-        """Create a LoRAModel from a local checkpoint."""
+        """Create a LoRAModel from a local checkpoint.
+        
+        Args:
+            lora_dir: The local path that has lora data.
+            expected_lora_modules: Name of modules that are expected to be
+                replaced by lora.
+            max_position_embeddings: Max position embedding length. Used to
+                scaling the largest context length. If None, the lora model's
+                context length is not scaled.
+            lora_model_id: Lora model id. If not given, automatically set by
+                a global counter.
+            device: Device where the lora model is loaded.
+            dtype: dtype of the lora model weights.
+
+        Returns:
+            Loaded LoRA Model.
+        """
         lora_config_path = os.path.join(lora_dir, "adapter_config.json")
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
@@ -212,10 +305,14 @@ class LoRAModel:
         target_modules = config["target_modules"]
         unexpected_modules = []
         for module in target_modules:
-            if module not in expected_lora_modules:
+            # Compatible with more modules, such as:layers.11.self_attn.k_proj
+            part_name = module.split(".")[-1]
+            if part_name not in expected_lora_modules:
                 unexpected_modules.append(module)
         # loaded lora's target modules must be a subset of expected_lora_modules
+
         if unexpected_modules:
+            print(unexpected_modules, "modules")
             raise ValueError(
                 f"While loading {lora_dir}, expected"
                 f" target modules in {expected_lora_modules}"
@@ -237,6 +334,14 @@ class LoRAModel:
 
         rank = config["r"]
         lora_alpha = config["lora_alpha"]
+        context_length = config.get("context_length", None)
+        scaling_factor = None
+        if context_length:
+            if max_position_embeddings is None:
+                max_position_embeddings = context_length
+            scaling_factor = float(
+                math.ceil(context_length / max_position_embeddings))
+
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
             if lora_model_id is None else lora_model_id,
@@ -247,6 +352,7 @@ class LoRAModel:
             dtype=dtype,
             embeddings=embeddings,
             target_embedding_padding=target_embedding_padding,
+            scaling_factor=scaling_factor,
             embedding_modules=embedding_modules,
             embedding_padding_modules=embedding_padding_modules,
         )
@@ -280,6 +386,7 @@ class LoRAModelManager:
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
+        self.long_lora_context: Optional[LongContextLoRAContext] = None
         self.base_indices = torch.empty(self.max_num_batched_tokens,
                                         dtype=torch.long,
                                         device="cuda")
@@ -293,16 +400,25 @@ class LoRAModelManager:
                                               self.max_num_batched_tokens,
                                               dtype=torch.long,
                                               device="cuda")
-        self.offsets = []
+        self.long_lora_indices = torch.empty(self.max_num_batched_tokens,
+                                             dtype=torch.long,
+                                             device="cuda")
+        # Scaling factor -> offset to the sin_cos_cache to it.
+        # Used for long context lora.
+        self.scaling_factor_to_offset: Dict[float, int] = {}
         # 4 is the number of indicies tensors defined above
         # base_indices, sampler_indices, sampler_indices_padded,
         # embeddings_indices
-        self.indices_len = [None] * 4
+        self.indices_len: List[Optional[int]] = [None] * 4
 
         self.model: nn.Module = model
         if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
                 self.model.supported_lora_modules)
+            if lora_config.long_lora_scaling_factors:
+                # We need to replace rotary emb layer to do batch computation
+                # for long lora.
+                self.supported_lora_modules.append("rotary_emb")
             self.packed_modules_mapping = copy.deepcopy(
                 self.model.packed_modules_mapping)
         self.packed_modules: Dict[str, List[str]] = {}
@@ -310,7 +426,7 @@ class LoRAModelManager:
         self._registered_loras: Dict[int, LoRAModel] = {}
         # Dict instead of a Set for compatibility with LRUCache.
         self._active_loras: Dict[int, None] = {}
-        self._last_mapping = None
+        self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
         self.model.lora_manager = self
 
@@ -340,8 +456,8 @@ class LoRAModelManager:
         index, _ = first_free_slot
         self._active_loras[lora_id] = None
         lora_model = self._registered_loras[lora_id]
-        logger.debug(
-            f"Activating LoRA. int id: {lora_model.id}, slot index: {index}")
+        logger.debug("Activating LoRA. int id: %d, slot index: %d",
+                     lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
             module_lora = lora_model.get_lora(module_name)
@@ -368,12 +484,32 @@ class LoRAModelManager:
             return True
         return False
 
-    def _add_lora(self, lora: LoRAModel) -> bool:
+    def _set_long_lora_context(self, lora: LoRAModel):
+        if self.long_lora_context is None:
+            return
+
+        if lora.scaling_factor is None:
+            return
+
+        if (lora.scaling_factor not in self.scaling_factor_to_offset):
+            raise ValueError(f"Long LoRA scaling factor {lora.scaling_factor}"
+                             " has not been initialized.")
+
+        offsets = self.scaling_factor_to_offset.get(lora.scaling_factor)
+        if offsets:
+            self.long_lora_context.offsets_by_lora_id[lora.id] = offsets
+
+    def _add_lora(self, lora: LoRAModel):
         self._create_merged_loras_inplace(lora)
         self._registered_loras[lora.id] = lora
+        self._set_long_lora_context(lora)
 
     def add_lora(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager CPU cache."""
+        logger.debug(
+            "Adding lora. Model id: %d, "
+            "int id: %d, "
+            "scaling factor: %s", lora.id, lora.id, lora.scaling_factor)
         if lora.id not in self._registered_loras:
             if len(self._registered_loras) >= self.capacity:
                 raise RuntimeError("No free LoRA slots.")
@@ -385,15 +521,18 @@ class LoRAModelManager:
         """Remove a LoRAModel from the manager CPU cache."""
         # TODO: should we check active lora?
         self.deactivate_lora(lora_id)
+        if self.long_lora_context:
+            self.long_lora_context.offsets_by_lora_id.pop(lora_id, None)
         return bool(self._registered_loras.pop(lora_id, None))
 
     # TODO see if this can be vectorized
     def _set_lora_mapping(self, mapping: LoRAMapping) -> None:
         (base_indices, sampler_indices, sampler_indices_padded,
-         embeddings_indices,
+         embeddings_indices, long_lora_offsets_tensor,
          indices_len) = convert_mapping(mapping, self.lora_index_to_id,
                                         self.lora_slots + 1, self.vocab_size,
-                                        self.lora_config.lora_extra_vocab_size)
+                                        self.lora_config.lora_extra_vocab_size,
+                                        self.long_lora_context)
         self.base_indices[:base_indices.shape[0]].copy_(base_indices)
         self.sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices)
         self.sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
@@ -401,6 +540,11 @@ class LoRAModelManager:
         self.embeddings_indices[:embeddings_indices.
                                 shape[0], :embeddings_indices.shape[1]].copy_(
                                     embeddings_indices)
+        if long_lora_offsets_tensor is not None:
+            self.long_lora_indices[:long_lora_offsets_tensor.shape[0]].copy_(
+                long_lora_offsets_tensor)
+        else:
+            self.long_lora_indices.zero_()
         # Maintain the reference
         self.indices_len[:] = indices_len
 
@@ -416,14 +560,15 @@ class LoRAModelManager:
     def get_lora(self, lora_id: int) -> Optional[LoRAModel]:
         return self._registered_loras.get(lora_id, None)
 
-    def remove_all_loras(self) -> bool:
+    def remove_all_loras(self):
         """Remove all LoRAModels from the manager."""
         self._registered_loras.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_loras.clear()
 
     def _create_lora_modules(self):
-        for module_name, module in self.model.named_modules():
+        for module_name, module in self.model.named_modules(
+                remove_duplicate=False):
             if not self._match_target_modules(module_name):
                 continue
             parts = module_name.split(".")[-1]
@@ -432,6 +577,13 @@ class LoRAModelManager:
                 self.model, module_name,
                 from_layer(module, self.lora_slots, self.lora_config,
                            packed_moduled_lst, self.model.config))
+            # LinearScalingRotaryEmbeddingWithLora is used to handle
+            # long context lora. Register relevant metadata.
+            if isinstance(new_module, LinearScalingRotaryEmbeddingWithLora):
+                self.long_lora_context = LongContextLoRAContext(
+                    new_module.scaling_factors, new_module.rotary_dim)
+                self.scaling_factor_to_offset = \
+                    new_module.scaling_factor_to_offset
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
                 logits_processor_module = self.model.get_submodule(
@@ -446,7 +598,8 @@ class LoRAModelManager:
             self._register_packed_modules(module_name)
             new_module.set_mapping(self.base_indices, self.sampler_indices,
                                    self.sampler_indices_padded,
-                                   self.embeddings_indices, self.indices_len)
+                                   self.embeddings_indices,
+                                   self.long_lora_indices, self.indices_len)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA)
@@ -456,15 +609,18 @@ class LoRAModelManager:
             self,
             lora_id: int,
             rank: int,
+            scaling_factor: Optional[float],
             embedding_modules: Optional[Dict[str, str]] = None) -> LoRAModel:
         """Create zero-initialized LoRAModel for warmup."""
-        model = LoRAModel(lora_id, rank, {})
+        model = LoRAModel(lora_id, rank, {}, scaling_factor)
         for module_name, module in self.model.named_modules():
             if not self._match_target_modules(module_name) or not isinstance(
-                    module, BaseLayerWithLoRA):
+                    module, BaseLayerWithLoRA) or isinstance(
+                        module, LinearScalingRotaryEmbeddingWithLora):
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:
+                assert embedding_modules is not None
                 if parts[-1] in embedding_modules:
                     input_dim = (module.base_layer.org_vocab_size +
                                  self.lora_config.lora_extra_vocab_size if
@@ -498,7 +654,7 @@ class LoRAModelManager:
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
-                subloras = []
+                subloras: List[Optional["LoRALayerWeights"]] = []
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
@@ -536,7 +692,7 @@ class LoRAModelManager:
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
-            replacement_loras = []
+            replacement_loras: List[Optional[LoRALayerWeights]] = []
             has_replacement = False
             for r in new_module_names:
                 lora = lora_model.get_lora(r)
@@ -555,13 +711,13 @@ class LoRAModelManager:
 
 class LoRALRUCache(LRUCache[LoRAModel]):
 
-    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[Hashable],
-                                                                   None]):
+    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int],
+                                                                   bool]):
         super().__init__(capacity)
         self.deactivate_lora_fn = deactivate_lora_fn
 
-    def _on_remove(self, key: Hashable, value: LoRAModel):
-        logger.debug(f"Removing LoRA. int id: {key}")
+    def _on_remove(self, key: int, value: LoRAModel):
+        logger.debug("Removing LoRA. int id: %d", key)
         self.deactivate_lora_fn(key)
         return super()._on_remove(key, value)
 
@@ -590,6 +746,10 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def add_lora(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
+        logger.debug(
+            "Adding lora. Model id: %d, "
+            "int id: %d, "
+            "scaling factor: %s", lora.id, lora.id, lora.scaling_factor)
         if lora.id not in self._registered_loras:
             self._add_lora(lora)
             was_added = True

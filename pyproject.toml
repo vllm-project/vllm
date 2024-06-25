@@ -5,7 +5,7 @@ requires = [
     "ninja",
     "packaging",
     "setuptools >= 49.4.0",
-    "torch == 2.2.1",
+    "torch == 2.3.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -32,6 +32,7 @@ select = [
     "SIM",
     # isort
     # "I",
+    "G",
 ]
 ignore = [
     # star imports
@@ -46,19 +47,29 @@ ignore = [
 python_version = "3.8"
 
 ignore_missing_imports = true
- check_untyped_defs = true
+check_untyped_defs = true
+follow_imports = "skip"
 
 files = "vllm"
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 exclude = [
     "vllm/model_executor/parallel_utils/|vllm/model_executor/models/",
+    # Ignore triton kernels in ops.
+    'vllm/attention/ops/.*\.py$'
 ]
 
-
 [tool.codespell]
-ignore-words-list = "dout, te, indicies"
-skip = "./tests/prompts,./benchmarks/sonnet.txt"
+ignore-words-list = "dout, te, indicies, subtile"
+skip = "./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
 
 [tool.isort]
 use_parentheses = true
 skip_gitignore = true
+
+[tool.pytest.ini_options]
+markers = [
+    "skip_global_cleanup",
+    "llm: run tests for vLLM API only",
+    "openai: run tests for OpenAI API only",
+    "llava: run tests for LLaVA models only",
+]

@@ -68,9 +68,13 @@ async def async_request_tgi(
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
+                        chunk_bytes = chunk_bytes.decode("utf-8")
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
-                                              "data:")
+                        #NOTE: Sometimes TGI returns a ping response without
+                        # any data, we should skip it.
+                        if chunk_bytes.startswith(":"):
+                            continue
+                        chunk = remove_prefix(chunk_bytes, "data:")
 
                         data = json.loads(chunk)
                         timestamp = time.perf_counter()
@@ -89,6 +93,9 @@ async def async_request_tgi(
                     output.latency = most_recent_timestamp - st
                     output.success = True
                     output.generated_text = data["generated_text"]
+                else:
+                    output.error = response.reason or ""
+                    output.success = False
         except Exception:
             output.success = False
             exc_info = sys.exc_info()
@@ -276,6 +283,9 @@ async def async_request_openai_completions(
                     output.generated_text = generated_text
                     output.success = True
                     output.latency = latency
+                else:
+                    output.error = response.reason or ""
+                    output.success = False
         except Exception:
             output.success = False
             exc_info = sys.exc_info()

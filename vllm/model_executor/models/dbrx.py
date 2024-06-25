@@ -5,15 +5,17 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               QKVParallelLinear,
+from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -44,7 +46,7 @@ class DbrxRouter(nn.Module):
             self.num_total_experts,
             bias=False,
             params_dtype=params_dtype,
-            linear_method=None,
+            quant_config=None,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -63,7 +65,7 @@ class DbrxExperts(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
@@ -165,7 +167,8 @@ class DbrxAttention(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -183,13 +186,13 @@ class DbrxAttention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=False,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.out_proj = RowParallelLinear(
             self.d_model,
             self.d_model,
             bias=False,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -215,12 +218,12 @@ class DbrxAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -244,11 +247,12 @@ class DbrxFusedNormAttention(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.d_model = config.d_model
-        self.attn = DbrxAttention(config, linear_method)
+        self.attn = DbrxAttention(config, cache_config, quant_config)
         self.norm_1 = nn.LayerNorm(self.d_model)
         self.norm_2 = nn.LayerNorm(self.d_model)
 
@@ -278,11 +282,13 @@ class DbrxBlock(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.norm_attn_norm = DbrxFusedNormAttention(config, linear_method)
-        self.ffn = DbrxExperts(config, linear_method)
+        self.norm_attn_norm = DbrxFusedNormAttention(config, cache_config,
+                                                     quant_config)
+        self.ffn = DbrxExperts(config, quant_config)
 
     def forward(
         self,
@@ -307,15 +313,18 @@ class DbrxModel(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
             config.d_model,
         )
-        self.blocks = nn.ModuleList(
-            [DbrxBlock(config, linear_method) for _ in range(config.n_layers)])
+        self.blocks = nn.ModuleList([
+            DbrxBlock(config, cache_config, quant_config)
+            for _ in range(config.n_layers)
+        ])
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
         for module in self.modules():
             if hasattr(module, "bias") and isinstance(module.bias,
@@ -348,13 +357,14 @@ class DbrxForCausalLM(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
+        self.quant_config = quant_config
         self.unpadded_vocab_size = config.vocab_size
-        self.transformer = DbrxModel(config, linear_method)
+        self.transformer = DbrxModel(config, cache_config, quant_config)
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.d_model,

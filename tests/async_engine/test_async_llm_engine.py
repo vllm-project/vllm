@@ -25,7 +25,7 @@ class MockEngine:
         return [RequestOutput(
             request_id=self.request_id)] if self.request_id else []
 
-    async def encode_request_async(self, *args, **kwargs):
+    async def process_model_inputs_async(self, *args, **kwargs):
         pass
 
     def generate(self, request_id):
@@ -91,4 +91,6 @@ async def test_new_requests_event():
     assert engine.engine.step_calls == old_step_calls + 1
 
     engine = MockAsyncLLMEngine(worker_use_ray=True, engine_use_ray=True)
+    assert engine.get_model_config() is not None
     assert engine.get_tokenizer() is not None
+    assert engine.get_decoding_config() is not None

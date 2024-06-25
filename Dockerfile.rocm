@@ -14,7 +14,7 @@ RUN echo "Base image is $BASE_IMAGE"
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
 RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
 
-ARG FA_BRANCH="3d2b6f5"
+ARG FA_BRANCH="ae7928c"
 RUN echo "FA_BRANCH is $FA_BRANCH"
 
 # whether to build flash-attention
@@ -46,7 +46,7 @@ RUN apt-get update && apt-get install -y \
 
 ### Mount Point ###
 # When launching the container, mount the code directory to /app
-ARG APP_MOUNT=/app
+ARG APP_MOUNT=/vllm-workspace
 VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}
 
@@ -89,21 +89,27 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
     && cd ../..; \
     fi
 
-COPY ./ /app/vllm
+WORKDIR /vllm-workspace
+COPY . .
 
+#RUN python3 -m pip install pynvml # to be removed eventually
 RUN python3 -m pip install --upgrade pip numba
-RUN python3 -m pip install xformers==0.0.23 --no-deps
 
-RUN cd /app \
-    && cd vllm \
-    && pip install -U -r requirements-rocm.txt \
-    && if [ "$BUILD_FA" = "1" ]; then \
-       bash patch_xformers.rocm.sh; fi \
-    && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch \
+# make sure punica kernels are built (for LoRA)
+ENV VLLM_INSTALL_PUNICA_KERNELS=1
+# Workaround for ray >= 2.10.0
+ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+
+ENV VLLM_NCCL_SO_PATH=/opt/rocm/lib/librccl.so
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -U -r requirements-rocm.txt \
+    && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch \
     && python3 setup.py install \
+    && cp build/lib.linux-x86_64-cpython-39/vllm/_C.abi3.so vllm/ \
+    && cp build/lib.linux-x86_64-cpython-39/vllm/_punica_C.abi3.so vllm/ \
+    && cp build/lib.linux-x86_64-cpython-39/vllm/_moe_C.abi3.so vllm/ \
     && cd ..
 
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir ray[all]==2.9.3
 
 CMD ["/bin/bash"]

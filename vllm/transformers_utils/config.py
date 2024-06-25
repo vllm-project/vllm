@@ -1,11 +1,15 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Type
 
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
+from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MPTConfig, RWConfig)
 
-_CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
+logger = init_logger(__name__)
+
+_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "dbrx": DbrxConfig,
     "mpt": MPTConfig,
@@ -18,8 +22,14 @@ _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
 def get_config(model: str,
                trust_remote_code: bool,
                revision: Optional[str] = None,
-               code_revision: Optional[str] = None) -> PretrainedConfig:
+               code_revision: Optional[str] = None,
+               rope_scaling: Optional[dict] = None,
+               rope_theta: Optional[float] = None) -> PretrainedConfig:
     try:
+        if VLLM_USE_MODELSCOPE:
+            from modelscope import AutoConfig
+        else:
+            from transformers import AutoConfig
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
@@ -41,6 +51,12 @@ def get_config(model: str,
         config = config_class.from_pretrained(model,
                                               revision=revision,
                                               code_revision=code_revision)
+    for key, value in [("rope_scaling", rope_scaling),
+                       ("rope_theta", rope_theta)]:
+        if value is not None:
+            logger.info("Updating %s from %r to %r", key,
+                        getattr(config, key, None), value)
+            config.update({key: value})
     return config
 
 
