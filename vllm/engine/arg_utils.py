@@ -50,6 +50,7 @@ class EngineArgs:
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
+    max_queue_length: int = -1
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
@@ -384,6 +385,10 @@ class EngineArgs:
             default=EngineArgs.max_logprobs,
             help=('Max number of log probs to return logprobs is specified in'
                   ' SamplingParams.'))
+        parser.add_argument('--max-queue-length',
+                            type=int,
+                            default=EngineArgs.max_queue_length,
+                            help='maximum number of requests in waiting queue')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
@@ -646,6 +651,7 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=self.device)
         model_config = ModelConfig(
+<<<<<<< HEAD
             model=self.model,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
@@ -719,6 +725,27 @@ class EngineArgs:
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
         )
+=======
+            self.model, self.tokenizer, self.tokenizer_mode,
+            self.trust_remote_code, self.download_dir, self.load_format,
+            self.dtype, self.seed, self.revision, self.code_revision,
+            self.tokenizer_revision, self.max_model_len, self.quantization,
+            self.enforce_eager, self.max_context_len_to_capture)
+        cache_config = CacheConfig(self.block_size,
+                                   self.gpu_memory_utilization,
+                                   self.swap_space, self.kv_cache_dtype,
+                                   model_config.get_sliding_window())
+        parallel_config = ParallelConfig(self.pipeline_parallel_size,
+                                         self.tensor_parallel_size,
+                                         self.worker_use_ray,
+                                         self.max_parallel_loading_workers,
+                                         self.disable_custom_all_reduce)
+        scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
+                                           self.max_num_seqs,
+                                           model_config.max_model_len,
+                                           self.max_paddings,
+                                           self.max_queue_length)
+>>>>>>> 92f98a8e (pushing changes to my fork)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

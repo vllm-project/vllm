@@ -702,6 +702,7 @@ class SchedulerConfig:
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
                  max_model_len: int,
+                 max_queue_length: int,
                  use_v2_block_manager: bool = False,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
@@ -734,6 +735,7 @@ class SchedulerConfig:
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
+        self.max_queue_length = max_queue_length
 
         self._verify_args()
 
@@ -753,6 +755,10 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
+        # TODO: verify max_queue_length
+    
+    def get_max_queue_length(self) -> int:
+        return self.max_queue_length
 
         if self.num_lookahead_slots < 0:
             raise ValueError(
