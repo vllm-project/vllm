@@ -124,7 +124,7 @@ run_serving_tests() {
     else
       echo ""
       echo "lmdeploy failed to start within the timeout period."
-      continue
+      exit 0
     fi
 
     # get model name

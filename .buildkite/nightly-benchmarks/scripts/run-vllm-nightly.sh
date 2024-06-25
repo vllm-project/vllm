@@ -71,7 +71,7 @@ run_serving_tests() {
     # if TEST_SELECTOR is set, only run the test cases that match the selector
     if [[ -n "$TEST_SELECTOR" ]] && [[ ! "$test_name" =~ $TEST_SELECTOR ]]; then
       echo "Skip test case $test_name."
-      continue
+      exit 0
     fi
 
     # append vllm to the test name
@@ -123,7 +123,7 @@ run_serving_tests() {
     else
       echo ""
       echo "vllm failed to start within the timeout period."
-      continue
+      exit 0
     fi
 
     # iterate over different QPS
