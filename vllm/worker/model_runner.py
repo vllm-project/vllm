@@ -132,6 +132,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     """
     Helper class for shared methods between GPU model runners.
     """
+    _model_input_cls: Type[TModelInputForGPU]
 
     def __init__(
         self,
@@ -205,8 +206,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
-
-        self._model_input_cls : Type[TModelInputForGPU] = ModelInputForGPUWithSamplingMetadata
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -930,6 +929,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     """
     GPU model runner with sampling step.
     """
+    _model_input_cls: Type[ModelInputForGPUWithSamplingMetadata] = (
+        ModelInputForGPUWithSamplingMetadata)
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,

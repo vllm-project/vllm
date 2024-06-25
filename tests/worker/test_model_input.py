@@ -75,8 +75,9 @@ def test_model_runner_input():
     # Test round trip serialization.
     tensor_dict = model_input.as_broadcastable_tensor_dict()
     attn_backend = MockAttentionBackend()
-    received_model_input = ModelInputForGPUWithSamplingMetadata.from_broadcasted_tensor_dict(
-        tensor_dict, attn_backend=attn_backend)
+    received_model_input = (
+        ModelInputForGPUWithSamplingMetadata.from_broadcasted_tensor_dict(
+            tensor_dict, attn_backend=attn_backend))
     # Check that received copy has correct values.
     assert isinstance(received_model_input,
                       ModelInputForGPUWithSamplingMetadata)
@@ -125,8 +126,9 @@ def test_embedding_model_runner_input():
     # Test round trip serialization.
     tensor_dict = model_input.as_broadcastable_tensor_dict()
     attn_backend = MockAttentionBackend()
-    received_model_input = ModelInputForGPUWithPoolingMetadata.from_broadcasted_tensor_dict(
-        tensor_dict, attn_backend=attn_backend)
+    received_model_input = (
+        ModelInputForGPUWithPoolingMetadata.from_broadcasted_tensor_dict(
+            tensor_dict, attn_backend=attn_backend))
     # Check that received copy has correct values.
     assert isinstance(received_model_input,
                       ModelInputForGPUWithPoolingMetadata)

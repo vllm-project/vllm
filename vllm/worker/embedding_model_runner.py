@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -25,6 +25,8 @@ class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
 
 class EmbeddingModelRunner(
         GPUModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
+    _model_input_cls: Type[ModelInputForGPUWithPoolingMetadata] = (
+        ModelInputForGPUWithPoolingMetadata)
 
     def __init__(
         self,
@@ -49,8 +51,6 @@ class EmbeddingModelRunner(
                          kv_cache_dtype=kv_cache_dtype,
                          is_driver_worker=is_driver_worker,
                          vision_language_config=vision_language_config)
-
-        self._model_input_cls : Type[TModelInputForGPU] = ModelInputForGPUWithPoolingMetadata
 
     @torch.inference_mode()
     def execute_model(
