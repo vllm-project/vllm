@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
 from vllm.model_executor.utils import set_weight_attrs
 
 __all__ = ["CompressedTensorsW4A16Sparse24"]
+W4A16SPARSE24_SUPPORTED_BITS = [4]
 
 
 class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):

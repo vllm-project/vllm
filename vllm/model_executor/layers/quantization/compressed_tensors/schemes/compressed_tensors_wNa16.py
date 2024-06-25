@@ -11,10 +11,11 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
     marlin_permute_scales)
 from vllm.model_executor.utils import set_weight_attrs
 
-__all__ = ["CompressedTensorsW4A16"]
+__all__ = ["CompressedTensorsWNA16"]
+WNA16_SUPPORTED_BITS = [4, 8]
 
 
-class CompressedTensorsW4A16(CompressedTensorsScheme):
+class CompressedTensorsWNA16(CompressedTensorsScheme):
 
     def __init__(self,
                  strategy: str,
