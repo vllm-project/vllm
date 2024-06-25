@@ -46,8 +46,8 @@ is_avx512_disabled(AVX512_DISABLED)
 
 find_isa(${CPUINFO} "avx2" AVX2_FOUND)
 find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
-
-message(STATUS "CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
+find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
+find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
@@ -70,7 +70,7 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
 elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
-elseif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "ppc64")
+elseif (POWER9_FOUND OR POWER10_FOUND)
     message(STATUS "PowerPC detected")
     # Check for PowerPC VSX support
     list(APPEND CXX_COMPILE_FLAGS
@@ -78,7 +78,7 @@ elseif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "ppc64")
         "-mcpu=native"
         "-mtune=native")
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512 or AVX2 or VSX ISA support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512 or AVX2 or Power9+ ISA support.")
 endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
