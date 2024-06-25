@@ -13,6 +13,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 # Create an LLM.
 llm = LLM(model="facebook/opt-125m",
           speculative_model="facebook/opt-125m",
+          enforce_eager=True,
           num_speculative_tokens=5,
           use_v2_block_manager=True)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
