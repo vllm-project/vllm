@@ -137,6 +137,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     typical_acceptance_sampler_posterior_threshold,
                 posterior_alpha=typical_acceptance_sampler_posterior_alpha,
         )
+        logger.info("Configuring SpecDecodeWorker with sampler=%s",
+                    type(spec_decode_sampler))
+
  
         return SpecDecodeWorker(
             proposer_worker,
