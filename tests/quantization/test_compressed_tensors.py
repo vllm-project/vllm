@@ -147,7 +147,7 @@ def _run_sparseml(model_path: str, prompts: List[str], n_tokens: int):
     from sparseml.transformers import (  # noqa: E501
         SparseAutoModelForCausalLM, SparseAutoTokenizer)
     model = SparseAutoModelForCausalLM.from_pretrained(model_path,
-                                                       device_map="cuda")
+                                                       device_map="auto")
     tokenizer = SparseAutoTokenizer.from_pretrained(model_path)
     inputs = tokenizer(prompts, return_tensors="pt").to("cuda")
     num_input_ids = inputs.get("input_ids").shape[-1]
