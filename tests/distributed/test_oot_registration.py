@@ -9,8 +9,10 @@ oot_registration_file = os.path.join(os.path.dirname(__file__),
 
 
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
-@pytest.mark.parametrize("backend", ["mp", "ray"])
-def test_oot_registration(tensor_parallel_size, backend):
+def test_oot_registration(tensor_parallel_size):
+    backend = os.environ.get("DISTRIBUTED_EXECUTOR_BACKEND", "mp")
+    if backend == "ray" and tensor_parallel_size == 1:
+        pytest.skip()
     prompts = ["Hello, my name is", "The text does not matter"]
     sampling_params = SamplingParams(temperature=0)
     llm = LLM(
