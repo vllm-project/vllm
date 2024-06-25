@@ -1025,6 +1025,9 @@ class ModelRunner:
             torch.empty(FLASHINFER_WORKSPACE_BUFFER_SIZE,
                                                 dtype=torch.uint8,
                                               device=self.device)
+            indices_buffer = torch.empty(self.cache_config.num_gpu_blocks,
+                                         dtype=torch.int32,
+                                         device=self.device)
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
@@ -1033,10 +1036,6 @@ class ModelRunner:
                     indptr_buffer = torch.empty(batch_size + 1,
                                                 dtype=torch.int32,
                                                 device=self.device)
-                    indices_buffer = torch.empty(
-                        self.cache_config.num_gpu_blocks,
-                        dtype=torch.int32,
-                        device=self.device)
                     last_page_len_buffer = torch.empty(batch_size,
                                                        dtype=torch.int32,
                                                        device=self.device)
