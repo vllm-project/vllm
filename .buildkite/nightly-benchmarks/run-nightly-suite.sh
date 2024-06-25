@@ -45,6 +45,14 @@ main() {
     cd benchmarks
     wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 
+    if [ ! -f /workspace/buildkite-agent ]; then
+        echo "buildkite-agent binary not found. Skip uploading the results."
+        return 0
+    else
+        /workspace/buildkite-agent annotate --style "info" --context "header" < /vllm/.buildkite/nightly-benchmarks/nightly-descriptions.md
+    fi
+    
+
     # run lmdeploy
     if which lmdeploy >/dev/null; then
         echo "lmdeploy is available, redirect to run-lmdeploy-nightly.sh"
