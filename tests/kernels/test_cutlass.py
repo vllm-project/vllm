@@ -49,7 +49,7 @@ def cutlass_fp8_gemm_helper(m: int,
         (1, n_b_scales), device=device, dtype=torch.float32) / 10)
     if bias:
         # bias term should be > 1 so that the absolute tolerance can catch it
-        bias_t = torch.rand((n, ), device=device, dtype=torch.float32) + 1.0
+        bias_t = torch.rand((n, ), device=device, dtype=out_dtype) + 1.0
         out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias_t)
     else:
         out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype)
