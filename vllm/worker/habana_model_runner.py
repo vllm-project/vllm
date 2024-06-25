@@ -758,15 +758,11 @@ class HabanaModelRunner:
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
-            slot_mapping = metadata_dict.pop("slot_mapping")
-            num_prefills = metadata_dict.pop("num_prefills")
             selected_token_indices = metadata_dict.pop(
                 "selected_token_indices")
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
             multi_modal_input = metadata_dict.pop("multi_modal_input")
-            num_prefill_tokens = metadata_dict.pop("num_prefill_tokens")
-            num_decode_tokens = metadata_dict.pop("num_decode_tokens")
             batch_type = metadata_dict.pop("batch_type")
 
             # Create an attention metadata.

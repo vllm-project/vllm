@@ -31,7 +31,7 @@ class RayHabanaExecutor(DistributedGPUExecutor):
         assert (not self.speculative_config
                 ), "Speculative decoding not yet supported for RayGPU backend."
 
-        assert self.parallel_config.worker_use_ray
+        assert self.parallel_config.distributed_executor_backend == "ray"
         placement_group = self.parallel_config.placement_group
 
         # Disable Ray usage stats collection.
@@ -146,7 +146,7 @@ class RayHabanaExecutor(DistributedGPUExecutor):
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
 
-    def execute_model(
+    def _driver_execute_model(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         all_outputs = self._run_workers(
@@ -273,6 +273,10 @@ class RayHabanaExecutor(DistributedGPUExecutor):
             raise RuntimeError("At least one Worker is dead. "
                                f"Dead Workers: {dead_actors}. ")
 
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
+        ray.get(parallel_worker_tasks)
 
 class RayHabanaExecutorAsync(RayHabanaExecutor, DistributedGPUExecutorAsync):
 
