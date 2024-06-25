@@ -22,10 +22,10 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
 from vllm.multimodal.image import (DummyImageDataFactories, ImageFeatureData,
-                                   ImageInputProcessors, ImagePixelData,
-                                   get_clip_num_patches)
+                                   ImageInputProcessors, ImagePixelData)
 from vllm.sequence import SamplerOutput
 
+from .clip import get_clip_num_patches
 from .llava import LlavaMultiModalProjector, merge_vision_embeddings
 from .vlm_base import VisionLanguageModelBase
 
@@ -80,7 +80,8 @@ def _get_llava_next_image_feature_size(
     vision_config = hf_config.vision_config
 
     if isinstance(vision_config, CLIPVisionConfig):
-        num_patches = get_clip_num_patches(vision_config)
+        num_patches = get_clip_num_patches(image_size=vision_config.image_size,
+                                           patch_size=vision_config.patch_size)
         base_feature_size = num_patches * num_patches
 
         num_patch_height, num_patch_width = get_anyres_image_grid_shape(
