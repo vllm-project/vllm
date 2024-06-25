@@ -61,9 +61,41 @@ class OpenVINOAttentionBackend(AttentionBackend):
 @dataclass
 class OpenVINOAttentionMetadata:
     """Metadata for OpenVINOAttentionBackend.
+
+    Basic terms used below:
+    - batch_size_in_sequences - total number of sequences to execute​
+    - prompt_lens – per sequence size number of scheduled tokens​
+    - batch_size_in_tokens = sum(prompt_lens)​
+    - max_context_len = max(context_lens)​
+    - max_num_blocks = div_up(max_context_len / BLOCK_SIZE)​
+    - num_blocks – total number of blocks in block_indices​
     """
+
+    # Describes past KV cache size for each sequence within a batch
+    # Shape: [batch_size_in_sequences]
+    # Type: i32​
     past_lens: torch.Tensor
+
+    # Describes start indices of input / speculative tokens from
+    # current sequences within a batch sequence​
+    # Shape: [batch_size_in_sequences + 1]​
+    # Type: i32
     subsequence_begins: torch.Tensor
+
+    # Describes block tables for each sequence within a batch​ -
+    # indices along 0th dimension in key_cache and value_cache inputs​
+    # Shape: [num_blocks]
+    # Type: i32​
     block_indices: torch.Tensor
+
+    # Describes block tables for each sequence within a batch​ -
+    # for i-th element, it is an index in block_indices with the
+    # first block belonging to i-th sequence​
+    # Shape: [batch_size_in_sequences + 1]
+    # Type: i32​
     block_indices_begins: torch.Tensor
+
+    # Describes max context length
+    # Shape: scalar
+    # Type: i32
     max_context_len: torch.Tensor

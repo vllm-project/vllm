@@ -10,6 +10,7 @@ from openvino._offline_transformations import paged_attention_transformation
 from optimum.intel import OVModelForCausalLM
 from torch import nn
 
+import vllm.envs as envs
 from vllm.attention.backends.openvino import OpenVINOAttentionMetadata
 from vllm.config import DeviceConfig, ModelConfig
 from vllm.logger import init_logger
@@ -126,20 +127,19 @@ class OpenVINOCasualLM(nn.Module):
         export = _require_model_export(model_config.model)
         if export:
             logger.warning(
-                f"[ INFO ] Provided model id {model_config.model} does not "  # noqa: G004
+                f"Provided model id {model_config.model} does not "  # noqa: G004
                 "contain OpenVINO IR, the model will be converted to IR with "
                 "default options. If you need to use specific options for "
                 "model conversion, use optimum-cli export openvino with "
                 "desired options.")
         else:
             logger.warning(
-                "[ INFO ] OpenVINO IR is available for provided model id "  # noqa: G004
+                "OpenVINO IR is available for provided model id "  # noqa: G004
                 f"{model_config.model}. This IR will be used for inference "
                 "as-is, all possible options that may affect model conversion "
                 "are ignored.")
 
-        load_in_8bit = os.environ.get("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS",
-                                      "0") == "1"  # noqa: E501
+        load_in_8bit = envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS
         pt_model = OVModelForCausalLM.from_pretrained(
             model_config.model,
             export=export,
@@ -151,11 +151,6 @@ class OpenVINOCasualLM(nn.Module):
         paged_attention_transformation(pt_model.model)
         _modify_cache_parameters(pt_model.model, kv_cache_dtype,
                                  device_config.device.type == "cpu")
-
-        # For deployment outside vLLM
-        model_file_name = os.environ.get("VLLM_OPENVINO_EXPORTED_IR_NAME", "")
-        if model_file_name:
-            ov.save_model(pt_model.model, model_file_name)
 
         core = ov.Core()
         ov_compiled = core.compile_model(pt_model.model, "CPU")

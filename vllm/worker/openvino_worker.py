@@ -47,6 +47,7 @@ class OpenVINOCacheEngine:
             # Scale, zero point and quantized data will be stored together.
             # The layout for per token per head:
             # |scale(f32)|zeropoint(f32)|quantized data(u8,idx_1)|quantized data(u8,idx_2)|...|quantized data(u8,idx_head_size)| # noqa: E501
+            # so, we have to extend head_size by 8, which is sizeof(float) for scale and sizeof(float) for zeropoint
             self.head_size += 8
         self.num_layers = model_config.get_num_layers(parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
@@ -60,7 +61,7 @@ class OpenVINOCacheEngine:
         # Get attention backend.
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
-            self.model_config.get_head_size(),
+            self.head_size,
             self.model_config.get_num_kv_heads(self.parallel_config),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
@@ -115,6 +116,7 @@ class OpenVINOCacheEngine:
             # Scale, zero point and quantized data will be stored together.
             # The layout for per token per head:
             # |scale(f32)|zeropoint(f32)|quantized data(u8,idx_1)|quantized data(u8,idx_2)|...|quantized data(u8,idx_head_size)| # noqa: E501
+            # so, we have to extend head_size by 8, which is sizeof(float) for scale and sizeof(float) for zeropoint
             head_size += 8
 
         key_cache_block = block_size * num_kv_heads * head_size

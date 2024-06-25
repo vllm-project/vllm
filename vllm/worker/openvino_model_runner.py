@@ -111,7 +111,6 @@ class OpenVINOModelRunner:
         subsequence_begins: List[int] = []
         block_indices: List[int] = []
         block_indices_begins: List[int] = []
-        multi_modal_input_list: List[torch.Tensor] = []
 
         # initialize beginning of prefix sums
         subsequence_begins.append(0)
@@ -220,15 +219,6 @@ class OpenVINOModelRunner:
         max_query_len = max(query_lens)
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
-        if multi_modal_input_list:
-            assert self.vision_language_config, (
-                "Multi-modal inputs are only supported by "
-                "vision language models.")
-            multi_modal_input = torch.cat(multi_modal_input_list,
-                                          dim=0).to(self.device)
-        else:
-            multi_modal_input = None
-
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
@@ -267,7 +257,7 @@ class OpenVINOModelRunner:
             attn_metadata,
             seq_lens,
             query_lens,
-            multi_modal_input,
+            None,
         )
 
     def prepare_input_tensors(
