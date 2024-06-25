@@ -5,6 +5,8 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+from vllm.multimodal.image import ImagePixelData
+from vllm.multimodal.utils import rescale_image
 
 from ..conftest import IMAGE_FILES
 
@@ -25,11 +27,12 @@ assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
 
 
 def iter_llava_next_configs(model_name: str):
+    # Need to use the max possible feature size for profile_run
     image_hw_to_feature_size = {
-        (336, 336): 1176,
+        (336, 336): 2928,
         (672, 672): 2928,
-        (1344, 336): 1944,
-        (336, 1344): 1890,
+        (1344, 336): 2928,
+        (336, 1344): 2928,
     }
 
     for (h, w), f in image_hw_to_feature_size.items():
@@ -74,9 +77,11 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("is_multiscale", [True, False])
 def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
-                model_and_config, dtype: str, max_tokens: int) -> None:
+                model_and_config, dtype: str, max_tokens: int,
+                is_multiscale: bool) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -88,10 +93,21 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     """
     model_id, vlm_config = model_and_config
 
+    combinations = [
+        (rescale_image(hf_image, image_scale),
+         ImagePixelData(image=rescale_image(vllm_image.image, image_scale)),
+         prompt) for hf_image, vllm_image, prompt in zip(
+             hf_images, vllm_images, HF_IMAGE_PROMPTS)
+        for image_scale in ((0.25, 0.5, 1.0) if is_multiscale else (1, ))
+    ]
+    prompt_inputs = [prompt for _, _, prompt in combinations]
+    hf_image_inputs = [hf_image for hf_image, _, _ in combinations]
+    vllm_image_inputs = [vllm_image for _, vllm_image, _ in combinations]
+
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
-        hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
+        hf_outputs = hf_model.generate_greedy(prompt_inputs,
                                               max_tokens,
-                                              images=hf_images)
+                                              images=hf_image_inputs)
 
     with vllm_runner(
             model_id,
@@ -101,15 +117,19 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
             enforce_eager=True,
             **vlm_config.as_cli_args_dict(),
     ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(HF_IMAGE_PROMPTS,
+        vllm_outputs = vllm_model.generate_greedy(prompt_inputs,
                                                   max_tokens,
-                                                  images=vllm_images)
+                                                  images=vllm_image_inputs)
 
-    for i in range(len(HF_IMAGE_PROMPTS)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_to_hf_output(
-            vllm_outputs[i], vlm_config, model_id)
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    for i in range(len(combinations)):
+        try:
+            hf_output_ids, hf_output_str = hf_outputs[i]
+            vllm_output_ids, vllm_output_str = vllm_to_hf_output(
+                vllm_outputs[i], vlm_config, model_id)
+            assert hf_output_str == vllm_output_str, (
+                f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
+            assert hf_output_ids == vllm_output_ids, (
+                f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+        except Exception as e:
+            msg = f"Wrong output for combination {combinations[i]}"
+            raise AssertionError(msg) from e

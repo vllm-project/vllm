@@ -67,3 +67,9 @@ def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:
 def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     """Load image from base64 format."""
     return Image.open(BytesIO(base64.b64decode(image)))
+
+
+def rescale_image(image: Image.Image, factor: float) -> Image.Image:
+    new_width = int(image.width * factor)
+    new_height = int(image.height * factor)
+    return image.resize((new_width, new_height))

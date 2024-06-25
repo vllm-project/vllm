@@ -823,7 +823,9 @@ class ModelRunner:
 
             seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
                 .dummy_data_for_profiling(model_config, seq_len)
-            assert len(seq_data.prompt_token_ids) == seq_len
+            assert len(seq_data.prompt_token_ids) == seq_len, (
+                f"Wrong number of tokens generated. Expected: {seq_len} "
+                f"but got: {len(seq_data.prompt_token_ids)}")
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
