@@ -245,7 +245,7 @@ def _make_alibi_bias(
     dtype: torch.dtype,
     seq_lens: List[int],
 ) -> List[torch.Tensor]:
-    attn_biases = []
+    attn_biases: List[torch.Tensor] = []
     for seq_len in seq_lens:
         bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
@@ -271,7 +271,7 @@ def _make_sliding_window_bias(
     window_size: Optional[int],
     dtype: torch.dtype,
 ) -> List[torch.Tensor]:
-    attn_biases = []
+    attn_biases: List[torch.Tensor] = []
     for seq_len in seq_lens:
         tensor = torch.full(
             (1, seq_len, seq_len),

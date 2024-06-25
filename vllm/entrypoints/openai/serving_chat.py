@@ -31,6 +31,8 @@ from vllm.multimodal.utils import (async_get_and_parse_image,
                                    get_full_image_text_prompt)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
+from vllm.tracing import (contains_trace_headers, extract_trace_headers,
+                          log_tracing_disabled_warning)
 from vllm.utils import random_uuid
 from llama_tools import preprocess_input, postprocess_output
 
@@ -275,11 +277,20 @@ class OpenAIServingChat(OpenAIServing):
         if image_data is not None:
             inputs["multi_modal_data"] = image_data
 
+        is_tracing_enabled = await self.engine.is_tracing_enabled()
+        trace_headers = None
+        if is_tracing_enabled and raw_request:
+            trace_headers = extract_trace_headers(raw_request.headers)
+        if not is_tracing_enabled and raw_request and contains_trace_headers(
+                raw_request.headers):
+            log_tracing_disabled_warning()
+
         result_generator = self.engine.generate(
             inputs,
             sampling_params,
             request_id,
             lora_request,
+            trace_headers=trace_headers,
         )
         # Streaming response
         if request.stream:
@@ -495,7 +506,7 @@ class OpenAIServingChat(OpenAIServing):
             final_res = res
         assert final_res is not None
 
-        choices = []
+        choices: List[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
         print("========================output========================")

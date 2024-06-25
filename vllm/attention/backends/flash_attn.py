@@ -83,7 +83,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
-    # |-------------------- seq_len ----------------------|
+    # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
 
     # Maximum query length in the batch. None for decoding.
