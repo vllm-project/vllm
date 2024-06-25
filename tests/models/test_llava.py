@@ -5,17 +5,17 @@ from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
 
-from ..conftest import IMAGE_FILES
+from ..conftest import IMAGE_ASSETS
 
 pytestmark = pytest.mark.vlm
 
 # The image token is placed before "user" on purpose so that the test can pass
-HF_IMAGE_PROMPTS = [
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    "stop_sign":
     "<image>\nUSER: What's the content of the image?\nASSISTANT:",
+    "cherry_blossom":
     "<image>\nUSER: What is the season?\nASSISTANT:",
-]
-
-assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
+})
 
 
 def iter_llava_configs(model_name: str):
@@ -69,8 +69,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
-                model_and_config, dtype: str, max_tokens: int) -> None:
+def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
+                dtype: str, max_tokens: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -81,6 +81,8 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     The text output is sanitized to be able to compare with hf.
     """
     model_id, vlm_config = model_and_config
+    hf_images = [asset.for_hf() for asset in image_assets]
+    vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
         hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,

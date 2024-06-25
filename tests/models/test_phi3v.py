@@ -6,17 +6,17 @@ from transformers import AutoTokenizer
 from vllm.config import VisionLanguageConfig
 from vllm.utils import is_cpu
 
-from ..conftest import IMAGE_FILES
+from ..conftest import IMAGE_ASSETS
 
 pytestmark = pytest.mark.vlm
 
 # The image token is placed before "user" on purpose so that the test can pass
-HF_IMAGE_PROMPTS = [
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    "stop_sign":
     "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
-    "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
-]
-
-assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
+    "cherry_blossom":
+    "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",  # noqa: E501
+})
 
 
 def iter_phi3v_configs(model_name: str):
@@ -82,8 +82,8 @@ if is_cpu():
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
-                model_and_config, dtype: str, max_tokens: int) -> None:
+def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
+                dtype: str, max_tokens: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -94,6 +94,8 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     The text output is sanitized to be able to compare with hf.
     """
     model_id, vlm_config = model_and_config
+    hf_images = [asset.for_hf() for asset in image_assets]
+    vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
     hf_model_kwargs = {"_attn_implementation": "eager"}
