@@ -125,6 +125,22 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         CMAKE_BUILD_TYPE=Release \
         python3 setup.py bdist_wheel --dist-dir=dist
 
+#################### libsodium Build IMAGE ####################
+FROM base as libsodium-builder
+
+RUN microdnf install -y gcc gzip \
+    && microdnf clean all
+
+WORKDIR /usr/src/libsodium
+
+ARG LIBSODIUM_VERSION=1.0.20
+RUN curl -LO https://github.com/jedisct1/libsodium/releases/download/${LIBSODIUM_VERSION}-RELEASE/libsodium-${LIBSODIUM_VERSION}.tar.gz \
+    && tar -xzvf libsodium*.tar.gz \
+    && rm -f libsodium*.tar.gz \
+    && mv libsodium*/* ./
+
+RUN ./configure --prefix="/usr/" && make && make check
+
 ## Release #####################################################################
 FROM python-install AS vllm-openai
 
@@ -143,7 +159,12 @@ COPY extras/custom_cache_manager.py /opt/vllm/lib/python3.11/site-packages/custo
 # install vllm wheel first, so that torch etc will be installed
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
-    pip install dist/*.whl --verbose
+    pip install $(echo dist/*.whl)'[tensorizer]' --verbose
+
+# Install libsodium for Tensorizer encryption
+RUN --mount=type=bind,from=libsodium-builder,src=/usr/src/libsodium,target=/usr/src/libsodium \
+    cd /usr/src/libsodium \
+    && make install
 
 ENV HF_HUB_OFFLINE=1 \
     PORT=8000 \
