@@ -8,7 +8,10 @@ oot_registration_file = os.path.join(os.path.dirname(__file__),
                                      "dummy_model.py")
 
 
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+# NOTE: order is important here, first test with tensor_parallel_size=2
+# then test with tensor_parallel_size=1
+# because CUDA_VISIBLE_DEVICES might be set in the first test
+@pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 def test_oot_registration(tensor_parallel_size):
     backend = os.environ.get("DISTRIBUTED_EXECUTOR_BACKEND", "mp")
     if backend == "ray" and tensor_parallel_size == 1:
