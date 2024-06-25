@@ -2,10 +2,10 @@ from itertools import count
 from typing import Iterator, List
 
 from vllm.sequence import (ExecuteModelRequest, SequenceData,
-                           SequenceGroupMetadata)
+                           SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
-from vllm.spec_decode.util import get_all_seq_ids, nvtx_range
+from vllm.spec_decode.util import nvtx_range
 from vllm.worker.worker_base import WorkerBase
 
 SeqId = int
