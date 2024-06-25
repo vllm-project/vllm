@@ -556,9 +556,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         decode_query = query[num_prefill_tokens:]
         # QKV for prefill.
         query = query[:num_prefill_tokens]
-
         if key is not None and value is not None:
-
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
 
