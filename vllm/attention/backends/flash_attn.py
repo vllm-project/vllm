@@ -83,7 +83,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
-    # |-------------------- seq_len ----------------------|
+    # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
 
     # Maximum query length in the batch. None for decoding.
@@ -170,13 +170,13 @@ class FlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
-            seq_lens=None,
+            seq_lens=self.seq_lens,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
-            max_query_len=None,
+            max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
-            query_start_loc=None,
-            seq_start_loc=None,
+            query_start_loc=self.query_start_loc,
+            seq_start_loc=self.seq_start_loc,
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
@@ -351,17 +351,33 @@ class FlashAttentionImpl(AttentionImpl):
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
-            # Decoding run.
-            output[num_prefill_tokens:] = flash_attn_with_kvcache(
-                decode_query.unsqueeze(1),
-                key_cache,
-                value_cache,
-                block_table=decode_meta.block_tables,
-                cache_seqlens=decode_meta.seq_lens_tensor,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-            ).squeeze(1)
+            if decode_meta.max_query_len and decode_meta.max_query_len > 1:
+                assert decode_meta.seq_lens is not None
+                max_seq_len = max(decode_meta.seq_lens)
+                output[num_prefill_tokens:] = flash_attn_varlen_func(
+                    q=decode_query,
+                    k=key_cache,
+                    v=value_cache,
+                    cu_seqlens_q=decode_meta.query_start_loc,
+                    max_seqlen_q=decode_meta.max_query_len,
+                    cu_seqlens_k=decode_meta.seq_start_loc,
+                    max_seqlen_k=max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    block_table=decode_meta.block_tables,
+                )
+            else:
+                output[num_prefill_tokens:] = flash_attn_with_kvcache(
+                    decode_query.unsqueeze(1),
+                    key_cache,
+                    value_cache,
+                    block_table=decode_meta.block_tables,
+                    cache_seqlens=decode_meta.seq_lens_tensor,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                ).squeeze(1)
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

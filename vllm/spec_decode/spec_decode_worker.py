@@ -9,11 +9,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
                            SamplerOutput, SequenceGroupMetadata)
-from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
-from vllm.spec_decode.mqa_scorer import MQAScorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
+# from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
+from vllm.spec_decode.mqa_scorer import MQAScorer
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -174,11 +174,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         #     scorer_worker=self.scorer_worker,
         #     device=self.device,
         #     vocab_size=self._vocab_size)
-        self.scorer = MQAScorer(
-            scorer_worker=self.scorer_worker,
-            device=self.device,
-            vocab_size=self._vocab_size
-        )
+        self.scorer = MQAScorer(scorer_worker=self.scorer_worker,
+                                device=self.device,
+                                vocab_size=self._vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
 
@@ -294,8 +292,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
 
-        return self._run_speculative_decoding_step(execute_model_req,
-                                                   num_lookahead_slots)
+        output = self._run_speculative_decoding_step(execute_model_req,
+                                                     num_lookahead_slots)
+        print("return sampler output===", len(output))
+        return output
 
     @torch.inference_mode()
     def start_worker_execution_loop(self) -> None:
@@ -472,6 +472,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # metadata.
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
+        print("-------------accept token ids------------", accepted_token_ids)
         return accepted_token_ids, logprobs
 
     def _create_output_sampler_list(

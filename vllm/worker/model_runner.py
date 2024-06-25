@@ -315,23 +315,19 @@ class ModelRunner:
                         "now.")
 
                 seq_data = seq_group_metadata.seq_data[seq_id]
-                if is_prompt:
-                    context_len = seq_data.get_num_computed_tokens()
-                else:
-                    # get_num_computed_tokens is incorrect for spec decoding.
-                    # So, we should have a special logic here.
-                    # TODO(sang): Fix it.
-                    context_len = seq_data.get_len() - 1
 
-                seq_len = min(
-                    seq_data.get_len(),
-                    context_len + seq_group_metadata.token_chunk_size)
+                context_len = seq_data.get_num_computed_tokens()
+
                 if is_prompt:
-                    tokens = seq_data.get_token_ids()[context_len:seq_len]
+                    seq_len = min(
+                        seq_data.get_len(),
+                        context_len + seq_group_metadata.token_chunk_size)
                 else:
-                    # Optimization. get_token_ids requires the entire copy of
-                    # tokens.
-                    tokens = [seq_data.get_last_token_id()]
+                    seq_len = seq_data.get_len()
+                tokens = seq_data.get_token_ids()[context_len:seq_len]
+                # tokens = [seq_data.get_last_token_id()]
+                print("tokens", tokens)
+                print("context_len, seq_len", context_len, seq_len)
 
                 # Prefix cache was hit.
                 # Prefix is not supported with sliding_window
@@ -426,9 +422,6 @@ class ModelRunner:
                     decode_only = False
                     prefill_seq_lens.append(seq_len)
                 else:
-                    assert query_len == 1, (
-                        "seq_len: {}, context_len: {}, query_len: {}".format(
-                            seq_len, context_len, query_len))
                     num_decode_tokens += query_len
                     decode_seq_lens.append(sliding_seq_len)
 

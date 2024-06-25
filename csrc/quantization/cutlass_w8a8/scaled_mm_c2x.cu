@@ -250,7 +250,119 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   CUTLASS_CHECK(status);
 }
 
+template <typename InType, typename OutType,
+          template <typename, typename> typename Epilogue>
+struct sm80_config_default {
+  // This config is used in 2 cases,
+  //  - M in (128, inf)
+  //  - M in (64, 128] and N >= 8192
+  static_assert(std::is_same<InType, int8_t>());
+  using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
+  using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
+  using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
+  using Cutlass2xGemm =
+      cutlass_2x_gemm<cutlass::arch::Sm80, enable_sm80_to_sm89, InType, OutType,
+                      Epilogue, TileShape, WarpShape, InstructionShape, 5>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename> typename Epilogue>
+struct sm80_config_M64 {
+  // This config is used in 2 cases,
+  // - M in (32, 64]
+  // - M in (64, 128] and N < 8192
+  static_assert(std::is_same<InType, int8_t>());
+  using TileShape = typename cutlass::gemm::GemmShape<64, 128, 128>;
+  using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
+  using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
+  using Cutlass2xGemm =
+      cutlass_2x_gemm<cutlass::arch::Sm80, enable_sm80_to_sm89, InType, OutType,
+                      Epilogue, TileShape, WarpShape, InstructionShape, 5>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename> typename Epilogue>
+struct sm80_config_M32 {
+  // M in (16, 32]
+  static_assert(std::is_same<InType, int8_t>());
+  using TileShape = typename cutlass::gemm::GemmShape<32, 64, 128>;
+  using WarpShape = typename cutlass::gemm::GemmShape<32, 64, 64>;
+  using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
+  using Cutlass2xGemm =
+      cutlass_2x_gemm<cutlass::arch::Sm80, enable_sm80_to_sm89, InType, OutType,
+                      Epilogue, TileShape, WarpShape, InstructionShape, 5>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename> typename Epilogue>
+struct sm80_config_M16 {
+  // M in [1, 16]
+  static_assert(std::is_same<InType, int8_t>());
+  using TileShape = typename cutlass::gemm::GemmShape<16, 64, 128>;
+  using WarpShape = typename cutlass::gemm::GemmShape<16, 64, 64>;
+  using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
+  using Cutlass2xGemm =
+      cutlass_2x_gemm<cutlass::arch::Sm80, enable_sm80_to_sm89, InType, OutType,
+                      Epilogue, TileShape, WarpShape, InstructionShape, 5>;
+};
+
 }  // namespace
+
+template <typename InType, typename OutType,
+          template <typename, typename> typename Epilogue,
+          typename... EpilogueArgs>
+void cutlass_gemm_sm80_dispatch(torch::Tensor& out, torch::Tensor const& a,
+                                torch::Tensor const& b,
+                                EpilogueArgs&&... args) {
+  static_assert(std::is_same<InType, int8_t>());
+  TORCH_CHECK(a.dtype() == torch::kInt8);
+  TORCH_CHECK(b.dtype() == torch::kInt8);
+
+  using Cutlass2xGemmDefault =
+      typename sm80_config_default<InType, OutType, Epilogue>::Cutlass2xGemm;
+  using Cutlass2xGemmM128BigN =
+      typename sm80_config_default<InType, OutType, Epilogue>::Cutlass2xGemm;
+  using Cutlass2xGemmM128SmallN =
+      typename sm80_config_M64<InType, OutType, Epilogue>::Cutlass2xGemm;
+  using Cutlass2xGemmM64 =
+      typename sm80_config_M64<InType, OutType, Epilogue>::Cutlass2xGemm;
+  using Cutlass2xGemmM32 =
+      typename sm80_config_M32<InType, OutType, Epilogue>::Cutlass2xGemm;
+  using Cutlass2xGemmM16 =
+      typename sm80_config_M16<InType, OutType, Epilogue>::Cutlass2xGemm;
+
+  uint32_t const m = a.size(0);
+  uint32_t const mp2 =
+      std::max(static_cast<uint32_t>(16), next_pow_2(m));  // next power of 2
+  if (mp2 <= 16) {
+    // M in [1, 16]
+    return cutlass_gemm_caller<Cutlass2xGemmM16>(
+        out, a, b, std::forward<EpilogueArgs>(args)...);
+  } else if (mp2 <= 32) {
+    // M in (16, 32]
+    return cutlass_gemm_caller<Cutlass2xGemmM32>(
+        out, a, b, std::forward<EpilogueArgs>(args)...);
+  } else if (mp2 <= 64) {
+    // M in (32, 64]
+    return cutlass_gemm_caller<Cutlass2xGemmM64>(
+        out, a, b, std::forward<EpilogueArgs>(args)...);
+  } else if (mp2 <= 128) {
+    // M in (64, 128]
+    uint32_t const n = out.size(1);
+    bool const small_n = n < 8192;
+    if (small_n) {
+      return cutlass_gemm_caller<Cutlass2xGemmM128SmallN>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else {
+      return cutlass_gemm_caller<Cutlass2xGemmM128BigN>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    }
+  } else {
+    // M in (128, inf)
+    return cutlass_gemm_caller<Cutlass2xGemmDefault>(
+        out, a, b, std::forward<EpilogueArgs>(args)...);
+  }
+}
 
 void cutlass_scaled_mm_sm75(torch::Tensor& out, torch::Tensor const& a,
                             torch::Tensor const& b,
@@ -288,20 +400,13 @@ void cutlass_scaled_mm_sm80(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
 
-  using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
-  using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
-  using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
-
   if (out.dtype() == torch::kBFloat16) {
-    return cutlass_gemm_caller<cutlass_2x_gemm<
-        cutlass::arch::Sm80, enable_sm80_to_sm89, int8_t, cutlass::bfloat16_t,
-        ScaledEpilogue, TileShape, WarpShape, InstructionShape, 5>>(
-        out, a, b, a_scales, b_scales);
+    return cutlass_gemm_sm80_dispatch<int8_t, cutlass::bfloat16_t,
+                                      ScaledEpilogue>(out, a, b, a_scales,
+                                                      b_scales);
   } else {
     TORCH_CHECK(out.dtype() == torch::kFloat16);
-    return cutlass_gemm_caller<cutlass_2x_gemm<
-        cutlass::arch::Sm80, enable_sm80_to_sm89, int8_t, cutlass::half_t,
-        ScaledEpilogue, TileShape, WarpShape, InstructionShape, 5>>(
+    return cutlass_gemm_sm80_dispatch<int8_t, cutlass::half_t, ScaledEpilogue>(
         out, a, b, a_scales, b_scales);
   }
 }

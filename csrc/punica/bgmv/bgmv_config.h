@@ -20,6 +20,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 1152) \
     f(in_T, out_T, W_T, narrow, 1280) \
     f(in_T, out_T, W_T, narrow, 1536) \
+    f(in_T, out_T, W_T, narrow, 1664) \
     f(in_T, out_T, W_T, narrow, 1728) \
     f(in_T, out_T, W_T, narrow, 1792) \
     f(in_T, out_T, W_T, narrow, 2048) \
@@ -36,6 +37,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 5120) \
     f(in_T, out_T, W_T, narrow, 5504) \
     f(in_T, out_T, W_T, narrow, 5632) \
+    f(in_T, out_T, W_T, narrow, 5888) \
     f(in_T, out_T, W_T, narrow, 6144) \
     f(in_T, out_T, W_T, narrow, 6400) \
     f(in_T, out_T, W_T, narrow, 6848) \
@@ -45,6 +47,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 9216) \
     f(in_T, out_T, W_T, narrow, 10240) \
     f(in_T, out_T, W_T, narrow, 11008) \
+    f(in_T, out_T, W_T, narrow, 11264) \
     f(in_T, out_T, W_T, narrow, 12288) \
     f(in_T, out_T, W_T, narrow, 13696) \
     f(in_T, out_T, W_T, narrow, 13824) \
@@ -53,6 +56,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 16384) \
     f(in_T, out_T, W_T, narrow, 20480) \
     f(in_T, out_T, W_T, narrow, 22016) \
+    f(in_T, out_T, W_T, narrow, 22528) \
     f(in_T, out_T, W_T, narrow, 24576) \
     f(in_T, out_T, W_T, narrow, 27392) \
     f(in_T, out_T, W_T, narrow, 27648) \
@@ -65,6 +69,8 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 36864) \
     f(in_T, out_T, W_T, narrow, 43264) \
     f(in_T, out_T, W_T, narrow, 49152) \
+    f(in_T, out_T, W_T, narrow, 60544) \
+    f(in_T, out_T, W_T, narrow, 60672) \
     f(in_T, out_T, W_T, narrow, 64000) \
     f(in_T, out_T, W_T, narrow, 64256) \
     f(in_T, out_T, W_T, narrow, 64512) \
@@ -74,6 +80,8 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, narrow, 128000) \
     f(in_T, out_T, W_T, narrow, 128256) \
     f(in_T, out_T, W_T, narrow, 128512) \
+    
+    
 // Keep above in sync with vllm/lora/layers::LogitsProcessorWithLoRA
 // and vllm/tests/lora/test_punica.py
 
@@ -91,6 +99,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 1152, narrow) \
     f(in_T, out_T, W_T, 1280, narrow) \
     f(in_T, out_T, W_T, 1536, narrow) \
+    f(in_T, out_T, W_T, 1664, narrow) \
     f(in_T, out_T, W_T, 1728, narrow) \
     f(in_T, out_T, W_T, 1792, narrow) \
     f(in_T, out_T, W_T, 2048, narrow) \
@@ -107,6 +116,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 5120, narrow) \
     f(in_T, out_T, W_T, 5504, narrow) \
     f(in_T, out_T, W_T, 5632, narrow) \
+    f(in_T, out_T, W_T, 5888, narrow) \
     f(in_T, out_T, W_T, 6144, narrow) \
     f(in_T, out_T, W_T, 6400, narrow) \
     f(in_T, out_T, W_T, 6848, narrow) \
@@ -116,6 +126,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 9216, narrow) \
     f(in_T, out_T, W_T, 10240, narrow) \
     f(in_T, out_T, W_T, 11008, narrow) \
+    f(in_T, out_T, W_T, 11264, narrow) \
     f(in_T, out_T, W_T, 12288, narrow) \
     f(in_T, out_T, W_T, 13696, narrow) \
     f(in_T, out_T, W_T, 13824, narrow) \
@@ -124,6 +135,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 16384, narrow) \
     f(in_T, out_T, W_T, 20480, narrow) \
     f(in_T, out_T, W_T, 22016, narrow) \
+    f(in_T, out_T, W_T, 22528, narrow) \
     f(in_T, out_T, W_T, 24576, narrow) \
     f(in_T, out_T, W_T, 27392, narrow) \
     f(in_T, out_T, W_T, 27648, narrow) \
@@ -136,6 +148,8 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 36864, narrow) \
     f(in_T, out_T, W_T, 43264, narrow) \
     f(in_T, out_T, W_T, 49152, narrow) \
+    f(in_T, out_T, W_T, 60544, narrow) \
+    f(in_T, out_T, W_T, 60672, narrow) \
     f(in_T, out_T, W_T, 64000, narrow) \
     f(in_T, out_T, W_T, 64256, narrow) \
     f(in_T, out_T, W_T, 64512, narrow) \

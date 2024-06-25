@@ -450,6 +450,7 @@ class Scheduler:
             else:
                 self._append_slots(seq_group, blocks_to_copy)
                 is_prefill = seq_group.is_prefill()
+                print("++++++++++++++++++++++++++", is_prefill)
                 if is_prefill:
                     prefill_seq_groups.append(
                         ScheduledSequenceGroup(

@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import sys
 from io import StringIO
@@ -16,14 +15,14 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import random_uuid
+from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible batch runner.")
     parser.add_argument(
         "-i",
@@ -58,7 +57,7 @@ async def read_file(path_or_url: str) -> str:
                    session.get(path_or_url) as resp:
             return await resp.text()
     else:
-        with open(path_or_url, "r") as f:
+        with open(path_or_url, "r", encoding="utf-8") as f:
             return f.read()
 
 
@@ -71,7 +70,7 @@ async def write_file(path_or_url: str, data: str) -> None:
         # We should make this async, but as long as this is always run as a
         # standalone program, blocking the event loop won't effect performance
         # in this particular case.
-        with open(path_or_url, "w") as f:
+        with open(path_or_url, "w", encoding="utf-8") as f:
             f.write(data)
 
 
