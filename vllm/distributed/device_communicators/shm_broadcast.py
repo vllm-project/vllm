@@ -157,7 +157,10 @@ class ShmRingBufferIO:
                     # if this block is not ready to write,
                     # we need to wait until it is read by all readers
 
-                    # wait for a while (0.1 us)
+                    # wait for a while
+                    # if we sleep for too short, it will consume too much CPU
+                    # if we sleep for too long, it will slow down the writer
+                    # 0.1 us is a good balance
                     time.sleep(1e-7)
 
                     # if we wait for a long time, we should warn the user
@@ -211,7 +214,10 @@ class ShmRingBufferIO:
                     # if this block is not ready,
                     # we need to wait until it is written
 
-                    # wait for a while (0.1 us)
+                    # wait for a while
+                    # if we sleep for too short, it will consume too much CPU
+                    # if we sleep for too long, it will slow down the reader
+                    # 0.1 us is a good balance
                     time.sleep(1e-7)
 
                     # if we wait for a long time, we should warn the user
