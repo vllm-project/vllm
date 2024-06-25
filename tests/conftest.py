@@ -37,6 +37,12 @@ _IMAGE_DIR = Path(_TEST_DIR) / "images"
 """You can use `.buildkite/download-images.sh` to download the assets."""
 
 
+def _read_prompts(filename: str) -> List[str]:
+    with open(filename, "r") as f:
+        prompts = f.readlines()
+        return prompts
+
+
 @dataclass(frozen=True)
 class ImageAsset:
     name: Literal["stop_sign", "cherry_blossom"]
@@ -92,12 +98,6 @@ class _ImageAssets(UserList[ImageAsset]):
 
 IMAGE_ASSETS = _ImageAssets()
 """Singleton instance of :class:`_ImageAssets`."""
-
-
-def _read_prompts(filename: str) -> List[str]:
-    with open(filename, "r") as f:
-        prompts = f.readlines()
-        return prompts
 
 
 def cleanup():
