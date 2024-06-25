@@ -9,8 +9,9 @@ python -m vllm.entrypoints.openai.api_server \
     --image-feature-size 576 \
     --chat-template template_llava.jinja
 """
-import requests
 import base64
+
+import requests
 from openai import OpenAI
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
@@ -31,21 +32,27 @@ image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisco
 # Use image url in the payload
 chat_completion_from_url = client.chat.completions.create(
     messages=[{
-      "role": "user",
-      "content": [
-        {"type": "text", "text": "What’s in this image?"},
-        {
-          "type": "image_url",
-          "image_url": {
-            "url": image_url
-          },
-        },
-      ],
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "What’s in this image?"
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                },
+            },
+        ],
     }],
     model=model,
 )
 
-print(f"Chat completion results:{chat_completion_from_url.choices[0].message.content}")
+result = chat_completion_from_url.choices[0].message.content
+print(f"Chat completion output:{result}")
+
 
 # Use base64 encoded image in the payload
 def encode_image_base64_from_url(image_url: str) -> str:
@@ -57,21 +64,27 @@ def encode_image_base64_from_url(image_url: str) -> str:
 
     return result
 
+
 image_base64 = encode_image_base64_from_url(image_url=image_url)
 chat_completion_from_base64 = client.chat.completions.create(
     messages=[{
-      "role": "user",
-      "content": [
-        {"type": "text", "text": "What’s in this image?"},
-        {
-          "type": "image_url",
-          "image_url": {
-            "url": f"data:image/jpeg;base64,{image_base64}"
-          },
-        },
-      ],
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "What’s in this image?"
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{image_base64}"
+                },
+            },
+        ],
     }],
     model=model,
 )
 
-print(f"Chat completion results: {chat_completion_from_base64.choices[0].message.content}")
+result = chat_completion_from_base64.choices[0].message.content
+print(f"Chat completion output:{result}")
