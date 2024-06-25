@@ -635,7 +635,7 @@ class ModelRunner:
 
         if self.lora_config:
             lora_mapping = LoRAMapping(lora_index_mapping, lora_prompt_mapping,
-                                       bool(attn_metadata.prefill_metadata))
+                                       is_prompt)
         else:
             lora_mapping = None
 
