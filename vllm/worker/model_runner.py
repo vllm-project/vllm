@@ -142,7 +142,6 @@ class ModelRunner:
         self.seqlen_agnostic_cache: Optional[Tuple[torch.Tensor, torch.Tensor]]
         self.seqlen_agnostic_gc_cache_buffer: Optional[Tuple[torch.Tensor, torch.Tensor]]
         self.contains_seqlen_agnostic_layers = self.model_config.contains_seqlen_agnostic_layers(parallel_config)
-        self.seqlen_agnostic_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
 
         # When using CUDA graph, the input block tables must be padded to
         # max_seq_len_to_capture. However, creating the block table in
@@ -170,28 +169,7 @@ class ModelRunner:
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
-    def prepare_seqlen_agnostic_cache(self, dtype):
-        if not self.contains_seqlen_agnostic_layers:
-            return
-        num_seqlen_agnostic_layers = self.model_config.get_num_seqlen_agnostic_layers(self.parallel_config)
-        max_batch_size = _BATCH_SIZES_TO_CAPTURE[-1]
-        conv_state_shape, temporal_state_shape = self.model_config.get_seqlen_agnostic_cache_shape(self.parallel_config)
-        assert conv_state_shape is not None and temporal_state_shape is not None
-        for buffername in [
-            "seqlen_agnostic_cache",
-            "seqlen_agnostic_gc_cache_buffer",
-        ]:
-            buffer = (
-                torch.empty(
-                size=(num_seqlen_agnostic_layers,max_batch_size)
-                        + conv_state_shape, dtype=dtype,
-                device="cuda"),
-                torch.empty(
-                size=(num_seqlen_agnostic_layers,max_batch_size) +
-                        temporal_state_shape, dtype=dtype,
-                device="cuda")
-            )
-            setattr(self,buffername, buffer)
+    
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -849,29 +827,15 @@ class ModelRunner:
             "positions": input_positions,
             "kv_caches": kv_caches,
             "attn_metadata": attn_metadata,
+            "requests_info": requests_info
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
-
-        current_seqlen_agnostic_cache = None
-        if self.contains_seqlen_agnostic_layers:
-            if getattr(self, "seqlen_agnostic_cache", None) is None:
-                self.prepare_seqlen_agnostic_cache(self.model_config.dtype)
-            batch_size = input_tokens.shape[0] if attn_metadata.prefill_metadata is None else len(requests_info)
-            current_seqlen_agnostic_cache, indices = self._prepare_current_run_seqlen_agnostic_cache(requests_info, batch_size)
-            execute_model_kwargs = {
-                **execute_model_kwargs,
-                "seqlen_agnostic_cache": current_seqlen_agnostic_cache,
-            }
 
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
-
-        if self.contains_seqlen_agnostic_layers:
-            for i, offset in enumerate(indices):
-                self._copy_seqlen_agnostic_cache(offset, i, current_seqlen_agnostic_cache)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
@@ -884,79 +848,6 @@ class ModelRunner:
         )
 
         return output
-
-    def _first_free_index_in_seqlen_agnostic_cache(self) -> int:
-        if self.contains_seqlen_agnostic_layers and self.seqlen_agnostic_cache is not None:
-            max_possible_bs = self.seqlen_agnostic_cache[0].shape[1]
-            occupied = [
-                id for seq_ids in self.seqlen_agnostic_cache_indices_mapping.values()
-                for id in seq_ids.values()
-            ]
-            first_free_index = [
-                i not in occupied for i in range(max_possible_bs)
-            ].index(True)
-            return first_free_index
-        return 0
-
-
-    def _copy_seqlen_agnostic_cache(self, index_to, index_from, from_buffer):
-        assert self.seqlen_agnostic_cache is not None
-        self.seqlen_agnostic_cache[0][:,index_to].copy_(from_buffer[0][:,index_from])
-        self.seqlen_agnostic_cache[1][:,index_to].copy_(from_buffer[1][:,index_from])
-
-
-    def _assign_seq_id_to_seqlen_agnostic_cache(
-        self,
-        cur_rid: str,
-        seqs_id: List[int]
-    ) -> List[int]:
-        indices_for_current_run = []
-        for seq_id in seqs_id:
-            if cur_rid not in self.seqlen_agnostic_cache_indices_mapping:
-                self.seqlen_agnostic_cache_indices_mapping[cur_rid] = {}
-                first_free_index = self._first_free_index_in_seqlen_agnostic_cache()
-                self.seqlen_agnostic_cache_indices_mapping[cur_rid][seq_id] = first_free_index
-                index_for_current_run = first_free_index
-            ## case of decoding n>1, copy prefill cache to decoding indices
-            elif seq_id not in (seq_ids2indices := self.seqlen_agnostic_cache_indices_mapping[cur_rid]):
-                first_free_index = self._first_free_index_in_seqlen_agnostic_cache()
-                index_exist = list(seq_ids2indices.values())[0]
-                self._copy_seqlen_agnostic_cache(
-                    index_from=index_exist,
-                    index_to=first_free_index,
-                    from_buffer=self.seqlen_agnostic_cache
-                )
-                self.seqlen_agnostic_cache_indices_mapping[cur_rid][seq_id] = first_free_index
-                index_for_current_run = first_free_index
-            else:
-                index_for_current_run = self.seqlen_agnostic_cache_indices_mapping[cur_rid][seq_id]
-
-            indices_for_current_run.append(index_for_current_run)
-        return indices_for_current_run
-
-    def _prepare_current_run_seqlen_agnostic_cache(
-        self,
-        requests_info: List[RequestInfo],
-        batch_size: int
-    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor] ,List[int]]:
-        indices_for_current_run = []
-        for request_info in requests_info:
-            cur_rid = request_info.request_id
-            indices_for_current_run += self._assign_seq_id_to_seqlen_agnostic_cache(
-                cur_rid,
-                request_info.seqs_id
-            )
-        ## Pad the batch in case of running batch that was not captured via CG
-        padded_indices = indices_for_current_run.copy()
-        pad_index = self._first_free_index_in_seqlen_agnostic_cache()
-
-        for _ in range(batch_size - len(indices_for_current_run)):
-            padded_indices.append(pad_index)
-
-        conv_state = self.seqlen_agnostic_cache[0][:,padded_indices]
-        temporal_state = self.seqlen_agnostic_cache[1][:,padded_indices]
-
-        return (conv_state, temporal_state), indices_for_current_run
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -1136,11 +1027,7 @@ class ModelRunner:
                     "memory_pool": self.graph_memory_pool,
                 }
                 if self.contains_seqlen_agnostic_layers:
-                    assert self.seqlen_agnostic_gc_cache_buffer is not None
-                    capture_inputs["seqlen_agnostic_cache"] = (
-                        self.seqlen_agnostic_gc_cache_buffer[0][:, :batch_size],
-                        self.seqlen_agnostic_gc_cache_buffer[1][:, :batch_size],
-                    )
+                    capture_inputs["seqlen_agnostic_capture_inputs"] = self.model.capture_inputs(batch_size)
                 graph_runner.capture(**capture_inputs)
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[batch_size] = graph_runner
@@ -1251,28 +1138,19 @@ class CUDAGraphRunner:
         self.input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
 
-        if "seqlen_agnostic_cache" in kwargs:
-            self.input_buffers["seqlen_agnostic_cache"][0].copy_(
-                kwargs["seqlen_agnostic_cache"][0],
-                non_blocking=True
-            )
-            self.input_buffers["seqlen_agnostic_cache"][1].copy_(
-                kwargs["seqlen_agnostic_cache"][1],
-                non_blocking=True
+        if "seqlen_agnostic_capture_inputs" in self.input_buffers:
+            self.model.copy_inputs_before_cuda_grpahs(
+                self.input_buffers,
+                **kwargs
             )
 
         # Run the graph.
         self.graph.replay()
 
-        # in-place edit of the seqlen agnostic cache states as in the KV cache
-        if "seqlen_agnostic_cache" in kwargs:
-            kwargs["seqlen_agnostic_cache"][0].copy_(
-                self.input_buffers["seqlen_agnostic_cache"][0],
-                non_blocking=True
-            )
-            kwargs["seqlen_agnostic_cache"][1].copy_(
-                self.input_buffers["seqlen_agnostic_cache"][1],
-                non_blocking=True
+        if "seqlen_agnostic_capture_inputs" in self.input_buffers:
+            self.model.copy_outputs_after_cuda_grpahs(
+                self.input_buffers,
+                **kwargs
             )
 
         # Return the output tensor.

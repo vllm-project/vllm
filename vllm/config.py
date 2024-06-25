@@ -348,25 +348,7 @@ class ModelConfig:
             parallel_config
         ) if t != "attention"])
 
-    def get_seqlen_agnostic_cache_shape(
-        self,
-        parallel_config
-    ) -> Tuple[Optional[Tuple[int,int]],Optional[Tuple[int,int]]]:
-        world_size = parallel_config.tensor_parallel_size
-        hidden_size = self.get_hidden_size()
-        conv_state_shape = None
-        temporal_state_shape = None
-        if self.hf_config.model_type in ["jamba"]:
-            conv_state_shape = (
-                self.hf_config.mamba_expand * hidden_size // world_size,
-                self.hf_config.mamba_d_conv,
-            )
-            temporal_state_shape = (
-                self.hf_config.mamba_expand * self.hf_config.hidden_size // world_size,
-                self.hf_config.mamba_d_state,
-            )
-
-        return conv_state_shape, temporal_state_shape
+    
 
 
 
