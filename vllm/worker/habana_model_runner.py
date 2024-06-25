@@ -131,9 +131,7 @@ class HpuModelAdapter():
                          .masked_fill_(mask, -math.inf))
             #FIXME: Restore sliding window support
             #if self.sliding_window is not None:
-            #prefill_metadata = prefill_metadata._replace(attn_bias=attn_bias)
-#            attn_metadata = attn_metadata._replace(prefill_metadata=prefill_metadata)
-            attn_metadata.attn_bias = attn_bias
+            attn_metadata = attn_metadata._replace(attn_bias=attn_bias)
             return attn_metadata
         else:
             # FIXME: This needs updating...
@@ -809,22 +807,15 @@ class HabanaModelRunner:
             return attn_metadata.block_tables.size(1) * self.block_size
 
     def trim_attn_metadata(self, metadata: AttentionMetadata) -> object:
-        prefill_metadata = subtuple(metadata.prefill_metadata,
-                                    'TrimmedPrefillMetadata',
+        prefill_metadata = subtuple(metadata,
+                                    'TrimmedAttentionMetadata',
                                     ['block_tables',
                                      'seq_lens_tensor',
-                                     'attn_bias'])
-        decode_metadata = subtuple(metadata.decode_metadata,
-                                   'TrimmedDecodeMetadata',
-                                   ['block_tables',
-                                    'seq_lens_tensor',
-                                    ])
-        return subtuple(metadata,
-                        'TrimmedMetadata',
-                        ['slot_mapping',
-                         'kv_cache_dtype'],
-                        {'prefill_metadata': prefill_metadata,
-                         'decode_metadata': decode_metadata})
+                                     'attn_bias',
+                                     'num_prefills',
+                                     'num_decode_tokens',
+                                     'slot_mapping'])
+        return prefill_metadata
 
     @torch.inference_mode()
     def execute_model(
@@ -860,7 +851,7 @@ class HabanaModelRunner:
             "input_ids": input_tokens,
             "positions": input_positions,
             "kv_caches": kv_caches,
-            "attn_metadata": attn_metadata,
+            "attn_metadata": self.trim_attn_metadata(attn_metadata),
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
