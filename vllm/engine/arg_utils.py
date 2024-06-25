@@ -37,6 +37,7 @@ class EngineArgs:
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
+    worker_init_callback_script: str = ""
     distributed_executor_backend: Optional[str] = None
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
@@ -298,6 +299,11 @@ class EngineArgs:
             '--worker-use-ray',
             action='store_true',
             help='Deprecated, use --distributed-executor-backend=ray.')
+        parser.add_argument(
+            '--worker-init-callback-script',
+            type=str,
+            default="",
+            help="The script to run before each worker's initialization.")
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -671,6 +677,7 @@ class EngineArgs:
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             worker_use_ray=self.worker_use_ray,
+            worker_init_callback_script=self.worker_init_callback_script,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(

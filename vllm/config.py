@@ -564,6 +564,8 @@ class ParallelConfig:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
         worker_use_ray: Deprecated, use distributed_executor_backend instead.
+        worker_init_callback_script: Path to a Python script that will be
+            executed in each worker process before the model is loaded.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
             parallel and large models.
@@ -585,6 +587,7 @@ class ParallelConfig:
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
         worker_use_ray: Optional[bool] = None,
+        worker_init_callback_script: str = "",
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
@@ -601,6 +604,7 @@ class ParallelConfig:
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
 
+        self.worker_init_callback_script = worker_init_callback_script
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
         if worker_use_ray:
             if self.distributed_executor_backend is None:
