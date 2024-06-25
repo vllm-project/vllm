@@ -1,6 +1,5 @@
 #!/bin/bash
 
-set -ex
 set -o pipefail
 
 check_gpus() {
@@ -116,7 +115,7 @@ run_serving_tests() {
     else
       echo ""
       echo "tgi failed to start within the timeout period."
-      exit 0
+      break
     fi
 
     # iterate over different QPS
