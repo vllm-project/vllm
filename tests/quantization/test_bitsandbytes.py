@@ -74,3 +74,36 @@ def test_load_bnb_model(vllm_runner) -> None:
             expected_output = expected_outputs[index].split('\n', 1)[0]
             assert actual_output == expected_output, (
                 f'Expected: {expected_output}, but got: {actual_output}')
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("bitsandbytes")
+    or torch.cuda.device_count() < 2,
+    reason='This test requires bitsandbytes support and at least 2 GPUs.')
+def test_tp_load_bnb_model(vllm_runner) -> None:
+    with vllm_runner('huggyllama/llama-7b',
+                     quantization='bitsandbytes',
+                     load_format='bitsandbytes',
+                     tensor_parallel_size=2,
+                     enforce_eager=True) as llm:
+
+        sampling_params = SamplingParams(temperature=0.0,
+                                         logprobs=1,
+                                         prompt_logprobs=1,
+                                         max_tokens=8)
+
+        prompts = ['That which does not kill us', 'To be or not to be,']
+        expected_outputs = [
+            'That which does not kill us makes us stronger.',
+            'To be or not to be, that is the question.'
+        ]
+        outputs = llm.generate(prompts, sampling_params=sampling_params)
+
+        assert len(outputs) == len(prompts)
+
+        for index in range(len(outputs)):
+            # compare the first line of the output
+            actual_output = outputs[index][1][0].split('\n', 1)[0]
+            expected_output = expected_outputs[index].split('\n', 1)[0]
+            assert actual_output == expected_output, (
+                f'Expected: {expected_output}, but got: {actual_output}')

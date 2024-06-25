@@ -700,8 +700,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                               "`pip install bitsandbytes>=0.42.0` to use "
                               "bitsandbytes quantizer.") from err
 
+        from vllm.distributed import (get_tensor_model_parallel_rank,
+                                      get_tensor_model_parallel_world_size)
+
         hf_weights_files, use_safetensors = self._prepare_weights(
             model_name_or_path, revision)
+
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
 
         quant_state_dict = {}
         if use_safetensors:
@@ -711,11 +717,36 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         def generator():
             for weight_name, weight_tensor in weight_iterator:
+
                 if any(target_module in weight_name
                        for target_module in self.target_modules):
                     weight_name = weight_name.replace(".weight", ".qweight")
+
+                    # weight partitions of different modules occur at
+                    # different dimensions
+                    if 'down_proj' in weight_name or 'o_proj' in weight_name:
+                        total_size = weight_tensor.size(-1)
+                        start_index = total_size // tp_size * tp_rank
+                        end_index = total_size // tp_size * (tp_rank + 1)
+                        weight_sub_tensor = weight_tensor[
+                            ..., start_index:end_index]
+
+                    else:
+                        total_size = weight_tensor.size(0)
+                        start_index = total_size // tp_size * tp_rank
+                        end_index = total_size // tp_size * (tp_rank + 1)
+                        weight_sub_tensor = weight_tensor[
+                            start_index:end_index, ...]
+
                     #  bitsandbytes requires data in GPU
-                    loaded_weight = weight_tensor.cuda().data
+                    if weight_sub_tensor.is_cuda:
+                        loaded_weight = weight_sub_tensor
+                    else:
+                        loaded_weight = weight_sub_tensor.cuda()
+                    # bitsandbytes requires a contiguous tensor
+                    if loaded_weight.is_contiguous() is False:
+                        loaded_weight = loaded_weight.contiguous()
+
                     with set_default_torch_dtype(torch.float32):
                         processed_weight, quant_state = quantize_4bit(
                             loaded_weight,

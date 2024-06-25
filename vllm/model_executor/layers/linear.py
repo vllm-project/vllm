@@ -108,6 +108,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
             if bias is not None:
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
+
         return F.linear(x, weight, bias)
 
 
@@ -440,8 +441,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
             start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                 shard_size)
+
+            # bitsandbytes loads the weights of the specific portion
+            # no need to narrow here
+            if not use_bitsandbytes:
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
+                                                     shard_size)
         # Special case for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
@@ -652,8 +657,12 @@ class QKVParallelLinear(ColumnParallelLinear):
             else:
                 shard_id = tp_rank // self.num_kv_head_replicas
             start_idx = shard_id * shard_size
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                 shard_size)
+
+            # bitsandbytes loads the weights of the specific portion
+            # no need to narrow here
+            if not use_bitsandbytes:
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
+                                                     shard_size)
         # Special case for for AQLM codebooks.
         elif is_metadata:
             # metadata indicates fixed size concatenated along dim 0
@@ -757,8 +766,11 @@ class RowParallelLinear(LinearBase):
 
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
+        use_bitsandbytes = getattr(param, "use_bitsandbytes", False)
         param_data = param.data
-        if input_dim is not None:
+        # bitsandbytes loads the weights of the specific portion
+        # no need to narrow here
+        if input_dim is not None and use_bitsandbytes is False:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
