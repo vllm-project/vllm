@@ -169,7 +169,7 @@ struct ScaledEpilogueBias
       cutlass::FloatRoundStyle::round_to_nearest>;
 
   using Bias = cutlass::epilogue::threadblock::VisitorRowBroadcast<
-      OutputTileThreadMap, float, Stride<Int<0>, Int<1>, Int<0>>>;
+      OutputTileThreadMap, ElementD, Stride<Int<0>, Int<1>, Int<0>>>;
 
  public:
   using EVTCompute = cutlass::epilogue::threadblock::Sm80EVT<Compute1, ScaleA,
@@ -185,7 +185,7 @@ struct ScaledEpilogueBias
 
     ScaleBArgs b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
     ScaleAArgs a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
-    BiasArgs bias_args{bias.data_ptr<float>(), {}};
+    BiasArgs bias_args{static_cast<ElementD*>(bias.data_ptr()), {}};
 
     typename EVTCompute0::Arguments evt0_compute_args{b_args};
 
@@ -459,7 +459,8 @@ void cutlass_scaled_mm_sm75(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   if (bias) {
-    TORCH_CHECK(bias->dtype() == torch::kFloat32);
+    TORCH_CHECK(bias->dtype() == out.dtype(),
+                "currently bias dtype must match output dtype ", out.dtype());
     return cutlass_scaled_mm_sm75_epilogue<ScaledEpilogueBias>(
         out, a, b, a_scales, b_scales, *bias);
   } else {
@@ -494,7 +495,8 @@ void cutlass_scaled_mm_sm80(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   if (bias) {
-    TORCH_CHECK(bias->dtype() == torch::kFloat32);
+    TORCH_CHECK(bias->dtype() == out.dtype(),
+                "currently bias dtype must match output dtype ", out.dtype());
     return cutlass_scaled_mm_sm80_epilogue<ScaledEpilogueBias>(
         out, a, b, a_scales, b_scales, *bias);
   } else {
@@ -556,7 +558,8 @@ void cutlass_scaled_mm_sm89(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   if (bias) {
-    TORCH_CHECK(bias->dtype() == torch::kFloat32);
+    TORCH_CHECK(bias->dtype() == out.dtype(),
+                "currently bias dtype must match output dtype ", out.dtype());
     return cutlass_scaled_mm_sm89_epilogue<ScaledEpilogueBias>(
         out, a, b, a_scales, b_scales, *bias);
   } else {

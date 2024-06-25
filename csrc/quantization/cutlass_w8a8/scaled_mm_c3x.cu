@@ -176,8 +176,7 @@ struct ScaledEpilogueBias
 
     ScaleA_Args a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
     ScaleB_Args b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
-    Bias_Args bias_args{
-        reinterpret_cast<ElementD const*>(bias.const_data_ptr())};
+    Bias_Args bias_args{static_cast<ElementD*>(bias.data_ptr())};
 
     return ArgumentType{a_args, {b_args}, bias_args};
   }
@@ -546,7 +545,7 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   if (bias) {
     TORCH_CHECK(bias->dtype() == c.dtype(),
-                "currently bias dtype must match output dtype ", c.type());
+                "currently bias dtype must match output dtype ", c.dtype());
     return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBias>(
         c, a, b, a_scales, b_scales, *bias);
   } else {
