@@ -38,8 +38,6 @@ import math
 
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
-    BaseModelOutput,
-    BaseModelOutputWithPastAndCrossAttentions,
     Seq2SeqLMOutput,
     Seq2SeqModelOutput,
 )
@@ -48,23 +46,6 @@ from transformers.utils import (
 from transformers import BartConfig
 
 logger = logging.get_logger(__name__)
-
-
-def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int,
-                       decoder_start_token_id: int):
-    """
-    Shift input ids one token to the right.
-    """
-    shifted_input_ids = input_ids.new_zeros(input_ids.shape)
-    shifted_input_ids[:, 1:] = input_ids[:, :-1].clone()
-    shifted_input_ids[:, 0] = decoder_start_token_id
-
-    if pad_token_id is None:
-        raise ValueError("self.model.config.pad_token_id has to be defined.")
-    # replace possible -100 values in labels by `pad_token_id`
-    shifted_input_ids.masked_fill_(shifted_input_ids == -100, pad_token_id)
-
-    return shifted_input_ids
 
 
 def get_bsz_seq_len(input_ids):
@@ -128,7 +109,8 @@ class BartLearnedPositionalEmbedding(nn.Embedding):
 
 class BartScaledWordEmbedding(nn.Embedding):
     """
-    This module overrides nn.Embeddings' forward by multiplying with embeddings scale.
+    This module overrides nn.Embeddings' 
+    forward by multiplying with embeddings scale.
     """
 
     def __init__(self,
@@ -162,9 +144,9 @@ class BartEncoderAttention(nn.Module):
         self.config = config
 
         if (self.head_dim * num_heads) != self.embed_dim:
-            raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
-                f" and `num_heads`: {num_heads}).")
+            raise ValueError(f"embed_dim must be divisible by num_heads "
+                             f"(got `embed_dim`: {self.embed_dim}"
+                             f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
@@ -223,9 +205,9 @@ class BartDecoderSelfAttention(nn.Module):
         self.config = config
 
         if (self.head_dim * num_heads) != self.embed_dim:
-            raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
-                f" and `num_heads`: {num_heads}).")
+            raise ValueError(f"embed_dim must be divisible by num_heads "
+                             f"(got `embed_dim`: {self.embed_dim}"
+                             f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
@@ -284,9 +266,9 @@ class BartCrossAttention(nn.Module):
         self.config = config
 
         if (self.head_dim * num_heads) != self.embed_dim:
-            raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
-                f" and `num_heads`: {num_heads}).")
+            raise ValueError(f"embed_dim must be divisible by num_heads "
+                             f"(got `embed_dim`: {self.embed_dim}"
+                             f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
@@ -503,8 +485,8 @@ class BartDecoderLayer(nn.Module):
 
 class BartEncoder(nn.Module):
     """
-    Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
-    [`BartEncoderLayer`].
+    Transformer encoder consisting of *config.encoder_layers*
+    self attention layers. Each layer is a [`BartEncoderLayer`].
 
     Args:
         config: BartConfig
@@ -552,45 +534,27 @@ class BartEncoder(nn.Module):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    def forward(
-            self, input_ids: torch.Tensor,
-            kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata) -> Union[Tuple, BaseModelOutput]:
+    def forward(self, input_ids: torch.Tensor, kv_caches: List[torch.Tensor],
+                attn_metadata: AttentionMetadata) -> torch.Tensor:
         r"""
         Args:
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
+            input_ids
+            (`torch.LongTensor` of shape `(total_num_tokens)`):
+
+                Indices of *encoder* input sequence tokens in the vocabulary.
+                Padding will be ignored by default should you
                 provide it.
 
-                Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-                [`PreTrainedTokenizer.__call__`] for details.
+            kv_caches:
 
-                [What are input IDs?](../glossary#input-ids)
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+                Layer-wise list of KV cache tensors
 
-                - 1 for tokens that are **not masked**,
-                - 0 for tokens that are **masked**.
+            attn_metadata:
 
-                [What are attention masks?](../glossary#attention-mask)
-            head_mask (`torch.Tensor` of shape `(encoder_layers, encoder_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the attention modules. Mask values selected in `[0, 1]`:
+                vLLM Attention metadata structure
 
-                - 1 indicates the head is **not masked**,
-                - 0 indicates the head is **masked**.
-
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
-                Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
-                This is useful if you want more control over how to convert `input_ids` indices into associated vectors
-                than the model's internal embedding lookup matrix.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+        Returns:
+            Decoder output torch.Tensor
         """
         # retrieve input_ids and inputs_embeds
 
@@ -617,7 +581,8 @@ class BartEncoder(nn.Module):
 
 class BartDecoder(nn.Module):
     """
-    Transformer decoder consisting of *config.decoder_layers* layers. Each layer is a [`BartDecoderLayer`]
+    Transformer decoder consisting of *config.decoder_layers* layers.
+    Each layer is a [`BartDecoderLayer`]
 
     Args:
         config: BartConfig
@@ -666,75 +631,33 @@ class BartDecoder(nn.Module):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    def forward(
-        self, decoder_input_ids: torch.Tensor, 
-        encoder_hidden_states: Optional[torch.Tensor],
-        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata
-    ) -> Union[Tuple, BaseModelOutputWithPastAndCrossAttentions]:
+    def forward(self, decoder_input_ids: torch.Tensor,
+                encoder_hidden_states: Optional[torch.Tensor],
+                kv_caches: List[torch.Tensor],
+                attn_metadata: AttentionMetadata) -> torch.Tensor:
         r"""
         Args:
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
+            decoder_input_ids
+            (`torch.LongTensor` of shape `(total_num_tokens)`):
+
+                Indices of *decoder* input sequence tokens in the vocabulary.
+                Padding will be ignored by default should you
                 provide it.
 
-                Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-                [`PreTrainedTokenizer.__call__`] for details.
+            encoder_hidden_states:
 
-                [What are input IDs?](../glossary#input-ids)
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+                Tensor of encoder output embeddings
 
-                - 1 for tokens that are **not masked**,
-                - 0 for tokens that are **masked**.
+            kv_caches:
 
-                [What are attention masks?](../glossary#attention-mask)
-            encoder_hidden_states (`torch.FloatTensor` of shape `(batch_size, encoder_sequence_length, hidden_size)`, *optional*):
-                Sequence of hidden-states at the output of the last layer of the encoder. Used in the cross-attention
-                of the decoder.
-            encoder_attention_mask (`torch.LongTensor` of shape `(batch_size, encoder_sequence_length)`, *optional*):
-                Mask to avoid performing cross-attention on padding tokens indices of encoder input_ids. Mask values
-                selected in `[0, 1]`:
+                Layer-wise list of KV cache tensors
 
-                - 1 for tokens that are **not masked**,
-                - 0 for tokens that are **masked**.
+            attn_metadata:
 
-                [What are attention masks?](../glossary#attention-mask)
-            head_mask (`torch.Tensor` of shape `(decoder_layers, decoder_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the attention modules. Mask values selected in `[0, 1]`:
+                vLLM Attention metadata structure
 
-                - 1 indicates the head is **not masked**,
-                - 0 indicates the head is **masked**.
-
-            cross_attn_head_mask (`torch.Tensor` of shape `(decoder_layers, decoder_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the cross-attention modules in the decoder to avoid performing
-                cross-attention on hidden heads. Mask values selected in `[0, 1]`:
-
-                - 1 indicates the head is **not masked**,
-                - 0 indicates the head is **masked**.
-
-            past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-                Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of
-                shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and 2 additional tensors of
-                shape `(batch_size, num_heads, encoder_sequence_length, embed_size_per_head)`.
-
-                Contains pre-computed hidden-states (key and values in the self-attention blocks and in the
-                cross-attention blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
-
-                If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those
-                that don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of
-                all `decoder_input_ids` of shape `(batch_size, sequence_length)`.
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
-                Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
-                This is useful if you want more control over how to convert `input_ids` indices into associated vectors
-                than the model's internal embedding lookup matrix.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+        Returns:
+            Decoder output torch.Tensor
         """
 
         input = decoder_input_ids
