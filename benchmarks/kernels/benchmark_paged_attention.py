@@ -1,4 +1,3 @@
-import argparse
 import random
 import time
 from typing import List, Optional
@@ -6,7 +5,8 @@ from typing import List, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
+                        create_kv_caches_with_random)
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512
@@ -161,7 +161,7 @@ def main(
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Benchmark the paged attention kernel.")
     parser.add_argument("--version",
                         type=str,
