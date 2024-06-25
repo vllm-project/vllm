@@ -348,7 +348,6 @@ class ModelConfig:
             parallel_config
         ) if t != "attention"])
 
-    
 
 
 

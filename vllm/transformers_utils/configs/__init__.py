@@ -8,5 +8,9 @@ from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 
 __all__ = [
-    "ChatGLMConfig", "DbrxConfig", "MPTConfig", "RWConfig", "JAISConfig"
+    "ChatGLMConfig",
+    "DbrxConfig",
+    "MPTConfig",
+    "RWConfig",
+    "JAISConfig",
 ]

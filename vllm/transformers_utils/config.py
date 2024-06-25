@@ -11,7 +11,7 @@ _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
-    "jais": JAISConfig
+    "jais": JAISConfig,
 }
 
 
