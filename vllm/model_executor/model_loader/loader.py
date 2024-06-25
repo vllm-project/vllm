@@ -257,7 +257,7 @@ class DefaultModelLoader(BaseModelLoader):
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
+            with torch.device('cpu'): # FIXME(kzawora): this is a nasty workaround!!!
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config,
                                           cache_config)
@@ -277,6 +277,7 @@ class DefaultModelLoader(BaseModelLoader):
                 # to use quant_method.
                 if hasattr(module, "process_weights_after_loading"):
                     module.process_weights_after_loading()
+        model = model.to('hpu') # FIXME(kzawora): this is a nasty workaround!!!
         return model.eval()
 
 

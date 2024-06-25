@@ -832,14 +832,14 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             self.model_executor.stop_remote_worker_execution_loop()
 
-        out_prompt = [ro.prompt for ro in request_outputs]
-        out_indices =  [ro.outputs[-1].index for ro in request_outputs]
-        out_text =  [f'{ro.outputs[-1].text!r}' for ro in request_outputs]
-        for idx, (p, i, t) in enumerate(zip(out_prompt, out_indices, out_text)):
-            logger.info(f'\tPROMPT ({idx}): {p}')            
-            logger.info(f'\tGEN IDX ({idx}): {i}')            
-            logger.info(f'\tGEN TXT ({idx}): {t}')            
-            logger.info('')            
+#        out_prompt = [ro.prompt for ro in request_outputs]
+#        out_indices =  [ro.outputs[-1].index for ro in request_outputs]
+#        out_text =  [f'{ro.outputs[-1].text!r}' for ro in request_outputs]
+#        for idx, (p, i, t) in enumerate(zip(out_prompt, out_indices, out_text)):
+#            logger.info(f'\tPROMPT ({idx}): {p}')            
+#            logger.info(f'\tGEN IDX ({idx}): {i}')            
+#            logger.info(f'\tGEN TXT ({idx}): {t}')            
+#            logger.info('')            
         return request_outputs
 
     def do_log_stats(
