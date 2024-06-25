@@ -81,11 +81,6 @@ def _modify_cache_parameters(model: ov.Model, kv_cache_dtype: ov.Type,
 
 
 def _require_model_export(model_id, revision=None, subfolder=None):
-    # Stored IR may not be suitable for vLLM purposes (too old,
-    # not stateful, not compressed etc.). This is an option to override
-    # IR usage logic and always do model conversion.
-    if os.environ.get("VLLM_OPENVINO_OPTIMUM_FORCE_CONVERSION", "0") == "1":
-        return True
     model_dir = Path(model_id)
     if subfolder is not None:
         model_dir = model_dir / subfolder
