@@ -30,6 +30,7 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
+  - wait
   - label: "A100 trt benchmark"
     agents:
       queue: A100
