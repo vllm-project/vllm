@@ -4,11 +4,10 @@ from typing import Iterator, List, Tuple
 import torch
 
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
-                           SequenceGroupMetadata)
+                           SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
-from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
-                                   sampler_output_to_torch,
+from vllm.spec_decode.util import (nvtx_range, sampler_output_to_torch,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker_base import WorkerBase
 
@@ -98,6 +97,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             probs=all_probs,
             token_ids=all_tokens,
             logprobs=spec_logprobs,
+            hidden_states=target_sampler_output.hidden_states,
         )
 
     def _expand_batch(

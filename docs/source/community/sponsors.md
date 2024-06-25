@@ -22,5 +22,6 @@ vLLM is a community project. Our compute resources for development and testing a
 - Trainy
 - UC Berkeley
 - UC San Diego
+- ZhenFund
 
 We also have an official fundraising venue through [OpenCollective](https://opencollective.com/vllm). We plan to use the fund to support the development, maintenance, and adoption of vLLM.

@@ -1,0 +1,23 @@
+# testing
+pytest
+tensorizer>=2.9.0
+pytest-forked
+pytest-asyncio
+pytest-rerunfailures
+pytest-shard
+
+# testing utils
+awscli
+einops # required for MPT
+httpx
+peft
+requests
+ray
+sentence-transformers # required for embedding
+torchvision # required for the image processor of phi3v
+
+# Benchmarking
+aiohttp
+
+# quantization
+bitsandbytes==0.42.0
