@@ -20,7 +20,7 @@ BACKEND_NAMES = [STR_XFORMERS_ATTN_VAL]
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("backend_name",BACKEND_NAMES)
+@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 def test_models(
     hf_runner,
     vllm_runner,
@@ -37,8 +37,7 @@ def test_models(
     # Force Attention wrapper backend
     override_backend_env_variable(monkeypatch, backend_name)
 
-    with hf_runner(model, 
-                   dtype=dtype, 
+    with hf_runner(model, dtype=dtype,
                    is_encoder_decoder_model=True) as hf_model:
         hf_outputs = hf_model.generate_encoder_decoder_greedy_logprobs_limit(
             example_encoder_decoder_prompts, max_tokens, num_logprobs)

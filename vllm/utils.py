@@ -13,7 +13,6 @@ import uuid
 import warnings
 from collections import defaultdict
 from functools import lru_cache, partial, wraps
-from numbers import Number
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
@@ -615,16 +614,6 @@ class CudaMemoryProfiler:
         gc.collect()
 
 
-def str_to_int_tuple(s: str) -> Tuple[int, ...]:
-    """Convert a string to a tuple of integers."""
-    try:
-        return tuple(map(int, s.split(",")))
-    except ValueError as e:
-        raise ValueError(
-            "String must be a series of integers separated by commas "
-            f"(e.g., 1, 2, 3). Given input: {s}") from e
-
-
 def make_tensor_with_pad(
     x: List[List[int]],
     max_len: int,
@@ -642,6 +631,16 @@ def make_tensor_with_pad(
         assert len(blocktb) <= max_len
         padded_x[ind, :len(blocktb)] = blocktb
     return torch.tensor(padded_x, dtype=dtype, device=device)
+
+
+def str_to_int_tuple(s: str) -> Tuple[int, ...]:
+    """Convert a string to a tuple of integers."""
+    try:
+        return tuple(map(int, s.split(",")))
+    except ValueError as e:
+        raise ValueError(
+            "String must be a series of integers separated by commas "
+            f"(e.g., 1, 2, 3). Given input: {s}") from e
 
 
 def async_tensor_h2d(
@@ -837,66 +836,6 @@ def cuda_device_count_stateless() -> int:
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
 
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
-
-def maybe_make_int_tensor(_list: List[int],
-                              device: Union[torch.device, str]) \
-  -> torch.Tensor:
-    '''
-    Convert Python int list to a 1D int torch.Tensor on `device`
-
-    Returns:
-
-    * If _list is not None: 1D int torch.Tensor on `device`
-    * None otherwise
-    '''
-    return None if _list is None else torch.tensor(
-        _list, dtype=torch.int, device=device)
-
-def maybe_make_long_tensor(_list: List[int],
-                               device: Union[torch.device, str]) \
-  -> torch.Tensor:
-    '''
-    Convert Python int list to a 1D long torch.Tensor on `device`
-
-    Returns:
-
-    * If _list is not None: 1D long torch.Tensor on `device`
-    * None otherwise
-    '''
-    return None if _list is None else torch.tensor(
-        _list, dtype=torch.long, device=device)
-
-
-def maybe_max(_list: List) -> Optional[Number]:
-    '''
-    Returns:
-
-    * If _list is not None: max(_list)
-    * None otherwise
-    '''
-    return None if _list is None else max(_list)
-
-def make_causal_mask(q_max_seq_len: int, kv_max_seq_len: int) \
-                                                -> torch.Tensor:
-    '''
-    Create a q_max_seq_len x kv_max_seq_len causal mask
-
-    Arguments:
-    
-    * q_max_seq_len: query max seq len
-    * kv_max_seq_len: key/value max seq len
-
-    Returns:
-
-    * 2D tensor, q_max_seq_len x kv_max_seq_len
-    '''
-
-    # Create a matrix where entry (i, j) is True if i >= j
-    mask = torch.triu(torch.ones(q_max_seq_len, kv_max_seq_len), diagonal=1)
-    # Replace True with float('-inf') and False with 0
-    mask = mask.masked_fill(mask == 1,
-                            float('-inf')).masked_fill(mask == 0, 0.0)
-    return mask
 
 
 #From: https://stackoverflow.com/a/4104188/2749989

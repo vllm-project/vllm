@@ -20,8 +20,8 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (EncoderDecoderLLMInputs, EncoderDecoderStringPrompts,
-                         LLMInputs, LLMInputsOptions, PromptInputs)
+from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, LLMInputsOptions,
+                         PromptInputs)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
@@ -559,7 +559,8 @@ class LLMEngine:
                 inputs = {"encoder_prompt": inputs}
 
             if isinstance(inputs, tuple) and len(inputs) == 2:
-                # Detect input which is EncoderDecoderStringPrompts (i.e. Tuple[str,str])
+                # Detect input which is EncoderDecoderStringPrompts
+                # (i.e. Tuple[str,str])
                 # Interpret a tuple of input string prompts as a single
                 # encoder input and a single decoder input, respectively
                 inputs = {

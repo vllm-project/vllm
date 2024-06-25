@@ -16,11 +16,11 @@ import torch
 
 from tests.kernels.utils import *
 import copy
+from tests.kernels.utils import make_causal_mask, maybe_make_long_tensor
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
-from vllm.utils import (is_hip, make_causal_mask, maybe_make_long_tensor,
-                        LIST_ENC_DEC_SUPPORTED_BACKENDS)
+from vllm.utils import (is_hip, LIST_ENC_DEC_SUPPORTED_BACKENDS)
 
 HEAD_SIZES = [64, 256]
 
@@ -575,7 +575,7 @@ def _run_encoder_attention_test(attn: Attention,
     '''
     Run encoder attention.
 
-    attn_metadata.attention_type is assigned AttentionType.ENCODER in order 
+    attn.forward() is passed attn_type=AttentionType.ENCODER in order 
     to configure the kernel invocation for encoder attention
 
     Requires attn_metadata.num_decode_tokens == 0
@@ -613,7 +613,7 @@ def _run_decoder_self_attention_test(test_rsrcs: TestResources,
     '''
     Run decoder self-attention test.
 
-    attn_metadata.attention_type is assigned AttentionType.DECODER 
+    attn.forward() is passed attn_type=AttentionType.DECODER
     in order to configure the kernel invocation for decoder self-attention.
 
     Arguments:
@@ -658,7 +658,7 @@ def _run_encoder_decoder_cross_attention_test(
     is None, this reflects that in decode-phase cross attention there
     is no growth in the key and value tensors.
 
-    attn_metadata.attention_type is assigned AttentionType.ENCODER_DECODER 
+    attn.forward() is passed attn_type=AttentionType.ENCODER_DECODER
     in order to configure the kernel invocation for encoder/decoder cross-
     attention.
 
