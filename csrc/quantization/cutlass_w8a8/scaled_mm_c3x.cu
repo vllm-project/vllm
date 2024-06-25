@@ -144,23 +144,23 @@ struct ScaledEpilogueBias
   using ScaleB = typename SUPER::ScaleB;
 
   using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::multiplies, float, float,
+      cutlass::multiplies, ElementD, ElementD,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
   using EVTCompute0 =
       cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
 
   using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::multiply_add, ElementD, float,
+      cutlass::multiply_add, ElementD, ElementD,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
   using BiasDescriptor =
       cutlass::epilogue::collective::detail::RowBroadcastDescriptor<
-          EpilogueDescriptor, float>;
+          EpilogueDescriptor, ElementD>;
 
   using Bias = cutlass::epilogue::fusion::Sm90RowBroadcast<
-      BiasDescriptor::Stages, typename EpilogueDescriptor::TileShape, float,
-      Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<float>, false>;
+      BiasDescriptor::Stages, typename EpilogueDescriptor::TileShape, ElementD,
+      Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<ElementD>, false>;
 
  public:
   using EVTCompute =
@@ -176,7 +176,8 @@ struct ScaledEpilogueBias
 
     ScaleA_Args a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
     ScaleB_Args b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
-    Bias_Args bias_args{bias.data_ptr<float>()};
+    Bias_Args bias_args{
+        reinterpret_cast<ElementD const*>(bias.const_data_ptr())};
 
     return ArgumentType{a_args, {b_args}, bias_args};
   }
@@ -544,7 +545,13 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
   if (bias) {
-    TORCH_CHECK(bias->dtype() == torch::kFloat32);
+    TORCH_CHECK(bias->dtype() == c.dtype(),
+                "currently bias dtype must match output dtype ", c.type());
+    TORCH_CHECK(bias->dim() == 1 && bias->size(0) == c.size(1),
+                "the bias shape, should be (", c.size(1),
+                ",) i.e. a vector with length matching the number of cols of "
+                "the output matrix");
+    TORCH_CHECK(bias->is_contiguous(), "bias must be contiguous");
     return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBias>(
         c, a, b, a_scales, b_scales, *bias);
   } else {
