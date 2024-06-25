@@ -755,7 +755,7 @@ class EngineArgs:
                 image_input_type=VisionLanguageConfig.
                 get_image_input_enum_type(self.image_input_type),
                 image_token_id=self.image_token_id,
-                image_input_shape=self.image_input_shape,
+                image_input_shape=str_to_int_tuple(self.image_input_shape),
                 image_feature_size=self.image_feature_size,
                 image_processor=self.image_processor,
                 image_processor_revision=self.image_processor_revision,
