@@ -1,13 +1,9 @@
 import time
-<<<<<<< HEAD
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, ClassVar, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Type, TypeVar, Union
-=======
 from http import HTTPStatus
-from typing import Dict, Iterable, List, Optional, Tuple, Type, Union
->>>>>>> 45b4cb2f (done with max_queue_length)
 
 from transformers import GenerationConfig, PreTrainedTokenizer
 
@@ -50,7 +46,6 @@ logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
 
-<<<<<<< HEAD
 def _load_generation_config_dict(model_config: ModelConfig):
     try:
         return GenerationConfig.from_pretrained(
@@ -63,13 +58,11 @@ def _load_generation_config_dict(model_config: ModelConfig):
 
 
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
-=======
 class QueueOverflowError(BaseException):
 
     def __init__(self, message, status_code):
         super().__init__(message)
         self.status_code = status_code
->>>>>>> 45b4cb2f (done with max_queue_length)
 
 
 class LLMEngine:

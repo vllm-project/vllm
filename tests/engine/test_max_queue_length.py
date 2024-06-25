@@ -86,7 +86,13 @@ def test_max_queue_length(max_wait_q_len, expect_error, test_prompts):
     args_to_test = [
         '--max-num-seqs',
         str(1), '--max-queue-length',
-        str(max_wait_q_len)
+        str(max_wait_q_len),
+        "--max-num-batched-tokens",
+        "2048",
+        "--gpu-memory-utilization",
+        "1",
+        "--max-model-len",
+        "1024",
     ]
     args = parser.parse_args(args_to_test)
     engine_args = EngineArgs.from_cli_args(args)
