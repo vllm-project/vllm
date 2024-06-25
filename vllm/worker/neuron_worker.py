@@ -8,7 +8,6 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
@@ -36,15 +35,16 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self._model_runner = NeuronModelRunner(model_config, parallel_config,
-                                               scheduler_config, device_config)
+        self.model_runner: NeuronModelRunner = NeuronModelRunner(
+            model_config, parallel_config, scheduler_config, device_config)
+        self.is_driver_worker = True
 
     def init_device(self) -> None:
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        self._model_runner.load_model()
+        self.model_runner.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
@@ -76,16 +76,8 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     @property
-    def is_driver_worker(self) -> bool:
-        return True
-
-    @property
     def do_metadata_broadcast(self) -> bool:
         return False
-
-    @property
-    def model_runner(self) -> ModelRunnerBase:
-        return self._model_runner
 
     @property
     def kv_cache(self) -> Optional[List[torch.Tensor]]:

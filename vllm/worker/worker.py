@@ -19,7 +19,6 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
-from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 
@@ -57,8 +56,8 @@ class Worker(LocalOrDistributedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.load_config = load_config
-        self._is_driver_worker = is_driver_worker
-        if self._is_driver_worker:
+        self.is_driver_worker = is_driver_worker
+        if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
         if self.model_config.trust_remote_code:
@@ -81,7 +80,7 @@ class Worker(LocalOrDistributedWorkerBase):
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if self.model_config.embedding_mode:
             ModelRunnerClass = EmbeddingModelRunner
-        self._model_runner: GPUModelRunnerBase = ModelRunnerClass(
+        self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             model_config,
             parallel_config,
             scheduler_config,
@@ -129,7 +128,7 @@ class Worker(LocalOrDistributedWorkerBase):
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        self._model_runner.load_model()
+        self.model_runner.load_model()
 
     def save_sharded_state(
         self,
@@ -137,7 +136,7 @@ class Worker(LocalOrDistributedWorkerBase):
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        self._model_runner.save_sharded_state(
+        self.model_runner.save_sharded_state(
             path,
             pattern=pattern,
             max_size=max_size,
@@ -147,7 +146,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self,
         tensorizer_config: TensorizerConfig,
     ) -> None:
-        self._model_runner.save_tensorized_model(
+        self.model_runner.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
@@ -169,7 +168,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        self._model_runner.profile_run()
+        self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -190,8 +189,8 @@ class Worker(LocalOrDistributedWorkerBase):
                              cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
-        if self._model_runner.lora_manager:
-            self._model_runner.remove_all_loras()
+        if self.model_runner.lora_manager:
+            self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
@@ -221,22 +220,14 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
-            self._model_runner.capture_model(self.gpu_cache)
+            self.model_runner.capture_model(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
     @property
-    def is_driver_worker(self) -> bool:
-        return self._is_driver_worker
-
-    @property
     def do_metadata_broadcast(self) -> bool:
         return self.parallel_config.tensor_parallel_size > 1
-
-    @property
-    def model_runner(self) -> ModelRunnerBase:
-        return self._model_runner
 
     @property
     def kv_cache(self) -> Optional[List[torch.Tensor]]:
@@ -282,16 +273,16 @@ class Worker(LocalOrDistributedWorkerBase):
             self.cache_engine.copy(worker_input.blocks_to_copy)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self._model_runner.add_lora(lora_request)
+        return self.model_runner.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self._model_runner.remove_lora(lora_id)
+        return self.model_runner.remove_lora(lora_id)
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self._model_runner.pin_lora(lora_id)
+        return self.model_runner.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
-        return self._model_runner.list_loras()
+        return self.model_runner.list_loras()
 
     @property
     def max_model_len(self) -> int:
@@ -299,7 +290,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
     @property
     def vocab_size(self) -> int:
-        return self._model_runner.vocab_size
+        return self.model_runner.vocab_size
 
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.

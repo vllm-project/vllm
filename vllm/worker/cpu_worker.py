@@ -15,7 +15,6 @@ from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.cpu_model_runner import CPUModelRunner
-from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
 
@@ -147,15 +146,15 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.vision_language_config = vision_language_config
-        self._is_driver_worker = is_driver_worker
-        if self._is_driver_worker:
+        self.is_driver_worker = is_driver_worker
+        if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self._model_runner = CPUModelRunner(
+        self.model_runner: CPUModelRunner = CPUModelRunner(
             model_config,
             parallel_config,
             scheduler_config,
@@ -177,7 +176,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        self._model_runner.load_model()
+        self.model_runner.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of blocks available for the KV cache.
@@ -248,7 +247,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                                            self.parallel_config,
                                            self.device_config)
         self.cpu_cache = self.cache_engine.cpu_cache
-        self._model_runner.block_size = self.cache_engine.block_size
+        self.model_runner.block_size = self.cache_engine.block_size
 
         assert self.cpu_cache is not None
 
@@ -257,16 +256,8 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             layer_cache.fill_(0)
 
     @property
-    def is_driver_worker(self) -> bool:
-        return self._is_driver_worker
-
-    @property
     def do_metadata_broadcast(self) -> bool:
         return self.parallel_config.tensor_parallel_size > 1
-
-    @property
-    def model_runner(self) -> ModelRunnerBase:
-        return self._model_runner
 
     @property
     def kv_cache(self) -> Optional[List[torch.Tensor]]:

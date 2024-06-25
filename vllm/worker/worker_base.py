@@ -165,17 +165,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     If custom control plane logic is needed to transfer metadata, or if the
     model runner cannot inherit from ModelRunnerBase, use WorkerBase instead.
     """
-
-    @property
-    @abstractmethod
-    def is_driver_worker(self) -> bool:
-        """
-        Used by the default `execute_model` to check whether this is the driver
-        worker. The driver worker is responsible for broadcasting request
-        inputs to other workers in its TP group. If WorkerBase subclass only
-        supports single-worker execution, then this method should return True.
-        """
-        raise NotImplementedError
+    is_driver_worker: bool
+    model_runner: ModelRunnerBase
 
     @property
     @abstractmethod
@@ -185,16 +176,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         needed to transfer request inputs from the driver worker to other
         workers in the TP group. If WorkerBase subclass only supports
         single-worker execution, then this method should return False.
-        """
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def model_runner(self) -> ModelRunnerBase:
-        """
-        Get the worker's model runner. Used by the default `execute_model`. If
-        the worker's model runner does not follow the ModelRunnerBase
-        interface, then inherit from WorkerBase instead.
         """
         raise NotImplementedError
 
