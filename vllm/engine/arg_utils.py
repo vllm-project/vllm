@@ -55,6 +55,7 @@ class EngineArgs:
     code_revision: Optional[str] = None
     rope_scaling: Optional[dict] = None
     rope_theta: Optional[float] = None
+    hf_kwargs: Optional[dict] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: bool = False
@@ -409,6 +410,12 @@ class EngineArgs:
                             help='RoPE theta. Use with `rope_scaling`. In '
                             'some cases, changing the RoPE theta improves the '
                             'performance of the scaled model.')
+        parser.add_argument('--hf-kwargs',
+                            type=json.loads,
+                            default=EngineArgs.hf_kwargs,
+                            help='Extra arguments for the HF config.'
+                            'This should be a JSON string that will be '
+                            'parsed into a dictionary.')
         parser.add_argument('--enforce-eager',
                             action='store_true',
                             help='Always use eager-mode PyTorch. If False, '
@@ -658,7 +665,8 @@ class EngineArgs:
             max_logprobs=self.max_logprobs,
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
-            served_model_name=self.served_model_name)
+            served_model_name=self.served_model_name,
+            hf_kwargs=self.hf_kwargs)
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,

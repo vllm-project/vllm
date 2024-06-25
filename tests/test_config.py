@@ -120,3 +120,17 @@ def test_rope_customization():
     assert getattr(longchat_model_config.hf_config, "rope_scaling",
                    None) == TEST_ROPE_SCALING
     assert longchat_model_config.max_model_len == 4096
+
+def test_hf_kwargs():
+    HF_KWARGS = {"output_attentions": True}
+    config = ModelConfig(
+        "Qwen/Qwen1.5-7B",
+        "Qwen/Qwen1.5-7B",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        dtype="float16",
+        seed=0,
+        hf_kwargs=HF_KWARGS
+    )
+    assert config.hf_config.output_attentions == True
+    
