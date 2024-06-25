@@ -9,12 +9,16 @@ oot_registration_file = os.path.join(os.path.dirname(__file__),
 
 
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
-def test_oot_registration(tensor_parallel_size):
+@pytest.mark.parametrize("backend", ["mp", "ray"])
+def test_oot_registration(tensor_parallel_size, backend):
     prompts = ["Hello, my name is", "The text does not matter"]
     sampling_params = SamplingParams(temperature=0)
-    llm = LLM(model="facebook/opt-125m",
-              worker_init_callback_script=oot_registration_file,
-              tensor_parallel_size=tensor_parallel_size)
+    llm = LLM(
+        model="facebook/opt-125m",
+        worker_init_callback_script=oot_registration_file,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=backend,
+    )
     first_token = llm.get_tokenizer().decode(0)
     outputs = llm.generate(prompts, sampling_params)
 
