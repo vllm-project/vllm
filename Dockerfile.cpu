@@ -10,6 +10,7 @@ RUN ln -s /usr/bin/python3 /usr/bin/python
 
 RUN git clone https://github.com/intel/intel-extension-for-pytorch \
     && cp intel-extension-for-pytorch/scripts/compile_bundle.sh . \
+    && sed -i "s/VER_IPEX=main/VER_IPEX=a6d3a14c49e6d018381a72ce59af239330c323ff/g" compile_bundle.sh 
     && bash compile_bundle.sh
 
 
