@@ -76,7 +76,13 @@ class _ImageAssetPrompts(TypedDict):
 class ImageAssets(UserList[ImageAsset]):
 
     def prompts(self, prompts: _ImageAssetPrompts) -> List[str]:
-        """Convenience method to define the prompt for each test image."""
+        """
+        Convenience method to define the prompt for each test image.
+
+        Note:
+            The order of the returned list should match that of
+            :const:`IMAGE_ASSETS`.
+        """
         return [prompts["stop_sign"], prompts["cherry_blossom"]]
 
 
