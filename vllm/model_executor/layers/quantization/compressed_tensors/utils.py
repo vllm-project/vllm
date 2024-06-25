@@ -6,6 +6,14 @@ from pydantic import BaseModel, Field
 from torch.nn import Module
 
 
+class CompressionFormat(Enum):
+    dense = "dense"
+    sparse_bitmask = "sparse-bitmask"
+    int_quantized = "int-quantized"
+    pack_quantized = "pack-quantized"
+    marlin_24 = "marlin-24"
+
+
 class QuantizationType(str, Enum):
     """
     Enum storing quantization type options

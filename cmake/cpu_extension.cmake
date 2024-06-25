@@ -33,10 +33,21 @@ function (find_isa CPUINFO TARGET OUT)
     endif()
 endfunction()
 
+function (is_avx512_disabled OUT)
+    set(DISABLE_AVX512 $ENV{VLLM_CPU_DISABLE_AVX512})
+    if(DISABLE_AVX512 AND DISABLE_AVX512 STREQUAL "true")
+        set(${OUT} ON PARENT_SCOPE)
+    else()
+        set(${OUT} OFF PARENT_SCOPE)
+    endif()
+endfunction()
+
+is_avx512_disabled(AVX512_DISABLED)
+
 find_isa(${CPUINFO} "avx2" AVX2_FOUND)
 find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
 
-if (AVX512_FOUND)
+if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
         "-mavx512f"
         "-mavx512vl"
