@@ -691,6 +691,7 @@ class BatchRequestOutput(OpenAIBaseModel):
 
 
 class TokenizeRequest(OpenAIBaseModel):
+    model: str
     prompt: str
     add_special_tokens: bool = Field(default=True)
 
@@ -702,6 +703,7 @@ class TokenizeResponse(OpenAIBaseModel):
 
 
 class DetokenizeRequest(OpenAIBaseModel):
+    model: str
     tokens: List[int]
 
 

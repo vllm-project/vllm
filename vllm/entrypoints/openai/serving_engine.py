@@ -99,9 +99,10 @@ class OpenAIServing:
         })
         return json_str
 
-    async def _check_model(
-        self, request: Union[CompletionRequest, ChatCompletionRequest,
-                             EmbeddingRequest]
+    def _check_model(
+        self, request: Union[ChatCompletionRequest, CompletionRequest,
+                             DetokenizeRequest, EmbeddingRequest,
+                             TokenizeRequest]
     ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
