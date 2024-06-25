@@ -219,3 +219,42 @@ def test_decode_prompt_logprobs(complete_sequence: str,
             logprobs[token_id + 1].decoded_token
             for token_id, logprobs in zip(token_ids, decoded_prompt_logprobs)
         ])
+
+
+@pytest.mark.parametrize("tokenizer_name", ["facebook/opt-125m"])
+def test_decode_prompt_logprobs_5846(detokenizer: Detokenizer):
+    """ Regression test for #5846. """
+
+    # This set of random input will generate incorrect output before #5846.
+    prompt_token_ids = [3290, 1562, 8652, 3123, 1838, 9660]
+    dummy_logprobs = [{
+        1562: Logprob(logprob=0.0),
+        3290: Logprob(logprob=0.1)
+    }, {
+        8652: Logprob(logprob=0.0),
+        977: Logprob(logprob=0.1)
+    }, {
+        3123: Logprob(logprob=0.0),
+        30: Logprob(logprob=0.1)
+    }, {
+        1838: Logprob(logprob=0.0),
+        6: Logprob(logprob=0.1)
+    }, {
+        9660: Logprob(logprob=0.0),
+        1316: Logprob(logprob=0.1)
+    }]
+
+    seq = create_sequence(prompt_token_ids)
+    seq_group = SequenceGroup(
+        request_id="1",
+        seqs=[seq],
+        sampling_params=SamplingParams(prompt_logprobs=1),
+        arrival_time=0.0)
+
+    detokenizer.decode_prompt_logprobs_inplace(seq_group, dummy_logprobs)
+    decoded_prompt_logprobs = dummy_logprobs
+
+    tokenzier = detokenizer.get_tokenizer_for_seq(seq)
+    for logprobs in decoded_prompt_logprobs:
+        for token_id, logprob in logprobs.items():
+            assert tokenzier.decode(token_id) == logprob.decoded_token
