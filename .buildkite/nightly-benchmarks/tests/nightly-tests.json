@@ -112,5 +112,5 @@
         },
         "vllm_client_parameters": {
         }
-    },
+    }
 ]
