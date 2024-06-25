@@ -37,7 +37,8 @@ class Detokenizer:
         # We can pick any sequence for the prompt.
         seq = next(iter(seq_group.seqs_dict.values()))
         # Only prompt, without the generated token.
-        all_token_ids = seq.get_token_ids()
+        # Skip the first token as its logprob is not defined.
+        all_token_ids = seq.get_token_ids()[1:]
         prompt_token_ids = all_token_ids[:-1]
         tokenizer = self.get_tokenizer_for_seq(seq)
         prefix_offset = 0
@@ -46,7 +47,6 @@ class Detokenizer:
         next_iter_read_offset = 0
         next_iter_tokens: List[str] = []
         prev_tokens = None
-
         for token_position, prompt_logprobs_for_token in enumerate(
                 prompt_logprobs):
             if not prompt_logprobs_for_token:
