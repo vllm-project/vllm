@@ -10,8 +10,8 @@ import torch
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.xformers import XFormersBackend
-from vllm.utils import (make_tensor_with_pad, maybe_make_int_tensor,
-                        maybe_make_long_tensor, maybe_max)
+import numpy as np
+from numbers import Number
 
 # String name of register which may be set in order to
 # force auto-selection of attention backend by Attention
@@ -138,6 +138,83 @@ class PhaseTestParameters(NamedTuple):
     packed_qkvo: PackedQKVO
     kv_mmap: Optional[KVMemoryMap]
 
+def make_tensor_with_pad(
+    x: List[List[int]],
+    max_len: int,
+    pad: int,
+    dtype: torch.dtype,
+    device: Optional[Union[str, torch.device]],
+) -> torch.Tensor:
+    """Make a padded tensor of a 2D inputs.
+
+    The padding is applied to the end of each inner list until it reaches
+    `max_len`.
+    """
+    padded_x = np.zeros([len(x), max_len], dtype=np.int32) + pad
+    for ind, blocktb in enumerate(x):
+        assert len(blocktb) <= max_len
+        padded_x[ind, :len(blocktb)] = blocktb
+    return torch.tensor(padded_x, dtype=dtype, device=device)
+
+def maybe_make_int_tensor(_list: List[int],
+                              device: Union[torch.device, str]) \
+  -> torch.Tensor:
+    '''
+    Convert Python int list to a 1D int torch.Tensor on `device`
+
+    Returns:
+
+    * If _list is not None: 1D int torch.Tensor on `device`
+    * None otherwise
+    '''
+    return None if _list is None else torch.tensor(
+        _list, dtype=torch.int, device=device)
+
+def maybe_make_long_tensor(_list: List[int],
+                               device: Union[torch.device, str]) \
+  -> torch.Tensor:
+    '''
+    Convert Python int list to a 1D long torch.Tensor on `device`
+
+    Returns:
+
+    * If _list is not None: 1D long torch.Tensor on `device`
+    * None otherwise
+    '''
+    return None if _list is None else torch.tensor(
+        _list, dtype=torch.long, device=device)
+
+
+def maybe_max(_list: List) -> Optional[Number]:
+    '''
+    Returns:
+
+    * If _list is not None: max(_list)
+    * None otherwise
+    '''
+    return None if _list is None else max(_list)
+
+def make_causal_mask(q_max_seq_len: int, kv_max_seq_len: int) \
+                                                -> torch.Tensor:
+    '''
+    Create a q_max_seq_len x kv_max_seq_len causal mask
+
+    Arguments:
+    
+    * q_max_seq_len: query max seq len
+    * kv_max_seq_len: key/value max seq len
+
+    Returns:
+
+    * 2D tensor, q_max_seq_len x kv_max_seq_len
+    '''
+
+    # Create a matrix where entry (i, j) is True if i >= j
+    mask = torch.triu(torch.ones(q_max_seq_len, kv_max_seq_len), diagonal=1)
+    # Replace True with float('-inf') and False with 0
+    mask = mask.masked_fill(mask == 1,
+                            float('-inf')).masked_fill(mask == 0, 0.0)
+    return mask
 
 def override_backend_env_variable(mpatch: pytest.MonkeyPatch,
                                   backend_name: str) -> None:
