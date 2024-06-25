@@ -34,11 +34,12 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import (ImageFeatureData, ImageInputProcessors,
-                                   ImagePixelData, _cached_get_tokenizer)
+from vllm.multimodal.image import (ImageFeatureData, ImagePixelData,
+                                   cached_get_tokenizer)
 from vllm.sequence import SamplerOutput
 
-from .clip import dummy_pixel_data_for_clip, dummy_seq_data_for_clip
+from .clip import (dummy_pixel_data_for_clip, dummy_seq_data_for_clip,
+                   input_processor_for_clip)
 
 _KEYS_TO_MODIFY_MAPPING = {
     "model.vision_embed_tokens": "vision_embed_tokens",
@@ -359,7 +360,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = image_features.shape[-2]
 
     prompt_token_ids = llm_inputs["prompt_token_ids"]
-    tokenizer = _cached_get_tokenizer(model_config.tokenizer)
+    tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
     # We need to get the token for "<", not "▁<"
     # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/raw/main/tokenizer.json
@@ -384,7 +385,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
                            prompt=llm_inputs.get("prompt"),
                            multi_modal_data=multi_modal_data)
 
-    return ImageInputProcessors.input_processor_for_clip(
+    return input_processor_for_clip(
         model_config,
         multimodal_config,
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,

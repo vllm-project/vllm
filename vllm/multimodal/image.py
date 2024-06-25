@@ -1,143 +1,90 @@
 from functools import lru_cache
-from typing import (TYPE_CHECKING, Dict, List, Optional, Tuple, Type, TypeVar,
-                    Union)
+from typing import Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import torch
 from PIL import Image
-from transformers import CLIPVisionConfig, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.model_executor.models.clip import get_clip_image_feature_size
 from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from .base import MultiModalData, MultiModalPlugin
 
-if TYPE_CHECKING:
-    from vllm.inputs import LLMInputs
-else:
-    LLMInputs = dict
-
 logger = init_logger(__name__)
 
 cached_get_image_processor = lru_cache(get_image_processor)
-_cached_get_tokenizer = lru_cache(get_tokenizer)
+cached_get_tokenizer = lru_cache(get_tokenizer)
 
+# Utilities for image input processors
 _T = TypeVar("_T", str, int)
 
 
-class ImageInputProcessors:
-    """
-    Contains factories for image input processors.
+def repeat_and_pad_token(
+    token: _T,
+    *,
+    repeat_count: int = 1,
+    pad_token_left: Optional[_T] = None,
+    pad_token_right: Optional[_T] = None,
+) -> List[_T]:
+    replacement = [token] * repeat_count
+    if pad_token_left is not None:
+        replacement = [pad_token_left] + replacement
+    if pad_token_right is not None:
+        replacement = replacement + [pad_token_right]
 
-    See Also:
-        :data:`vllm.inputs.registry.InputProcessor`
-    """
+    return replacement
 
-    @classmethod
-    def repeat_and_pad_token(
-        cls,
-        token: _T,
-        *,
-        repeat_count: int = 1,
-        pad_token_left: Optional[_T] = None,
-        pad_token_right: Optional[_T] = None,
-    ) -> List[_T]:
-        replacement = [token] * repeat_count
-        if pad_token_left is not None:
-            replacement = [pad_token_left] + replacement
-        if pad_token_right is not None:
-            replacement = replacement + [pad_token_right]
 
-        return replacement
+def repeat_and_pad_image_tokens(
+    tokenizer: PreTrainedTokenizerBase,
+    prompt: Optional[str],
+    prompt_token_ids: List[int],
+    *,
+    image_token_id: int,
+    repeat_count: int = 1,
+    pad_token_left: Optional[int] = None,
+    pad_token_right: Optional[int] = None,
+) -> Tuple[Optional[str], List[int]]:
+    if prompt is None:
+        new_prompt = None
+    else:
+        image_token_str = tokenizer.decode(image_token_id)
+        pad_token_str_left = (None if pad_token_left is None else
+                              tokenizer.decode(pad_token_left))
+        pad_token_str_right = (None if pad_token_right is None else
+                               tokenizer.decode(pad_token_right))
+        replacement_str = "".join(
+            repeat_and_pad_token(
+                image_token_str,
+                repeat_count=repeat_count,
+                pad_token_left=pad_token_str_left,
+                pad_token_right=pad_token_str_right,
+            ))
 
-    @classmethod
-    def repeat_and_pad_image_tokens(
-        cls,
-        tokenizer: PreTrainedTokenizerBase,
-        prompt: Optional[str],
-        prompt_token_ids: List[int],
-        *,
-        image_token_id: int,
-        repeat_count: int = 1,
-        pad_token_left: Optional[int] = None,
-        pad_token_right: Optional[int] = None,
-    ) -> Tuple[Optional[str], List[int]]:
-        if prompt is None:
-            new_prompt = None
+        # The image tokens are removed to be consistent with HuggingFace
+        new_prompt = prompt.replace(image_token_str, replacement_str, 1)
+
+    new_token_ids: List[int] = []
+    for i, token in enumerate(prompt_token_ids):
+        if token == image_token_id:
+            replacement_ids = repeat_and_pad_token(
+                image_token_id,
+                repeat_count=repeat_count,
+                pad_token_left=pad_token_left,
+                pad_token_right=pad_token_right,
+            )
+            new_token_ids.extend(replacement_ids)
+
+            # No need to further scan the list since we only replace once
+            new_token_ids.extend(prompt_token_ids[i + 1:])
+            break
         else:
-            image_token_str = tokenizer.decode(image_token_id)
-            pad_token_str_left = (None if pad_token_left is None else
-                                  tokenizer.decode(pad_token_left))
-            pad_token_str_right = (None if pad_token_right is None else
-                                   tokenizer.decode(pad_token_right))
-            replacement_str = "".join(
-                cls.repeat_and_pad_token(
-                    image_token_str,
-                    repeat_count=repeat_count,
-                    pad_token_left=pad_token_str_left,
-                    pad_token_right=pad_token_str_right,
-                ))
+            new_token_ids.append(token)
 
-            # The image tokens are removed to be consistent with HuggingFace
-            new_prompt = prompt.replace(image_token_str, replacement_str, 1)
-
-        new_token_ids: List[int] = []
-        for i, token in enumerate(prompt_token_ids):
-            if token == image_token_id:
-                replacement_ids = cls.repeat_and_pad_token(
-                    image_token_id,
-                    repeat_count=repeat_count,
-                    pad_token_left=pad_token_left,
-                    pad_token_right=pad_token_right,
-                )
-                new_token_ids.extend(replacement_ids)
-
-                # No need to further scan the list since we only replace once
-                new_token_ids.extend(prompt_token_ids[i + 1:])
-                break
-            else:
-                new_token_ids.append(token)
-
-        return new_prompt, new_token_ids
-
-    @classmethod
-    def input_processor_for_clip(
-        cls,
-        model_config: ModelConfig,
-        multimodal_config: VisionLanguageConfig,
-        hf_config: CLIPVisionConfig,
-        llm_inputs: LLMInputs,
-        *,
-        image_token_id: int,
-        image_feature_size_override: Optional[int] = None,
-    ):
-        multi_modal_data = llm_inputs.get("multi_modal_data")
-        if multi_modal_data is None or not isinstance(
-                multi_modal_data, (ImagePixelData, ImageFeatureData)):
-            return llm_inputs
-
-        tokenizer = _cached_get_tokenizer(model_config.tokenizer)
-
-        if image_feature_size_override is None:
-            image_feature_size = get_clip_image_feature_size(hf_config)
-        else:
-            image_feature_size = image_feature_size_override
-
-        new_prompt, new_token_ids = cls.repeat_and_pad_image_tokens(
-            tokenizer,
-            llm_inputs.get("prompt"),
-            llm_inputs["prompt_token_ids"],
-            image_token_id=image_token_id,
-            repeat_count=image_feature_size,
-        )
-
-        # NOTE: Create a defensive copy of the original inputs
-        return LLMInputs(prompt_token_ids=new_token_ids,
-                         prompt=new_prompt,
-                         multi_modal_data=multi_modal_data)
+    return new_prompt, new_token_ids
 
 
 class ImagePixelData(MultiModalData):

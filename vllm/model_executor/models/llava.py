@@ -18,12 +18,11 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
-from vllm.multimodal.image import (ImageFeatureData, ImageInputProcessors,
-                                   ImagePixelData)
+from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SamplerOutput
 
 from .clip import (dummy_feature_data_for_clip, dummy_pixel_data_for_clip,
-                   dummy_seq_data_for_clip)
+                   dummy_seq_data_for_clip, input_processor_for_clip)
 from .vlm_base import VisionLanguageModelBase
 
 _KEYS_TO_MODIFY_MAPPING = {
@@ -125,7 +124,7 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
     vision_config = hf_config.vision_config
 
     if isinstance(vision_config, CLIPVisionConfig):
-        return ImageInputProcessors.input_processor_for_clip(
+        return input_processor_for_clip(
             model_config,
             multimodal_config,
             vision_config,
