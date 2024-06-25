@@ -4,7 +4,7 @@ from transformers import CLIPImageProcessor, LlavaNextImageProcessor
 
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import ImagePixelData
+from vllm.multimodal.image import ImageData
 
 from ..conftest import _STR_DTYPE_TO_TORCH_DTYPE
 
@@ -27,12 +27,10 @@ def test_clip_image_processor(image_assets, dtype):
         revision=None,
     )
     vlm_config = VisionLanguageConfig(
-        image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
+        image_input_type=None,
         image_token_id=32000,
         image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
         image_feature_size=576,
-        image_processor=MODEL_NAME,
-        image_processor_revision=None,
     )
 
     for asset in image_assets:
@@ -41,7 +39,7 @@ def test_clip_image_processor(image_assets, dtype):
             return_tensors="pt",
         ).to(dtype=_STR_DTYPE_TO_TORCH_DTYPE[dtype])
         vllm_result = MULTIMODAL_REGISTRY.process_input(
-            ImagePixelData(asset.pil_image),
+            ImageData(asset.pil_image),
             model_config=model_config,
             vlm_config=vlm_config,
         )
@@ -75,14 +73,11 @@ def test_llava_next_image_processor(image_assets, dtype):
         dtype=dtype,
         revision=None,
     )
-    vlm_config = VisionLanguageConfig(
-        image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-        image_token_id=64000,
-        image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
-        image_feature_size=2928,
-        image_processor=MODEL_NAME,
-        image_processor_revision=None,
-    )
+    vlm_config = VisionLanguageConfig(image_input_type=None,
+                                      image_token_id=64000,
+                                      image_input_shape=(1, 3, IMAGE_HEIGHT,
+                                                         IMAGE_WIDTH),
+                                      image_feature_size=2928)
 
     for asset in image_assets:
         hf_result = hf_processor.preprocess(
@@ -90,7 +85,7 @@ def test_llava_next_image_processor(image_assets, dtype):
             return_tensors="pt",
         ).to(dtype=_STR_DTYPE_TO_TORCH_DTYPE[dtype])
         vllm_result = MULTIMODAL_REGISTRY.process_input(
-            ImagePixelData(asset.pil_image),
+            ImageData(asset.pil_image),
             model_config=model_config,
             vlm_config=vlm_config,
         )
@@ -120,23 +115,20 @@ def test_image_pixel_types(image_assets, dtype):
         dtype=dtype,
         revision=None,
     )
-    vlm_config = VisionLanguageConfig(
-        image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-        image_token_id=32000,
-        image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
-        image_feature_size=576,
-        image_processor=MODEL_NAME,
-        image_processor_revision=None,
-    )
+    vlm_config = VisionLanguageConfig(image_input_type=None,
+                                      image_token_id=32000,
+                                      image_input_shape=(1, 3, IMAGE_HEIGHT,
+                                                         IMAGE_WIDTH),
+                                      image_feature_size=576)
 
     for asset in image_assets:
         image_result = MULTIMODAL_REGISTRY.process_input(
-            ImagePixelData(asset.pil_image),
+            ImageData(asset.pil_image),
             model_config=model_config,
             vlm_config=vlm_config,
         )
         tensor_result = MULTIMODAL_REGISTRY.process_input(
-            ImagePixelData(asset.pixel_values),
+            ImageData(asset.pixel_values),
             model_config=model_config,
             vlm_config=vlm_config,
         )

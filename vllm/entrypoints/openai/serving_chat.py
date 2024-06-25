@@ -26,7 +26,7 @@ from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
-from vllm.multimodal.image import ImagePixelData
+from vllm.multimodal.image import ImageData
 from vllm.multimodal.utils import (async_get_and_parse_image,
                                    get_full_image_text_prompt)
 from vllm.outputs import RequestOutput
@@ -47,8 +47,7 @@ class ConversationMessage(TypedDict):
 @dataclass(frozen=True)
 class ChatMessageParseResult:
     messages: List[ConversationMessage]
-    image_futures: List[Awaitable[ImagePixelData]] = field(
-        default_factory=list)
+    image_futures: List[Awaitable[ImageData]] = field(default_factory=list)
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -103,7 +102,7 @@ class OpenAIServingChat(OpenAIServing):
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
         texts: List[str] = []
-        image_futures: List[Awaitable[ImagePixelData]] = []
+        image_futures: List[Awaitable[ImageData]] = []
 
         vlm_config: Optional[VisionLanguageConfig] = getattr(
             self.engine.engine, "vision_language_config", None)
@@ -210,7 +209,7 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             conversation: List[ConversationMessage] = []
-            image_futures: List[Awaitable[ImagePixelData]] = []
+            image_futures: List[Awaitable[ImageData]] = []
 
             for msg in request.messages:
                 chat_parsed_result = self._parse_chat_message_content(msg)
@@ -228,7 +227,7 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         # Fetch image data
-        image_data: Optional[ImagePixelData] = None
+        image_data: Optional[ImageData] = None
         try:
             if len(image_futures):
                 # since we support only single image currently

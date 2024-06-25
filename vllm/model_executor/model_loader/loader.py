@@ -79,7 +79,7 @@ def _get_model_initialization_kwargs(
             "please open an issue on github.")
     elif issubclass(model_class, VisionLanguageModelBase):
         if vision_language_config is None:
-            raise ValueError("Provide `image_input_type` and other vision "
+            raise ValueError("Provide vision "
                              "related configurations through LLM entrypoint "
                              "or engine arguments.")
 

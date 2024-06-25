@@ -509,7 +509,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                      is not None else 1))
 
                 mm_data = seq_group_metadata.multi_modal_data
-                if mm_data is not None:
+                if mm_data:
                     # Process multi-modal data
                     if self.multi_modal_input_processor is None:
                         raise ValueError(

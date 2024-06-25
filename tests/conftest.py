@@ -17,13 +17,13 @@ from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
                           AutoProcessor, AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
-from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
+from vllm.config import TokenizerPoolConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
-from vllm.multimodal.image import ImageFeatureData, ImagePixelData
+from vllm.multimodal.image import ImageData
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
 
@@ -62,16 +62,8 @@ class ImageAsset:
     def for_hf(self) -> Image.Image:
         return self.pil_image
 
-    def for_vllm(self, vision_config: VisionLanguageConfig) -> MultiModalData:
-        image_input_type = vision_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
-
-        if image_input_type == ImageInputType.IMAGE_FEATURES:
-            return ImageFeatureData(self.image_features)
-        if image_input_type == ImageInputType.PIXEL_VALUES:
-            return ImagePixelData(self.pil_image)
-
-        raise NotImplementedError
+    def for_vllm(self) -> Dict[str, Any]:
+        return {"image": self.pil_image}
 
 
 class _ImageAssetPrompts(TypedDict):
