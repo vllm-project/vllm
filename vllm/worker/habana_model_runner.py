@@ -19,7 +19,7 @@ from vllm.attention import (AttentionMetadata, get_attn_backend)
 from vllm.config import (DeviceConfig, LoadConfig, CacheConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
-#from vllm.distributed.parallel_state import get_cpu_world_group
+from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -97,14 +97,13 @@ def subtuple(obj: object, typename: str, to_copy: List[str], to_override: Dict[s
 
 
 def align_workers(value, op):
-    #group = get_cpu_world_group()
-    #world_size = torch.distributed.get_world_size()
-    #if world_size <= 1:
-    #    return value
-    #value_t = torch.tensor(value, device='cpu')
-    #torch.distributed.all_reduce(value_t, op=op, group=group)
-    #return value_t.item()
-    return 0
+    group = get_world_group().cpu_group
+    world_size = torch.distributed.get_world_size()
+    if world_size <= 1:
+        return value
+    value_t = torch.tensor(value, device='cpu')
+    torch.distributed.all_reduce(value_t, op=op, group=group)
+    return value_t.item()
 
 
 class HpuModelAdapter():
