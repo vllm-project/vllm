@@ -22,7 +22,7 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
-from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
+from vllm.multimodal.image import ImageData, get_dummy_image_data
 from vllm.sequence import SamplerOutput, SequenceData
 
 from .llava import LlavaMultiModalProjector, merge_vision_embeddings
@@ -45,17 +45,7 @@ class LlavaNextImagePixelInputs(TypedDict):
     """Shape: (batch_size, 2)"""
 
 
-class LlavaNextImageFeatureInputs(TypedDict):
-    type: Literal["image_features"]
-    data: torch.Tensor
-    """Shape: (batch_size, 1 + num_patches, image_feature_size, hidden_size)"""
-
-    image_sizes: NotRequired[torch.Tensor]
-    """Shape: (batch_size, 2)"""
-
-
-LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
-                             LlavaNextImageFeatureInputs]
+LlavaNextImageInputs = LlavaNextImagePixelInputs
 
 
 def _get_dummy_image_data(
@@ -66,19 +56,15 @@ def _get_dummy_image_data(
     seq_data, fake_mm_data = get_dummy_image_data(seq_len, model_config,
                                                   vlm_config)
 
-    config_input_type = vlm_config.image_input_type
-    ImageInputType = VisionLanguageConfig.ImageInputType
-
-    if config_input_type == ImageInputType.PIXEL_VALUES:
-        _, c, h, w = vlm_config.image_input_shape
-        mode = {1: "L", 3: "RGB"}[c]
-        fake_mm_data = ImagePixelData(Image.new(mode, (w, h), color=0))
+    _, c, h, w = vlm_config.image_input_shape
+    mode = {1: "L", 3: "RGB"}[c]
+    fake_mm_data = ImageData(Image.new(mode, (w, h), color=0))
 
     return seq_data, fake_mm_data
 
 
 def _image_pixel_processor(
-    data: ImagePixelData,
+    data: ImageData,
     model_config: ModelConfig,
     vlm_config: VisionLanguageConfig,
 ) -> Dict[str, torch.Tensor]:
@@ -100,11 +86,11 @@ def _image_pixel_processor(
 
         data.image = image.resize((w, h))
 
-    return MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
+    return MULTIMODAL_REGISTRY._get_plugin_for_internal_data_type(ImageData) \
         ._default_input_processor(data, model_config, vlm_config)
 
 
-@MULTIMODAL_REGISTRY.register_image_pixel_input(_image_pixel_processor)
+@MULTIMODAL_REGISTRY.register_image_input(_image_pixel_processor)
 @MULTIMODAL_REGISTRY.register_dummy_data(_get_dummy_image_data)
 class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
 
@@ -118,11 +104,7 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         # Update the type annotation from that of its superclass
         self.config = config
 
-        if self.vision_language_config.image_input_type == (
-                VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_tower = CLIPVisionModel(config=config.vision_config)
-        else:
-            raise TypeError("Image features are not supported by LLaVA-NeXT")
+        self.vision_tower = CLIPVisionModel(config=config.vision_config)
 
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
@@ -175,36 +157,23 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
             self, **kwargs: object) -> Optional[LlavaNextImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
-        image_features = kwargs.pop("image_features", None)
 
-        expected_input_type = self.vision_language_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
+        if pixel_values is None:
+            return None
 
-        if expected_input_type == ImageInputType.PIXEL_VALUES:
-            if image_features is not None:
-                raise ValueError(
-                    "Expected pixel values but got image features")
-            if pixel_values is None:
-                return None
+        if not isinstance(pixel_values, torch.Tensor):
+            raise ValueError("Incorrect type of pixel values. "
+                             f"Got type: {type(pixel_values)}")
 
-            if not isinstance(pixel_values, torch.Tensor):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
+        if not isinstance(image_sizes, torch.Tensor):
+            raise ValueError("Incorrect type of image sizes. "
+                             f"Got type: {type(image_sizes)}")
 
-            if not isinstance(image_sizes, torch.Tensor):
-                raise ValueError("Incorrect type of image sizes. "
-                                 f"Got type: {type(image_sizes)}")
-
-            return LlavaNextImagePixelInputs(
-                type="pixel_values",
-                data=self._validate_image_pixels(pixel_values),
-                image_sizes=self._validate_image_sizes(image_sizes),
-            )
-
-        assert expected_input_type != ImageInputType.IMAGE_FEATURES, (
-            "Failed to validate this at initialization time")
-
-        return None
+        return LlavaNextImagePixelInputs(
+            type="pixel_values",
+            data=self._validate_image_pixels(pixel_values),
+            image_sizes=self._validate_image_sizes(image_sizes),
+        )
 
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
@@ -311,11 +280,8 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
 
     def _process_image_input(
             self, image_input: LlavaNextImageInputs) -> torch.Tensor:
-        if image_input["type"] == "pixel_values":
-            assert self.vision_tower is not None
-            image_features = self._process_image_pixels(image_input)
-        else:
-            image_features = image_input["data"]
+        assert self.vision_tower is not None
+        image_features = self._process_image_pixels(image_input)
 
         patch_embeddings = self.multi_modal_projector(image_features)
 

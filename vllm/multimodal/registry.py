@@ -1,18 +1,17 @@
 import functools
+from PIL import Image
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence,
-                    Tuple, Type, TypeVar)
+                    Tuple, Type, TypeVar, Union)
 
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.logger import init_logger
 
 from .base import MultiModalData, MultiModalPlugin
-from .image import (ImageFeatureData, ImageFeaturePlugin, ImagePixelData,
-                    ImagePixelPlugin)
+from .image import ImageData, ImagePlugin
 
 if TYPE_CHECKING:
     import torch
     from torch import nn
-
     from vllm.sequence import SequenceData
 
 logger = init_logger(__name__)
@@ -32,7 +31,7 @@ class MultiModalRegistry:
     according to its modality and the target model.
     """
 
-    DEFAULT_PLUGINS = (ImageFeaturePlugin(), ImagePixelPlugin())
+    DEFAULT_PLUGINS = (ImagePlugin(), )
 
     def __init__(self,
                  *,
@@ -53,7 +52,17 @@ class MultiModalRegistry:
 
         self._plugins_by_data_type[data_type] = plugin
 
-    def _get_plugin_for_data_type(self, data_type: Type[MultiModalData]):
+    def _process_external_input(self, data, model_config: ModelConfig,
+                                vlm_config: VisionLanguageConfig):
+        if isinstance(data, Image.Image):
+            return self._get_plugin_for_internal_data_type(
+                ImageData).process_input(ImageData(data), model_config,
+                                         vlm_config)
+        msg = f"Unknown multi-modal data type: {type(data)}"
+        raise NotImplementedError(msg)
+
+    def _get_plugin_for_internal_data_type(self,
+                                           data_type: Type[MultiModalData]):
         for typ in data_type.mro():
             plugin = self._plugins_by_data_type.get(typ)
             if plugin is not None:
@@ -105,41 +114,39 @@ class MultiModalRegistry:
 
         See :meth:`MultiModalPlugin.register_input_processor` for more details.
         """
-        return self._get_plugin_for_data_type(data_type) \
+        return self._get_plugin_for_internal_data_type(data_type) \
             .register_input_processor(processor)
 
-    def register_image_pixel_input(
+    def register_image_input(
             self,
-            processor: Optional[
-                MultiModalInputProcessor[ImagePixelData]] = None):
+            processor: Optional[MultiModalInputProcessor[ImageData]] = None):
         """
         Register an input processor for image pixel data to a model class.
 
         See :meth:`MultiModalPlugin.register_input_processor` for more details.
         """
-        return self.register_input(ImagePixelData, processor)
+        return self.register_input(ImageData, processor)
 
-    def register_image_feature_input(
-        self,
-        processor: Optional[
-            MultiModalInputProcessor[ImageFeatureData]] = None):
-        """
-        Register an input processor for image feature data to a model class.
-
-        See :meth:`MultiModalPlugin.register_input_processor` for more details.
-        """
-        return self.register_input(ImageFeatureData, processor)
-
-    def process_input(self, data: MultiModalData, model_config: ModelConfig,
+    def process_input(self, data: Union[MultiModalData, Dict[str, Any]],
+                      model_config: ModelConfig,
                       vlm_config: VisionLanguageConfig):
         """
-        Apply an input processor to a :class:`~MultiModalData` instance passed
-        to the model.
+        Apply an input processor before passing in to the model.
+
+        If the data is internally supplied (for profiling), it's of type :class:`~MultiModalData`.
+        If externally supplied through user API, it's of type dict. 
         
         See :meth:`MultiModalPlugin.process_input` for more details.
         """
-        return self._get_plugin_for_data_type(type(data)) \
-            .process_input(data, model_config, vlm_config)
+        if isinstance(data, MultiModalData):
+            return self._get_plugin_for_internal_data_type(type(data)) \
+                .process_input(data, model_config, vlm_config)
+        else:
+            result_list = [
+                self._process_external_input(d, model_config, vlm_config)
+                for d in data.values()
+            ]
+            return {k: v for d in result_list for k, v in d.items()}
 
     def create_input_processor(self, model_config: ModelConfig,
                                vlm_config: VisionLanguageConfig):

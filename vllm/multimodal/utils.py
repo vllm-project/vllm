@@ -7,7 +7,7 @@ from PIL import Image
 
 from vllm.config import ModelConfig
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
-from vllm.multimodal.image import ImagePixelData
+from vllm.multimodal.image import ImageData
 
 
 class ImageFetchAiohttp:
@@ -50,9 +50,9 @@ class ImageFetchAiohttp:
         return image
 
 
-async def async_get_and_parse_image(image_url: str) -> ImagePixelData:
+async def async_get_and_parse_image(image_url: str) -> ImageData:
     with await ImageFetchAiohttp.fetch_image(image_url) as image:
-        return ImagePixelData(image)
+        return ImageData(image)
 
 
 def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:

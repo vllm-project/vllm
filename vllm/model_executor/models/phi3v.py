@@ -35,7 +35,7 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
+from vllm.multimodal.image import ImageData, ImageData, get_dummy_image_data
 from vllm.sequence import SamplerOutput
 
 logger = init_logger(__name__)
@@ -309,7 +309,7 @@ def calc_hd_transform_size(width, height, hd_num=16):
 
 
 def _image_processor(
-    data: ImagePixelData,
+    data: ImageData,
     model_config: ModelConfig,
     vlm_config: VisionLanguageConfig,
 ) -> Dict[str, torch.Tensor]:
@@ -325,11 +325,11 @@ def _image_processor(
 
             data.image = image.resize((w, h))
 
-    return MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
+    return MULTIMODAL_REGISTRY._get_plugin_for_internal_data_type(ImageData) \
             ._default_input_processor(data, model_config, vlm_config)
 
 
-@MULTIMODAL_REGISTRY.register_image_pixel_input(_image_processor)
+@MULTIMODAL_REGISTRY.register_image_input(_image_processor)
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class Phi3VForCausalLM(VisionLanguageModelBase):
 
@@ -351,14 +351,6 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
             self, **kwargs: object) -> Optional[Phi3VImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
-
-        expected_input_type = self.vision_language_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
-
-        if expected_input_type != ImageInputType.PIXEL_VALUES:
-            raise ValueError(
-                f"Unexpected image input type: {expected_input_type}."
-                "Phi3v only support pixel_values input currently.")
 
         if pixel_values is not None and image_sizes is not None:
             return Phi3VImagePixelInputs(type="pixel_values",

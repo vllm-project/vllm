@@ -74,17 +74,10 @@ class LlavaImagePixelInputs(TypedDict):
     """Shape: (batch_size, num_channels, height, width)"""
 
 
-class LlavaImageFeatureInputs(TypedDict):
-    type: Literal["image_features"]
-    data: torch.Tensor
-    """Shape: (batch_size, image_feature_size, hidden_size)"""
+LlavaImageInputs = LlavaImagePixelInputs
 
 
-LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
-
-
-@MULTIMODAL_REGISTRY.register_image_feature_input()
-@MULTIMODAL_REGISTRY.register_image_pixel_input()
+@MULTIMODAL_REGISTRY.register_image_input()
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
@@ -97,8 +90,8 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
         self.config = config
 
-        if self.vision_language_config.image_input_type == (
-                VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
+        # TODO: To be replaced by `multi_modal_config`.
+        if self.vision_language_config:
             self.vision_tower = CLIPVisionModel(config.vision_config)
         else:
             self.vision_tower = None
@@ -137,44 +130,17 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
-        image_features = kwargs.pop("image_features", None)
+        if pixel_values is None:
+            return None
 
-        expected_input_type = self.vision_language_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
+        if not isinstance(pixel_values, torch.Tensor):
+            raise ValueError("Incorrect type of pixel values. "
+                             f"Got type: {type(pixel_values)}")
 
-        if expected_input_type == ImageInputType.PIXEL_VALUES:
-            if image_features is not None:
-                raise ValueError(
-                    "Expected pixel values but got image features")
-            if pixel_values is None:
-                return None
-
-            if not isinstance(pixel_values, torch.Tensor):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
-            return LlavaImagePixelInputs(
-                type="pixel_values",
-                data=self._validate_image_data(pixel_values),
-            )
-
-        if expected_input_type == ImageInputType.IMAGE_FEATURES:
-            if pixel_values is not None:
-                raise ValueError(
-                    "Expected image features but got pixel values")
-            if image_features is None:
-                return None
-
-            if not isinstance(image_features, torch.Tensor):
-                raise ValueError("Incorrect type of image features. "
-                                 f"Got type: {type(image_features)}")
-
-            return LlavaImageFeatureInputs(
-                type="image_features",
-                data=self._validate_image_data(image_features),
-            )
-
-        return None
+        return LlavaImagePixelInputs(
+            type="pixel_values",
+            data=self._validate_image_data(pixel_values),
+        )
 
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
@@ -209,12 +175,8 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     def _process_image_input(self,
                              image_input: LlavaImageInputs) -> torch.Tensor:
-        if image_input["type"] == "pixel_values":
-            assert self.vision_tower is not None
-            image_features = self._process_image_pixels(image_input)
-        else:
-            image_features = image_input["data"]
-
+        assert self.vision_tower is not None
+        image_features = self._process_image_pixels(image_input)
         return self.multi_modal_projector(image_features)
 
     def forward(
@@ -245,19 +207,12 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
 
-        This model has two modes of image inputs:
-        `PIXEL_VALUES` and `IMAGE_FEATURES`.
-
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values: The pixels in each input image.
                 Expects a batch with shape `[1, 3, 336, 336]`.
                 (Only applicable to `PIXEL_VALUES` mode)
-            image_features: The image features for each input image outputted by
-                the vision tower before passing to the multi-modal projector.
-                Expects a batch with shape `[1, 576, 1024]`.
-                (Only applicable to `IMAGE_FEATURES` mode)
 
         See also:
             Each input maps to huggingface implementation, as follows:

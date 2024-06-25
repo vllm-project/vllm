@@ -3,7 +3,7 @@ import copy
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, Any
 
 import torch
 
@@ -257,8 +257,8 @@ class Sequence:
         return self.inputs["prompt_token_ids"]
 
     @property
-    def multi_modal_data(self) -> Optional["MultiModalData"]:
-        return self.inputs.get("multi_modal_data")
+    def multi_modal_data(self) -> Dict[str, Any]:
+        return self.inputs.get("multi_modal_data") or {}
 
     @property
     def lora_int_id(self) -> int:
@@ -640,7 +640,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
-        multi_modal_data: Optional["MultiModalData"] = None,
+        multi_modal_data: Optional[Dict[str, Any]] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
     ) -> None:

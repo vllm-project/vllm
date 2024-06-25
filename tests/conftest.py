@@ -12,13 +12,13 @@ from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
                           AutoProcessor, AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
-from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
+from vllm.config import TokenizerPoolConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
-from vllm.multimodal.image import ImageFeatureData, ImagePixelData
+from vllm.multimodal.image import ImageData
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
 
@@ -30,19 +30,10 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 # Multi modal related
 # You can use `.buildkite/download-images.sh` to download the assets
-PIXEL_VALUES_FILES = [
-    os.path.join(_TEST_DIR, "images", filename) for filename in
-    ["stop_sign_pixel_values.pt", "cherry_blossom_pixel_values.pt"]
-]
-IMAGE_FEATURES_FILES = [
-    os.path.join(_TEST_DIR, "images", filename) for filename in
-    ["stop_sign_image_features.pt", "cherry_blossom_image_features.pt"]
-]
 IMAGE_FILES = [
     os.path.join(_TEST_DIR, "images", filename)
     for filename in ["stop_sign.jpg", "cherry_blossom.jpg"]
 ]
-assert len(PIXEL_VALUES_FILES) == len(IMAGE_FEATURES_FILES) == len(IMAGE_FILES)
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -87,23 +78,8 @@ def hf_images() -> List[Image.Image]:
 
 
 @pytest.fixture()
-def vllm_images(request) -> List[MultiModalData]:
-    vision_language_config = request.getfixturevalue("model_and_config")[1]
-    if vision_language_config.image_input_type == (
-            VisionLanguageConfig.ImageInputType.IMAGE_FEATURES):
-        return [
-            ImageFeatureData(torch.load(filename))
-            for filename in IMAGE_FEATURES_FILES
-        ]
-    else:
-        return [
-            ImagePixelData(Image.open(filename)) for filename in IMAGE_FILES
-        ]
-
-
-@pytest.fixture()
-def vllm_image_tensors(request) -> List[torch.Tensor]:
-    return [torch.load(filename) for filename in PIXEL_VALUES_FILES]
+def vllm_images() -> List[MultiModalData]:
+    return [ImageData(Image.open(filename)) for filename in IMAGE_FILES]
 
 
 @pytest.fixture
