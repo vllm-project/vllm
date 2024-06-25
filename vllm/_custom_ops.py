@@ -46,10 +46,12 @@ def hint_on_error(fn):
     return wrapper
 
 _ops = torch.ops._C
+_cache_ops = torch.ops._C_cache_ops
 if importlib.util.find_spec('habana_frameworks') is not None:
     from vllm.hpu import ops as vllm_ops
     from vllm.hpu import cache_ops as vllm_cache_ops
     _ops = vllm_ops
+    _cache_ops = vllm_cache_ops
 
 # activation ops
 def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
@@ -369,7 +371,7 @@ def reshape_and_cache(
     kv_cache_dtype: str,
     kv_scale: float,
 ) -> None:
-    torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
+    _cache_ops.reshape_and_cache(key, value, key_cache,
                                              value_cache, slot_mapping,
                                              kv_cache_dtype, kv_scale)
 
@@ -382,7 +384,7 @@ def reshape_and_cache_flash(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
 ) -> None:
-    torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
+    _cache_ops.reshape_and_cache_flash(key, value, key_cache,
                                                    value_cache, slot_mapping,
                                                    kv_cache_dtype)
 
@@ -390,19 +392,19 @@ def reshape_and_cache_flash(
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
-    torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+    _cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
-    torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
+    _cache_ops.swap_blocks(src, dst, block_mapping)
 
 
 def convert_fp8(output: torch.Tensor,
                 input: torch.Tensor,
                 scale: float = 1.0,
                 kv_dtype: str = "fp8") -> None:
-    torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
+    _cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
 def get_device_attribute(attribute: int, device: int) -> int:

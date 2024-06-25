@@ -227,6 +227,40 @@ class HabanaWorker(WorkerBase):
                                                  self.hpu_cache)
         return [output]
 
+    @torch.inference_mode()
+    def start_worker_execution_loop(self) -> None:
+        """Execute model loop in parallel worker.
+
+        You can stop the loop by executing a driver worker with an empty output.
+        See `stop_remote_worker_execution_loop` for more details.
+        """
+        while self._execute_model_non_driver():
+            pass
+
+    def _execute_model_non_driver(self) -> bool:
+        """Execute model in parallel worker.
+
+        Returns True iff there are remaining sequences to process.
+        """
+        assert not self.is_driver_worker
+        data = broadcast_tensor_dict(src=0)
+        if not data:
+            return False
+
+        num_seq_groups = data.get("num_seq_groups", 0)
+        blocks_to_swap_in = data.get("blocks_to_swap_in")
+        blocks_to_swap_out = data.get("blocks_to_swap_out")
+        blocks_to_copy = data.get("blocks_to_copy")
+        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+
+        # If there is no input, we don't need to execute the model.
+        if num_seq_groups == 0:
+            return False
+
+        self.model_runner.execute_model(None, self.hpu_cache)
+        return True
+
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
 

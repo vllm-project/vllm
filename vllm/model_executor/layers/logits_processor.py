@@ -54,7 +54,7 @@ class LogitsProcessor(nn.Module):
         # NOTE(kzawora): allgather on HPU will cause logits to be not None, 
         # and we need to guard against applying logits processors on non-driver worker
         #if logits is not None and sampling_metadata.seq_groups is not None:
-        if logits is not None:
+        if logits is not None and sampling_metadata.seq_groups is not None:
             if self.scale != 1.0:
                 logits *= self.scale
 
