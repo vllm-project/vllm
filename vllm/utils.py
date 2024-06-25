@@ -18,6 +18,7 @@ from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
                     Union)
 
+import numpy as np
 import psutil
 import torch
 import torch.types
@@ -26,8 +27,6 @@ from typing_extensions import ParamSpec
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
-
-import numpy as np
 
 logger = init_logger(__name__)
 
@@ -575,6 +574,7 @@ class CudaMemoryProfiler:
         # Force garbage collection
         gc.collect()
 
+
 def make_tensor_with_pad(
     x: List[List[int]],
     max_len: int,
@@ -592,6 +592,7 @@ def make_tensor_with_pad(
         assert len(blocktb) <= max_len
         padded_x[ind, :len(blocktb)] = blocktb
     return torch.tensor(padded_x, dtype=dtype, device=device)
+
 
 def str_to_int_tuple(s: str) -> Tuple[int, ...]:
     """Convert a string to a tuple of integers."""

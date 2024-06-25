@@ -11,7 +11,6 @@ import torch
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.xformers import XFormersBackend
-
 from vllm.utils import make_tensor_with_pad
 
 # String name of register which may be set in order to
