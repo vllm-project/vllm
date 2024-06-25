@@ -1,11 +1,12 @@
-import argparse
 from itertools import accumulate
-from typing import Optional
+from typing import List, Optional
 
 import nvtx
 import torch
 
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding,
+                                                         get_rope)
+from vllm.utils import FlexibleArgumentParser
 
 
 def benchmark_rope_kernels_multi_lora(
@@ -37,7 +38,7 @@ def benchmark_rope_kernels_multi_lora(
                             })
     # non-batched RoPE takes only one scaling factor, we create multiple
     # instances to simulate the same behavior
-    non_batched_ropes = []
+    non_batched_ropes: List[RotaryEmbedding] = []
     for scaling_factor in scaling_factors:
         non_batched_ropes.append(
             get_rope(head_size, rotary_dim, max_position, base, is_neox_style,
@@ -85,7 +86,7 @@ def benchmark_rope_kernels_multi_lora(
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Benchmark the rotary embedding kernels.")
     parser.add_argument("--is-neox-style", type=bool, default=True)
     parser.add_argument("--batch-size", type=int, default=16)

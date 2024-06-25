@@ -13,13 +13,14 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
-from vllm.distributed.communication_op import graph_capture
+from vllm.distributed.parallel_state import graph_capture
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
@@ -85,6 +86,7 @@ class ModelRunner:
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        return_hidden_states: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -95,6 +97,7 @@ class ModelRunner:
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.vision_language_config = vision_language_config
+        self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -115,15 +118,17 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
+            num_attn_heads,
             self.model_config.get_head_size(),
             self.model_config.get_num_kv_heads(self.parallel_config),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
-        )
+        ) if num_attn_heads else None
 
         # Create processor for multi-modal data
         if self.vision_language_config is not None:
@@ -220,6 +225,16 @@ class ModelRunner:
             path,
             pattern=pattern,
             max_size=max_size,
+        )
+
+    def save_tensorized_model(
+        self,
+        tensorizer_config: TensorizerConfig,
+    ) -> None:
+        from vllm.model_executor.model_loader.loader import TensorizerLoader
+        TensorizerLoader.save_model(
+            self.model,
+            tensorizer_config=tensorizer_config,
         )
 
     def get_max_block_per_batch(self) -> int:
@@ -751,10 +766,18 @@ class ModelRunner:
             return None
 
         # Sample the next token.
-        output = self.model.sample(
+        output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
+
+        if self.return_hidden_states:
+            # we only need to pass hidden states of most recent token
+            assert seq_group_metadata_list is not None
+            if seq_group_metadata_list[0].is_prompt:
+                hidden_states = hidden_states.index_select(
+                    0, sampling_metadata.selected_token_indices)
+            output.hidden_states = hidden_states
 
         return output
 
@@ -768,8 +791,8 @@ class ModelRunner:
         # that will have unique loras, an therefore the max amount of memory
         # consumption create dummy lora request copies from the lora request
         # passed in, which contains a lora from the lora warmup path.
-        dummy_lora_requests = []
-        dummy_lora_requests_per_seq = []
+        dummy_lora_requests: List[LoRARequest] = []
+        dummy_lora_requests_per_seq: List[LoRARequest] = []
         if self.lora_config:
             assert self.lora_manager is not None
             with self.lora_manager.dummy_lora_cache():
@@ -854,6 +877,11 @@ class ModelRunner:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         if not self.lora_manager:

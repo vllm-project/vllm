@@ -33,9 +33,21 @@ function (find_isa CPUINFO TARGET OUT)
     endif()
 endfunction()
 
+function (is_avx512_disabled OUT)
+    set(DISABLE_AVX512 $ENV{VLLM_CPU_DISABLE_AVX512})
+    if(DISABLE_AVX512 AND DISABLE_AVX512 STREQUAL "true")
+        set(${OUT} ON PARENT_SCOPE)
+    else()
+        set(${OUT} OFF PARENT_SCOPE)
+    endif()
+endfunction()
+
+is_avx512_disabled(AVX512_DISABLED)
+
+find_isa(${CPUINFO} "avx2" AVX2_FOUND)
 find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
 
-if (AVX512_FOUND)
+if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
         "-mavx512f"
         "-mavx512vl"
@@ -53,8 +65,11 @@ if (AVX512_FOUND)
     else()
         message(WARNING "Disable AVX512-BF16 ISA support, no avx512_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512BF16=1.")
     endif()
+elseif (AVX2_FOUND)
+    list(APPEND CXX_COMPILE_FLAGS "-mavx2")
+    message(WARNING "vLLM CPU backend using AVX2 ISA")
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512 ISA support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512 or AVX2 ISA support.")
 endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")

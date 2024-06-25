@@ -36,7 +36,6 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
             threshold in typical acceptance sampling. Typically defaults to
             sqrt of posterior_threshold and is set to 0.3.
         """
-        print('Hello in tas')
         self._posterior_threshold = posterior_threshold
         self._posterior_alpha = posterior_alpha
         super().__init__()
@@ -83,7 +82,6 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         """
         # Only perform shape/dtype/device checking in strict mode, as it adds
         # overhead.
-        start = time.time()
         if self._strict_mode:
             self._raise_if_incorrect_input(target_probs, draft_token_ids,
                                            bonus_token_ids)
@@ -93,12 +91,6 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         output_token_ids = self._create_output(accepted, recovered_token_ids,
                                                draft_token_ids,
                                                bonus_token_ids)
-        #print('draft_token_ids ' + str(draft_token_ids))
-        #print('output_token_ids ' + str(output_token_ids))
-        #print('target_probs ' + str(target_probs))
-        end = time.time()
-        self.total_time += (end - start)
-        self.total_calls += 1
         return output_token_ids
 
     def _evaluate_accepted_tokens(self, target_probs, draft_token_ids):
@@ -152,9 +144,17 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
             index=draft_token_ids.unsqueeze(-1), ).squeeze(-1)
         posterior_entropy = -torch.sum(
             target_probs * torch.log(target_probs + 1e-5), dim=-1)
-        #print('posterior_entropy ' + str(posterior_entropy))
         threshold = torch.minimum(
             torch.ones_like(posterior_entropy, device=device) * self._posterior_threshold,
+            index=draft_token_ids.unsqueeze(-1)).squeeze(-1)
+        # A small constant added to prevent computing the logarithm of zero,
+        # which can lead to undefined values.
+        epsilon = 1e-5
+        posterior_entropy = -torch.sum(
+            target_probs * torch.log(target_probs + epsilon), dim=-1)
+        threshold = torch.minimum(
+            torch.ones_like(posterior_entropy, device=device) *
+            self._posterior_threshold,
             torch.exp(-posterior_entropy) * self._posterior_alpha,
         )
         accepted_mask = candidates_prob > threshold
@@ -186,6 +186,7 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         """
         max_indices = torch.argmax(target_probs[:, 0, :], dim=1)
         output = -torch.ones((target_probs.shape[0], target_probs.shape[1]),
-                             dtype=self.token_id_dtype, device=target_probs.device)
+                             dtype=self.token_id_dtype,
+                             device=target_probs.device)
         output[:, 0] = max_indices
         return output

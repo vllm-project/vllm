@@ -1,12 +1,12 @@
 from unittest.mock import MagicMock
 
 import pytest
+
 import torch
-from vllm.sequence import SequenceGroupMetadata
+from vllm.sequence import SequenceGroupMetadata, get_all_seq_ids
 from vllm.spec_decode.util import get_all_seq_ids, split_batch_by_proposal_len
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.layers.typical_acceptance_sampler import TypicalAcceptanceSampler
-
 
 
 def test_get_all_seq_ids():

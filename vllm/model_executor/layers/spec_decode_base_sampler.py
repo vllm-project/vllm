@@ -32,7 +32,6 @@ class SpecDecodeBaseSampler():
 
         self.num_accepted_tokens: Optional[torch.Tensor] = None
         self.num_emitted_tokens: Optional[torch.Tensor] = None
-        self.num_emitted_tokens: Optional[torch.Tensor] = None
         self.num_draft_tokens: int = 0
         self.total_time: float = 0
         self.total_calls: float = 0
