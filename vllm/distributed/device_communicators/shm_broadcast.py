@@ -14,6 +14,12 @@ from vllm.logger import init_logger
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
+# time to wait if the queue is full or empty
+# if we sleep for too short, it will consume too much CPU
+# if we sleep for too long, it will slow down the writer/reader
+# 0.1 us is a good balance
+RINGBUFFER_SLEEP_INTERVAL = 1e-7
+
 logger = init_logger(__name__)
 
 
@@ -158,10 +164,7 @@ class ShmRingBufferIO:
                     # we need to wait until it is read by all readers
 
                     # wait for a while
-                    # if we sleep for too short, it will consume too much CPU
-                    # if we sleep for too long, it will slow down the writer
-                    # 0.1 us is a good balance
-                    time.sleep(1e-7)
+                    time.sleep(RINGBUFFER_SLEEP_INTERVAL)
 
                     # if we wait for a long time, we should warn the user
                     if time.monotonic(
@@ -215,10 +218,7 @@ class ShmRingBufferIO:
                     # we need to wait until it is written
 
                     # wait for a while
-                    # if we sleep for too short, it will consume too much CPU
-                    # if we sleep for too long, it will slow down the reader
-                    # 0.1 us is a good balance
-                    time.sleep(1e-7)
+                    time.sleep(RINGBUFFER_SLEEP_INTERVAL)
 
                     # if we wait for a long time, we should warn the user
                     if time.monotonic(
