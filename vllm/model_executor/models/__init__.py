@@ -57,7 +57,7 @@ _GENERATION_MODELS = {
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
-    "TeleChatForCausalLM": ("telechat", "TeleChatForCausalLM"), #telechat52b
+    "TeleChatForCausalLM": ("telechat", "TeleChatForCausalLM"),  #telechat52b
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
