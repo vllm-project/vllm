@@ -59,10 +59,9 @@ class Qwen2EmbeddingModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.model.forward(input_ids, positions, kv_caches,
-                                  attn_metadata, inputs_embeds)
+                                  attn_metadata)
 
     def pooler(
         self,
