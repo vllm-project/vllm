@@ -93,7 +93,7 @@ def server(zephyr_lora_files, ray_ctx):
         MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",
+        "bfloat16",  # use half precision for speed and memory savings in CI environment
         "--max-model-len",
         "8192",
         "--enforce-eager",

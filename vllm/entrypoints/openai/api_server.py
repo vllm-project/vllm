@@ -115,6 +115,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 @app.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
+
     generator = await openai_serving_completion.create_completion(
         request, raw_request)
     if isinstance(generator, ErrorResponse):

@@ -149,7 +149,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            msg, status_code = e.args
+            return self.create_error_response(msg, status_code=status_code)
 
         result_generator: AsyncIterator[Tuple[
             int, RequestOutput]] = merge_async_iterators(*generators)
