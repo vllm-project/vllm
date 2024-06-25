@@ -414,7 +414,7 @@ class EngineArgs:
         parser.add_argument('--hf-kwargs',
                             type=json.loads,
                             default=EngineArgs.hf_kwargs,
-                            help='Extra arguments for the HF config.'
+                            help='Extra arguments for the HuggingFace config.'
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
         parser.add_argument('--enforce-eager',

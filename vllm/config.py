@@ -82,6 +82,7 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model 
             names provided, the first name will be used. If not specified, 
             the model name will be the same as `model`.
+        hf_kwargs: Extra arguments for the HuggingFace config.
     """
 
     def __init__(
