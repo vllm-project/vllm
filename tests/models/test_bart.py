@@ -4,9 +4,10 @@ Run `pytest tests/models/test_bart.py`.
 """
 import pytest
 
-from .utils import check_logprobs_close
 from tests.kernels.utils import override_backend_env_variable
 from vllm.utils import STR_XFORMERS_ATTN_VAL
+
+from .utils import check_logprobs_close
 
 MODELS = ["facebook/bart-large-cnn"]
 

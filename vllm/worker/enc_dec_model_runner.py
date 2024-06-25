@@ -16,11 +16,12 @@ from vllm.model_executor import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
+from vllm.utils import (LIST_ENC_DEC_SUPPORTED_BACKENDS,
+                        STR_NOT_IMPL_ENC_DEC_BACKEND,
                         STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
+                        STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
                         STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
-                        STR_NOT_IMPL_ENC_DEC_BACKEND, STR_NOT_IMPL_ENC_DEC_SWA,
-                        LIST_ENC_DEC_SUPPORTED_BACKENDS, make_tensor_with_pad)
+                        STR_NOT_IMPL_ENC_DEC_SWA, make_tensor_with_pad)
 from vllm.worker.model_runner import LORA_WARMUP_RANK, ModelInput, ModelRunner
 
 logger = init_logger(__name__)

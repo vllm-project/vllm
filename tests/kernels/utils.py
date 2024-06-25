@@ -11,8 +11,8 @@ import torch
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.xformers import XFormersBackend
-from vllm.utils import (make_tensor_with_pad, STR_BACKEND_ENV_VAR,
-                        STR_XFORMERS_ATTN_VAL)
+from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
+                        make_tensor_with_pad)
 
 
 class QKVInputs(NamedTuple):

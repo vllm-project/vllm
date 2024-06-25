@@ -5,7 +5,7 @@ import torch
 
 from tests.kernels.utils import override_backend_env_variable
 from vllm.attention.selector import which_attn_to_use
-from vllm.utils import (STR_FLASH_ATTN_VAL, STR_INVALID_VAL)
+from vllm.utils import STR_FLASH_ATTN_VAL, STR_INVALID_VAL
 
 
 @pytest.mark.parametrize(

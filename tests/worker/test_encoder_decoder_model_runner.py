@@ -3,11 +3,11 @@ from typing import List
 import pytest
 import torch
 
-from vllm.utils import STR_XFORMERS_ATTN_VAL
 from tests.kernels.utils import override_backend_env_variable
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
+from vllm.utils import STR_XFORMERS_ATTN_VAL
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 
 # Backends under test
