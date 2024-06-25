@@ -1,6 +1,10 @@
 # imports for guided decoding tests
 import json
 import re
+import subprocess
+import sys
+import time
+import asyncio
 from typing import List
 
 import jsonschema
@@ -703,6 +707,7 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
         assert texts[0] == texts[1]
 
 
+
 @pytest.mark.asyncio
 async def test_logits_bias(client: openai.AsyncOpenAI):
     prompt = "Hello, my name is"
@@ -749,6 +754,33 @@ async def test_logits_bias(client: openai.AsyncOpenAI):
     )
     assert first_response != completion.choices[0].text
 
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_max_queue_length(server, client: openai.AsyncOpenAI,
+                                model_name: str):
+    sample_prompts = [
+        "Who won the world series in 2020?",
+        "Where was the 2020 world series played?",
+        "How long did the 2020 world series last?",
+        "What were some television viewership statistics?",
+        "Why was the 2020 world series so popular?"
+    ]
+
+    coroutines = [
+        client.completions.create(
+            prompt=sample_prompt,
+            model=model_name,
+            temperature=0.8,
+            presence_penalty=0.2,
+            max_tokens=400,
+        )
+        for sample_prompt in sample_prompts
+    ]
+
+    responses = await asyncio.gather(*coroutines, return_exceptions=True)
+
+    for response in responses:
+        if response.status_code != 200:
+            assert response.status_code == 503
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
