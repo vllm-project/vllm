@@ -73,8 +73,7 @@ class BartLearnedPositionalEmbedding(nn.Embedding):
     def forward(self,
                 input_ids: torch.Tensor,
                 attn_type: AttentionType,
-                attn_metadata: AttentionMetadata,
-                past_key_values_length: int = 0):
+                attn_metadata: AttentionMetadata) -> torch.Tensor:
         """`input_ids' shape is expected to be [bsz x seqlen]."""
 
         assert attn_type != AttentionType.ENCODER_DECODER
@@ -121,7 +120,7 @@ class BartScaledWordEmbedding(nn.Embedding):
         super().__init__(num_embeddings, embedding_dim, padding_idx)
         self.embed_scale = embed_scale
 
-    def forward(self, input_ids: torch.Tensor):
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return super().forward(input_ids) * self.embed_scale
 
 
@@ -161,15 +160,10 @@ class BartEncoderAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads,
-                           self.head_dim).transpose(1, 2).contiguous()
-
     def forward(
         self, hidden_states: torch.Tensor, kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[Tuple[torch.Tensor]]]:
+    ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -222,15 +216,10 @@ class BartDecoderSelfAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads,
-                           self.head_dim).transpose(1, 2).contiguous()
-
     def forward(
         self, hidden_states: torch.Tensor, kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[Tuple[torch.Tensor]]]:
+    ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
@@ -283,18 +272,13 @@ class BartCrossAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads,
-                           self.head_dim).transpose(1, 2).contiguous()
-
     def forward(
         self,
         decoder_hidden_states: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         encoder_hidden_states: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[Tuple[torch.Tensor]]]:
+    ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
         q = self.q_proj(decoder_hidden_states)
         k=None if encoder_hidden_states is None else \
@@ -339,7 +323,7 @@ class BartEncoderLayer(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata
-    ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
+    ) -> torch.Tensor:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -419,8 +403,7 @@ class BartDecoderLayer(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         encoder_hidden_states: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor,
-                                                 torch.FloatTensor]]]:
+    ) -> torch.Tensor:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -499,7 +482,6 @@ class BartEncoder(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  lora_config: Optional[LoRAConfig] = None,
                  embed_tokens: Optional[nn.Embedding] = None):
-        #super().__init__(config)
         super().__init__()
 
         self.cache_config = cache_config
@@ -527,12 +509,6 @@ class BartEncoder(nn.Module):
              for _ in range(config.encoder_layers)])
 
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
-
-    def get_input_embeddings(self):
-        return self.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.embed_tokens = value
 
     def forward(self, input_ids: torch.Tensor, kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
@@ -625,12 +601,6 @@ class BartDecoder(nn.Module):
 
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
 
-    def get_input_embeddings(self):
-        return self.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.embed_tokens = value
-
     def forward(self, decoder_input_ids: torch.Tensor,
                 encoder_hidden_states: Optional[torch.Tensor],
                 kv_caches: List[torch.Tensor],
@@ -714,19 +684,6 @@ class BartModel(nn.Module):
                                    cache_config,
                                    quant_config=quant_config)
 
-    def _tie_weights(self):
-        if self.config.tie_word_embeddings:
-            self._tie_or_clone_weights(self.encoder.embed_tokens, self.shared)
-            self._tie_or_clone_weights(self.decoder.embed_tokens, self.shared)
-
-    def get_input_embeddings(self):
-        return self.shared
-
-    def set_input_embeddings(self, value):
-        self.shared = value
-        self.encoder.embed_tokens = self.shared
-        self.decoder.embed_tokens = self.shared
-
     def get_encoder(self):
         return self.encoder
 
@@ -737,7 +694,7 @@ class BartModel(nn.Module):
             self, input_ids: torch.Tensor, positions: torch.Tensor,
             encoder_input_ids: torch.Tensor, encoder_positions: torch.Tensor,
             kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata
-    ) -> Union[Tuple, Seq2SeqModelOutput]:
+    ) -> torch.Tensor:
 
         encoder_hidden_states = None
 
@@ -761,10 +718,6 @@ class BartModel(nn.Module):
 
 class BartForConditionalGeneration(nn.Module):
     base_model_prefix = "model"
-    _tied_weights_keys = [
-        "encoder.embed_tokens.weight", "decoder.embed_tokens.weight",
-        "lm_head.weight"
-    ]
 
     def __init__(self,
                  config: BartConfig,
@@ -789,42 +742,11 @@ class BartForConditionalGeneration(nn.Module):
                                                 config.vocab_size)
         self.sampler = Sampler()
 
-    def get_encoder(self):
-        return self.model.get_encoder()
-
-    def get_decoder(self):
-        return self.model.get_decoder()
-
-    def resize_token_embeddings(
-            self,
-            new_num_tokens: int,
-            pad_to_multiple_of: Optional[int] = None) -> nn.Embedding:
-        new_embeddings = super().resize_token_embeddings(
-            new_num_tokens, pad_to_multiple_of)
-        self._resize_final_logits_bias(new_embeddings.weight.shape[0])
-        return new_embeddings
-
-    def _resize_final_logits_bias(self, new_num_tokens: int) -> None:
-        old_num_tokens = self.final_logits_bias.shape[-1]
-        if new_num_tokens <= old_num_tokens:
-            new_bias = self.final_logits_bias[:, :new_num_tokens]
-        else:
-            extra_bias = torch.zeros((1, new_num_tokens - old_num_tokens),
-                                     device=self.final_logits_bias.device)
-            new_bias = torch.cat([self.final_logits_bias, extra_bias], dim=1)
-        self.register_buffer("final_logits_bias", new_bias)
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
     def forward(
             self, input_ids: torch.Tensor, positions: torch.Tensor,
             encoder_input_ids: torch.Tensor, encoder_positions: torch.Tensor,
             kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata) -> Union[Tuple, Seq2SeqLMOutput]:
+            attn_metadata: AttentionMetadata) -> torch.Tensor:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`,
             *optional*): Labels for computing the masked language modeling
@@ -835,6 +757,7 @@ class BartForConditionalGeneration(nn.Module):
             tokens with labels in `[0, ..., config.vocab_size]`.
 
         Returns:
+            torch.Tensor inference result
         """
         hidden_states = self.model(input_ids, positions, encoder_input_ids,
                                    encoder_positions, kv_caches, attn_metadata)
@@ -853,6 +776,27 @@ class BartForConditionalGeneration(nn.Module):
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
+
+    stacked_params_mapping = {
+        "query": {
+            "param_name": "qkv_proj",
+            "shard_id": "q",
+        },
+        "key": {
+            "param_name": "qkv_proj",
+            "shard_id": "k",
+        },
+        "value": {
+            "param_name": "qkv_proj",
+            "shard_id": "v",
+        },
+    }
+
+    params_mapping = {
+        "beta": "bias",
+        "gamma": "weight",
+        "LayerNorm": "layernorm",
+    }
 
     def _rename_key(self, key: str):
         prefix = f"{self.base_model_prefix}."
@@ -879,8 +823,6 @@ class BartForConditionalGeneration(nn.Module):
         top_params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in weights:
-            # if 'shared.weight' in name:
-            #     continue
 
             name = self._rename_key(name)
             name, shard_id = self._rename_stacked_param(name)
