@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+import dataclasses
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
@@ -15,7 +15,7 @@ from vllm.worker.model_runner import GPUModelRunnerBase, ModelInputForGPU
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
     """
     Used by the EmbeddingModelRunner.
@@ -117,7 +117,8 @@ class EmbeddingModelRunner(
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
                                                  model_input.seq_lens)
 
-        return model_input.replace(pooling_metadata=pooling_metadata)
+        return dataclasses.replace(model_input,
+                                   pooling_metadata=pooling_metadata)
 
     def _prepare_pooling(
         self,
