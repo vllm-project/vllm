@@ -277,7 +277,6 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             assert seq_group_metadata_list is not None
             num_seq_groups: int = len(seq_group_metadata_list)
             assert execute_model_req is not None
-            blocks_to_copy = execute_model_req.blocks_to_copy
             blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                           device="cpu",
                                           dtype=torch.int64).view(-1, 2)
