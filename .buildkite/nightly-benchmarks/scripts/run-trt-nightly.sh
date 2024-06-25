@@ -122,6 +122,7 @@ run_trt_server() {
     --output_dir=${trt_engine_path} 
 
   cd /tensorrtllm_backend/triton_model_repo
+  rm -rf ./tensorrt_llm/1/*
   cp -r ${trt_engine_path}/* ./tensorrt_llm/1
   cd /tensorrtllm_backend
   python3 scripts/launch_triton_server.py \
@@ -235,6 +236,7 @@ run_serving_tests() {
 
     # clean up
     kill_gpu_processes
+    rm -rf /root/.cache/huggingface/*
   done
 }
 

@@ -165,6 +165,7 @@ run_serving_tests() {
 
     # clean up
     kill_gpu_processes
+    rm -rf /root/.cache/huggingface/*
   done
 }
 
