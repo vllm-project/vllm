@@ -1,8 +1,7 @@
 import gc
 import time
 import warnings
-from collections import defaultdict
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import Dict, List, Mapping, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -22,7 +21,8 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+                             MultiModalInputs)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
@@ -49,7 +49,7 @@ class ModelInput(NamedTuple):
     query_lens: List[int]
     lora_mapping: Optional[LoRAMapping]
     lora_requests: Set[LoRARequest]
-    multi_modal_kwargs: Dict[str, torch.Tensor]
+    multi_modal_kwargs: Mapping[str, BatchedTensors]
     slot_mapping: torch.Tensor
     num_prefill_tokens: int
     num_decode_tokens: int
@@ -265,8 +265,7 @@ class ModelRunner:
         context_lens: List[int] = []
         query_lens: List[int] = []
         block_tables: List[List[int]] = []
-        multi_modal_kwargs_list: Dict[str,
-                                      List[torch.Tensor]] = defaultdict(list)
+        multi_modal_inputs_list: List[MultiModalInputs] = []
         decode_only = True
         num_prefills = 0
         num_prefill_tokens = 0
@@ -445,8 +444,7 @@ class ModelRunner:
                 if mm_data is not None:
                     # Process multi-modal data
                     mm_kwargs = self.multi_modal_input_mapper(mm_data)
-                    for k, v in mm_kwargs.items():
-                        multi_modal_kwargs_list[k].append(v)
+                    multi_modal_inputs_list.append(mm_kwargs)
 
                 if _is_block_tables_empty(seq_group_metadata.block_tables):
                     # During memory profiling, the block tables are not
@@ -631,10 +629,8 @@ class ModelRunner:
         else:
             lora_mapping = None
 
-        multi_modal_kwargs = {
-            k: torch.cat(v, dim=0).to(self.device)
-            for k, v in multi_modal_kwargs_list.items()
-        }
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
+                                                    device=self.device)
 
         return ModelInput(
             input_tokens=input_tokens_tensor,
@@ -655,7 +651,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
+               Set[LoRARequest], LoRAMapping, Mapping[str, BatchedTensors]]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.

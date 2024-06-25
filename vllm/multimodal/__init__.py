@@ -1,4 +1,5 @@
-from .base import MultiModalData, MultiModalPlugin
+from .base import (BatchedTensors, MultiModalData, MultiModalInputs,
+                   MultiModalPlugin)
 from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
@@ -8,6 +9,6 @@ dispatch data processing according to its modality and the target model.
 """
 
 __all__ = [
-    "MultiModalData", "MultiModalPlugin", "MULTIMODAL_REGISTRY",
-    "MultiModalRegistry"
+    "BatchedTensors", "MultiModalData", "MultiModalInputs", "MultiModalPlugin",
+    "MULTIMODAL_REGISTRY", "MultiModalRegistry"
 ]

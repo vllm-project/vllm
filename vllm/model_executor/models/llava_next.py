@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Callable, Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
@@ -20,14 +20,14 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
+from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensors, MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SamplerOutput
 
 from .clip import (dummy_feature_data_for_clip, dummy_pixel_data_for_clip,
                    dummy_seq_data_for_clip, get_clip_patch_grid_length,
                    input_processor_for_clip)
-from .llava import LlavaMultiModalProjector, merge_vision_embeddings
+from .llava import LlavaMultiModalProjector
 from .vlm_base import VisionLanguageModelBase
 
 logger = init_logger(__name__)
@@ -40,11 +40,15 @@ _KEYS_TO_MODIFY_MAPPING = {
 
 class LlavaNextImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, 1 + num_patches, num_channels, height, width)"""
+    data: BatchedTensors
+    """
+    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
+
+    Note that `num_patches` may be different for each batch.
+    """
 
     image_sizes: NotRequired[torch.Tensor]
-    """Shape: (batch_size, 2)"""
+    """Shape: `(batch_size, 2)`"""
 
 
 def _get_llava_next_num_unpadded_features(
@@ -228,24 +232,6 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
 
-    def _validate_image_pixels(self, data: torch.Tensor) -> torch.Tensor:
-        _, num_channels, _, _ = self.vision_language_config.image_input_shape
-
-        # Note that this is different from that of vLLM vision_language_config
-        # since the image is resized by the HuggingFace preprocessor
-        height = width = self.config.vision_config.image_size
-
-        if list(data.shape[2:]) != [num_channels, height, width]:
-            raise ValueError(
-                f"The expected image tensor shape is batch dimension plus "
-                f"num_patches plus {[num_channels, height, width]}. "
-                f"You supplied {data.shape}. "
-                f"If you are using vLLM's entrypoint, make sure your "
-                f"supplied image input is consistent with "
-                f"image_input_shape in engine args.")
-
-        return data
-
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         if list(data.shape[1:]) != [2]:
             raise ValueError(
@@ -266,7 +252,7 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
             if pixel_values is None:
                 return None
 
-            if not isinstance(pixel_values, torch.Tensor):
+            if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
@@ -276,7 +262,7 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_image_pixels(pixel_values),
+                data=pixel_values,
                 image_sizes=self._validate_image_sizes(image_sizes),
             )
 
@@ -330,20 +316,20 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
                 other_patch_embeds = patch_embeddings[1:]
 
                 # image_aspect_ratio == "anyres"
-                num_patch_width, num_patch_height = get_anyres_image_grid_shape(
-                    (orig_width, orig_height),
+                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+                    (orig_height, orig_width),
                     self.config.image_grid_pinpoints,
                     self.config.vision_config.image_size,
                 )
                 other_patch_embeds = other_patch_embeds \
-                    .view(num_patch_width, num_patch_height, height, width, -1)
+                    .view(num_patch_height, num_patch_width, height, width, -1)
 
                 if "unpad" in strategy:
                     other_patch_embeds = other_patch_embeds \
                         .permute(4, 0, 2, 1, 3).contiguous() \
                         .flatten(1, 2).flatten(2, 3)
                     other_patch_embeds = unpad_image(other_patch_embeds,
-                                                     image_size)
+                                                     (orig_height, orig_width))
                     other_patch_embeds = torch.cat((
                         other_patch_embeds,
                         self.image_newline[:, None, None] \
@@ -374,42 +360,54 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         raise ValueError(f"Unexpected patch merge strategy: {strategy}")
 
     def _process_image_pixels(
-            self, inputs: LlavaNextImagePixelInputs) -> torch.Tensor:
+        self,
+        inputs: LlavaNextImagePixelInputs,
+        proj: Callable[[torch.Tensor], torch.Tensor],
+    ) -> BatchedTensors:
         assert self.vision_tower is not None
 
         pixel_values = inputs["data"]
 
-        b, num_patches, c, h, w = pixel_values.shape
-        stacked_pixel_values = pixel_values.view(b * num_patches, c, h, w)
+        if isinstance(pixel_values, torch.Tensor):
+            b, num_patches, c, h, w = pixel_values.shape
+            stacked_pixel_values = pixel_values.view(b * num_patches, c, h, w)
+            stacked_image_features = self._image_pixels_to_features(
+                self.vision_tower, stacked_pixel_values)
+            stacked_patch_embeddings = proj(stacked_image_features)
 
+            return stacked_patch_embeddings.view(b, num_patches,
+                                                 *stacked_patch_embeddings.shape[1:])
+
+        num_patches_per_batch = [v.shape[0] for v in pixel_values]
+        stacked_pixel_values = torch.cat(pixel_values)
         stacked_image_features = self._image_pixels_to_features(
             self.vision_tower, stacked_pixel_values)
 
-        return stacked_image_features.view(b, num_patches,
-                                           *stacked_image_features.shape[-2:])
+        return [
+            proj(image_features)
+            for image_features in torch.split(stacked_image_features,
+                                              num_patches_per_batch)
+        ]
 
     def _process_image_input(
-            self, image_input: LlavaNextImagePixelInputs) -> torch.Tensor:
-        image_features = self._process_image_pixels(image_input)
-
-        patch_embeddings = self.multi_modal_projector(image_features)
+            self, image_input: LlavaNextImagePixelInputs) -> BatchedTensors:
+        patch_embeddings = self._process_image_pixels(image_input,
+                                                      proj=self.multi_modal_projector)
 
         image_sizes = image_input.get("image_sizes")
         if image_sizes is None:
-            batch_size = image_input["data"].shape[0]
+            batch_size = len(image_input["data"])
             vision_config = self.config.vision_config
             default_width = default_height = vision_config.image_size
             image_sizes = torch.as_tensor([[default_width, default_height]
                                            for _ in range(batch_size)])
 
-        merged_patch_embeddings = [
+        return [
             self._merge_image_patch_embeddings(image_sizes[i],
-                                               patch_features,
+                                               patch_features_batch,
                                                strategy="spatial_unpad")
-            for i, patch_features in enumerate(patch_embeddings)
+            for i, patch_features_batch in enumerate(patch_embeddings)
         ]
-
-        return torch.stack(merged_patch_embeddings, dim=0)
 
     def forward(
         self,
@@ -459,7 +457,7 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = merge_vision_embeddings(
+            inputs_embeds = self.merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.vision_language_config.image_token_id)
 

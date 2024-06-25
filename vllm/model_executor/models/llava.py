@@ -53,34 +53,16 @@ class LlavaMultiModalProjector(nn.Module):
         return hidden_states
 
 
-def merge_vision_embeddings(input_ids: torch.Tensor,
-                            inputs_embeds: torch.Tensor,
-                            vision_embeddings: torch.Tensor,
-                            image_token_id: int) -> torch.Tensor:
-    """In place merges in vision_embeddings with inputs_embeds."""
-    mask = (input_ids == image_token_id)
-
-    image_feature_size = vision_embeddings.shape[0] * vision_embeddings.shape[1]
-    if mask.sum() != image_feature_size:
-        raise ValueError(f"image_feature_size should be {image_feature_size}, "
-                         f"but found: {mask.sum()}")
-
-    inputs_embeds[mask] = vision_embeddings.view(image_feature_size,
-                                                 vision_embeddings.shape[-1])
-
-    return inputs_embeds
-
-
 class LlavaImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: (batch_size, num_channels, height, width)"""
+    """Shape: `(batch_size, num_channels, height, width)`"""
 
 
 class LlavaImageFeatureInputs(TypedDict):
     type: Literal["image_features"]
     data: torch.Tensor
-    """Shape: (batch_size, image_feature_size, hidden_size)"""
+    """Shape: `(batch_size, image_feature_size, hidden_size)`"""
 
 
 LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
@@ -325,7 +307,7 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = merge_vision_embeddings(
+            inputs_embeds = self.merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.vision_language_config.image_token_id)
 

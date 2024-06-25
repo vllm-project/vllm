@@ -33,7 +33,7 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensors
 from vllm.multimodal.image import (ImageFeatureData, ImagePixelData,
                                    cached_get_tokenizer)
 from vllm.sequence import SamplerOutput
@@ -267,11 +267,15 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
 class Phi3VImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, 1 + num_patches, num_channels, height, width)"""
+    data: BatchedTensors
+    """
+    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
+
+    Note that `num_patches` may be different for each batch.
+    """
 
     image_sizes: torch.Tensor
-    """Shape: (batch_size, 2)"""
+    """Shape: `(batch_size, 2)`"""
 
 
 def _get_phi3v_image_feature_size(
@@ -441,7 +445,7 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
             if pixel_values is None:
                 return None
 
-            if not isinstance(pixel_values, torch.Tensor):
+            if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 

@@ -1,14 +1,15 @@
 from abc import ABC, abstractmethod
-from typing import (TYPE_CHECKING, Callable, Dict, Generic, Optional, Type,
-                    TypeVar)
+from collections import UserDict, defaultdict
+from typing import (Callable, Dict, Generic, List, Optional, Type, TypeVar,
+                    Union)
+
+import torch
+import torch.types
+from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-
-if TYPE_CHECKING:
-    import torch
-    from torch import nn
 
 logger = init_logger(__name__)
 
@@ -30,10 +31,65 @@ class MultiModalData:
     pass
 
 
-D = TypeVar("D", bound=MultiModalData)
-N = TypeVar("N", bound=Type["nn.Module"])
+BatchedTensors = Union[torch.Tensor, List[torch.Tensor]]
+"""
+If each input tensor in the batch has the same size, this is a single batched
+tensor; otherwise, this is a list of tensors with one element per batch.
+"""
 
-MultiModalInputMapper = Callable[[InputContext, D], Dict[str, "torch.Tensor"]]
+
+class MultiModalInputs(UserDict[str, torch.Tensor]):
+    """
+    A dictionary that represents the keyword arguments to
+    :meth:`~torch.nn.Module.forward`.
+    """
+
+    @staticmethod
+    def try_concat(
+        tensors: List[torch.Tensor],
+        *,
+        device: torch.types.Device,
+    ) -> BatchedTensors:
+        unbatched_shape = tensors[0].shape[1:]
+
+        for tensor in tensors:
+            if tensor.shape[1:] != unbatched_shape:
+                return [tensor.squeeze(0).to(device=device)
+                        for tensor in tensors]
+
+        return torch.cat(tensors, dim=0).to(device=device)
+
+    @staticmethod
+    def batch(
+        inputs_list: List["MultiModalInputs"],
+        device: torch.types.Device,
+    ) -> Dict[str, BatchedTensors]:
+        """Batch multiple inputs together into a dictionary."""
+        if len(inputs_list) == 0:
+            return {}
+
+        keys = inputs_list[0].keys()
+
+        item_lists: Dict[str, List[torch.Tensor]] = defaultdict(list)
+
+        for inputs in inputs_list:
+            if inputs.keys() != keys:
+                msg = f"Inputs do not share the same keys ({keys})"
+                raise ValueError(msg)
+
+            for k, v in inputs.items():
+                item_lists[k].append(v)
+
+        return {
+            k: MultiModalInputs.try_concat(item_list, device=device)
+            for k, item_list in item_lists.items()
+        }
+
+
+D = TypeVar("D", bound=MultiModalData)
+N = TypeVar("N", bound=Type[nn.Module])
+
+MultiModalInputMapper = Callable[[InputContext, D], MultiModalInputs]
 """Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
 and processors in HuggingFace Transformers."""
@@ -51,7 +107,7 @@ class MultiModalPlugin(ABC, Generic[D]):
     """
 
     def __init__(self) -> None:
-        self._input_mappers: Dict[Type["nn.Module"],
+        self._input_mappers: Dict[Type[nn.Module],
                                   MultiModalInputMapper[D]] = {}
 
     @abstractmethod
@@ -64,7 +120,7 @@ class MultiModalPlugin(ABC, Generic[D]):
 
     @abstractmethod
     def _default_input_mapper(self, ctx: InputContext,
-                              data: D) -> Dict[str, "torch.Tensor"]:
+                              data: D) -> MultiModalInputs:
         """Return a dictionary to be passed as keyword arguments to
         :meth:`~torch.nn.Module.forward`. This is similar in concept to
         tokenizers and processors in HuggingFace Transformers.
@@ -99,7 +155,7 @@ class MultiModalPlugin(ABC, Generic[D]):
         return wrapper
 
     def map_input(self, model_config: ModelConfig,
-                  data: D) -> Dict[str, "torch.Tensor"]:
+                  data: D) -> MultiModalInputs:
         """
         Apply an input mapper to a :class:`~MultiModalData` instance passed
         to the model, transforming the data into a dictionary of model inputs.

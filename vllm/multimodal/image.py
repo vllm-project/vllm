@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import List, Optional, Tuple, Type, TypeVar, Union
 
 import torch
 from PIL import Image
@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from .base import MultiModalData, MultiModalPlugin
+from .base import MultiModalData, MultiModalInputs, MultiModalPlugin
 
 logger = init_logger(__name__)
 
@@ -130,7 +130,7 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
         )
 
     def _default_input_mapper(self, ctx: InputContext,
-                              data: ImagePixelData) -> Dict[str, torch.Tensor]:
+                              data: ImagePixelData) -> MultiModalInputs:
         model_config = ctx.model_config
         image = data.image
 
@@ -140,15 +140,18 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
                 raise RuntimeError("No HuggingFace processor is available"
                                    "to process the image object")
             try:
-                return image_processor.preprocess(image, return_tensors="pt") \
+                batch_data = image_processor \
+                    .preprocess(image, return_tensors="pt") \
                     .to(model_config.dtype).data
             except Exception:
                 logger.error("Failed to process image (%s)", image)
                 raise
+
+            return MultiModalInputs(batch_data)
         elif isinstance(image, torch.Tensor):
             pixel_values = image.to(model_config.dtype)
 
-            return {"pixel_values": pixel_values}
+            return MultiModalInputs({"pixel_values": pixel_values})
 
         raise TypeError(f"Invalid image type: {type(image)}")
 
@@ -175,10 +178,9 @@ class ImageFeaturePlugin(MultiModalPlugin[ImageFeatureData]):
     def get_data_type(self) -> Type[ImageFeatureData]:
         return ImageFeatureData
 
-    def _default_input_mapper(
-            self, ctx: InputContext,
-            data: ImageFeatureData) -> Dict[str, torch.Tensor]:
+    def _default_input_mapper(self, ctx: InputContext,
+                              data: ImageFeatureData) -> MultiModalInputs:
         model_config = ctx.model_config
         image_features = data.image_features.to(model_config.dtype)
 
-        return {"image_features": image_features}
+        return MultiModalInputs({"image_features": image_features})

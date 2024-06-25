@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Mapping, Optional, Set, Tuple
 
 import torch
 
@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.multimodal import BatchedTensors
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
@@ -90,7 +91,7 @@ class EmbeddingModelRunner(ModelRunner):
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
-               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
+               Set[LoRARequest], LoRAMapping, Mapping[str, BatchedTensors]]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
