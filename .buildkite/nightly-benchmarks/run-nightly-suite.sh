@@ -50,6 +50,7 @@ main() {
         return 0
     else
         /workspace/buildkite-agent annotate --style "info" --context "header" < /vllm/.buildkite/nightly-benchmarks/nightly-descriptions.md
+        /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" --append < /vllm/.buildkite/nightly-benchmarks/nightly-results-header.md
     fi
     
 

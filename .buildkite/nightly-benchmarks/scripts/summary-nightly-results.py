@@ -55,17 +55,20 @@ if __name__ == "__main__":
             serving_column_mapping.keys())].rename(
                 columns=serving_column_mapping)
 
-    serving_md_table = tabulate(serving_results,
+    serving_md_table_with_headers = tabulate(serving_results,
                                 headers='keys',
                                 tablefmt='pipe',
                                 showindex=False)
+    # remove the first line of header
+    serving_md_table_lines = serving_md_table_with_headers.split('\n')
+    serving_md_table_without_header = '\n'.join(serving_md_table_lines[2:])
 
     prefix = os.environ.get("CURRENT_LLM_SERVING_ENGINE")
 
     # document benchmarking results in markdown
     with open(results_folder / f"{prefix}_nightly_results.md", "w") as f:
-        f.write(serving_md_table)
-        f.write('\n\n')
+        f.write(serving_md_table_without_header)
+        f.write('\n')
 
     # document benchmarking results in json
     with open(results_folder / f"{prefix}_nightly_results.json", "w") as f:
