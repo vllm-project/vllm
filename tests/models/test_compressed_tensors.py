@@ -16,6 +16,7 @@ MODELS = [
 MAX_TOKENS = 32
 NUM_LOGPROBS = 5
 
+
 # @pytest.mark.flaky(reruns=3)
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(
@@ -31,7 +32,7 @@ def test_models(
         sparseml_outputs = sparseml_model.generate_greedy_logprobs_limit(
             example_prompts, MAX_TOKENS, NUM_LOGPROBS)
 
-    # Run vllm. 
+    # Run vllm.
     with vllm_runner(model_name=model_name) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, MAX_TOKENS, NUM_LOGPROBS)

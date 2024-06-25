@@ -359,7 +359,7 @@ class HfRunner:
         outputs = zip(all_output_ids, all_output_strs, all_logprobs)
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
-    
+
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         return self.model.encode(prompts)
 
