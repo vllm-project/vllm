@@ -1,0 +1,62 @@
+steps:
+  - label: "Wait for container to be ready"
+    agents:
+      queue: A100
+    plugins:
+    - kubernetes:
+        podSpec:
+          containers:
+          - image: badouralix/curl-jq
+            command:
+            - sh
+            - .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
+  - wait
+  - label: "A100 Benchmark"
+    agents:
+      queue: A100
+    plugins:
+    - kubernetes:
+        podSpec:
+          priorityClassName: perf-benchmark
+          containers:
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+            command:
+            - bash .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+            volumeMounts:
+            - name: devshm
+              mountPath: /dev/shm
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+          volumes:
+          - name: devshm
+            emptyDir:
+              medium: Memory
+  # - label: "H100: NVIDIA SMI"
+  #   agents:
+  #     queue: H100
+  #   plugins:
+  #   - docker#v5.11.0:
+  #       image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+  #       command:
+  #       - bash
+  #       - .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
+  #       mount-buildkite-agent: true
+  #       propagate-environment: true
+  #       propagate-uid-gid: false
+  #       ipc: host
+  #       gpus: all
+  #       environment:
+  #       - VLLM_USAGE_SOURCE
+  #       - HF_TOKEN
+

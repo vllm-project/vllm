@@ -8,7 +8,8 @@ from vllm.logger import init_logger
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA)
+    MergedQKVParallelLinearWithShardedLora, QKVParallelLinearWithShardedLora,
+    RowParallelLinearWithShardedLoRA)
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -35,6 +36,7 @@ _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
     RowParallelLinearWithLoRA,
     LogitsProcessorWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    QKVParallelLinearWithShardedLora,
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithShardedLora,
     RowParallelLinearWithShardedLoRA,

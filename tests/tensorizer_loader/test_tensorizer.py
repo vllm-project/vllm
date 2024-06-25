@@ -22,9 +22,10 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          tensorize_vllm_model)
 
 from ..conftest import VllmRunner, cleanup
-from ..utils import ServerRunner
+from ..utils import RemoteOpenAIServer
 
 # yapf conflicts with isort for this docstring
+
 
 
 prompts = [
@@ -216,18 +217,13 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
     openai_args = [
         "--model", model_ref, "--dtype", "float16", "--load-format",
         "tensorizer", "--model-loader-extra-config",
-        json.dumps(model_loader_extra_config), "--port", "8000"
+        json.dumps(model_loader_extra_config),
     ]
 
-    server = ServerRunner.remote(openai_args)
-
-    assert ray.get(server.ready.remote())
+    server = RemoteOpenAIServer(openai_args)
     print("Server ready.")
 
-    client = openai.OpenAI(
-        base_url="http://localhost:8000/v1",
-        api_key="token-abc123",
-    )
+    client = server.get_client()
     completion = client.completions.create(model=model_ref,
                                            prompt="Hello, my name is",
                                            max_tokens=5,

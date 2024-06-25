@@ -260,7 +260,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # at max extend.
         if self.enable_caching:
             block_table = self.block_tables[seq.seq_id]
-            block_ids = []
+            block_ids: List[Optional[int]] = []
             for block_id in block_table.physical_block_ids:
                 block_ids.append(block_id)
             self.block_allocator.mark_blocks_as_accessed(

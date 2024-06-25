@@ -133,7 +133,7 @@ Alongside each architecture, we include some popular models that use it.
     - ✅︎
   * - :code:`Phi3ForCausalLM`
     - Phi-3
-    - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, etc.
+    - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, :code:`microsoft/Phi-3-medium-128k-instruct`, etc.
     -
   * - :code:`Phi3SmallForCausalLM`
     - Phi-3-Small
@@ -143,6 +143,10 @@ Alongside each architecture, we include some popular models that use it.
     - Persimmon
     - :code:`adept/persimmon-8b-base`, :code:`adept/persimmon-8b-chat`, etc.
     - 
+  * - :code:`Phi3VForCausalLM`
+    - Phi-3-Vision
+    - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
+    -
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
