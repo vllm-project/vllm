@@ -194,21 +194,20 @@ class HabanaAttentionImpl(AttentionImpl):
                                                       value_cache,
                                                       attn_metadata.slot_mapping,
                                                       self.kv_cache_dtype,
-                                                      attn_metadata.prefill_metadata is not None)
+                                                      attn_metadata.num_prefills > 0)
 
         if attn_metadata.num_prefills > 0:
-            prefill_meta = attn_metadata
             # Prompt run.
-            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
+            if kv_cache is None or attn_metadata.block_tables.numel() == 0:
                 # TODO: move this outside of model
-                assert prefill_meta.attn_bias is not None, 'attn_bias must be set before calling model.forward!'
+                assert attn_metadata.attn_bias is not None, 'attn_bias must be set before calling model.forward!'
                 query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
                 kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
                 out = xops.prompt_attention(
                     query.view(query_shape),
                     key.view(kv_shape),
                     value.view(kv_shape),
-                    attn_bias=prefill_meta.attn_bias,
+                    attn_bias=attn_metadata.attn_bias,
                     p=0.0,
                     scale=self.scale,
                 )
@@ -221,22 +220,21 @@ class HabanaAttentionImpl(AttentionImpl):
                     value,
                     key_cache,
                     value_cache,
-                    prefill_meta.block_tables,
-                    prefill_meta.subquery_start_loc,
-                    prefill_meta.seq_lens_tensor,
-                    prefill_meta.context_lens_tensor,
-                    prefill_meta.max_query_len,
+                    attn_metadata.block_tables,
+                    attn_metadata.subquery_start_loc,
+                    attn_metadata.seq_lens_tensor,
+                    attn_metadata.context_lens_tensor,
+                    attn_metadata.max_query_len,
                     self.alibi_slopes,
                 )
         if attn_metadata.num_decode_tokens > 0:
-            decode_meta = attn_metadata
             # Decoding run.
             output = HabanaPagedAttention.forward_decode(
                 query,
                 key_cache,
                 value_cache,
-                decode_meta.block_tables,
-                decode_meta.seq_lens_tensor,
+                attn_metadata.block_tables,
+                attn_metadata.seq_lens_tensor,
                 self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
