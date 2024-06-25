@@ -274,17 +274,35 @@ class Phi3VImagePixelInputs(TypedDict):
     """Shape: (batch_size, 2)"""
 
 
+def _get_phi3v_image_feature_size(
+    *,
+    input_height: int,
+    input_width: int,
+) -> int:
+    h, w = input_height, input_width
+
+    # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L178
+    return (h // 336 * w // 336 + 1) * 144 + 1 + (h // 336 + 1) * 12
+
+
 def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
+    # TODO: How to get the max possible feature size?
+    dummy_height, dummy_width = 1344, 1008
+    image_feature_size = _get_phi3v_image_feature_size(
+        input_height=dummy_height,
+        input_width=dummy_width,
+    )
+
     seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
         image_token_id=32044,
-        image_feature_size_override=1921,
+        image_feature_size_override=image_feature_size,
     )
     mm_data = dummy_pixel_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-        image_width_override=1344,
-        image_height_override=1008,
+        image_width_override=dummy_width,
+        image_height_override=dummy_height,
     )
 
     return seq_data, mm_data
@@ -322,17 +340,6 @@ def _calc_hd_transform_size(width, height, hd_num=16):
         padded_width, padded_height = padded_height, padded_width
 
     return padded_width, padded_height
-
-
-def _get_phi3v_image_feature_size(
-    *,
-    input_height: int,
-    input_width: int,
-) -> int:
-    h, w = input_height, input_width
-
-    # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L178
-    return (h // 336 * w // 336 + 1) * 144 + 1 + (h // 336 + 1) * 12
 
 
 def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
