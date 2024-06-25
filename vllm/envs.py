@@ -216,7 +216,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # default is 4GB
     "VLLM_OPENVINO_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "0")),
-    
+
     # OpenVINO KV cache precision
     # default is bf16 if natively supported by platform, otherwise f16
     "VLLM_OPENVINO_CPU_KV_CACHE_PRECISION":
