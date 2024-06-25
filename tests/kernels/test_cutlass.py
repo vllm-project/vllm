@@ -254,7 +254,8 @@ def test_cutlass_int8_azp():
     baseline_dq = torch.mm(a_dq, b_dq).to(out_dtype)
 
     J = torch.ones((1, k), device="cuda", dtype=torch.float32)
-    azp_bias = azp_a * scale_b * (J @ bq_f32).to(dtype=torch.float32)
+    azp_bias = (azp_a * scale_b *
+                (J @ bq_f32).to(dtype=torch.float32)).to(out_dtype)
     assert azp_bias.shape == (1, n)
     assert azp_bias[0, :].shape == (n,)
 
