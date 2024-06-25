@@ -54,12 +54,15 @@ wait_for_server() {
 run_trt_server() {
 
   params=$1
+  common_params=$2
 
-  model_name=$(echo "$params" | jq -r '.model_name')
-  model_path=$(echo "$params" | jq -r '.model_path')
+
+
+  model_path=$(echo "$common_params" | jq -r '.model')
+  model_name="${model_path#*/}"
   model_type=$(echo "$params" | jq -r '.model_type')
   model_dtype=$(echo "$params" | jq -r '.model_dtype')
-  model_tp_size=$(echo "$params" | jq -r '.model_tp_size')
+  model_tp_size=$(echo "$common_params" | jq -r '.tp')
   max_batch_size=$(echo "$params" | jq -r '.max_batch_size')
   max_input_len=$(echo "$params" | jq -r '.max_input_len')
   max_output_len=$(echo "$params" | jq -r '.max_output_len')
@@ -141,26 +144,34 @@ run_serving_tests() {
   jq -c '.[]' "$serving_test_file" | while read -r params; do
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
-    # append trt to the test name
-    test_name=trt_$test_name
-
+    
     # if TEST_SELECTOR is set, only run the test cases that match the selector
     if [[ -n "$TEST_SELECTOR" ]] && [[ ! "$test_name" =~ $TEST_SELECTOR ]]; then
       echo "Skip test case $test_name."
       continue
     fi
 
+    # append trt to the test name
+    test_name=trt_$test_name
+
+    # get common parameters
+    common_params=$(echo "$params" | jq -r '.common_parameters')
+    model=$(echo "$common_params" | jq -r '.model')
+    tp=$(echo "$common_params" | jq -r '.tensor_parallel_size')
+    dataset_name=$(echo "$common_params" | jq -r '.dataset_name')
+    dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
+    port=$(echo "$common_params" | jq -r '.port')
+    num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
+
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.trt_server_parameters')
     client_params=$(echo "$params" | jq -r '.trt_client_parameters')
-    model=$(echo "$client_params" | jq -r '.model')
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
     echo "Running over qps list $qps_list"
 
     # check if there is enough GPU to run the test
-    tp=$(echo "$server_params" | jq -r '.model_tp_size')
     if [[ $gpu_count -lt $tp ]]; then
       echo "Required model_tp_size $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
@@ -178,7 +189,7 @@ run_serving_tests() {
 
     # run the server
     echo "Running test case $test_name"
-    run_trt_server "$server_params"
+    run_trt_server "$server_params" "$common_params"
 
     # wait until the server is alive
     wait_for_server
@@ -188,6 +199,7 @@ run_serving_tests() {
     else
       echo ""
       echo "trt failed to start within the timeout period."
+      continue
     fi
 
     # go back to vllm benchmarking directory
@@ -207,6 +219,11 @@ run_serving_tests() {
       client_command="python3 benchmark_serving.py \
         --backend tensorrt-llm \
         --tokenizer /tokenizer_cache \
+        --model $model \
+        --dataset-name $dataset_name \
+        --dataset-path $dataset_path \
+        --num-prompts $num_prompts \
+        --port $port \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \
@@ -218,6 +235,7 @@ run_serving_tests() {
 
       eval "$client_command"
 
+      server_command=""
       # record the benchmarking commands
       jq_output=$(jq -n \
         --arg server "$server_command" \

@@ -61,14 +61,25 @@ run_serving_tests() {
   jq -c '.[]' "$serving_test_file" | while read -r params; do
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
-    # append tgi to the test name
-    test_name=tgi_$test_name
+    
 
     # if TEST_SELECTOR is set, only run the test cases that match the selector
     if [[ -n "$TEST_SELECTOR" ]] && [[ ! "$test_name" =~ $TEST_SELECTOR ]]; then
       echo "Skip test case $test_name."
       continue
     fi
+
+    # append tgi to the test name
+    test_name=tgi_$test_name
+
+    # get common parameters
+    common_params=$(echo "$params" | jq -r '.common_parameters')
+    model=$(echo "$common_params" | jq -r '.model')
+    tp=$(echo "$common_params" | jq -r '.tensor_parallel_size')
+    dataset_name=$(echo "$common_params" | jq -r '.dataset_name')
+    dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
+    port=$(echo "$common_params" | jq -r '.port')
+    num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
 
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.tgi_server_parameters')
@@ -80,14 +91,17 @@ run_serving_tests() {
     echo "Running over qps list $qps_list"
 
     # check if there is enough GPU to run the test
-    tp=$(echo "$server_params" | jq -r '.num_shard')
     if [[ $gpu_count -lt $tp ]]; then
       echo "Required num-shard $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
     fi
 
 
-    server_command="/tgi-entrypoint.sh $server_args"
+    server_command="/tgi-entrypoint.sh \
+      --model-id $model \
+      --num-shard $tp \
+      --port $port \
+      $server_args"
 
     # run the server
     echo "Running test case $test_name"
@@ -102,6 +116,7 @@ run_serving_tests() {
     else
       echo ""
       echo "tgi failed to start within the timeout period."
+      continue
     fi
 
     # iterate over different QPS
@@ -117,6 +132,11 @@ run_serving_tests() {
 
       client_command="python3 benchmark_serving.py \
         --backend tgi \
+        --model $model \
+        --dataset-name $dataset_name \
+        --dataset-path $dataset_path \
+        --num-prompts $num_prompts \
+        --port $port \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \

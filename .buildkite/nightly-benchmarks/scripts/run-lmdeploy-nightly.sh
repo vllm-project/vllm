@@ -72,13 +72,21 @@ run_serving_tests() {
     
     # append lmdeploy to the test name
     test_name=lmdeploy_$test_name
+    
+    # get common parameters
+    common_params=$(echo "$params" | jq -r '.common_parameters')
+    model=$(echo "$common_params" | jq -r '.model')
+    tp=$(echo "$common_params" | jq -r '.tensor_parallel_size')
+    dataset_name=$(echo "$common_params" | jq -r '.dataset_name')
+    dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
+    port=$(echo "$common_params" | jq -r '.port')
+    num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
 
     
 
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.lmdeploy_server_parameters')
     client_params=$(echo "$params" | jq -r '.lmdeploy_client_parameters')
-    model=$(echo "$params" | jq -r '.lmdeploy_server_model')
     server_args=$(json2args "$server_params")
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
@@ -86,7 +94,6 @@ run_serving_tests() {
     echo "Running over qps list $qps_list"
 
     # check if there is enough GPU to run the test
-    tp=$(echo "$server_params" | jq -r '.tp')
     if [[ $gpu_count -lt $tp ]]; then
       echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
       continue
@@ -99,7 +106,10 @@ run_serving_tests() {
       --model "$model" \
       --cachedir /tokenizer_cache
 
-    server_command="lmdeploy serve api_server $model $server_args"
+    server_command="lmdeploy serve api_server $model \
+      --tp $tp \
+      --server-port $port \
+      $server_args"
 
     # run the server
     echo "Running test case $test_name"
@@ -110,10 +120,11 @@ run_serving_tests() {
     wait_for_server
     if [ $? -eq 0 ]; then
       echo ""
-      echo "vllm server is up and running."
+      echo "lmdeploy server is up and running."
     else
       echo ""
-      echo "vllm failed to start within the timeout period."
+      echo "lmdeploy failed to start within the timeout period."
+      continue
     fi
 
     # get model name
@@ -133,6 +144,10 @@ run_serving_tests() {
       client_command="python3 benchmark_serving.py \
         --backend lmdeploy \
         --tokenizer /tokenizer_cache \
+        --dataset-name $dataset_name \
+        --dataset-path $dataset_path \
+        --num-prompts $num_prompts \
+        --port $port \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \

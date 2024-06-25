@@ -1,62 +1,40 @@
 [
     {
-        "test_name": "llama70B_tp4",
-        "qps_list": [1, 16],
-        "lmdeploy_server_model": "meta-llama/Meta-Llama-3-70B-Instruct",
+        "test_name": "llama8B_tp1",
+        "qps_list": [1, 8],
+        "common_parameters": {
+            "model": "meta-llama/Meta-Llama-3-8B",
+            "tp": 1,
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200,
+            "port": 8000
+        },
         "lmdeploy_server_parameters": {
-            "tp": 4,
-            "server_port": 8000
         },
         "lmdeploy_client_parameters": {
-            "dataset_name": "sharegpt",
-            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 200,
-            "port": 8000
         },
         "tgi_server_parameters": {
-            "model_id": "meta-llama/Meta-Llama-3-70B-Instruct",
-            "num_shard": 4,
-            "port": 8000
         },
         "tgi_client_parameters": {
-            "model": "meta-llama/Meta-Llama-3-70B-Instruct",
-            "dataset_name": "sharegpt",
-            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 200,
-            "port": 8000,
             "endpoint": "/generate_stream"
         },
         "trt_server_parameters": {
-            "model_path": "meta-llama/Meta-Llama-3-70B-Instruct",
-            "model_name": "Meta-Llama-3-70B-Instruct",
             "model_type": "llama",
             "model_dtype": "float16",
-            "model_tp_size": 4,
             "max_batch_size": 256,
             "max_input_len": 10000,
             "max_output_len": 10000,
             "trt_llm_version": "r24.04"
         },
         "trt_client_parameters": {
-            "model": "meta-llama/Meta-Llama-3-70B-Instruct",
-            "dataset_name": "sharegpt",
-            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 200,
-            "port": 8000,
             "endpoint": "/v2/models/ensemble/generate_stream"
         },
         "vllm_server_parameters": {
-            "model": "meta-llama/Meta-Llama-3-70B-Instruct",
-            "tensor_parallel_size": 4,
             "disable_log_stats": "",
             "disable_log_requests": ""
         },
         "vllm_client_parameters": {
-            "model": "meta-llama/Meta-Llama-3-70B-Instruct",
-            "backend": "vllm",
-            "dataset_name": "sharegpt",
-            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 200
         }
     }
 ]
