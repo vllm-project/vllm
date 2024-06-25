@@ -8,7 +8,7 @@ import torch
 
 from vllm import SamplingParams
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod, CompressedTensorsW4A16,
+    CompressedTensorsLinearMethod, CompressedTensorsW4N16,
     CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8DynamicToken,
     CompressedTensorsW8A8StaticTensor)
 
@@ -86,7 +86,7 @@ def test_compressed_tensors_w4a16(vllm_runner, w4a16_args):
 
         qkv_proj = layer.self_attn.qkv_proj
         assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-        assert isinstance(qkv_proj.scheme, CompressedTensorsW4A16)
+        assert isinstance(qkv_proj.scheme, CompressedTensorsW4N16)
 
         assert qkv_proj.scheme.strategy == strategy
         assert qkv_proj.scheme.group_size == group
