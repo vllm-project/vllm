@@ -9,8 +9,7 @@ from transformers import CLIPVisionConfig, PreTrainedTokenizerBase
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.model_executor.models.clip import get_clip_num_patches
-from vllm.sequence import SequenceData
+from vllm.model_executor.models.clip import get_clip_image_feature_size
 from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -23,74 +22,8 @@ else:
 
 logger = init_logger(__name__)
 
-_cached_get_image_processor = lru_cache(get_image_processor)
+cached_get_image_processor = lru_cache(get_image_processor)
 _cached_get_tokenizer = lru_cache(get_tokenizer)
-
-
-def get_clip_image_feature_size(hf_config: CLIPVisionConfig) -> int:
-    return get_clip_num_patches(image_size=hf_config.image_size,
-                                patch_size=hf_config.patch_size)
-
-
-class DummyImageDataFactories:
-    """
-    Contains factories for dummy image data factories.
-
-    See Also:
-        :data:`vllm.inputs.registry.DummyDataFactory`
-    """
-
-    @classmethod
-    def dummy_seq_data_for_clip(
-        cls,
-        hf_config: CLIPVisionConfig,
-        seq_len: int,
-        *,
-        image_token_id: int,
-        image_feature_size_override: Optional[int] = None,
-    ):
-        if image_feature_size_override is None:
-            image_feature_size = get_clip_image_feature_size(hf_config)
-        else:
-            image_feature_size = image_feature_size_override
-
-        token_ids = [image_token_id] * image_feature_size
-        token_ids += [0] * (seq_len - image_feature_size)
-        return SequenceData(token_ids)
-
-    @classmethod
-    def dummy_pixel_data_for_clip(
-        cls,
-        hf_config: CLIPVisionConfig,
-        *,
-        image_width_override: Optional[int] = None,
-        image_height_override: Optional[int] = None,
-    ):
-        width = height = hf_config.image_size
-        if image_width_override is not None:
-            width = image_width_override
-        if image_height_override is not None:
-            height = image_height_override
-
-        image = Image.new("RGB", (width, height), color=0)
-        return ImagePixelData(image)
-
-    @classmethod
-    def dummy_feature_data_for_clip(
-        cls,
-        hf_config: CLIPVisionConfig,
-        *,
-        image_feature_size_override: Optional[int] = None,
-    ):
-        if image_feature_size_override is None:
-            image_feature_size = get_clip_image_feature_size(hf_config)
-        else:
-            image_feature_size = image_feature_size_override
-
-        values = torch.zeros((1, image_feature_size, hf_config.hidden_size),
-                             dtype=torch.float16)
-        return ImageFeatureData(values)
-
 
 _T = TypeVar("_T", str, int)
 
@@ -243,7 +176,7 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
         if vlm_config is None or vlm_config.image_processor is None:
             return None
 
-        return _cached_get_image_processor(
+        return cached_get_image_processor(
             vlm_config.image_processor,
             trust_remote_code=model_config.trust_remote_code,
             revision=vlm_config.image_processor_revision,

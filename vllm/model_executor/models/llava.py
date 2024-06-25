@@ -18,10 +18,12 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
-from vllm.multimodal.image import (DummyImageDataFactories, ImageFeatureData,
-                                   ImageInputProcessors, ImagePixelData)
+from vllm.multimodal.image import (ImageFeatureData, ImageInputProcessors,
+                                   ImagePixelData)
 from vllm.sequence import SamplerOutput
 
+from .clip import (dummy_feature_data_for_clip, dummy_pixel_data_for_clip,
+                   dummy_seq_data_for_clip)
 from .vlm_base import VisionLanguageModelBase
 
 _KEYS_TO_MODIFY_MAPPING = {
@@ -91,7 +93,7 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int):
     vision_config = hf_config.vision_config
 
     if isinstance(vision_config, CLIPVisionConfig):
-        seq_data = DummyImageDataFactories.dummy_seq_data_for_clip(
+        seq_data = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
             image_token_id=hf_config.image_token_index,
@@ -101,11 +103,9 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int):
         ImageInputType = VisionLanguageConfig.ImageInputType
         mm_data: MultiModalData
         if image_input_type == ImageInputType.PIXEL_VALUES:
-            mm_data = DummyImageDataFactories.dummy_pixel_data_for_clip(
-                vision_config)
+            mm_data = dummy_pixel_data_for_clip(vision_config)
         elif image_input_type == ImageInputType.IMAGE_FEATURES:
-            mm_data = DummyImageDataFactories.dummy_feature_data_for_clip(
-                vision_config)
+            mm_data = dummy_feature_data_for_clip(vision_config)
 
         return seq_data, mm_data
 

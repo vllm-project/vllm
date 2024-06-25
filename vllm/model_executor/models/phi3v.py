@@ -34,10 +34,11 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import (DummyImageDataFactories, ImageFeatureData,
-                                   ImageInputProcessors, ImagePixelData,
-                                   _cached_get_tokenizer)
+from vllm.multimodal.image import (ImageFeatureData, ImageInputProcessors,
+                                   ImagePixelData, _cached_get_tokenizer)
 from vllm.sequence import SamplerOutput
+
+from .clip import dummy_pixel_data_for_clip, dummy_seq_data_for_clip
 
 _KEYS_TO_MODIFY_MAPPING = {
     "model.vision_embed_tokens": "vision_embed_tokens",
@@ -273,13 +274,13 @@ class Phi3VImagePixelInputs(TypedDict):
 
 
 def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
-    seq_data = DummyImageDataFactories.dummy_seq_data_for_clip(
+    seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
         image_token_id=32044,
         image_feature_size_override=1921,
     )
-    mm_data = DummyImageDataFactories.dummy_pixel_data_for_clip(
+    mm_data = dummy_pixel_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         image_width_override=1344,
         image_height_override=1008,
