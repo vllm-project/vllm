@@ -29,7 +29,8 @@ MAIN_MODEL = "ibm-granite/granite-3b-code-instruct"
 # speculative model
 SPEC_MODEL = "ibm-granite/granite-3b-code-instruct-accelerator"
 
-# max. number of speculative tokens
+# max. number of speculative tokens: this corresponds to
+# n_predict in the config.json of the speculator model.
 MAX_SPEC_TOKENS = 5
 
 # precision
@@ -50,17 +51,15 @@ PRECISION = "float16"
 
         # Precision
         "dtype": PRECISION,
-    }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    {
+
+        # Main model
         "model": MAIN_MODEL,
-    },
-])
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
         "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -94,17 +93,15 @@ def test_mlp_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator,
 
         # Precision
         "dtype": PRECISION,
-    }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    {
+
+        # Main model
         "model": MAIN_MODEL,
-    },
-])
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
         "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
     },
 ])
 @pytest.mark.parametrize(
@@ -132,8 +129,6 @@ def test_mlp_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "model": MAIN_MODEL,
-
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
@@ -142,6 +137,9 @@ def test_mlp_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
 
         # Precision
         "dtype": PRECISION,
+
+        # Main model
+        "model": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -178,8 +176,6 @@ def test_mlp_different_k(baseline_llm_generator, test_llm_generator,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "model": MAIN_MODEL,
-
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
@@ -188,13 +184,15 @@ def test_mlp_different_k(baseline_llm_generator, test_llm_generator,
 
         # Precision
         "dtype": PRECISION,
+
+        # Main model
+        "model": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs",
                          [{
                              "speculative_model": SPEC_MODEL,
-                             "num_speculative_tokens": MAX_SPEC_TOKENS,
                              "speculative_disable_by_batch_size": 4
                          }])
 @pytest.mark.parametrize("batch_size", [1, 5])
