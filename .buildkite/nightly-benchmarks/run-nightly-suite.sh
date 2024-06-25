@@ -34,6 +34,8 @@ main() {
     check_gpus
     check_hf_token
 
+    df -h
+
     (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
     (which jq) || (apt-get update && apt-get -y install jq)
     cd /
