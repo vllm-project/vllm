@@ -57,19 +57,19 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     x1, x2, x3 ... to 1, 32000, x1, x2, x3 ...
     It also reduces `output_str` from "<image><image>bla" to "bla".
     """
-    input_ids, output_str = vllm_output
+    output_ids, output_str = vllm_output
     image_token_id = vlm_config.image_token_id
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     image_token_str = tokenizer.decode(image_token_id)
 
-    hf_input_ids = [
-        input_id for idx, input_id in enumerate(input_ids)
-        if input_id != image_token_id or input_ids[idx - 1] != image_token_id
+    hf_output_ids = [
+        token_id for idx, token_id in enumerate(output_ids)
+        if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
     hf_output_str = re.sub(fr"({image_token_str})+", " ", output_str)
 
-    return hf_input_ids, hf_output_str
+    return hf_output_ids, hf_output_str
 
 
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
