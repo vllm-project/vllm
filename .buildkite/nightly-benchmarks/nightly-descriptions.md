@@ -16,3 +16,9 @@ We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following workload:
 - Average QPS (query per second): 4, 8 for 8B model and 1, 4 for larger models. For each QPS, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
 - Models: llama-3 8B, llama-3 70B, mixtral 8x7B.
 - Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
+
+
+## Results
+
+| Test name             | GPU            |   Successful req. |   Tput (req/s) |   Mean TTFT (ms) |   Median TTFT (ms) |   P99 TTFT (ms) |   Mean ITL (ms) |   Median ITL (ms) |   P99 ITL (ms) | Engine   |
+|:----------------------|:---------------|------------------:|---------------:|-----------------:|-------------------:|----------------:|----------------:|------------------:|---------------:|:---------|
