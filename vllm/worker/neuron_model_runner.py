@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -11,9 +11,10 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.worker.model_runner_base import (ModelRunnerBase,
-                                           ModelRunnerInputBase,
-                                           _filter_valid_kwargs)
+from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -33,9 +34,13 @@ class ModelInputForNeuron(ModelRunnerInputBase):
         raise NotImplementedError("ModelInputForNeuron cannot be broadcast.")
 
     @classmethod
-    def new(cls, **kwargs) -> "ModelInputForNeuron":
-        kwargs = _filter_valid_kwargs(cls, kwargs)
-        return cls(**kwargs)
+    def from_broadcasted_tensor_dict(
+        cls,
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> "ModelInputForNeuron":
+        assert attn_backend is None
+        return cls.from_broadcasted_tensor_dict(tensor_dict)
 
 
 class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
@@ -163,10 +168,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         return input_tokens, input_positions, input_block_ids
 
-    def make_model_input(self,
-                         make_attn_metadata: bool = False,
-                         **kwargs) -> ModelInputForNeuron:
-        return ModelInputForNeuron.new(**kwargs)
+    def make_model_input_from_broadcasted_tensor_dict(
+            self, tensor_dict: Dict[str, Any]) -> ModelInputForNeuron:
+        return ModelInputForNeuron.from_broadcasted_tensor_dict(tensor_dict)
 
     def prepare_model_input(
         self,
@@ -193,10 +197,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             self.device,
             self.pin_memory)
 
-        return ModelInputForNeuron.new(input_tokens=input_tokens,
-                                       input_positions=input_positions,
-                                       input_block_ids=input_block_ids,
-                                       sampling_metadata=sampling_metadata)
+        return ModelInputForNeuron(input_tokens=input_tokens,
+                                   input_positions=input_positions,
+                                   input_block_ids=input_block_ids,
+                                   sampling_metadata=sampling_metadata)
 
     @torch.inference_mode()
     def execute_model(

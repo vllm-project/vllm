@@ -1,7 +1,7 @@
 import dataclasses
 from abc import ABC, abstractmethod
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
-                    TypeVar, Union)
+                    TypeVar)
 
 import torch
 
@@ -16,7 +16,7 @@ T = TypeVar('T', bound="ModelRunnerInputBase")
 
 
 def _add_attn_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Union[int, torch.Tensor]],
+        tensor_dict: Dict[str, Any],
         attn_metadata: Optional["AttentionMetadata"]) -> None:
     """
     Helper method to update tensor_dict with broadcastable
@@ -26,8 +26,10 @@ def _add_attn_metadata_broadcastable_dict(
         tensor_dict.update(attn_metadata.asdict_zerocopy())
 
 
-def _init_attn_metadata_from_kwargs(attn_backend: "AttentionBackend",
-                                    **kwargs) -> Dict[str, Any]:
+def _init_attn_metadata_from_tensor_dict(
+    attn_backend: "AttentionBackend",
+    tensor_dict: Dict[str, Any],
+) -> Dict[str, Any]:
     """
     Helper method to initialize AttentionMetadata based on an
     AttentionBackend and broadcastable AttentionMetadata fields.
@@ -35,38 +37,38 @@ def _init_attn_metadata_from_kwargs(attn_backend: "AttentionBackend",
     # Extract the fields used to create AttentionMetadata.
     valid_attn_kwargs = {}
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
-        val = kwargs.pop(field.name, None)
+        val = tensor_dict.pop(field.name, None)
         if val is not None:
             valid_attn_kwargs[field.name] = val
 
     attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
-    kwargs["attn_metadata"] = attn_metadata
-    return kwargs
+    tensor_dict["attn_metadata"] = attn_metadata
+    return tensor_dict
 
 
-def _init_sampling_metadata_from_kwargs(  # type: ignore
-        selected_token_indices: torch.Tensor = None,
-        **kwargs) -> Dict[str, Any]:
+def _init_sampling_metadata_from_tensor_dict(  # type: ignore
+        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
     """
     Helper method to initialize SamplingMetadata based on broadcastable
     SamplingMetadata fields.
     """
     from vllm.model_executor import SamplingMetadata
 
+    selected_token_indices = tensor_dict.pop("selected_token_indices", None)
     # An empty SamplingMetadata to signal that the worker should skip
     # sampling.
-    sampling_metadata = SamplingMetadata(
-        seq_groups=None,
-        selected_token_indices=selected_token_indices,
-        categorized_sample_indices=None,
-        num_prompts=0,
-    )
-    kwargs["sampling_metadata"] = sampling_metadata
-    return kwargs
+    if selected_token_indices is not None:
+        tensor_dict["sampling_metadata"] = SamplingMetadata(
+            seq_groups=None,
+            selected_token_indices=selected_token_indices,
+            categorized_sample_indices=None,
+            num_prompts=0,
+        )
+    return tensor_dict
 
 
 def _add_sampling_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Union[int, torch.Tensor]],
+        tensor_dict: Dict[str, Any],
         sampling_metadata: Optional["SamplingMetadata"]) -> None:
     """
     Helper method to update tensor_dict with broadcastable
@@ -75,19 +77,6 @@ def _add_sampling_metadata_broadcastable_dict(
     if sampling_metadata is not None:
         tensor_dict["selected_token_indices"] = (
             sampling_metadata.selected_token_indices)
-
-
-def _filter_valid_kwargs(cls, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Helper method to filter the given kwargs to kwargs that
-    are valid for the given dataclass `cls`.
-    """
-    init_kwargs = {}
-    for field in dataclasses.fields(cls):
-        val = kwargs.get(field.name, None)
-        if val is not None:
-            init_kwargs[field.name] = val
-    return init_kwargs
 
 
 @dataclasses.dataclass(frozen=True)
@@ -102,26 +91,29 @@ class ModelRunnerInputBase(ABC):
     serialize/deserialize a ModelInput for broadcast between workers.
     """
 
-    @classmethod
-    @abstractmethod
-    def new(cls: Type[T], **kwargs) -> T:
-        """
-        Create a new instance of this class. Populate the new instance with
-        the given kwargs.
-        """
-        raise NotImplementedError
-
     def replace(self: T, **kwargs) -> T:
         """
         Replace current fields with fields in kwargs.
         """
         return dataclasses.replace(self, **kwargs)
 
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         """
         Extract broadcastable fields. Override for fields that require some
         custom deserialization.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def from_broadcasted_tensor_dict(
+        cls: Type[T],
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> T:
+        """
+        Pop fields from the given tensor_dict and populate a new instance of
+        ModelRunnerInputBase.
         """
         raise NotImplementedError
 
@@ -137,13 +129,13 @@ class ModelRunnerBase(ABC, Generic[T]):
     """
 
     @abstractmethod
-    def make_model_input(self,
-                         make_attn_metadata: bool = False,
-                         **model_input_fields) -> T:
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> T:
         """
-        Make an instance of a ModelRunnerInputBase from the given fields. If
-        make_attn_metadata=True, then AttentionMetadata will be created from
-        fields extracted from model_input_fields.
+        Make an instance of a ModelRunnerInputBase from the broadcasted tensor
+        dict.
         """
         raise NotImplementedError
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -18,8 +18,9 @@ from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
-    _add_sampling_metadata_broadcastable_dict, _filter_valid_kwargs,
-    _init_attn_metadata_from_kwargs, _init_sampling_metadata_from_kwargs)
+    _add_sampling_metadata_broadcastable_dict,
+    _init_attn_metadata_from_tensor_dict,
+    _init_sampling_metadata_from_tensor_dict)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -56,17 +57,16 @@ class ModelInputForXPU(ModelRunnerInputBase):
         return tensor_dict
 
     @classmethod
-    def new(cls,
-            attn_backend: Optional["AttentionBackend"] = None,
-            selected_token_indices: Optional[torch.Tensor] = None,
-            **kwargs) -> "ModelInputForXPU":
+    def from_broadcasted_tensor_dict(
+        cls: Type["ModelInputForXPU"],
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> "ModelInputForXPU":
+        tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
         if attn_backend is not None:
-            kwargs = _init_attn_metadata_from_kwargs(attn_backend, **kwargs)
-        if selected_token_indices is not None:
-            kwargs = _init_sampling_metadata_from_kwargs(
-                selected_token_indices, **kwargs)
-        kwargs = _filter_valid_kwargs(cls, kwargs)
-        return cls(**kwargs)
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
 
 
 class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
@@ -180,15 +180,12 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         torch.xpu.synchronize()
         return
 
-    def make_model_input(self,
-                         make_attn_metadata: bool = False,
-                         **kwargs) -> ModelInputForXPU:
-        if make_attn_metadata:
-            kwargs["attn_backend"] = self.attn_backend
-        return ModelInputForXPU.new(
+    def make_model_input_from_broadcasted_tensor_dict(
+            self, tensor_dict: Dict[str, Any]) -> ModelInputForXPU:
+        return (ModelInputForXPU.from_broadcasted_tensor_dict(
+            tensor_dict,
             attn_backend=self.attn_backend,
-            **kwargs,
-        )
+        ))
 
     def prepare_model_input(
         self,
@@ -240,11 +237,11 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 num_prompts=0,
             )
 
-        return self.make_model_input(input_tokens=input_tokens,
-                                     input_positions=input_positions,
-                                     attn_metadata=attn_metadata,
-                                     sampling_metadata=sampling_metadata,
-                                     multi_modal_input=multi_modal_input)
+        return ModelInputForXPU(input_tokens=input_tokens,
+                                input_positions=input_positions,
+                                attn_metadata=attn_metadata,
+                                sampling_metadata=sampling_metadata,
+                                multi_modal_input=multi_modal_input)
 
     def _prepare_decode(
         self,

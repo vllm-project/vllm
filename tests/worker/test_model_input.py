@@ -64,7 +64,7 @@ def test_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
     )
-    model_input = ModelInputForGPUWithSamplingMetadata.new(
+    model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),
         input_positions=torch.ones(10),
         sampling_metadata=sampling_metadata,
@@ -75,8 +75,8 @@ def test_model_runner_input():
     # Test round trip serialization.
     tensor_dict = model_input.as_broadcastable_tensor_dict()
     attn_backend = MockAttentionBackend()
-    received_model_input = ModelInputForGPUWithSamplingMetadata.new(
-        attn_backend=attn_backend, **tensor_dict)
+    received_model_input = ModelInputForGPUWithSamplingMetadata.from_broadcasted_tensor_dict(
+        tensor_dict, attn_backend=attn_backend)
     # Check that received copy has correct values.
     assert isinstance(received_model_input,
                       ModelInputForGPUWithSamplingMetadata)
@@ -114,7 +114,7 @@ def test_embedding_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
     )
-    model_input = ModelInputForGPUWithPoolingMetadata.new(
+    model_input = ModelInputForGPUWithPoolingMetadata(
         input_tokens=torch.ones(10),
         input_positions=torch.ones(10),
         pooling_metadata=pooling_metadata,
@@ -125,8 +125,8 @@ def test_embedding_model_runner_input():
     # Test round trip serialization.
     tensor_dict = model_input.as_broadcastable_tensor_dict()
     attn_backend = MockAttentionBackend()
-    received_model_input = ModelInputForGPUWithPoolingMetadata.new(
-        attn_backend=attn_backend, **tensor_dict)
+    received_model_input = ModelInputForGPUWithPoolingMetadata.from_broadcasted_tensor_dict(
+        tensor_dict, attn_backend=attn_backend)
     # Check that received copy has correct values.
     assert isinstance(received_model_input,
                       ModelInputForGPUWithPoolingMetadata)

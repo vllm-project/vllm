@@ -1,6 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from torch import nn
@@ -18,8 +18,9 @@ from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
-    _add_sampling_metadata_broadcastable_dict, _filter_valid_kwargs,
-    _init_attn_metadata_from_kwargs, _init_sampling_metadata_from_kwargs)
+    _add_sampling_metadata_broadcastable_dict,
+    _init_attn_metadata_from_tensor_dict,
+    _init_sampling_metadata_from_tensor_dict)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -53,17 +54,16 @@ class CPUModelInput(ModelRunnerInputBase):
         return tensor_dict
 
     @classmethod
-    def new(cls,
-            attn_backend: Optional["AttentionBackend"] = None,
-            selected_token_indices: Optional[torch.Tensor] = None,
-            **kwargs) -> "CPUModelInput":
+    def from_broadcasted_tensor_dict(
+            cls: Type["CPUModelInput"],
+            tensor_dict: Dict[str, Any],
+            attn_backend: Optional["AttentionBackend"] = None
+    ) -> "CPUModelInput":
+        tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
         if attn_backend is not None:
-            kwargs = _init_attn_metadata_from_kwargs(attn_backend, **kwargs)
-        if selected_token_indices is not None:
-            kwargs = _init_sampling_metadata_from_kwargs(
-                selected_token_indices, **kwargs)
-        kwargs = _filter_valid_kwargs(cls, kwargs)
-        return cls(**kwargs)
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
 
 
 class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
@@ -315,12 +315,14 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             attn_metadata,
         )
 
-    def make_model_input(self,
-                         make_attn_metadata: bool = False,
-                         **kwargs) -> CPUModelInput:
-        if make_attn_metadata:
-            kwargs["attn_backend"] = self.attn_backend
-        return CPUModelInput.new(**kwargs, )
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> CPUModelInput:
+        return CPUModelInput.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
 
     def prepare_model_input(
         self,
@@ -348,7 +350,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             seq_lens,
             self.device,
             pin_memory=False)
-        return CPUModelInput.new(
+        return CPUModelInput(
             input_tokens=input_tokens,
             input_positions=input_positions,
             attn_metadata=attn_metadata,

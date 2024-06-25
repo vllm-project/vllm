@@ -1,9 +1,9 @@
+import dataclasses
 import gc
 import time
 import warnings
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Type,
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
                     TypeVar, Union)
 
 import numpy as np
@@ -30,8 +30,9 @@ from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
-    _add_sampling_metadata_broadcastable_dict, _filter_valid_kwargs,
-    _init_attn_metadata_from_kwargs, _init_sampling_metadata_from_kwargs)
+    _add_sampling_metadata_broadcastable_dict,
+    _init_attn_metadata_from_tensor_dict,
+    _init_sampling_metadata_from_tensor_dict)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -51,7 +52,7 @@ _NUM_WARMUP_ITERS = 2
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class ModelInputForGPU(ModelRunnerInputBase):
     """
     This base class contains metadata needed for the base model forward pass
@@ -68,8 +69,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
 
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -81,16 +81,18 @@ class ModelInputForGPU(ModelRunnerInputBase):
         return tensor_dict
 
     @classmethod
-    def new(cls: Type[TModelInputForGPU],
-            attn_backend: Optional["AttentionBackend"] = None,
-            **kwargs) -> TModelInputForGPU:
+    def from_broadcasted_tensor_dict(
+        cls: Type[TModelInputForGPU],
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> TModelInputForGPU:
         if attn_backend is not None:
-            kwargs = _init_attn_metadata_from_kwargs(attn_backend, **kwargs)
-        kwargs = _filter_valid_kwargs(cls, kwargs)
-        return cls(**kwargs)
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     """
     Used by the ModelRunner.
@@ -100,8 +102,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     # used by the driver worker.
     is_prompt: Optional[bool] = None
 
-    def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -115,17 +116,16 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
         return tensor_dict
 
     @classmethod
-    def new(cls,
-            attn_backend: Optional["AttentionBackend"] = None,
-            selected_token_indices: Optional[torch.Tensor] = None,
-            **kwargs) -> "ModelInputForGPUWithSamplingMetadata":
-        if selected_token_indices is not None:
-            kwargs = _init_sampling_metadata_from_kwargs(
-                selected_token_indices, **kwargs)
+    def from_broadcasted_tensor_dict(
+        cls,
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> "ModelInputForGPUWithSamplingMetadata":
+        tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
         if attn_backend is not None:
-            kwargs = _init_attn_metadata_from_kwargs(attn_backend, **kwargs)
-        kwargs = _filter_valid_kwargs(cls, kwargs)
-        return cls(**kwargs)
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
 
 
 class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
@@ -205,6 +205,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+
+        self._model_input_cls : Type[TModelInputForGPU] = ModelInputForGPUWithSamplingMetadata
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -357,7 +359,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
-            return self.make_model_input()
+            return self._model_input_cls()
 
         if self.sliding_window is not None:
             sliding_window_blocks = (self.sliding_window + self.block_size -
@@ -707,7 +709,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             for k, v in multi_modal_kwargs_list.items()
         }
 
-        return self.make_model_input(
+        return self._model_input_cls(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
             attn_metadata=attn_metadata,
@@ -929,12 +931,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     GPU model runner with sampling step.
     """
 
-    def make_model_input(self,
-                         make_attn_metadata: bool = False,
-                         **kwargs) -> ModelInputForGPUWithSamplingMetadata:
-        if make_attn_metadata:
-            kwargs["attn_backend"] = self.attn_backend
-        return ModelInputForGPUWithSamplingMetadata.new(**kwargs, )
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> ModelInputForGPUWithSamplingMetadata:
+        return (
+            ModelInputForGPUWithSamplingMetadata.from_broadcasted_tensor_dict(
+                tensor_dict,
+                attn_backend=self.attn_backend,
+            ))
 
     def prepare_model_input(
         self,
@@ -960,10 +965,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                                      model_input.query_lens,
                                                      self.device,
                                                      self.pin_memory)
-        return model_input.replace(
-            sampling_metadata=sampling_metadata,
-            is_prompt=seq_group_metadata_list[0].is_prompt
-            if seq_group_metadata_list else None)
+        is_prompt = (seq_group_metadata_list[0].is_prompt
+                     if seq_group_metadata_list else None)
+        return dataclasses.replace(model_input,
+                                   sampling_metadata=sampling_metadata,
+                                   is_prompt=is_prompt)
 
     @torch.inference_mode()
     def execute_model(

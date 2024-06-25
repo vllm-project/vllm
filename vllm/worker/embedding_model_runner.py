@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -50,6 +50,8 @@ class EmbeddingModelRunner(
                          is_driver_worker=is_driver_worker,
                          vision_language_config=vision_language_config)
 
+        self._model_input_cls : Type[TModelInputForGPU] = ModelInputForGPUWithPoolingMetadata
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -94,12 +96,14 @@ class EmbeddingModelRunner(
         return self.model.pooler(hidden_states=hidden_states,
                                  pooling_metadata=model_input.pooling_metadata)
 
-    def make_model_input(self,
-                         make_attn_metadata: bool = False,
-                         **kwargs) -> ModelInputForGPUWithPoolingMetadata:
-        if make_attn_metadata:
-            kwargs["attn_backend"] = self.attn_backend
-        return ModelInputForGPUWithPoolingMetadata.new(**kwargs, )
+    def make_model_input_from_broadcasted_tensor_dict(
+            self,
+            tensor_dict: Dict[str,
+                              Any]) -> ModelInputForGPUWithPoolingMetadata:
+        return ModelInputForGPUWithPoolingMetadata.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
 
     def prepare_model_input(
         self,

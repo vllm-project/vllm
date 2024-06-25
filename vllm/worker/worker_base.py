@@ -2,7 +2,7 @@ import dataclasses
 import importlib
 import os
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
@@ -126,28 +126,32 @@ class WorkerInput:
     blocks_to_copy: Optional[torch.Tensor] = None
 
     @classmethod
-    def new(cls: Type["WorkerInput"], **kwargs) -> "WorkerInput":
+    def from_broadcasted_tensor_dict(
+        cls: Type["WorkerInput"],
+        tensor_dict: Dict[str, Any],
+    ) -> "WorkerInput":
         """
-        Create a new instance of this class. Populate the new instance with
-        fields from the given kwargs.
+        Pop fields from the given tensor_dict and populate a new instance of
+        WorkerInput.
         """
-        init_kwargs = {}
-        for field in dataclasses.fields(cls):
-            val = kwargs.get(field.name, None)
-            if val is not None:
-                init_kwargs[field.name] = val
-        return cls(**init_kwargs)
+        return cls(
+            num_seq_groups=tensor_dict.pop("num_seq_groups"),
+            blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
+            blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
+            blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
+        )
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
         """
         Extract broadcastable fields.
         """
-        tensor_dict: Dict[str, Union[int, torch.Tensor]] = {}
-        for field in dataclasses.fields(self):
-            val = getattr(self, field.name, None)
-            if val is not None:
-                tensor_dict[field.name] = val
+        tensor_dict = {
+            "num_seq_groups": self.num_seq_groups,
+            "blocks_to_swap_in": self.blocks_to_swap_in,
+            "blocks_to_swap_out": self.blocks_to_swap_out,
+            "blocks_to_copy": self.blocks_to_copy,
+        }
 
         return tensor_dict
 
@@ -255,9 +259,11 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             if not broadcast_data:
                 return None
 
-            worker_input = WorkerInput.new(**broadcast_data)
-            model_input = self.model_runner.make_model_input(
-                make_attn_metadata=True, **broadcast_data)
+            worker_input = WorkerInput.from_broadcasted_tensor_dict(
+                broadcast_data)
+            model_input = (
+                self.model_runner.
+                make_model_input_from_broadcasted_tensor_dict(broadcast_data))
 
         self.execute_worker(worker_input)
 
