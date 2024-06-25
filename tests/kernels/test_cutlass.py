@@ -225,22 +225,35 @@ def test_cutlass_int8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
 
 
 def test_cutlass_int8_azp():
-    m = 512
-    n = 1024
-    k = 256
+    m = 32
+    n = 16
+    k = 64
 
-    scale_a = torch.randn((m, 1), device="cuda", dtype=torch.float32) / 10
+    # azp inside the scale, representable in int8
+    # do gemm in int32, add azp, then scale
+    # also do where azp is applied first (but not scale)
+    # TODO scale_a not per-token anymore, so that azp (if outside scales) is not per-token
+
+    scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, n), device="cuda", dtype=torch.float32) / 10
 
     aq_i8 = rand_int8((m, k))
     bq_i8 = rand_int8((n, k)).t()
 
+    aq_i32 = aq_i8.to(dtype=torch.int32)
+    bq_i32 = bq_i8.to(dtype=torch.int32)
+
     aq_f32 = aq_i8.to(dtype=torch.float32)
     bq_f32 = bq_i8.to(dtype=torch.float32)
 
-    azp_a = torch.rand((1,), device="cuda", dtype=torch.float32) + 2.0
-    a_dq = scale_a * aq_f32 + azp_a
     b_dq = scale_b * bq_f32
+
+    azp_a = torch.rand((1,), device="cuda", dtype=torch.float32) + 2.0
+    azp_aq_i8 = (azp_a / scale_a).to(dtype=torch.int8)
+    azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a # correct for rounding
+
+    a_dq = scale_a * (aq_i32 + azp_aq_i8).to(dtype=torch.float32)
+    torch.allclose(a_dq, scale_a * aq_f32 + azp_a)
 
     out_dtype = torch.bfloat16
     baseline_dq = torch.mm(a_dq, b_dq).to(out_dtype)
@@ -250,10 +263,15 @@ def test_cutlass_int8_azp():
     assert azp_bias.shape == (1, n)
     assert azp_bias[0, :].shape == (n,)
 
-    # baseline_q_no_azp = ops.cutlass_scaled_mm(
-    #     aq_i8, bq_i8, scale_a, scale_b,
-    #     out_dtype=out_dtype).to(dtype=torch.float32)
-    # baseline_q = (baseline_q_no_azp + azp_bias).to(out_dtype)
+    baseline_q_i32 = torch.zeros((m, n), device="cuda", dtype=torch.int32)
+    aq_i32_no_azp = aq_i32 + azp_aq_i8
+    for i in range(m):
+        for j in range(n):
+            for k2 in range(k):
+                baseline_q_i32[i, j] += aq_i32_no_azp[i, k2] * bq_i32[k2, j]
+
+    baseline_q = (scale_a * scale_b * baseline_q_i32).to(dtype=out_dtype)
+
     out = ops.cutlass_scaled_mm(aq_i8,
                                 bq_i8,
                                 scale_a,
@@ -261,7 +279,7 @@ def test_cutlass_int8_azp():
                                 out_dtype=out_dtype,
                                 bias=azp_bias[0, :])
     assert torch.allclose(out, baseline_dq, rtol=1e-2, atol=1e0)
-    # assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
+    assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
 
 
 # Test working with a subset of A and B
