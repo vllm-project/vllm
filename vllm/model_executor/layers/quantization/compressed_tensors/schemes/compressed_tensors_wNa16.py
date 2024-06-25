@@ -77,19 +77,17 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             weight_scale_dim = 1
             scales_and_zp_size = input_size_per_partition // group_size
 
-        weight = PackedParameter(
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader
-            packed_factor=pack_factor,
-            packed_dim=packed_dim
-            data=torch.empty(
-                output_size_per_partition,
-                input_size_per_partition // pack_factor,
-                dtype=torch.int32,
-            )
-        )
-
+        print(output_partition_sizes, output_size_per_partition)
+        weight = PackedParameter(input_dim=1,
+                                 output_dim=0,
+                                 weight_loader=weight_loader,
+                                 packed_factor=pack_factor,
+                                 packed_dim=1,
+                                 data=torch.empty(
+                                     output_size_per_partition,
+                                     input_size_per_partition // pack_factor,
+                                     dtype=torch.int32,
+                                 ))
         """
         weight = Parameter(
             torch.empty(
@@ -127,16 +125,14 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 "output_dim": 0
             })
         """
-        weight_scale = vLLMParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                scales_and_zp_size,
-                dtype=params_dtype,
-            )
-            input_dim=input_dim,
-            output_dim=output_size_per_partition,
-            weight_loader=weight_loader
-        )
+        weight_scale = vLLMParameter(input_dim=weight_scale_dim,
+                                     output_dim=0,
+                                     weight_loader=weight_loader,
+                                     data=torch.empty(
+                                         output_size_per_partition,
+                                         scales_and_zp_size,
+                                         dtype=params_dtype,
+                                     ))
         layer.register_parameter("weight_scale", weight_scale)
 
         # A 2D array defining the original shape of the weights
@@ -145,17 +141,14 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         weight_shape = Parameter(torch.empty(2, dtype=torch.int64),
                                  requires_grad=False)
 
-        layer.register_parameter("weight_shape", weight_shape)
         set_weight_attrs(weight_shape, {
             "weight_loader": weight_loader,
             "ignore_warning": True,
         })
         """
-        weight_shape = vLLMParameter(
-            data=torch.empty(2, dtype=torch.int64),
-            weight_loader=weight_loader
-        )
-
+        weight_shape = vLLMParameter(data=torch.empty(2, dtype=torch.int64),
+                                     weight_loader=weight_loader)
+        layer.register_parameter("weight_shape", weight_shape)
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
