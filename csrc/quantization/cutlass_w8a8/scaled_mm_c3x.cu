@@ -547,11 +547,6 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
   if (bias) {
     TORCH_CHECK(bias->dtype() == c.dtype(),
                 "currently bias dtype must match output dtype ", c.type());
-    TORCH_CHECK(bias->dim() == 1 && bias->size(0) == c.size(1),
-                "the bias shape, should be (", c.size(1),
-                ",) i.e. a vector with length matching the number of cols of "
-                "the output matrix");
-    TORCH_CHECK(bias->is_contiguous(), "bias must be contiguous");
     return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBias>(
         c, a, b, a_scales, b_scales, *bias);
   } else {
