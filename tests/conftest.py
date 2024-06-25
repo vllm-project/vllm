@@ -73,22 +73,25 @@ class _ImageAssetPrompts(TypedDict):
     cherry_blossom: str
 
 
-class ImageAssets(UserList[ImageAsset]):
+class _ImageAssets(UserList[ImageAsset]):
+
+    def __init__(self) -> None:
+        super().__init__(
+            [ImageAsset("stop_sign"),
+             ImageAsset("cherry_blossom")])
 
     def prompts(self, prompts: _ImageAssetPrompts) -> List[str]:
         """
         Convenience method to define the prompt for each test image.
 
-        Note:
-            The order of the returned list should match that of
-            :const:`IMAGE_ASSETS`.
+        The order of the returned prompts matches the order of the
+        assets when iterating through this object.
         """
         return [prompts["stop_sign"], prompts["cherry_blossom"]]
 
 
-IMAGE_ASSETS = ImageAssets(
-    [ImageAsset("stop_sign"),
-     ImageAsset("cherry_blossom")])
+IMAGE_ASSETS = _ImageAssets()
+"""Singleton instance of :class:`_ImageAssets`."""
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -144,7 +147,7 @@ def example_long_prompts() -> List[str]:
 
 
 @pytest.fixture(scope="session")
-def image_assets() -> ImageAssets:
+def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
