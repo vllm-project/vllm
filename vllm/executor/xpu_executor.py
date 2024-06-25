@@ -62,6 +62,8 @@ class XPUExecutor(GPUExecutor):
         wrapper = WorkerWrapperBase(
             worker_module_name=worker_module_name,
             worker_class_name=worker_class_name,
+            worker_init_callback_script=self.parallel_config.
+            worker_init_callback_script,
         )
         wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
                                                       distributed_init_method))
