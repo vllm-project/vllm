@@ -105,6 +105,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
             )(RayWorkerWrapper).remote(
                 worker_module_name=worker_module_name,
                 worker_class_name=worker_class_name,
+                worker_init_callback_script=self.parallel_config.
+                worker_init_callback_script,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
@@ -116,6 +118,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 self.driver_worker = RayWorkerWrapper(
                     worker_module_name=worker_module_name,
                     worker_class_name=worker_class_name,
+                    worker_init_callback_script=self.parallel_config.
+                    worker_init_callback_script,
                     trust_remote_code=self.model_config.trust_remote_code,
                 )
             else:
