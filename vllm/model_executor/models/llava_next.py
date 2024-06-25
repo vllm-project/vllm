@@ -22,10 +22,11 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
-from vllm.multimodal.image import (DummyImageDataFactories, ImagePixelData,
-                                   get_clip_num_patches)
+from vllm.multimodal.image import ImagePixelData
 from vllm.sequence import SamplerOutput
 
+from .clip import (dummy_feature_data_for_clip, dummy_pixel_data_for_clip,
+                   dummy_seq_data_for_clip, get_clip_patch_grid_length)
 from .llava import LlavaMultiModalProjector, merge_vision_embeddings
 from .vlm_base import VisionLanguageModelBase
 
@@ -93,7 +94,10 @@ def _get_llava_next_image_feature_size(
     vision_config = hf_config.vision_config
 
     if isinstance(vision_config, CLIPVisionConfig):
-        num_patches = get_clip_num_patches(vision_config)
+        num_patches = get_clip_patch_grid_length(
+            image_size=vision_config.image_size,
+            patch_size=vision_config.patch_size,
+        )
         base_feature_size = num_patches * num_patches
 
         num_patch_height, num_patch_width = get_anyres_image_grid_shape(
@@ -127,7 +131,7 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
         hf_config, input_height=dummy_height, input_width=dummy_width)
 
     if isinstance(vision_config, CLIPVisionConfig):
-        seq_data = DummyImageDataFactories.dummy_seq_data_for_clip(
+        seq_data = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
             image_token_id=hf_config.image_token_index,
@@ -138,13 +142,13 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
         ImageInputType = VisionLanguageConfig.ImageInputType
         mm_data: MultiModalData
         if image_input_type == ImageInputType.PIXEL_VALUES:
-            mm_data = DummyImageDataFactories.dummy_pixel_data_for_clip(
+            mm_data = dummy_pixel_data_for_clip(
                 vision_config,
                 image_width_override=dummy_width,
                 image_height_override=dummy_height,
             )
         elif image_input_type == ImageInputType.IMAGE_FEATURES:
-            mm_data = DummyImageDataFactories.dummy_feature_data_for_clip(
+            mm_data = dummy_feature_data_for_clip(
                 vision_config,
                 image_feature_size_override=image_feature_size,
             )
