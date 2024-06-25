@@ -18,7 +18,9 @@ lm_eval: "lm_eval_t" = pytest.importorskip("lm_eval",
                                            reason="lm_eval required")
 
 RTOL = 0.02
-TEST_DATA_FILE = os.environ.get("LM_EVAL_TEST_DATA_FILE", None)
+TEST_DATA_FILE = os.environ.get(
+    "LM_EVAL_TEST_DATA_FILE",
+    ".buildkite/lm-eval-harness/configs/small-models.txt")
 
 
 def wait_for_server(timeout=900) -> bool:
