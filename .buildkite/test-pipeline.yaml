@@ -190,6 +190,20 @@ steps:
   - pip install aiohttp
   - bash run-benchmarks.sh
 
+- label: LM Eval Small Models
+  working_dir: "/vllm-workspace/.buildkite"
+  commands:
+  - pip install lm-eval==0.4.2
+  - bash .buildkite/lm-eval-harness/run-lm-eval-vllm.sh -c .buildkite/lm-eval-harness/configs/small-models.txt
+
+- label: LM Eval Large Models
+  gpus: a100
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite"
+  commands:
+  - pip install lm-eval==0.4.2
+  - bash .buildkite/lm-eval-harness/run-lm-eval-vllm.sh -c .buildkite/lm-eval-harness/configs/large-models.txt
+
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
   no_gpu: True
