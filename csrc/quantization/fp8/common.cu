@@ -129,18 +129,20 @@ __global__ void pack_fp8_to_int32_kernel(
     int64_t rows, int64_t cols) {
   int tid = blockDim.x * blockIdx.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
+  int64_t num_packed_elems = (rows / 4) * cols;
 
-  for (int64_t idx = tid; idx < (rows / 4) * cols; idx += stride) {
-    int64_t packed_row = idx / cols;
-    int64_t col = idx % cols;
+  for (int64_t i = tid; i < num_packed_elems; i += stride) {
+    int64_t out_row = i / cols;
+    int64_t col = i % cols;
 
     uint32_t packed = 0;
     for (int j = 0; j < 4; ++j) {
-      int64_t input_idx = (packed_row * 4 + j) * cols + col;
+      int64_t input_row = out_row * 4 + j;
+      int64_t input_idx = input_row * cols + col;
       uint32_t fp8_bits = *reinterpret_cast<const uint8_t*>(&input[input_idx]);
       packed |= (fp8_bits << (j * 8));
     }
-    out[idx] = static_cast<int32_t>(packed);
+    out[i] = static_cast<int32_t>(packed);
   }
 }
 
