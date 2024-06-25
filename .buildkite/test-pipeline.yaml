@@ -1,7 +1,10 @@
 # In this file, you can add more tests to run either by adding a new step or
 # adding a new command to an existing step. See different options here for examples.
-# This script will be feed into Jinja template in `test-template-aws.j2` to generate
-# the final pipeline yaml file.
+
+# This script will be feed into Jinja template in `test-template-aws.j2` at
+# https://github.com/vllm-project/buildkite-ci/blob/main/scripts/test-template-aws.j2 
+# to generate the final pipeline yaml file.
+
 
 steps:
 - label: Regression Test
