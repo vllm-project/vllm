@@ -15,9 +15,30 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils import get_open_port, is_hip
 
-if (not is_hip()):
+if is_hip():
+    from amdsmi import (amdsmi_get_gpu_vram_usage,
+                        amdsmi_get_processor_handles, amdsmi_init,
+                        amdsmi_shut_down)
+
+    @contextmanager
+    def _nvml():
+        try:
+            amdsmi_init()
+            yield
+        finally:
+            amdsmi_shut_down()
+else:
     from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
-                        nvmlInit)
+                        nvmlInit, nvmlShutdown)
+
+    @contextmanager
+    def _nvml():
+        try:
+            nvmlInit()
+            yield
+        finally:
+            nvmlShutdown()
+
 
 # Path to root of repository so that utilities can be imported by ray workers
 VLLM_PATH = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir))
@@ -160,20 +181,25 @@ def error_on_warning():
         yield
 
 
+@_nvml()
 def wait_for_gpu_memory_to_clear(devices: List[int],
                                  threshold_bytes: int,
                                  timeout_s: float = 120) -> None:
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
-    nvmlInit()
     start_time = time.time()
     while True:
         output: Dict[int, str] = {}
         output_raw: Dict[int, float] = {}
         for device in devices:
-            dev_handle = nvmlDeviceGetHandleByIndex(device)
-            mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
-            gb_used = mem_info.used / 2**30
+            if is_hip():
+                dev_handle = amdsmi_get_processor_handles()[device]
+                mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
+                gb_used = mem_info["vram_used"] / 2**10
+            else:
+                dev_handle = nvmlDeviceGetHandleByIndex(device)
+                mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
+                gb_used = mem_info.used / 2**30
             output_raw[device] = gb_used
             output[device] = f'{gb_used:.02f}'
 

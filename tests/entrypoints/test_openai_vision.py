@@ -8,7 +8,7 @@ import ray
 
 from vllm.multimodal.utils import ImageFetchAiohttp, encode_image_base64
 
-from ..utils import VLLM_PATH, RemoteOpenAIServer
+from ..utils import RemoteOpenAIServer
 
 MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
 LLAVA_CHAT_TEMPLATE = (Path(__file__).parent.parent.parent /
@@ -27,7 +27,7 @@ pytestmark = pytest.mark.openai
 
 @pytest.fixture(scope="module")
 def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
+    ray.init()
     yield
     ray.shutdown()
 
