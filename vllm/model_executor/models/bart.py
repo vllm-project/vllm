@@ -82,8 +82,10 @@ class BartLearnedPositionalEmbedding(nn.Embedding):
     """
 
     def __init__(self, num_embeddings: int, embedding_dim: int):
-        # Bart is set up so that if padding_idx is specified then offset the embedding ids by 2
-        # and adjust num_embeddings appropriately. Other models don't have this hack
+        # Bart is set up so that if padding_idx is
+        # specified then offset the embedding ids by 2
+        # and adjust num_embeddings appropriately.
+        # Other models don't have this hack
         self.offset = 2
         super().__init__(num_embeddings + self.offset, embedding_dim)
 
@@ -551,7 +553,7 @@ class BartEncoder(nn.Module):
         self.embed_tokens = value
 
     def forward(
-            self, input_ids: torch.Tensor, positions: torch.Tensor,
+            self, input_ids: torch.Tensor,
             kv_caches: List[torch.Tensor],
             attn_metadata: AttentionMetadata) -> Union[Tuple, BaseModelOutput]:
         r"""
@@ -665,9 +667,8 @@ class BartDecoder(nn.Module):
         self.embed_tokens = value
 
     def forward(
-        self, decoder_input_ids: torch.Tensor, decoder_positions: torch.Tensor,
+        self, decoder_input_ids: torch.Tensor, 
         encoder_hidden_states: Optional[torch.Tensor],
-        encoder_positions: Optional[torch.Tensor],
         kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata
     ) -> Union[Tuple, BaseModelOutputWithPastAndCrossAttentions]:
         r"""
@@ -759,7 +760,6 @@ class BartDecoder(nn.Module):
                 attn_metadata=attn_metadata,
                 encoder_hidden_states=encoder_hidden_states,
             )
-            # hidden_states = layer_outputs[0]
 
         return hidden_states
 
@@ -774,17 +774,7 @@ class BartModel(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  lora_config: Optional[LoRAConfig] = None):
-        #super().__init__(config)
         super().__init__()
-
-        # padding_idx, vocab_size = config.pad_token_id, config.vocab_size
-        # self.shared = nn.Embedding(vocab_size, config.d_model, padding_idx)
-
-        # self.encoder = BartEncoder(config, self.shared)
-        # self.decoder = BartDecoder(config, self.shared)
-
-        # # Initialize weights and apply final processing
-        # self.post_init()
 
         self.config = config
 
@@ -793,12 +783,6 @@ class BartModel(nn.Module):
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
-
-        # self.embed_tokens = VocabParallelEmbedding(
-        #     self.vocab_size,
-        #     config.hidden_size,
-        #     org_num_embeddings=config.vocab_size,
-        # )
 
         self.encoder = BartEncoder(config,
                                    cache_config,
@@ -838,16 +822,14 @@ class BartModel(nn.Module):
             # Run encoder attention if a non-zero number of encoder tokens
             # are provided as input
             encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
-                                                 positions=encoder_positions,
                                                  kv_caches=kv_caches,
                                                  attn_metadata=attn_metadata)
 
-        # decoder outputs consists of (dec_features, past_key_value, dec_hidden, dec_attn)
+        # decoder outputs consists of
+        # (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_outputs = self.decoder(
             decoder_input_ids=input_ids,
-            decoder_positions=positions,
             encoder_hidden_states=encoder_hidden_states,
-            encoder_positions=encoder_positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata)
 
@@ -861,21 +843,11 @@ class BartForConditionalGeneration(nn.Module):
         "lm_head.weight"
     ]
 
-    # _keys_to_ignore_on_load_missing = ["final_logits_bias"]
-
     def __init__(self,
                  config: BartConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  lora_config: Optional[LoRAConfig] = None):
-        #super().__init__(config)
-        # self.model = BartModel(config)
-        # self.register_buffer(
-        #     "final_logits_bias",
-        #     torch.zeros((1, self.model.shared.num_embeddings)))
-
-        # # Initialize weights and apply final processing
-        # self.post_init()
 
         super().__init__()
         self.config = config
@@ -890,15 +862,6 @@ class BartForConditionalGeneration(nn.Module):
 
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-        # self.lm_head = ParallelLMHead(
-        #     self.unpadded_vocab_size,
-        #     config.hidden_size,
-        #     org_num_embeddings=config.vocab_size,
-        #     padding_size=DEFAULT_VOCAB_PADDING_SIZE
-        #     # We need bigger padding if using lora for kernel
-        #     # compatibility
-        #     if not lora_config else lora_config.lora_vocab_padding_size,
-        # )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
@@ -940,74 +903,19 @@ class BartForConditionalGeneration(nn.Module):
             kv_caches: List[torch.Tensor],
             attn_metadata: AttentionMetadata) -> Union[Tuple, Seq2SeqLMOutput]:
         r"""
-        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-            config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-            (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`,
+            *optional*): Labels for computing the masked language modeling
+            loss. Indices should either be in `[0, ...,
+            config.vocab_size]` or -100 (see `input_ids` docstring). 
+            Tokens with indices set to `-100` are ignored
+            (masked), the loss is only computed for the 
+            tokens with labels in `[0, ..., config.vocab_size]`.
 
         Returns:
         """
         hidden_states = self.model(input_ids, positions, encoder_input_ids,
                                    encoder_positions, kv_caches, attn_metadata)
         return hidden_states[0, :, :]
-
-        # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        # if labels is not None:
-        #     if use_cache:
-        #         logger.warning(
-        #             "The `use_cache` argument is changed to `False` since `labels` is provided."
-        #         )
-        #     use_cache = False
-        #     if decoder_input_ids is None and decoder_inputs_embeds is None:
-        #         decoder_input_ids = shift_tokens_right(
-        #             labels, self.config.pad_token_id,
-        #             self.config.decoder_start_token_id)
-
-        # outputs = self.model(
-        #     input_ids,
-        #     attention_mask=attention_mask,
-        #     decoder_input_ids=decoder_input_ids,
-        #     encoder_outputs=encoder_outputs,
-        #     decoder_attention_mask=decoder_attention_mask,
-        #     head_mask=head_mask,
-        #     decoder_head_mask=decoder_head_mask,
-        #     cross_attn_head_mask=cross_attn_head_mask,
-        #     past_key_values=past_key_values,
-        #     inputs_embeds=inputs_embeds,
-        #     decoder_inputs_embeds=decoder_inputs_embeds,
-        #     use_cache=use_cache,
-        #     output_attentions=output_attentions,
-        #     output_hidden_states=output_hidden_states,
-        #     return_dict=return_dict,
-        # )
-
-        # lm_logits = self.lm_head(outputs[0])
-        # lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
-
-        # masked_lm_loss = None
-        # if labels is not None:
-        #     labels = labels.to(lm_logits.device)
-        #     loss_fct = CrossEntropyLoss()
-        #     masked_lm_loss = loss_fct(
-        #         lm_logits.view(-1, self.config.vocab_size), labels.view(-1))
-
-        # if not return_dict:
-        #     output = (lm_logits, ) + outputs[1:]
-        #     return ((masked_lm_loss, ) +
-        #             output) if masked_lm_loss is not None else output
-
-        # return Seq2SeqLMOutput(
-        #     loss=masked_lm_loss,
-        #     logits=lm_logits,
-        #     past_key_values=outputs.past_key_values,
-        #     decoder_hidden_states=outputs.decoder_hidden_states,
-        #     decoder_attentions=outputs.decoder_attentions,
-        #     cross_attentions=outputs.cross_attentions,
-        #     encoder_last_hidden_state=outputs.encoder_last_hidden_state,
-        #     encoder_hidden_states=outputs.encoder_hidden_states,
-        #     encoder_attentions=outputs.encoder_attentions,
-        # )
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
@@ -1022,82 +930,6 @@ class BartForConditionalGeneration(nn.Module):
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
-
-    def prepare_inputs_for_generation(
-        self,
-        decoder_input_ids,
-        past_key_values=None,
-        attention_mask=None,
-        decoder_attention_mask=None,
-        head_mask=None,
-        decoder_head_mask=None,
-        cross_attn_head_mask=None,
-        use_cache=None,
-        encoder_outputs=None,
-        **kwargs,
-    ):
-        # cut decoder_input_ids if past_key_values is used
-        if past_key_values is not None:
-            past_length = past_key_values[0][0].shape[2]
-
-            # Some generation methods already pass only the last input ID
-            if decoder_input_ids.shape[1] > past_length:
-                remove_prefix_length = past_length
-            else:
-                # Default to old behavior: keep only final ID
-                remove_prefix_length = decoder_input_ids.shape[1] - 1
-
-            decoder_input_ids = decoder_input_ids[:, remove_prefix_length:]
-
-        return {
-            "input_ids":
-            None,  # encoder_outputs is defined. input_ids not needed
-            "encoder_outputs": encoder_outputs,
-            "past_key_values": past_key_values,
-            "decoder_input_ids": decoder_input_ids,
-            "attention_mask": attention_mask,
-            "decoder_attention_mask": decoder_attention_mask,
-            "head_mask": head_mask,
-            "decoder_head_mask": decoder_head_mask,
-            "cross_attn_head_mask": cross_attn_head_mask,
-            "use_cache":
-            use_cache,  # change this to avoid caching (presumably for debugging)
-        }
-
-    def prepare_decoder_input_ids_from_labels(self, labels: torch.Tensor):
-        return shift_tokens_right(labels, self.config.pad_token_id,
-                                  self.config.decoder_start_token_id)
-
-    @staticmethod
-    def _reorder_cache(past_key_values, beam_idx):
-        reordered_past = ()
-        for layer_past in past_key_values:
-            # cached cross_attention states don't have to be reordered -> they are always the same
-            reordered_past += (tuple(
-                past_state.index_select(0, beam_idx.to(past_state.device))
-                for past_state in layer_past[:2]) + layer_past[2:], )
-        return reordered_past
-
-    stacked_params_mapping = {
-        "query": {
-            "param_name": "qkv_proj",
-            "shard_id": "q",
-        },
-        "key": {
-            "param_name": "qkv_proj",
-            "shard_id": "k",
-        },
-        "value": {
-            "param_name": "qkv_proj",
-            "shard_id": "v",
-        },
-    }
-
-    params_mapping = {
-        "beta": "bias",
-        "gamma": "weight",
-        "LayerNorm": "layernorm",
-    }
 
     def _rename_key(self, key: str):
         prefix = f"{self.base_model_prefix}."
@@ -1178,86 +1010,3 @@ class BartForConditionalGeneration(nn.Module):
                     weight_loader(param, loaded_weight, shard_id)
                 else:
                     weight_loader(param, loaded_weight)
-
-    # def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-
-    #     stacked_params_mapping = [
-    #         # (param_name, shard_name, shard_id)
-    #         ("qkv_proj", "q_proj", "q"),
-    #         ("qkv_proj", "k_proj", "k"),
-    #         ("qkv_proj", "v_proj", "v"),
-    #     ]
-
-    #     expert_params_mapping = [
-    #         # These are the weight scales for the experts
-    #         # (param_name, weight_name, expert_id)
-    #         ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
-    #          f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
-    #         for expert_id in range(self.config.num_local_experts)
-    #         for weight_name in ["w1", "w2", "w3"]
-    #     ] + [
-    #         # These are the weights for the experts
-    #         # (param_name, weight_name, expert_id)
-    #         ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
-    #          f"experts.{expert_id}.{weight_name}.weight", expert_id)
-    #         for expert_id in range(self.config.num_local_experts)
-    #         for weight_name in ["w1", "w2", "w3"]
-    #     ] + [
-    #         # These are the activation scales for the experts
-    #         # (param_name, weight_name, expert_id)
-    #         ("a13_scale" if weight_name in ["w1", "w3"] else "a2_scale",
-    #          f"experts.{expert_id}.{weight_name}.input_scale", expert_id)
-    #         for expert_id in range(self.config.num_local_experts)
-    #         for weight_name in ["w1", "w2", "w3"]
-    #     ]
-
-    #     params_dict = dict(self.named_parameters())
-    #     for name, loaded_weight in weights:
-    #         if "rotary_emb.inv_freq" in name:
-    #             continue
-
-    #         for (param_name, weight_name, shard_id) in stacked_params_mapping:
-    #             if weight_name not in name:
-    #                 continue
-    #             name = name.replace(weight_name, param_name)
-    #             # Skip loading extra bias for GPTQ models.
-    #             if name.endswith(".bias") and name not in params_dict:
-    #                 continue
-    #             param = params_dict[name]
-    #             weight_loader = param.weight_loader
-    #             weight_loader(param, loaded_weight, shard_id)
-    #             break
-    #         else:
-    #             for param_name, weight_name, expert_id in expert_params_mapping:
-    #                 if weight_name not in name:
-    #                     continue
-    #                 name = name.replace(weight_name, param_name)
-    #                 param = params_dict[name]
-    #                 weight_loader = param.weight_loader
-    #                 weight_loader(param,
-    #                               loaded_weight,
-    #                               weight_name,
-    #                               expert_id=expert_id)
-    #                 break
-    #             else:
-    #                 # Skip loading extra bias for GPTQ models.
-    #                 if name.endswith(".bias") and name not in params_dict:
-    #                     continue
-    #                 # Remapping the name of FP8 kv-scale.
-    #                 if name.endswith("kv_scale"):
-    #                     remapped_kv_scale_name = name.replace(
-    #                         ".kv_scale", ".attn.kv_scale")
-    #                     if remapped_kv_scale_name not in params_dict:
-    #                         print_warning_once(
-    #                             "Found kv scale in the checkpoint "
-    #                             f"(e.g. {name}), but not found the expected "
-    #                             f"name in the model "
-    #                             f"(e.g. {remapped_kv_scale_name}). "
-    #                             "kv-scale is not loaded.")
-    #                         continue
-    #                     else:
-    #                         name = remapped_kv_scale_name
-    #                 param = params_dict[name]
-    #                 weight_loader = getattr(param, "weight_loader",
-    #                                         default_weight_loader)
-    #                 weight_loader(param, loaded_weight)
