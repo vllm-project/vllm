@@ -1,4 +1,3 @@
-import os
 from typing import List, Set, Tuple
 
 import openvino as ov

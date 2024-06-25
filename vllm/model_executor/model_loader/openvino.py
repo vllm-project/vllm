@@ -1,5 +1,4 @@
 # ruff: noqa: SIM117
-import os
 from pathlib import Path
 from typing import List, Optional, Tuple
 
