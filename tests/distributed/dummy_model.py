@@ -11,9 +11,11 @@ class MyOPTForCausalLM(OPTForCausalLM):
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         # this dummy model always predicts the first token
         logits = super().compute_logits(hidden_states, sampling_metadata)
-        logits.zero_()
-        logits[:, 0] += 1.0
+        if logits is not None:
+            logits.zero_()
+            logits[:, 0] += 1.0
         return logits
+
 
 # register our dummy model
 ModelRegistry.register_model("OPTForCausalLM", MyOPTForCausalLM)
