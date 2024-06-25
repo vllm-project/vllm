@@ -9,7 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoProcessor, AutoTokenizer, BatchEncoding)
+                          AutoProcessor, AutoTokenizer, BatchEncoding,
+                          AutoModelForSeq2SeqLM)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
@@ -21,6 +22,7 @@ from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
+from vllm.outputs import RequestOutput
 
 logger = init_logger(__name__)
 
@@ -114,11 +116,23 @@ def example_prompts() -> List[str]:
     return prompts
 
 @pytest.fixture
-def example_encoder_decoder_prompts() -> List[str]:
-    prompts = []
+def example_encoder_decoder_prompts() -> Tuple[List[str],List[str]]:
+    '''
+    Returns an encoder prompt list and a decoder prompt list, wherein each pair
+    of same-index entries in both lists corresponds to an (encoder prompt,
+    decoder prompt) tuple.
+
+    Returns:
+    * Encoder prompt list
+    * Decoder prompt list (reverse of encoder prompt list)
+    '''
+    encoder_prompts = []
     for filename in _TEST_PROMPTS:
-        prompts += _read_prompts(filename)
-    return prompts
+        encoder_prompts += _read_prompts(filename)
+
+    # Encoder prompts, decoder prompts
+    return encoder_prompts, \
+           encoder_prompts[::-1]
 
 @pytest.fixture
 def example_long_prompts() -> List[str]:
@@ -153,6 +167,7 @@ class HfRunner:
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
+        is_encoder_decoder_model: bool = False
     ) -> None:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
@@ -170,6 +185,8 @@ class HfRunner:
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
+            elif is_encoder_decoder_model:
+                auto_cls = AutoModelForSeq2SeqLM
             else:
                 auto_cls = AutoModelForCausalLM
 
@@ -362,6 +379,72 @@ class HfRunner:
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
 
+    def generate_encoder_decoder_greedy_logprobs_limit(
+        self,
+        encoder_decoder_prompts: Tuple[List[str],List[str]],
+        max_tokens: int,
+        num_logprobs: int,
+    ) -> List[Tuple[List[int], str, List[Dict[int, float]]]]:
+        '''
+        Greedy logprobs generation for vLLM encoder/decoder models
+        '''
+
+        all_logprobs: List[List[Dict[int, float]]] = []
+        all_output_ids: List[List[int]] = []
+        all_output_strs: List[str] = []
+
+        for encoder_prompt,decoder_prompt in zip(*encoder_decoder_prompts):
+            encoder_input_ids = self.tokenizer(encoder_prompt, return_tensors="pt").input_ids
+            decoder_input_ids = self.tokenizer(decoder_prompt, return_tensors="pt").input_ids
+            output = self.model.generate(
+                self.wrap_device(encoder_input_ids),
+                decoder_input_ids=self.wrap_device(decoder_input_ids),
+                use_cache=True,
+                do_sample=False,
+                max_new_tokens=max_tokens,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+            )
+
+            seq_logprobs: List[torch.Tensor] = []
+            for _, decoder_hidden_states in enumerate(output.decoder_hidden_states):
+                last_hidden_states = decoder_hidden_states[-1][0]
+                logits = torch.matmul(
+                    last_hidden_states,
+                    self.model.get_output_embeddings().weight.t(),
+                )
+                if getattr(self.model.get_output_embeddings(), "bias",
+                           None) is not None:
+                    logits += self.model.get_output_embeddings(
+                    ).bias.unsqueeze(0)
+                logprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+                seq_logprobs.append(logprobs)
+
+            # convert to dict
+            seq_logprobs_lst: List[Dict[int, float]] = []
+            for tok_idx, tok_logprobs in enumerate(seq_logprobs):
+                # drop prompt logprobs
+                if tok_idx == 0:
+                    tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
+                topk = tok_logprobs.topk(num_logprobs)
+
+                tok_logprobs_dct = {}
+                for token_id, logprob in zip(topk.indices[0], topk.values[0]):
+                    tok_logprobs_dct[token_id.item()] = logprob.item()
+
+                seq_logprobs_lst.append(tok_logprobs_dct)
+
+            all_logprobs.append(seq_logprobs_lst)
+            seq_ids = output.sequences[0]
+            output_len = seq_ids.shape[0] - decoder_input_ids.shape[1]
+            output_ids = seq_ids[-output_len:]
+            all_output_ids.append(output_ids.tolist())
+            all_output_strs.append(self.tokenizer.decode(output_ids))
+
+        outputs = zip(all_output_ids, all_output_strs, all_logprobs)
+        return [(output_ids, output_str, output_logprobs)
+                for output_ids, output_str, output_logprobs in outputs]
+
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         return self.model.encode(prompts)
 
@@ -442,6 +525,22 @@ class VllmRunner:
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
+    def _final_steps_generate_w_logprobs(self, 
+                                         req_outputs: List[RequestOutput]) \
+                                            -> List[
+                                                Tuple[List[int], 
+                                                      str, 
+                                                      Optional[
+                                                          SampleLogprobs]]]:
+        outputs: List[Tuple[List[int], str, Optional[SampleLogprobs]]] = []
+        for req_output in req_outputs:
+            for sample in req_output.outputs:
+                output_str = sample.text
+                output_ids = sample.token_ids
+                output_logprobs = sample.logprobs
+            outputs.append((output_ids, output_str, output_logprobs))
+        return outputs
+
     def generate_w_logprobs(
         self,
         prompts: List[str],
@@ -451,14 +550,24 @@ class VllmRunner:
 
         req_outputs = self.model.generate(prompts,
                                           sampling_params=sampling_params)
-        outputs: List[Tuple[List[int], str, Optional[SampleLogprobs]]] = []
-        for req_output in req_outputs:
-            for sample in req_output.outputs:
-                output_str = sample.text
-                output_ids = sample.token_ids
-                output_logprobs = sample.logprobs
-            outputs.append((output_ids, output_str, output_logprobs))
-        return outputs
+        return self._final_steps_generate_w_logprobs(req_outputs)
+
+    def generate_encoder_decoder_w_logprobs(
+        self,
+        encoder_decoder_prompts: Tuple[List[str],List[str]],
+        sampling_params: SamplingParams,
+    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
+        '''
+        Logprobs generation for vLLM encoder/decoder models
+        '''
+
+        assert sampling_params.logprobs is not None
+
+        prompt_inputs = list(zip(encoder_decoder_prompts[0],encoder_decoder_prompts[1]))
+
+        req_outputs = self.model.generate(prompt_inputs,
+                                          sampling_params=sampling_params)
+        return self._final_steps_generate_w_logprobs(req_outputs)
 
     def generate_greedy(
         self,
@@ -481,6 +590,24 @@ class VllmRunner:
                                                 max_tokens=max_tokens,
                                                 logprobs=num_logprobs)
         outputs = self.generate_w_logprobs(prompts, greedy_logprobs_params)
+
+        return [(output_ids, output_str, output_logprobs)
+                for output_ids, output_str, output_logprobs in outputs]
+
+    def generate_encoder_decoder_greedy_logprobs(
+        self,
+        encoder_decoder_prompts: Tuple[List[str],List[str]],
+        max_tokens: int,
+        num_logprobs: int,
+    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
+        greedy_logprobs_params = SamplingParams(temperature=0.0,
+                                                max_tokens=max_tokens,
+                                                logprobs=num_logprobs)
+        '''
+        Greedy logprobs generation for vLLM encoder/decoder models
+        '''
+
+        outputs = self.generate_encoder_decoder_w_logprobs(encoder_decoder_prompts, greedy_logprobs_params)
 
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
