@@ -220,17 +220,17 @@ __device__ inline typename ScalarType<scalar_t>::FragB dequant_8bit(int q) {
 
 template <>
 __device__ inline typename ScalarType<half>::FragB dequant_8bit<half>(int q) {
-  c10::Float8_e4m3fn fp8_e4m3_vals[4];
-  fp8_e4m3_vals[0] = static_cast<c10::Float8_e4m3fn>((q >> 0) & 0xFF);
-  fp8_e4m3_vals[1] = static_cast<c10::Float8_e4m3fn>((q >> 8) & 0xFF);
-  fp8_e4m3_vals[2] = static_cast<c10::Float8_e4m3fn>((q >> 16) & 0xFF);
-  fp8_e4m3_vals[3] = static_cast<c10::Float8_e4m3fn>((q >> 24) & 0xFF);
+  union {
+    int i32;
+    c10::Float8_e4m3fn fp8[4];
+  } u;
+  u.i32 = q;
 
   typename ScalarType<half>::FragB frag_b;
-  frag_b[0] = __halves2half2(static_cast<half>(fp8_e4m3_vals[1]),
-                             static_cast<half>(fp8_e4m3_vals[0]));
-  frag_b[1] = __halves2half2(static_cast<half>(fp8_e4m3_vals[3]),
-                             static_cast<half>(fp8_e4m3_vals[2]));
+  frag_b[0] =
+      __halves2half2(static_cast<half>(u.fp8[0]), static_cast<half>(u.fp8[2]));
+  frag_b[1] =
+      __halves2half2(static_cast<half>(u.fp8[1]), static_cast<half>(u.fp8[3]));
 
   return frag_b;
 }
@@ -238,17 +238,17 @@ __device__ inline typename ScalarType<half>::FragB dequant_8bit<half>(int q) {
 template <>
 __device__ inline typename ScalarType<nv_bfloat16>::FragB
 dequant_8bit<nv_bfloat16>(int q) {
-  c10::Float8_e4m3fn fp8_e4m3_vals[4];
-  fp8_e4m3_vals[0] = static_cast<c10::Float8_e4m3fn>((q >> 0) & 0xFF);
-  fp8_e4m3_vals[1] = static_cast<c10::Float8_e4m3fn>((q >> 8) & 0xFF);
-  fp8_e4m3_vals[2] = static_cast<c10::Float8_e4m3fn>((q >> 16) & 0xFF);
-  fp8_e4m3_vals[3] = static_cast<c10::Float8_e4m3fn>((q >> 24) & 0xFF);
+  union {
+    int i32;
+    c10::Float8_e4m3fn fp8[4];
+  } u;
+  u.i32 = q;
 
   typename ScalarType<nv_bfloat16>::FragB frag_b;
-  frag_b[0] = __halves2bfloat162(static_cast<nv_bfloat16>(fp8_e4m3_vals[1]),
-                                 static_cast<nv_bfloat16>(fp8_e4m3_vals[0]));
-  frag_b[1] = __halves2bfloat162(static_cast<nv_bfloat16>(fp8_e4m3_vals[3]),
-                                 static_cast<nv_bfloat16>(fp8_e4m3_vals[2]));
+  frag_b[0] = __halves2bfloat162(static_cast<nv_bfloat16>(u.fp8[0]),
+                                 static_cast<nv_bfloat16>(u.fp8[2]));
+  frag_b[1] = __halves2bfloat162(static_cast<nv_bfloat16>(u.fp8[1]),
+                                 static_cast<nv_bfloat16>(u.fp8[3]));
 
   return frag_b;
 }
@@ -1538,30 +1538,10 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
 }
 
   #define CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)           \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
-                                                                       \
     __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)  \
-                                                                       \
     __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)  \
-                                                                       \
     __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)  \
-                                                                       \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS)
 
 template <typename scalar_t>
 void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s,

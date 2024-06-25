@@ -318,6 +318,14 @@ def scaled_fp8_quant(
     return output, scale
 
 
+def pack_fp8_to_int32(input: torch.Tensor) -> torch.Tensor:
+    assert input.shape[0] % 4 == 0
+    shape = (input.shape[0] // 4, *input.shape[1:])
+    output = torch.empty(shape, device=input.device, dtype=torch.int32)
+    torch.ops._C.pack_fp8_to_int32(output, input)
+    return output
+
+
 # int8
 def scaled_int8_quant(
         input: torch.Tensor,

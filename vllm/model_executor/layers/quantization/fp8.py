@@ -1,6 +1,5 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import numpy as np
 import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
@@ -266,10 +265,12 @@ class Fp8LinearMethod(LinearMethodBase):
             part_size_n = layer.output_size_per_partition
             part_size_k = layer.input_size_per_partition
 
+            # FP8 is always 8 bits
+            weight_bits = 8
+
             out_shape = x.shape[:-1] + (part_size_n, )
 
             if layer.marlin_state == GPTQMarlinState.REPACK:
-                print("REPACK")
                 layer.marlin_state = GPTQMarlinState.READY
 
                 device = layer.weight.device
@@ -286,33 +287,13 @@ class Fp8LinearMethod(LinearMethodBase):
                 )
 
                 # WEIGHTS
-                # FP8 is always 8 bits
-                weight_bits = 8
-                # # Repack weights to gptq format (packed int32 elements)
+                # Repack weights to gptq format (packed int32 elements)
                 fp8_weights = layer.weight
-                print("ORIG FP8 WEIGHT", fp8_weights.shape)
-                fp8_uint8 = fp8_weights.view(dtype=torch.uint8).cpu().numpy()
-
-                i = 0
-                row = 0
-                gptq_qweight = np.zeros(
-                    (fp8_weights.shape[0] // 32 * weight_bits,
-                     fp8_weights.shape[1]),
-                    dtype=np.uint32)
-                while row < gptq_qweight.shape[0]:
-                    for j in range(i, i + (32 // weight_bits)):
-                        gptq_qweight[row] |= fp8_uint8[j] << (weight_bits *
-                                                              (j - i))
-                    i += 32 // weight_bits
-                    row += 1
-
-                gptq_qweight = torch.from_numpy(gptq_qweight.astype(
-                    np.int32)).to(device)
-                print("GPTQ PACKED WEIGHT", gptq_qweight.shape)
+                packed_gptq_qweight = ops.pack_fp8_to_int32(fp8_weights)
 
                 # Repack weights to marlin format
                 marlin_qweight = ops.gptq_marlin_repack(
-                    gptq_qweight,
+                    packed_gptq_qweight,
                     layer.g_idx_sort_indices,
                     part_size_k,
                     part_size_n,
@@ -326,7 +307,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 scales_size_k = part_size_k
                 scales_size_n = part_size_n
                 scales = layer.weight_scale.repeat(1, scales_size_n).to(
-                    x.dtype)
+                    x.dtype).to(device)
                 # Permute scales
                 group_size = -1
                 marlin_scales = marlin_permute_scales(
@@ -344,27 +325,13 @@ class Fp8LinearMethod(LinearMethodBase):
                                       ) * GPTQ_MARLIN_MAX_PARALLEL
                 workspace = torch.zeros(max_workspace_size,
                                         dtype=torch.int,
+                                        device=device,
                                         requires_grad=False)
 
                 layer.workspace = workspace
-                # K is always full due to full alignment with
-                # group-size and shard of scales/zp
+                # K is always full
                 layer.is_k_full = True
 
-                torch.cuda.synchronize()
-
-            print("MARLIN FP8")
-            print("RESHAPE X", reshaped_x.shape)
-            print("WEIGHT", layer.weight.shape)
-            print("SCALES", layer.weight_scale.shape)
-            print("G IDX", layer.g_idx.shape)
-            print("G IDX SORT INDICES", layer.g_idx_sort_indices.shape)
-            print("WORKSPACE", layer.workspace.shape)
-            print("M", size_m)
-            print("N", part_size_n)
-            print("K", part_size_k)
-            print("IS K FULL", layer.is_k_full)
-            torch.cuda.synchronize()
             output = ops.fp8_marlin_gemm(
                 reshaped_x,
                 layer.weight,
@@ -378,7 +345,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 part_size_k,
                 layer.is_k_full,
             )
-            torch.cuda.synchronize()
 
             if bias is not None:
                 output.add_(bias)  # In-place add

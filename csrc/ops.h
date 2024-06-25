@@ -128,6 +128,8 @@ void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
 void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                               torch::Tensor& scale);
 
+void pack_fp8_to_int32(torch::Tensor& out, torch::Tensor& input);
+
 void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                           int64_t block_size, torch::Tensor sorted_token_ids,
                           torch::Tensor experts_ids,

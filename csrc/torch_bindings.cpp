@@ -181,6 +181,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "()");
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
 
+  // Pack FP8 quantized tensor into INT32 quantized tensor (GPTQ-style).
+  ops.def("pack_fp8_to_int32(Tensor! out, Tensor input) -> ()");
+  ops.impl("pack_fp8_to_int32", torch::kCUDA, &pack_fp8_to_int32);
+
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.
   ops.def(
