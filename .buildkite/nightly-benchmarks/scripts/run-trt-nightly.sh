@@ -157,7 +157,7 @@ run_serving_tests() {
     # get common parameters
     common_params=$(echo "$params" | jq -r '.common_parameters')
     model=$(echo "$common_params" | jq -r '.model')
-    tp=$(echo "$common_params" | jq -r '.tensor_parallel_size')
+    tp=$(echo "$common_params" | jq -r '.tp')
     dataset_name=$(echo "$common_params" | jq -r '.dataset_name')
     dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
     port=$(echo "$common_params" | jq -r '.port')
