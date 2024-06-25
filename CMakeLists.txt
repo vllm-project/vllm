@@ -138,7 +138,6 @@ if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_GPU_FLAGS "--threads=${NVCC_THREADS}")
 endif()
 
-list(APPEND VLLM_GPU_FLAGS "-DTORCH_USE_CUDA_DSA")
 #
 # Define extension targets
 #
@@ -198,12 +197,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
 endif()
-
-set_source_files_properties(
-      "csrc/quantization/fp8/fp8_marlin.cu"
-      PROPERTIES
-      COMPILE_FLAGS
-      "-lineinfo")
 
 define_gpu_extension_target(
   _C
