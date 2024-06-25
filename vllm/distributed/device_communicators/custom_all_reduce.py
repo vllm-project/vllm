@@ -74,9 +74,8 @@ def _is_full_nvlink(device_ids: List[int], world_size) -> bool:
                         if link_type["hops"] != 1 or link_type["type"] != 2:
                             return False
                     except AmdSmiException as error:
-                        logger.error(
-                            "AMD link detection failed.",
-                            exc_info=error)
+                        logger.error("AMD link detection failed.",
+                                     exc_info=error)
                         return False
     else:
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
