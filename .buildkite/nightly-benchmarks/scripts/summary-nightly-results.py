@@ -65,7 +65,7 @@ if __name__ == "__main__":
     # document benchmarking results in markdown
     with open(results_folder / f"{prefix}_nightly_results.md", "w") as f:
         f.write(serving_md_table)
-        f.write('\n')
+        f.write('\n\n')
 
     # document benchmarking results in json
     with open(results_folder / f"{prefix}_nightly_results.json", "w") as f:
