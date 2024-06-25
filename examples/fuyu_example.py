@@ -1,41 +1,48 @@
 import os
 import subprocess
 
-import torch
+import math
+from PIL import Image
 
-from vllm import LLM
-from vllm.sequence import MultiModalData
-
-# The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
+from vllm import LLM, SamplingParams
+from vllm.multimodal.image import ImagePixelData
 
 
 def run_fuyu_pixel_values():
     llm = LLM(
-        model="adept/fuyu-8b",
+        # model="adept/fuyu-8b",
+        model="/data/LLM-model/fuyu-8b",
+        max_model_len=4096,
         image_input_type="pixel_values",
         image_token_id=71011,
+        image_input_shape="1,3,576,1024",
+        # below makes no sense to fuyu, just make model_executor happy
+        image_feature_size=2700,
+        disable_image_processor=False,
     )
 
     # load and create image prompt
-    images = torch.load("images/cherry_blossom_pixel_values.pt")
+    image = Image.open("images/stop_sign.jpg")
+    H, W = image.size
 
-    _, _, H, W = images.shape
-    nrow = H // 30 + 1 if H % 30 else H // 30
-    ncol = W // 30 + 1 if W % 30 else W // 30
+    nrow = math.ceil(H/30)
+    ncol = math.ceil(W/30)
 
-    image_prompt = ("|SPEAKER|" * ncol + "|NEWLINE|") * nrow
-    prompt = image_prompt + "Generate a coco-style caption.\n"
+    # single-image prompt
+    prompt = "<image>\nWhat is the content of this image?\n"
+    prompt = prompt.replace("<image>", ("|SPEAKER|" * ncol + "|NEWLINE|") * nrow)
 
-    # inference
+    sampling_params = SamplingParams(temperature=0, max_tokens=64)
+
     outputs = llm.generate(
-        prompt,
-        multi_modal_data=MultiModalData(MultiModalData.Type.IMAGE, images),
-    )
-
-    # Print the outputs.
-    for output in outputs:
-        generated_text = output.outputs[0].text
-        print(f"Generated text: {generated_text!r}")
+        {
+            "prompt": prompt,
+            "multi_modal_data": ImagePixelData(image),
+        },
+        sampling_params=sampling_params)
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
 
 
 if __name__ == "__main__":

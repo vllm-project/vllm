@@ -15,90 +15,97 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch Fuyu model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Literal, TypedDict, Dict
+import math
 
 import torch
 import torch.utils.checkpoint
-from torch import nn
+from PIL import Image
 from transformers import FuyuConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import VisionLanguageConfig
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               RowParallelLinear)
+from vllm.config import VisionLanguageConfig, CacheConfig, ModelConfig
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
+from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
 from vllm.sequence import SamplerOutput
 
-
-class FuyuInputProcessor:
-    """Simple Processor for padding and patch PIXEL_VALUES image input"""
-
-    def __init__(self, patch_size=30, bos_token_id=1) -> None:
-        self.patch_size = patch_size
-        self.bos_token_id = bos_token_id
-
-    def _calculate_patch_nums(self, x: int) -> int:
-        x = x // self.patch_size
-        if x % self.patch_size != 0:
-            x += 1
-        return x
-
-    def _patch_image(self, image):
-        patches = list(image.split(self.patch_size, dim=0))
-        patches = [
-            torch.stack(patch.split(self.patch_size, dim=1))
-            for patch in patches
-        ]
-        patches = torch.concat(patches, dim=0)
-        return patches
-
-    def __call__(self, image: torch.Tensor) -> torch.Tensor:
-        batch_size, num_channels, H, W = image.shape
-        assert batch_size == 1
-        assert num_channels == 3, "Input image should have 3 channels"
-
-        image = image.squeeze(0).permute(1, 2, 0)
-        patch_y = self._calculate_patch_nums(H)
-        patch_x = self._calculate_patch_nums(W)
-
-        image_padded = torch.ones(
-            patch_y * self.patch_size,
-            patch_x * self.patch_size,
-            num_channels,
-            dtype=image.dtype,
-            device=image.device,
-        )
-        image_padded[:H, :W, :] = image
-        image_patches = self._patch_image(image_padded).view(
-            patch_y * patch_x, self.patch_size**2 * num_channels)
-        return image_patches
+logger = init_logger(__name__)
 
 
-class FuyuForCausalLM(nn.Module):
+class FuyuImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: (batch_size, num_patches, patch_size_x * patch_size_y * num_channels)"""
+
+
+def _image_processor(
+    data: ImagePixelData,
+    model_config: ModelConfig,
+    vlm_config: VisionLanguageConfig,
+) -> Dict[str, torch.Tensor]:
+    image = data.image
+
+    # if isinstance(image, Image.Image):
+    #     # Temporary patch before dynamic number of image tokens is supported
+    #     _, _, h, w = vlm_config.image_input_shape
+    #     if (w, h) != (image.width, image.height):
+    #         logger.warning(
+    #             "Dynamic image shape is currently not supported. "
+    #             "Resizing input image to (%d, %d).", w, h)
+
+    #         data.image = image.resize((w, h))
+    
+    img_processor = MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
+                    ._get_hf_image_processor(model_config, vlm_config)
+
+    # FuyuImageProcessor's preprocess returns unpatched image,
+    # we need to call patchify_image manually
+    processor_outputs = MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
+            ._default_input_processor(data, model_config, vlm_config)
+
+    image = torch.stack(processor_outputs["images"][0])
+    _, _, h, w = image.shape
+    image_unpadded_h = processor_outputs["image_unpadded_heights"]
+    image_unpadded_w = processor_outputs["image_unpadded_widths"]
+    new_h = min(h, math.ceil(image_unpadded_h[0][0] / 30) * 30)
+    new_w = min(w, math.ceil(image_unpadded_w[0][0] / 30) * 30)
+    image = image[:, :, :new_h, :new_w]
+
+    return {"image_patches": img_processor.patchify_image(image)}
+
+
+@MULTIMODAL_REGISTRY.register_image_pixel_input(_image_processor)
+@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
+class FuyuForCausalLM(VisionLanguageModelBase):
 
     def __init__(
         self,
         config: FuyuConfig,
         vision_language_config: VisionLanguageConfig,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
-        super().__init__()
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None) -> None:
+        super().__init__(vision_language_config)
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.vision_language_config = vision_language_config
         self.image_token_id = self.vision_language_config.image_token_id
 
-        self.processor = FuyuInputProcessor()
         self.vision_embed_tokens = RowParallelLinear(
             config.patch_size * config.patch_size * config.num_channels,
             config.hidden_size,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.language_model = PersimmonForCausalLM(config,
-                                                   linear_method=linear_method)
+                                                   cache_config=cache_config,
+                                                   quant_config=quant_config)
 
     def merge_embeddings(
         self,
@@ -112,19 +119,35 @@ class FuyuForCausalLM(nn.Module):
             -1, vision_embeddings.shape[-1])
         return inputs_embeds
 
+    def _parse_and_validate_image_input(self, **kwargs: object):
+        image_patches = kwargs.pop("image_patches", None)
+
+        expected_input_type = self.vision_language_config.image_input_type
+        ImageInputType = VisionLanguageConfig.ImageInputType
+
+        if expected_input_type != ImageInputType.PIXEL_VALUES:
+            raise ValueError(
+                f"Unexpected image input type: {expected_input_type}."
+                "Phi3v only support pixel_values input currently.")
+
+        if image_patches is not None:
+            image_patches = image_patches.to(self.vision_embed_tokens.weight.dtype)
+            return FuyuImagePixelInputs(type="pixel_values",
+                                         data=image_patches)
+        return None
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        image_input: Optional[torch.Tensor] = None,
+        **kwargs: object,
     ):
+        image_input = self._parse_and_validate_image_input(**kwargs)
+
         if image_input is not None:
-            # input_ids, image_patches = self.processor(input_ids, image_input)
-            image_patches = self.processor(image_input)
-            vision_embeddings, _ = self.vision_embed_tokens(
-                image_patches.to(self.vision_embed_tokens.weight.dtype))
+            vision_embeddings, _ = self.vision_embed_tokens(image_input["data"])
             inputs_embeds = self.language_model.model.embed_tokens(input_ids)
             inputs_embeds = self.merge_embeddings(
                 input_ids,

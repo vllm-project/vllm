@@ -29,10 +29,12 @@ from transformers.activations import ReLUSquaredActivation
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.config import CacheConfig
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
@@ -47,14 +49,14 @@ class PersimmonMLP(nn.Module):
 
     def __init__(self,
                  config: PersimmonConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,
                                                   config.intermediate_size,
-                                                  linear_method=linear_method)
+                                                  quant_config=quant_config)
         self.dense_4h_to_h = RowParallelLinear(config.intermediate_size,
                                                config.hidden_size,
-                                               linear_method=linear_method)
+                                               quant_config=quant_config)
         self.act = ReLUSquaredActivation()
 
     def forward(self, hidden_states) -> torch.Tensor:
@@ -68,7 +70,8 @@ class PersimmonAttention(nn.Module):
 
     def __init__(self,
                  config: PersimmonConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
         tensor_parallel_world_size = get_tensor_model_parallel_world_size()
@@ -90,13 +93,13 @@ class PersimmonAttention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.dense = RowParallelLinear(
             self.num_heads * self.head_dim,
             self.hidden_size,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.is_qk_layernorm = config.qk_layernorm
 
@@ -120,7 +123,9 @@ class PersimmonAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(self.num_heads,
                               self.head_dim,
-                              scale=self.scaling)
+                              scale=self.scaling,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         # [seq_length, hidden_size] -> [seq_length, num_heads, head_dim]
@@ -164,12 +169,14 @@ class PersimmonDecoderLayer(nn.Module):
 
     def __init__(self,
                  config: PersimmonConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = PersimmonAttention(config=config,
-                                            linear_method=linear_method)
-        self.mlp = PersimmonMLP(config, linear_method=linear_method)
+                                            cache_config=cache_config,
+                                            quant_config=quant_config)
+        self.mlp = PersimmonMLP(config, quant_config=quant_config)
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
@@ -210,14 +217,15 @@ class PersimmonModel(nn.Module):
 
     def __init__(self,
                  config: PersimmonConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.layers = nn.ModuleList([
-            PersimmonDecoderLayer(config, linear_method=linear_method)
+            PersimmonDecoderLayer(config, cache_config=cache_config, quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
@@ -250,12 +258,12 @@ class PersimmonForCausalLM(nn.Module):
 
     def __init__(self,
                  config,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
-        self.linear_method = linear_method
-        self.model = PersimmonModel(config, linear_method=linear_method)
+        self.model = PersimmonModel(config, cache_config=cache_config, quant_config=quant_config)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       bias=False)
