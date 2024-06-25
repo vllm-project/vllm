@@ -47,7 +47,7 @@ from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
 
 
-class TELECHATMLP(nn.Module):
+class TeleChatMLP(nn.Module):
 
     def __init__(
         self,
@@ -77,7 +77,7 @@ class TELECHATMLP(nn.Module):
         return x
 
 
-class TELECHATAttention(nn.Module):
+class TeleChatAttention(nn.Module):
 
     def __init__(
         self,
@@ -123,7 +123,6 @@ class TELECHATAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        #this params block in telechatBlock
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -154,15 +153,15 @@ class TELECHATAttention(nn.Module):
         return output
 
 
-class TELECHATBlock(nn.Module):
+class TeleChatBlock(nn.Module):
 
     def __init__(self, config, cache_config=None, quant_config=None):
         super().__init__()
         hidden_size = config.hidden_size
         inner_dim = (config.n_inner if config.n_inner is not None else 4 *
                      hidden_size)
-        self.attn = TELECHATAttention(config, quant_config=quant_config)
-        self.mlp = TELECHATMLP(inner_dim, config, quant_config=quant_config)
+        self.attn = TeleChatAttention(config, quant_config=quant_config)
+        self.mlp = TeleChatMLP(inner_dim, config, quant_config=quant_config)
 
         self.ln_1 = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.ln_2 = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
@@ -193,7 +192,7 @@ class TELECHATBlock(nn.Module):
         return hidden_states, residual
 
 
-class TELECHATModel(nn.Module):
+class TeleChatModel(nn.Module):
 
     def __init__(
         self,
@@ -215,7 +214,7 @@ class TELECHATModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.h = nn.ModuleList([
-            TELECHATBlock(config=config,
+            TeleChatBlock(config=config,
                           cache_config=cache_config,
                           quant_config=quant_config)
             for idx in range(config.num_hidden_layers)
@@ -262,7 +261,7 @@ class TeleChatForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        self.transformer = TELECHATModel(config,
+        self.transformer = TeleChatModel(config,
                                          cache_config,
                                          quant_config,
                                          lora_config=lora_config)
