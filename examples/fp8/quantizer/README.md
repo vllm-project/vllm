@@ -1,3 +1,32 @@
+## AMD Quark
+### Quantizer Utilities
+`quantize_quark.py`: AMD quantization utilities using Quark.
+
+### Prerequisite
+Quark Installation:
+`pip install --no-cache-dir quark`
+
+### Usage
+```
+python3 quantize_quark.py --model_dir [llama2 checkpoint folder] \
+      --output_dir output_dir \
+      --quant_scheme w_fp8_a_fp8_o_fp8 \
+      --num_calib_data 128 \
+      --model_export vllm_adopted_safetensors \
+      --no_weight_matrix_merge
+```
+
+Output: model structure, quantized model & parameters (with scaling factors) are in JSON and Safetensors.
+```
+ll output_dir/
+total 6837032
+drwxr-xr-x 2 root root       4096 Jun 25 18:42 ./
+drwxrwxr-x 1 root root       4096 Jun 25 18:42 ../
+-rw-r--r-- 1 root root     115917 Jun 25 18:42 llama.json
+-rw-r--r-- 1 root root 7000987528 Jun 25 18:42 llama.safetensors
+```
+
+## NVIDIA Ammo
 ### Quantizer Utilities
 `quantize.py`: NVIDIA Quantization utilities using AMMO, ported from TensorRT-LLM:
 `https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/quantization/quantize.py`
