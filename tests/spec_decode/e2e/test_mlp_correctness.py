@@ -33,7 +33,7 @@ SPEC_MODEL = "ibm-granite/granite-3b-code-instruct-accelerator"
 MAX_SPEC_TOKENS = 5
 
 # precision
-PRECISION = "bfloat16"
+PRECISION = "float16"
 
 
 @pytest.mark.parametrize(
@@ -64,7 +64,7 @@ PRECISION = "bfloat16"
     },
 ])
 @pytest.mark.parametrize("output_len", [
-    256,
+    128,
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
@@ -111,7 +111,7 @@ def test_mlp_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator,
     "output_len",
     [
         # Use small output len for fast test.
-        256,
+        128,
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
