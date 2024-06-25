@@ -1,7 +1,9 @@
 from functools import lru_cache
 from json import loads as json_loads
 from typing import Optional, Union
-
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    CompletionRequest)
 from lmformatenforcer import (CharacterLevelParser, JsonSchemaParser,
                               RegexParser, StringParser,
                               TokenEnforcerTokenizerData, UnionParser)
@@ -17,7 +19,8 @@ from vllm.sampling_params import LogitsProcessor
 
 
 def get_lm_format_enforcer_guided_decoding_logits_processor(
-        request: GuidedDecodingFields, tokenizer) -> Optional[LogitsProcessor]:
+        request: Union[CompletionRequest,
+                   ChatCompletionRequest, GuidedDecodingFields], tokenizer) -> Optional[LogitsProcessor]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
@@ -40,7 +43,7 @@ def get_lm_format_enforcer_guided_decoding_logits_processor(
         # CFG grammar not supported by LMFE, revert to outlines
         return get_outlines_guided_decoding_logits_processor(
             request, tokenizer)
-    elif request.guided_json_object:
+    elif isinstance(request, GuidedDecodingFields) and request.guided_json_object:
         # None means any json object
         character_level_parser = JsonSchemaParser(None)
     else:
