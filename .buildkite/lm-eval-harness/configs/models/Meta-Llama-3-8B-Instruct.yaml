@@ -1,5 +1,5 @@
-# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m neuralmagic/Meta-Llama-3-8B-Instruct-FP8 -b 32 -l 250 -f 5 -t 1
-model_name: "neuralmagic/Meta-Llama-3-8B-Instruct-FP8"
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m meta-llama/Meta-Llama-3-8B-Instruct -b 32 -l 250 -f 5 -t 1
+model_name: "meta-llama/Meta-Llama-3-8B-Instruct"
 tasks:
 - name: "gsm8k"
   metrics:
