@@ -633,18 +633,18 @@ def split_slot_mapping(slot_mapping_list: torch.Tensor, seq_lens: List[int],
 
     Context:
     * Your goal is to test (1) prefill of N prompts, with prompt-lengths
-      {K_i \forall i \in [0,N)}, followed by (2) decoding of a single token
+      {K_i \\forall i \\in [0,N)}, followed by (2) decoding of a single token
       for all N prompts (N tokens total); the resultant sequence lengths 
-      after decode would be {K_i + 1 for i \in [0,N)}
+      after decode would be {K_i + 1 for i \\in [0,N)}
     * The test you want to do requires (1) having the prefill slot mapping 
       for all tokens present during prefill, the number of which is 
-      M = \sum_i{K_i}, and (2) having the decode slot mapping for all N 
+      M = \\sum_i{K_i}, and (2) having the decode slot mapping for all N 
       decoded tokens
     
     This function consumes a single 1D slot mapping, which is the 
     concatenation of N slot mappings each of length K_i + 1 (corresponding
     to the  sequence lengths after decode), with a total length of
-    P = \sum_i{K_i + 1} = M + N
+    P = \\sum_i{K_i + 1} = M + N
 
     The prefill-phase slot mapping results from excising the (K_i + 1)-th entry
     from each of the N subsequences in the slot mapping (i.e. omitting the 
