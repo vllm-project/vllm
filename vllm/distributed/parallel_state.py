@@ -676,6 +676,28 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
+def init_world_group(ranks: List[int], local_rank: int,
+                     backend: str) -> GroupCoordinator:
+    return GroupCoordinator(
+        group_ranks=[ranks],
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        use_pynccl=False,
+        use_custom_allreduce=False,
+    )
+
+
+def init_model_parallel_group(group_ranks: List[List[int]], local_rank: int,
+                              backend: str) -> GroupCoordinator:
+    return GroupCoordinator(
+        group_ranks=group_ranks,
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        use_pynccl=True,
+        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
+    )
+
+
 _TP: Optional[GroupCoordinator] = None
 
 
@@ -764,13 +786,7 @@ def init_distributed_environment(
     global _WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = GroupCoordinator(
-            group_ranks=[ranks],
-            local_rank=local_rank,
-            torch_distributed_backend=backend,
-            use_pynccl=False,
-            use_custom_allreduce=False,
-        )
+        _WORLD = init_world_group(ranks, local_rank, backend)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
@@ -827,13 +843,8 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
-    _TP = GroupCoordinator(
-        group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank,
-        torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
-    )
+    _TP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank, backend)
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
@@ -845,13 +856,8 @@ def initialize_model_parallel(
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group_ranks.append(ranks)
-    _PP = GroupCoordinator(
-        group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank,
-        torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
-    )
+    _PP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank, backend)
 
 
 def ensure_model_parallel_initialized(
@@ -885,6 +891,34 @@ def ensure_model_parallel_initialized(
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
     return (_TP is not None and _PP is not None)
+
+
+_TP_STATE_PATCHED = False
+
+
+@contextmanager
+def patch_tensor_parallel_group(tp_group: GroupCoordinator):
+    """Patch the tp group temporarily until this function ends.
+
+    This method is for draft workers of speculative decoding to run draft model
+    with different tp degree from that of target model workers.
+
+    Args:
+        tp_group (GroupCoordinator): the tp group coordinator
+    """
+    global _TP_STATE_PATCHED
+    assert not _TP_STATE_PATCHED, "Should not call when it's already patched"
+
+    _TP_STATE_PATCHED = True
+    old_tp_group = get_tp_group()
+    global _TP
+    _TP = tp_group
+    try:
+        yield
+    finally:
+        # restore the original state
+        _TP_STATE_PATCHED = False
+        _TP = old_tp_group
 
 
 def get_tensor_model_parallel_world_size():
