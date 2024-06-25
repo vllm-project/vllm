@@ -677,19 +677,18 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     # Default enc/dec cross-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
                         attn_metadata.seq_lens, attn_metadata.encoder_seq_lens)
+                elif attn_type == AttentionType.ENCODER:
+                    assert attn_metadata.encoder_seq_lens is not None
+
+                    # Default encoder self-attention mask is non-causal
+                    attn_bias = BlockDiagonalMask.from_seqlens(
+                        attn_metadata.encoder_seq_lens)
                 else:
-                    if attn_type == AttentionType.ENCODER:
-                        assert attn_metadata.encoder_seq_lens is not None
+                    assert attn_metadata.seq_lens is not None
 
-                        # Default encoder self-attention mask is non-causal
-                        attn_bias = BlockDiagonalMask.from_seqlens(
-                            attn_metadata.encoder_seq_lens)
-                    else:
-                        assert attn_metadata.seq_lens is not None
-
-                        # Default decoder self-attention mask is causal
-                        attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                            attn_metadata.seq_lens)
+                    # Default decoder self-attention mask is causal
+                    attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                        attn_metadata.seq_lens)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
