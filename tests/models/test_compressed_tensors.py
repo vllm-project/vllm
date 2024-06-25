@@ -1,4 +1,4 @@
-"""Compares vllm vs the sparseml for compressed-tensors
+"""Compares vllm vs sparseml for compressed-tensors
 
 Note: vllm and sparseml do not have bitwise correctness, 
 so in this test, we just confirm that the top selected 
