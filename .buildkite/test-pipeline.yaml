@@ -13,7 +13,7 @@ steps:
   #mirror_hardwares: [amd]
   command: pytest -v -s async_engine
 
-- label: Basic Correctness Test
+- label: Basic Correctness  Test
   mirror_hardwares: [amd]
   commands:
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py
