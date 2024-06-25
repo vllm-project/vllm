@@ -20,6 +20,10 @@ from vllm.utils import make_tensor_with_pad
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = 0  # FIXME(woosuk)
+# FIXME(woosuk): A temporary hack to support `n > 1`.
+_MAX_NUM_SAMPLES = 128
+# FIXME(woosuk): Disabled top-p sampling since it's too slow.
+_ENABLE_TOP_P = False
 
 
 class TPUModelRunner:
@@ -139,8 +143,9 @@ class TPUModelRunner:
         p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
 
         # Dummy run.
+        num_samples = _MAX_NUM_SAMPLES if is_prompt else 1
         self.model(token_ids, position_ids, kv_caches, attn_metadata,
-                   input_lens, t, p)
+                   input_lens, t, p, num_samples)
 
     def warmup_model(
         self,
@@ -329,65 +334,108 @@ class TPUModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         padded_batch_size: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[int]]:
         assert len(seq_group_metadata_list) > 0
         t = []
         p = []
+        best_of = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.sampling_params is not None
             sampling_params = seq_group_metadata.sampling_params
 
+            # NOTE(woosuk): Here we mimic argmax sampling by applying a very
+            # low temperature. This is not accurate.
             t.append(sampling_params.temperature
                      if sampling_params.temperature >= 1e-5 else 1e-5)
+            if sampling_params.top_p != 1 and not _ENABLE_TOP_P:
+                raise NotImplementedError(
+                    "Top-p sampling is currently disabled for the TPU backend "
+                    "due to performance issues.")
             p.append(sampling_params.top_p)
+            if sampling_params.top_k != -1:
+                raise NotImplementedError(
+                    "Top-k sampling is currently disabled for the TPU backend "
+                    "due to performance issues.")
+            if sampling_params.best_of > _MAX_NUM_SAMPLES:
+                raise NotImplementedError(
+                    f"Best of > {_MAX_NUM_SAMPLES} is not supported by the TPU "
+                    "backend.")
+            best_of.append(sampling_params.best_of)
+            if sampling_params.use_beam_search:
+                raise NotImplementedError(
+                    "Beam search is not supported by the TPU backend.")
+            if sampling_params.logprobs is not None:
+                raise NotImplementedError(
+                    "logprobs is not supported by the TPU backend.")
+            if sampling_params.prompt_logprobs is not None:
+                raise NotImplementedError(
+                    "prompt_logprobs is not supported by the TPU backend.")
+
         num_paddings = padded_batch_size - len(seq_group_metadata_list)
         t += [1.0] * num_paddings
         p += [1.0] * num_paddings
 
         t = torch.tensor(t, dtype=torch.float32, device=self.device)
         p = torch.tensor(p, dtype=torch.float32, device=self.device)
-        return t, p
-
-    def prepare_inputs(
-        self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ):
-        assert seq_group_metadata_list is not None
-        assert len(seq_group_metadata_list) > 0
-        # NOTE: We assume that all sequences in the group are all prompts or
-        # all decodes.
-        if seq_group_metadata_list[0].is_prompt:
-            inputs = self._prepare_prompt(seq_group_metadata_list)
-        else:
-            inputs = self._prepare_decode(seq_group_metadata_list)
-        padded_batch_size = inputs[0].shape[0]
-        sample_inputs = self._prepare_sample(seq_group_metadata_list,
-                                             padded_batch_size)
-        return inputs + sample_inputs
+        return t, p, best_of
 
     def _execute_model(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> List[CompletionSequenceGroupOutput]:
-        inputs = self.prepare_inputs(seq_group_metadata_list)
+        # Prepare inputs.
+        assert len(seq_group_metadata_list) > 0
+        # NOTE: We assume that all sequences in the group are all prompts or
+        # all decodes.
+        is_prompt = seq_group_metadata_list[0].is_prompt
+        if is_prompt:
+            inputs = self._prepare_prompt(seq_group_metadata_list)
+        else:
+            inputs = self._prepare_decode(seq_group_metadata_list)
+        padded_batch_size = inputs[0].shape[0]
+        t, p, best_of = self._prepare_sample(seq_group_metadata_list,
+                                             padded_batch_size)
+        num_samples = _MAX_NUM_SAMPLES if is_prompt else 1
+
+        # Execute the model.
         next_token_ids = self.model(inputs[0], inputs[1], kv_caches,
-                                    *inputs[2:])
+                                    *inputs[2:], t, p, num_samples)
+        # Retrieve the outputs to CPU.
         next_token_ids = next_token_ids.cpu().tolist()
 
-        i = 0
-        sampler_outputs = []
-        for seq_group_metadata in seq_group_metadata_list:
-            seq_outputs = []
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            for seq_id in seq_ids:
-                next_token_id = next_token_ids[i]
-                seq_outputs.append(
-                    SequenceOutput(seq_id, next_token_id,
-                                   {next_token_id: Logprob(0.0)}))
-                i += 1
-            sampler_outputs.append(
-                CompletionSequenceGroupOutput(seq_outputs, None))
+        # NOTE(woosuk): Minimal code to build the sampler outputs.
+        # The TPU backend does not reuse the sampler, since the TPU backend
+        # does not support the advanced sampling parameters such as logprobs.
+        if is_prompt:
+            batch_idx = 0
+            sampler_outputs = []
+            for seq_group_metadata in seq_group_metadata_list:
+                seq_outputs = []
+                seq_ids = list(seq_group_metadata.seq_data.keys())
+                print(seq_ids)
+                for i, seq_id in enumerate(seq_ids):
+                    next_token_id = next_token_ids[batch_idx][i]
+                    seq_outputs.append(
+                        SequenceOutput(seq_id, next_token_id,
+                                    {next_token_id: Logprob(0.0)}))
+                batch_idx += 1
+                sampler_outputs.append(
+                    CompletionSequenceGroupOutput(seq_outputs, None))
+        else:
+            batch_idx = 0
+            sampler_outputs = []
+            for seq_group_metadata in seq_group_metadata_list:
+                seq_outputs = []
+                seq_ids = list(seq_group_metadata.seq_data.keys())
+                for seq_id in seq_ids:
+                    next_token_id = next_token_ids[batch_idx][0]
+                    seq_outputs.append(
+                        SequenceOutput(seq_id, next_token_id,
+                                       {next_token_id: Logprob(0.0)}))
+                    batch_idx += 1
+                sampler_outputs.append(
+                    CompletionSequenceGroupOutput(seq_outputs, None))
         return sampler_outputs
 
     def execute_model(
@@ -396,6 +444,7 @@ class TPUModelRunner:
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> SamplerOutput:
         assert seq_group_metadata_list is not None
+        assert len(seq_group_metadata_list) > 0
         if seq_group_metadata_list[0].is_prompt:
             # NOTE(woosuk): To reduce the compilation time, we only compile the
             # prefill inputs with batch size 1. Because the scheduler is not
@@ -429,6 +478,7 @@ class ModelWrapper(nn.Module):
         input_lens: torch.Tensor,
         t: torch.Tensor,
         p: torch.Tensor,
+        num_samples: int,
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
@@ -488,11 +538,12 @@ class ModelWrapper(nn.Module):
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         logits = logits / t.unsqueeze(dim=1)
-        # FIXME(woosuk): Disabled top-p sampling since it's too slow.
-        # logits = _apply_top_p(logits, p.unsqueeze(dim=1))
+        if _ENABLE_TOP_P:
+            logits = _apply_top_p(logits, p.unsqueeze(dim=1))
         probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-        # FIXME(woosuk): best_of > 1 is not supported.
-        next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(dim=1)
+        next_token_ids = torch.multinomial(probs,
+                                           num_samples,
+                                           replacement=True)
         return next_token_ids
 
 
