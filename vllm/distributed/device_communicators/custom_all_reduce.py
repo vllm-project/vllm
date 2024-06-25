@@ -15,9 +15,9 @@ from vllm.utils import is_hip
 
 try:
     if is_hip():
-        from amdsmi import (AmdSmiException,
-                            amdsmi_get_processor_handle_from_bdf, amdsmi_init,
-                            amdsmi_shut_down, amdsmi_topo_get_link_type)
+        from amdsmi import (AmdSmiException, amdsmi_get_processor_handles,
+                            amdsmi_init, amdsmi_shut_down,
+                            amdsmi_topo_get_link_type)
     else:
         import pynvml
 
@@ -62,25 +62,22 @@ def _is_full_nvlink(device_ids: List[int], world_size) -> bool:
     so it works on real physical device ids.
     """
     if is_hip():
-        # get devices' BDF in order to get XGMI link info from  amdsmi
-        bdf = custom_ar.get_device_bdf(torch.cuda.current_device())
-        all_bdf = [0] * world_size
-        dist.all_gather_object(all_bdf, bdf)
-        hsmi = [None] * world_size
-        try:
-            for i in range(world_size):
-                bdf_str = str(bytes(all_bdf[i]).decode("utf-8"))
-                hsmi[i] = amdsmi_get_processor_handle_from_bdf(bdf_str)
-            for i in range(world_size):
-                if i != 0:
-                    link_type = amdsmi_topo_get_link_type(hsmi[0], hsmi[i])
-                    # type is 2 for XGMI
-                    if link_type['hops'] != 1 or link_type['type'] != 2:
+        # On ROCm, we instead query if GPUs are connected by 1-hop XGMI
+        handles = [amdsmi_get_processor_handles()[i] for i in device_ids]
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i < j:
+                    try:
+                        link_type = amdsmi_topo_get_link_type(
+                            handle, peer_handle)
+                        # type is 2 for XGMI
+                        if link_type["hops"] != 1 or link_type["type"] != 2:
+                            return False
+                    except AmdSmiException as error:
+                        logger.error(
+                            "AMD link detection failed.",
+                            exc_info=error)
                         return False
-        except AmdSmiException as e:
-            logger.warning(e)
-            return False
-        return True
     else:
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
         for i, handle in enumerate(handles):
