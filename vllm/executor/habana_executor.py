@@ -113,7 +113,7 @@ class HabanaExecutor(ExecutorBase):
 
         output = self.driver_worker.execute_model(execute_model_req)
         return output
-
+    
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
 
@@ -121,6 +121,9 @@ class HabanaExecutor(ExecutorBase):
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
 
     def list_loras(self) -> List[int]:
+        raise NotImplementedError("LoRA is not implemented for HPU backend.")
+
+    def pin_lora(self) -> List[int]:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
 
     def check_health(self) -> None:

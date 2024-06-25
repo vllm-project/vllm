@@ -235,6 +235,9 @@ class HabanaWorker(WorkerBase):
     def list_loras(self) -> Set[int]:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
 
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError("LoRA is not implemented for HPU backend.")
+
     @property
     def max_model_len(self) -> int:
         return self.model_config.max_model_len
