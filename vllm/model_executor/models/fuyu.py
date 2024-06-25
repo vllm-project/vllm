@@ -53,15 +53,17 @@ def _image_processor(
 ) -> Dict[str, torch.Tensor]:
     image = data.image
 
-    # if isinstance(image, Image.Image):
-    #     # Temporary patch before dynamic number of image tokens is supported
-    #     _, _, h, w = vlm_config.image_input_shape
-    #     if (w, h) != (image.width, image.height):
-    #         logger.warning(
-    #             "Dynamic image shape is currently not supported. "
-    #             "Resizing input image to (%d, %d).", w, h)
-
-    #         data.image = image.resize((w, h))
+    if isinstance(image, Image.Image):
+        # Temporary patch before dynamic number of image tokens is supported
+        # It's difficult to infer number of image tokens from image size simply if the
+        # image is larger than (1920, 1080)
+        _, _, h, w = vlm_config.image_input_shape
+        if image.width > w or image.height > h:
+            h, w = min(h, image.height), min(w, image.width)
+            logger.warning(
+                "Dynamic image shape larger than (1920, 1080) is currently not supported. "
+                "Resizing input image to (%d, %d).", w, h)
+            data.image = image.resize((w, h))
     
     img_processor = MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
                     ._get_hf_image_processor(model_config, vlm_config)

@@ -15,18 +15,16 @@ def run_fuyu_pixel_values():
         max_model_len=4096,
         image_input_type="pixel_values",
         image_token_id=71011,
-        image_input_shape="1,3,576,1024",
-        # below makes no sense to fuyu, just make model_executor happy
-        image_feature_size=2700,
-        disable_image_processor=False,
+        image_input_shape="1,3,1080,1920",
+        image_feature_size=2304,
     )
 
     # load and create image prompt
-    image = Image.open("images/stop_sign.jpg")
-    H, W = image.size
+    image = Image.open("images/cherry_blossom.jpg")
+    W, H = image.size
 
-    nrow = math.ceil(H/30)
-    ncol = math.ceil(W/30)
+    nrow = math.ceil(min(H, 1080)/30)
+    ncol = math.ceil(min(W, 1920)/30)
 
     # single-image prompt
     prompt = "<image>\nWhat is the content of this image?\n"
