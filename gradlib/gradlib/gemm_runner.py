@@ -66,6 +66,8 @@ def get_dtype(dtype_csv):
         dtype = torch.bfloat16
     elif dtype_csv == 'torch.float32':
         dtype = torch.float32
+    elif dtype_csv == 'torch.float8_e4m3fnuz':
+        dtype = torch.float8_e4m3fnuz
     return dtype
 
 
