@@ -13,7 +13,6 @@ sampling_params = SamplingParams(temperature=0, top_p=0.95)
 # Create an LLM.
 llm = LLM(model="facebook/opt-125m",
           speculative_model="facebook/opt-125m",
-          enforce_eager=True,
           num_speculative_tokens=5,
           use_v2_block_manager=True,
           enforce_eager=True)
