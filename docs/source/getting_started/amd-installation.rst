@@ -88,7 +88,7 @@ Option 2: Build from source
 - `Pytorch <https://pytorch.org/>`_
 - `hipBLAS <https://rocm.docs.amd.com/projects/hipBLAS/en/latest/install.html>`_
 
-For installing PyTorch, you can start from a fresh docker image, e.g, `rocm6.0.2_ubuntu22.04_py3.10_pytorch_2.1.2`, `rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1`, `rocm/pytorch-nightly`.
+For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging`, `rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1`, `rocm/pytorch-nightly`.
 
 Alternatively, you can install pytorch using pytorch wheels. You can check Pytorch installation guild in Pytorch `Getting Started <https://pytorch.org/get-started/locally/>`_
 
@@ -126,12 +126,12 @@ Install ROCm's flash attention (v2.0.4) following the instructions from `ROCm/fl
 
     $ cd vllm
     $ pip install -U -r requirements-rocm.txt
-    $ python setup.py install # This may take 5-10 minutes. Currently, `pip install .`` does not work for ROCm installation
+    $ python setup.py develop # This may take 5-10 minutes. Currently, `pip install .`` does not work for ROCm installation
 
 
 .. tip::
 
     - You may need to turn on the ``--enforce-eager`` flag if you experience process hang when running the `benchmark_thoughput.py` script to test your installation.
     - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
-    - To use CK flash-attention, please use this flag ``export VLLM_USE_FLASH_ATTN_TRITON=0`` to turn off triton flash attention. 
+    - To use CK flash-attention, please use this flag ``export VLLM_USE_TRITON_FLASH_ATTN=0`` to turn off triton flash attention. 
     - The ROCm version of pytorch, ideally, should match the ROCm driver version.

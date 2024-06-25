@@ -11,7 +11,8 @@ from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (cuda_device_count_stateless,
                         get_distributed_init_method, get_open_port,
-                        get_vllm_instance_id, make_async)
+                        get_vllm_instance_id, make_async,
+                        update_environment_variables)
 
 logger = init_logger(__name__)
 
@@ -25,8 +26,9 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
         if "CUDA_VISIBLE_DEVICES" not in os.environ:
-            os.environ["CUDA_VISIBLE_DEVICES"] = (",".join(
-                map(str, range(world_size))))
+            update_environment_variables({
+                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
+            })
 
         # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
         os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()

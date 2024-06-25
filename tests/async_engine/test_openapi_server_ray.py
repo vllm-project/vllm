@@ -4,7 +4,7 @@ import pytest
 # and debugging.
 import ray
 
-from ..utils import VLLM_PATH, RemoteOpenAIServer
+from ..utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
@@ -12,7 +12,7 @@ MODEL_NAME = "facebook/opt-125m"
 
 @pytest.fixture(scope="module")
 def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
+    ray.init()
     yield
     ray.shutdown()
 
