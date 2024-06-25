@@ -131,7 +131,7 @@ class OpenAIServingChat(OpenAIServing):
                             "'image_url.detail' is currently not supported and "
                             "will be ignored.")
 
-                    image_future = async_get_and_parse_image(image_url["url"])
+                    image_future = await async_get_and_parse_image(image_url["url"])
                     image_futures.append(image_future)
 
                 else:
