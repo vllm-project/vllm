@@ -42,8 +42,7 @@ steps:
   # FIXIT: find out which code initialize cuda before running the test
   # before the fix, we need to use spawn to test it
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -s distributed/test_oot_registration.py
-  - DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -s distributed/test_oot_registration.py
+  - pytest -s distributed/test_oot_registration.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
