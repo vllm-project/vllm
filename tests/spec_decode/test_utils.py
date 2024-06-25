@@ -4,7 +4,7 @@ import pytest
 
 import torch
 from vllm.sequence import SequenceGroupMetadata, get_all_seq_ids
-from vllm.spec_decode.util import get_all_seq_ids, split_batch_by_proposal_len
+from vllm.spec_decode.util import split_batch_by_proposal_len
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.layers.typical_acceptance_sampler import TypicalAcceptanceSampler
 
@@ -130,7 +130,7 @@ def mock_spec_decode_sampler(request):
             sampler.token_id_dtype = torch.int64
             return sampler
         else:
-            return None  # Return None if the value is not recognized
+            raise ValueError(f"Invalid sampler name {value}")
     
     value = request.param  # Get the value passed to the fixture
     return create_samplers(value)
