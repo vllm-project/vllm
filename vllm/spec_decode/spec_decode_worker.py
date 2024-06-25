@@ -504,9 +504,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
                                                        1).clone()
         non_spec_token_ids[:, 1:] = -1
-        accepted_token_ids = self._get_accepted_token_ids(
-            proposal_verifier_probs=proposal_verifier_probs, bonus_token_ids=bonus_token_ids,
-            proposal_probs=proposal_probs, proposal_token_ids=proposal_token_ids)
+        accepted_token_ids = self.spec_decode_sampler(
+            target_probs=proposal_verifier_probs,
+            bonus_token_ids=bonus_token_ids,
+            draft_probs=proposal_probs,
+            draft_token_ids=proposal_token_ids,
+        )
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
         logprobs = proposal_scores.logprobs
@@ -529,27 +532,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                                        hidden_states)
 
         return accepted_token_ids, logprobs
-
-    def _get_accepted_token_ids(self, proposal_verifier_probs: torch.Tensor,
-                                bonus_token_ids: torch.Tensor,
-                                proposal_probs: torch.Tensor,
-                                proposal_token_ids: torch.Tensor):
-        if isinstance(self.spec_decode_sampler, RejectionSampler):
-            accepted_token_ids = self.spec_decode_sampler(
-                target_probs=proposal_verifier_probs,
-                bonus_token_ids=bonus_token_ids,
-                draft_probs=proposal_probs,
-                draft_token_ids=proposal_token_ids,
-            )
-        else:
-            assert isinstance(self.spec_decode_sampler, TypicalAcceptanceSampler)
-            accepted_token_ids = self.spec_decode_sampler(
-                target_probs=proposal_verifier_probs,
-                bonus_token_ids=bonus_token_ids,
-                draft_token_ids=proposal_token_ids,
-            )
-        return accepted_token_ids
-
+ 
     def _create_output_sampler_list(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],

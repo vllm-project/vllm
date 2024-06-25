@@ -7,7 +7,7 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
 
 
-class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
+class TypicalAcceptanceSampler(SpecDecodeBaseSampler):
     """Apply typical acceptance sampling as described in section 3.3.1 in 
         "MEDUSA: Simple LLM Inference Acceleration Framework with 
         Multiple Decoding Heads"
@@ -38,17 +38,16 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         """
         self._posterior_threshold = posterior_threshold
         self._posterior_alpha = posterior_alpha
-        super().__init__()
-        SpecDecodeBaseSampler.__init__(
-            self,
+        super().__init__(
             disable_bonus_tokens=disable_bonus_tokens,
             strict_mode=strict_mode)
-        nn.Module.__init__(self)
+
 
     def forward(
         self,
         target_probs: torch.Tensor,
         bonus_token_ids: torch.Tensor,
+        draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Sample token ids using typical acceptance sampling. This accepts 
@@ -69,6 +68,8 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
             bonus_token_ids: The "bonus" token ids that are accepted iff all
                 speculative tokens in a sequence are accepted.
             shape = [batch_size, num_bonus_tokens]
+
+            draft_probs: This parameter is unused by the acceptance sampler.
 
             draft_token_ids: The token ids that were sampled from the draft
                 probabilities.
@@ -145,8 +146,10 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         posterior_entropy = -torch.sum(
             target_probs * torch.log(target_probs + 1e-5), dim=-1)
         threshold = torch.minimum(
-            torch.ones_like(posterior_entropy, device=device) * self._posterior_threshold,
-            index=draft_token_ids.unsqueeze(-1)).squeeze(-1)
+            torch.ones_like(posterior_entropy, device=device) *
+            self._posterior_threshold,
+            torch.exp(-posterior_entropy) * self._posterior_alpha,
+        )
         # A small constant added to prevent computing the logarithm of zero,
         # which can lead to undefined values.
         epsilon = 1e-5

@@ -1,10 +1,12 @@
 from typing import Optional
+from abc import ABC, abstractmethod
 
 import torch
 import torch.jit
+import torch.nn as nn
 
 
-class SpecDecodeBaseSampler():
+class SpecDecodeBaseSampler(nn.Module):
     """Base class for samplers used for Speculative Decoding verification
         step.
     """
@@ -53,6 +55,17 @@ class SpecDecodeBaseSampler():
     @property
     def token_id_dtype(self):
         return torch.int64
+
+    @abstractmethod
+    def forward(
+        self,
+        target_probs: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        draft_probs: torch.Tensor,
+        draft_token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
 
     def _create_output(
             self,

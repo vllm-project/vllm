@@ -10,7 +10,7 @@ from vllm.model_executor.layers.spec_decode_base_sampler import SpecDecodeBaseSa
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
 
-class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
+class RejectionSampler(SpecDecodeBaseSampler):
     """Apply modified rejection sampling as described in "Accelerating Large
         Language Model Decoding with Speculative Sampling"
         https://arxiv.org/pdf/2302.01318.pdf.
@@ -29,8 +29,9 @@ class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
             during sampling. This catches correctness issues but adds
             nontrivial latency.
         """
-        SpecDecodeBaseSampler.__init__(self, disable_bonus_tokens, strict_mode)
-        nn.Module.__init__(self)
+        super().__init__(
+            disable_bonus_tokens=disable_bonus_tokens,
+            strict_mode=strict_mode)
 
     def forward(
         self,
@@ -243,7 +244,6 @@ class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
         See https://en.wikipedia.org/wiki/Subnormal_number for more information.
         """
         return torch.finfo(self.probs_dtype).tiny
-
 
 # torch.multinomial forces a GPU<->CPU sync.
 # Therefore, we use an optimized implementation instead that skips the sync.
