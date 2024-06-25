@@ -63,8 +63,9 @@ def test_get_sliding_window():
     assert mistral_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
 
 
-def test_rope_scaling():
+def test_rope_customization():
     TEST_ROPE_SCALING = {"type": "dynamic", "factor": 2.0}
+    TEST_ROPE_THETA = 16_000_000.0
     LONGCHAT_ROPE_SCALING = {"type": "linear", "factor": 8.0}
 
     llama_model_config = ModelConfig(
@@ -76,6 +77,7 @@ def test_rope_scaling():
         seed=0,
     )
     assert getattr(llama_model_config.hf_config, "rope_scaling", None) is None
+    assert getattr(llama_model_config.hf_config, "rope_theta", None) == 500_000
     assert llama_model_config.max_model_len == 8192
 
     llama_model_config = ModelConfig(
@@ -86,9 +88,12 @@ def test_rope_scaling():
         dtype="float16",
         seed=0,
         rope_scaling=TEST_ROPE_SCALING,
+        rope_theta=TEST_ROPE_THETA,
     )
     assert getattr(llama_model_config.hf_config, "rope_scaling",
                    None) == TEST_ROPE_SCALING
+    assert getattr(llama_model_config.hf_config, "rope_theta",
+                   None) == TEST_ROPE_THETA
     assert llama_model_config.max_model_len == 16384
 
     longchat_model_config = ModelConfig(

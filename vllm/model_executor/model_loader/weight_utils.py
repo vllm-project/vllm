@@ -329,7 +329,7 @@ def np_cache_weights_iterator(
     # dumping the same model weights to numpy at the same time.
     with get_lock(model_name_or_path, cache_dir):
         if not os.path.exists(weight_names_file):
-            weight_names = []
+            weight_names: List[str] = []
             for bin_file in hf_weights_files:
                 state = torch.load(bin_file, map_location="cpu")
                 for name, param in state.items():

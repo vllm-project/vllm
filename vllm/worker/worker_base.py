@@ -71,6 +71,10 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_loras(self) -> Set[int]:
         raise NotImplementedError
 
@@ -86,6 +90,10 @@ class LoraNotSupportedWorkerBase(WorkerBase):
     def remove_lora(self, lora_id: int) -> bool:
         raise ValueError(f"{type(self)} does not support LoRA")
 
+    def pin_lora(self, lora_id: int) -> bool:
+        return ValueError(
+            f"{type(self)} does not support LoRA")  # type: ignore
+
     def list_loras(self) -> Set[int]:
         raise ValueError(f"{type(self)} does not support LoRA")
 
@@ -99,8 +107,8 @@ class WorkerWrapperBase:
     """
 
     def __init__(self,
-                 worker_module_name=None,
-                 worker_class_name=None,
+                 worker_module_name: str,
+                 worker_class_name: str,
                  trust_remote_code: bool = False) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
