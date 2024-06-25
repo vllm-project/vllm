@@ -154,8 +154,12 @@ struct ScaledEpilogueBias
       cutlass::multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
+  using BiasDescriptor =
+      cutlass::epilogue::collective::detail::RowBroadcastDescriptor<
+          EpilogueDescriptor, float>;
+
   using Bias = cutlass::epilogue::fusion::Sm90RowBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, float,
+      BiasDescriptor::Stages, typename EpilogueDescriptor::TileShape, float,
       Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<float>, false>;
 
  public:
