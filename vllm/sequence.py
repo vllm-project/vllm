@@ -5,14 +5,16 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
+import torch
+
 from vllm.block import LogicalTokenBlock
+from vllm.inputs import LLMInputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
-    import torch
-
+    from vllm.multimodal import MultiModalData
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -121,7 +123,7 @@ class SequenceData:
             output_token_ids = []
 
         self.prompt_token_ids = prompt_token_ids
-        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
+        self._prompt_token_ids_tuple = tuple(prompt_token_ids)
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -210,8 +212,7 @@ class Sequence:
 
     Args:
         seq_id: The ID of the sequence.
-        prompt: The prompt of the sequence.
-        prompt_token_ids: The token IDs of the prompt.
+        inputs: The inputs of the sequence.
         block_size: The block size of the sequence. Should be the same as the
             block size used by the block manager and cache engine.
         lora_request: LoRA request.
@@ -220,25 +221,24 @@ class Sequence:
     def __init__(
         self,
         seq_id: int,
-        prompt: str,
-        prompt_token_ids: List[int],
+        inputs: LLMInputs,
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.seq_id = seq_id
-        self.prompt = prompt
+        self.inputs = inputs
         self.block_size = block_size
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
 
-        self.data: SequenceData = SequenceData(prompt_token_ids)
+        self.data = SequenceData(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
-        self._append_tokens_to_blocks(prompt_token_ids)
+        self._append_tokens_to_blocks(self.prompt_token_ids)
         self.status = SequenceStatus.WAITING
         self.stop_reason: Union[int, str, None] = None
 
@@ -247,6 +247,18 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+
+    @property
+    def prompt(self) -> Optional[str]:
+        return self.inputs.get("prompt")
+
+    @property
+    def prompt_token_ids(self) -> List[int]:
+        return self.inputs["prompt_token_ids"]
+
+    @property
+    def multi_modal_data(self) -> Optional["MultiModalData"]:
+        return self.inputs.get("multi_modal_data")
 
     @property
     def lora_int_id(self) -> int:
@@ -387,25 +399,6 @@ class SequenceGroupState:
     generator: Optional = None  # type: ignore
 
 
-class MultiModalData:
-    """Multi modal request.
-
-    Args:
-        type: The data type.
-        data: The actual data.
-        The required shape and semantic meaning of it depends on the vision
-        language config of the hosted model.
-        See `VisionLanguageConfig` in `config.py`.
-    """
-
-    class Type(enum.Enum):
-        IMAGE = enum.auto()
-
-    def __init__(self, type: Type, data: "torch.Tensor"):
-        self.type = type
-        self.data = data
-
-
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 
@@ -415,11 +408,13 @@ class SequenceGroup:
         sampling_params: The sampling parameters used to generate the outputs.
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
-        multi_modal_data: Multi modal data associated with the request.
         embeddings: The embeddings vectors of the prompt of the sequence group
             for an embedding model.
         pooling_params: The pooling parameters used to generate the pooling
             for an embedding model.
+        encoder_seq: Optional, the single encoder sequence. Should be None
+                     unless you are working with an encoder/decoder model.
+        trace_headers: OpenTelemetry trace headers.
     """
 
     def __init__(
@@ -429,9 +424,10 @@ class SequenceGroup:
         arrival_time: float,
         sampling_params: Optional[SamplingParams] = None,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
+        encoder_seq: Optional[Sequence] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -444,12 +440,13 @@ class SequenceGroup:
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
-        self.multi_modal_data = multi_modal_data
         self.embeddings = embeddings
         self.pooling_params = pooling_params
+        self.encoder_seq = encoder_seq
+        self.trace_headers = trace_headers
 
     @property
-    def prompt(self) -> str:
+    def prompt(self) -> Optional[str]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).prompt
@@ -458,7 +455,13 @@ class SequenceGroup:
     def prompt_token_ids(self) -> List[int]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
-        return next(iter(self.seqs_dict.values())).data.prompt_token_ids
+        return next(iter(self.seqs_dict.values())).prompt_token_ids
+
+    @property
+    def multi_modal_data(self) -> Optional["MultiModalData"]:
+        # All sequences in the group should have the same multi-modal data.
+        # We use the multi-modal data of an arbitrary sequence.
+        return next(iter(self.seqs_dict.values())).multi_modal_data
 
     @property
     def lora_int_id(self) -> int:
@@ -523,6 +526,12 @@ class SequenceGroup:
         return list(self.seqs_dict.values()) if status is None else [
             seq for seq in self.seqs_dict.values() if seq.status == status
         ]
+
+    def is_encoder_decoder(self) -> bool:
+        return self.encoder_seq is not None
+
+    def get_encoder_seq(self) -> Optional[Sequence]:
+        return self.encoder_seq
 
     def get_unfinished_seqs(self) -> List[Sequence]:
         return [
@@ -607,6 +616,15 @@ class SequenceGroupMetadata:
             used in prefix caching.
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
+        encoder_seq_data: Optional sequence data for encoder prompt
+                          (SequenceGroup.encoder_seq). Should be None 
+                          unless you are working with an encoder/decoder
+                          model.
+        cross_block_table: Optional cross-attention block table associated
+                           with the encoder prompt
+                           (SequenceGroup.encoder_seq). Should be None
+                           unless you are working with an encoder/decoder
+                           model.
     """
 
     def __init__(
@@ -622,7 +640,9 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
+        multi_modal_data: Optional["MultiModalData"] = None,
+        encoder_seq_data: Optional[SequenceData] = None,
+        cross_block_table: Optional[List[int]] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -634,6 +654,8 @@ class SequenceGroupMetadata:
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
+        self.encoder_seq_data = encoder_seq_data
+        self.cross_block_table = cross_block_table
         self._token_chunk_size = token_chunk_size
         self.do_sample = do_sample
 
@@ -761,16 +783,19 @@ class SamplerOutput:
     outputs: List[CompletionSequenceGroupOutput]
 
     # On-device tensor containing probabilities of each token.
-    sampled_token_probs: Optional["torch.Tensor"] = None
+    sampled_token_probs: Optional[torch.Tensor] = None
 
     # On-device tensor containing the logprobs of each token.
     logprobs: Optional["torch.Tensor"] = None
 
     # On-device tensor containing the sampled token ids.
-    sampled_token_ids: Optional["torch.Tensor"] = None
+    sampled_token_ids: Optional[torch.Tensor] = None
 
     # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+
+    # Optional last hidden states from the model.
+    hidden_states: Optional[torch.Tensor] = None
 
     def __getitem__(self, idx: int):
         return self.outputs[idx]
@@ -820,6 +845,46 @@ class PoolerOutput:
                           self.__class__) and self.outputs == other.outputs
 
 
+def get_all_seq_ids(
+        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
+    """Given a list of SequenceGroupMetadata, create a list of all
+    sequence ids.
+    """
+    return [seq_id for sg in seq_group_metadata_list for seq_id in sg.seq_data]
+
+
+class HiddenStates:
+    """Hidden states corresponding to in-progress sequences.
+    Used in speculative decoding to pass hidden states from
+    the target model to the proposer model in the subsequent step.
+
+    seq_ids are the sequence ids of each entry of the batch
+    dimension of the hidden_states tensor"""
+
+    def __init__(self, seq_group_metadata_list: List[SequenceGroupMetadata],
+                 hidden_states: torch.Tensor):
+        assert len(seq_group_metadata_list) == len(hidden_states)
+        self.seq_ids: List[int] = get_all_seq_ids(seq_group_metadata_list)
+        self.hidden_states: torch.Tensor = hidden_states
+
+    def update(self, seq_group_metadata_list: List[SequenceGroupMetadata],
+               hidden_states: torch.Tensor) -> None:
+        """Update hidden states from target model invocation."""
+        assert len(seq_group_metadata_list) == len(hidden_states)
+        self.seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
+        self.hidden_states = torch.cat([self.hidden_states, hidden_states])
+
+    def prune(self,
+              seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
+        """Prune to provided list of sequence ids."""
+        seq_ids = get_all_seq_ids(seq_group_metadata_list)
+        if seq_ids != self.seq_ids:
+            # Batch contents changed - prune removed sequences.
+            index = [self.seq_ids.index(seq_id) for seq_id in seq_ids]
+            self.hidden_states = self.hidden_states[index]
+            self.seq_ids = seq_ids
+
+
 @dataclass
 class ExecuteModelRequest:
     """The model execution request."""
@@ -835,6 +900,8 @@ class ExecuteModelRequest:
     num_lookahead_slots: int = 0
     # The number of requests in the running queue.
     running_queue_size: int = 0
+    # Optional hidden states from prior step.
+    previous_hidden_states: Optional[HiddenStates] = None
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -847,4 +914,5 @@ class ExecuteModelRequest:
             blocks_to_copy=self.blocks_to_copy.copy(),
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
+            previous_hidden_states=self.previous_hidden_states,
         )

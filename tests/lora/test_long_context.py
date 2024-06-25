@@ -78,7 +78,7 @@ def evaluate_json_response(model_response, golden_response):
 
 
 def generate(
-    llm,
+    llm: vllm.LLM,
     inputs: Tuple[str, SamplingParams, Optional[LoRARequest]],
 ):
     prompts, sampling_param, lora_request = inputs
@@ -87,41 +87,40 @@ def generate(
 
 
 def batched_generate(
-    llm,
+    llm: vllm.LLM,
     inputs: List[Tuple[str, SamplingParams, Optional[LoRARequest]]],
 ):
     for input in inputs:
         prompt, sampling_param, lora_req = input
-        requests_data = llm._validate_and_prepare_requests(
+        # Add requests to the engine and run the engine
+        llm._validate_and_add_requests(
             prompt,
             sampling_param,
             lora_request=lora_req,
         )
 
-        # Add requests to the engine and run the engine
-        for request_data in requests_data:
-            llm._add_request(**request_data)
     outputs = llm._run_engine(use_tqdm=True)
     return [outputs[i].outputs[0].text.strip() for i in range(len(outputs))]
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def lora_llm(long_context_infos):
     scaling_factors = [
         context_len_to_scaling_factor[info["context_length"]]
         for info in long_context_infos.values()
     ]
+
     #clear memory from previous run
     gc.collect()
-    llm = vllm.LLM(
-        "meta-llama/Llama-2-13b-chat-hf",
-        enable_lora=True,
-        max_num_seqs=16,
-        max_loras=2,
-        long_lora_scaling_factors=tuple(scaling_factors),
-        max_num_batched_tokens=4096 * 8,
-        tensor_parallel_size=4,
-    )
+    llm = vllm.LLM("meta-llama/Llama-2-13b-chat-hf",
+                   enable_lora=True,
+                   max_num_seqs=16,
+                   max_loras=2,
+                   long_lora_scaling_factors=tuple(scaling_factors),
+                   max_num_batched_tokens=4096 * 8,
+                   tensor_parallel_size=4,
+                   distributed_executor_backend="mp")
+
     yield llm
     del llm
 
@@ -158,12 +157,13 @@ def test_rotary_emb_replaced(dist_init):
     assert rotary_emb_count == 32
 
 
+@pytest.mark.skip_global_cleanup
 def test_batched_rope_kernel(lora_llm, long_context_infos):
     """We test the batched kernel by comparing the results of batched an
         non-batched generation.
     """
     # Create non batched results first to compare against batched results
-    non_batched_results = []
+    non_batched_results: List[str] = []
 
     for lora_id, info in long_context_infos.items():
         context_len = info["context_length"]
@@ -176,7 +176,8 @@ def test_batched_rope_kernel(lora_llm, long_context_infos):
     # Create batched results
     # Each element of the batch must be
     # (prompt, prompt_sampling_params, prompt_lora_request)
-    batched_prompts = []
+    batched_prompts: List[Tuple[str, SamplingParams,
+                                Optional[LoRARequest]]] = []
     for lora_id, info in long_context_infos.items():
         context_len = info["context_length"]
         batched_prompts.extend([
@@ -192,6 +193,7 @@ def test_batched_rope_kernel(lora_llm, long_context_infos):
             f"same:\n{batched}\n{non_batched}")
 
 
+@pytest.mark.skip_global_cleanup
 def test_self_consistency(lora_llm, long_context_infos):
     """We test consistency of the batched kernel by permuting batched
     inputs and comparing the results to the non-permuted batched results.
@@ -199,7 +201,8 @@ def test_self_consistency(lora_llm, long_context_infos):
     num_loras = len(long_context_infos)
 
     # Create results in order of long_context_infos
-    batched_prompts = []
+    batched_prompts: List[Tuple[str, SamplingParams,
+                                Optional[LoRARequest]]] = []
     for lora_id, info in long_context_infos.items():
         context_len = info["context_length"]
         batched_prompts.extend([
@@ -231,6 +234,7 @@ def test_self_consistency(lora_llm, long_context_infos):
                 f"\n{permutated_batched_results[permutation[i]]}")
 
 
+@pytest.mark.skip_global_cleanup
 def test_quality(lora_llm, long_context_infos):
     """We test the quality of the answers given by the LoRA model by
         comparing the generated text to the merged model's outputs.
@@ -246,7 +250,7 @@ def test_quality(lora_llm, long_context_infos):
     The test is expected to run for about 1 minute on a p4de.24xlarge
     instance.
     """
-    scores = []
+    scores: List[float] = []
     for lora_id, info in long_context_infos.items():
         context_len = info["context_length"]
         for prompt_and_response in prompts_and_responses[context_len]:
@@ -261,6 +265,7 @@ def test_quality(lora_llm, long_context_infos):
     assert np.mean(scores) > 0.5
 
 
+@pytest.mark.skip_global_cleanup
 def test_max_len(lora_llm, long_context_infos):
     """Test that we raise an ValueError when the input of a given LoRA
         model exceeds the maximum length."""
@@ -278,7 +283,8 @@ def test_max_len(lora_llm, long_context_infos):
             generate(lora_llm, (bad_prompt, sampling_params, lora_request))
 
     # Also test batched
-    batched_prompts = []
+    batched_prompts: List[Tuple[str, SamplingParams,
+                                Optional[LoRARequest]]] = []
     for lora_id_with_bad_inputs in long_context_infos:
         for lora_id, info in long_context_infos.items():
             context_len = info["context_length"]

@@ -79,6 +79,10 @@ class EmbeddingModelRunner(ModelRunner):
             execute_model_kwargs.update({"image_input": multi_modal_input})
         hidden_states = model_executable(**execute_model_kwargs)
 
+        # Only perform pooling in the driver worker.
+        if not self.is_driver_worker:
+            return None
+
         return self.model.pooler(hidden_states=hidden_states,
                                  pooling_metadata=pooling_metadata)
 
@@ -86,7 +90,7 @@ class EmbeddingModelRunner(ModelRunner):
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
-               Set[LoRARequest], LoRAMapping, torch.Tensor]:
+               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
@@ -98,7 +102,7 @@ class EmbeddingModelRunner(ModelRunner):
                 _,
                 lora_mapping,
                 lora_requests,
-                multi_modal_input,
+                multi_modal_kwargs,
                 slot_mapping,
                 num_prefill_tokens,
                 num_decode_tokens,
@@ -113,7 +117,7 @@ class EmbeddingModelRunner(ModelRunner):
                 "input_positions": input_positions,
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
-                "multi_modal_input": multi_modal_input,
+                "multi_modal_kwargs": multi_modal_kwargs,
                 "num_prefill_tokens": num_prefill_tokens,
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
@@ -128,7 +132,7 @@ class EmbeddingModelRunner(ModelRunner):
             input_positions = metadata_dict.pop("input_positions")
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
-            multi_modal_input = metadata_dict.pop("multi_modal_input")
+            multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
             if metadata_dict:
                 attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
@@ -139,7 +143,7 @@ class EmbeddingModelRunner(ModelRunner):
                                                prompt_lens=None)
 
         return (input_tokens, input_positions, attn_metadata, pooling_metadata,
-                lora_requests, lora_mapping, multi_modal_input)
+                lora_requests, lora_mapping, multi_modal_kwargs)
 
     def _prepare_pooling(
         self,

@@ -1,4 +1,6 @@
 """This file is used for /tests and /benchmarks"""
+from typing import Dict, List
+
 import numpy
 import torch
 
@@ -11,10 +13,10 @@ import torch
 #
 # As a result of this reordering, the vector loads inside the kernel will get the data as it is needed for tensor-core # noqa: E501
 # (without the need to use ldmatrix instructions) # noqa: E501
-def get_perms_24(num_bits):
-    perm_list = []
+def get_perms_24(num_bits: int):
+    perm_list: List[int] = []
     for i in range(32):
-        perm1 = []
+        perm1: List[int] = []
         col = i // 4
         col_o = col // 2
         for block in [0, 1]:
@@ -39,18 +41,18 @@ def get_perms_24(num_bits):
 
     perm = perm.reshape((-1, len(interleave)))[:, interleave].ravel()
     perm = torch.from_numpy(perm)
-    scale_perm = []
+    scale_perm: List[int] = []
     for i in range(8):
         scale_perm.extend([i * 8 + j for j in [0, 4, 1, 5, 2, 6, 3, 7]])
-    scale_perm_single = []
+    scale_perm_single: List[int] = []
     for i in range(8):
         scale_perm_single.extend([8 * i + j for j in [0, 1, 2, 3, 4, 5, 6, 7]])
     return perm, scale_perm, scale_perm_single
 
 
-marlin_24_perm = {}
-marlin_24_scale_perm = {}
-marlin_24_scale_perm_single = {}
+marlin_24_perm: Dict[int, torch.Tensor] = {}
+marlin_24_scale_perm: Dict[int, List[int]] = {}
+marlin_24_scale_perm_single: Dict[int, List[int]] = {}
 for num_bits in [4, 8]:
     perm_24, scale_perm_24, scale_perm_single_24 = get_perms_24(num_bits)
     marlin_24_perm[num_bits] = perm_24

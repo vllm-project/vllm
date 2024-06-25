@@ -1,5 +1,7 @@
+import gc
 import time
 import warnings
+from collections import defaultdict
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
@@ -11,16 +13,17 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
-from vllm.distributed.communication_op import graph_capture
+from vllm.distributed.parallel_state import graph_capture
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
-                           SequenceGroupMetadata)
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 
@@ -34,6 +37,7 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
+_NUM_WARMUP_ITERS = 2
 
 
 class ModelInput(NamedTuple):
@@ -44,7 +48,7 @@ class ModelInput(NamedTuple):
     query_lens: List[int]
     lora_mapping: Optional[LoRAMapping]
     lora_requests: Set[LoRARequest]
-    multi_modal_input: Optional[torch.Tensor]
+    multi_modal_kwargs: Dict[str, torch.Tensor]
     slot_mapping: torch.Tensor
     num_prefill_tokens: int
     num_decode_tokens: int
@@ -60,7 +64,7 @@ class ModelInput(NamedTuple):
             query_lens=[],
             lora_mapping=None,
             lora_requests=set(),
-            multi_modal_input=None,
+            multi_modal_kwargs={},
             slot_mapping=torch.empty(0, device=device),
             num_prefill_tokens=0,
             num_decode_tokens=0,
@@ -82,6 +86,7 @@ class ModelRunner:
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        return_hidden_states: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -92,6 +97,7 @@ class ModelRunner:
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.vision_language_config = vision_language_config
+        self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -112,15 +118,27 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
+            num_attn_heads,
             self.model_config.get_head_size(),
             self.model_config.get_num_kv_heads(self.parallel_config),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
-        )
+        ) if num_attn_heads else None
+
+        # Create processor for multi-modal data
+        if self.vision_language_config is not None:
+            self.multi_modal_input_processor = MULTIMODAL_REGISTRY \
+                .create_input_processor(
+                    self.model_config,
+                    self.vision_language_config,
+                )
+        else:
+            self.multi_modal_input_processor = None
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -209,6 +227,16 @@ class ModelRunner:
             max_size=max_size,
         )
 
+    def save_tensorized_model(
+        self,
+        tensorizer_config: TensorizerConfig,
+    ) -> None:
+        from vllm.model_executor.model_loader.loader import TensorizerLoader
+        TensorizerLoader.save_model(
+            self.model,
+            tensorizer_config=tensorizer_config,
+        )
+
     def get_max_block_per_batch(self) -> int:
         block_size = self.block_size
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
@@ -242,7 +270,8 @@ class ModelRunner:
         context_lens: List[int] = []
         query_lens: List[int] = []
         block_tables: List[List[int]] = []
-        multi_modal_input_list: List[torch.Tensor] = []
+        multi_modal_kwargs_list: Dict[str,
+                                      List[torch.Tensor]] = defaultdict(list)
         decode_only = True
         num_prefills = 0
         num_prefill_tokens = 0
@@ -268,6 +297,12 @@ class ModelRunner:
 
         if len(seq_group_metadata_list) == 0:
             return ModelInput.empty(self.device)
+
+        if self.sliding_window is not None:
+            sliding_window_blocks = (self.sliding_window + self.block_size -
+                                     1) // self.block_size
+            block_aligned_sliding_window = \
+                sliding_window_blocks * self.block_size
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -309,6 +344,30 @@ class ModelRunner:
                                     and self.sliding_window is None
                                     and is_prompt)
 
+                # These are seq_len/context_len capped to the sliding window.
+                # They are passed to decode kernel.
+                # We still need original seq_len/context_len to compute slot
+                # mapping (and input position) below.
+                curr_sliding_window_blocks = None
+                sliding_seq_len = seq_len
+                sliding_context_len = context_len
+
+                # TODO(sang): This is a hack to make sliding window work with
+                # paged attn. We can remove it if we make paged attn kernel
+                # to properly handle slinding window attn.
+                if (self.sliding_window is not None and not is_prompt):
+                    curr_sliding_window_blocks = sliding_window_blocks
+                    if self.scheduler_config.use_v2_block_manager:
+                        # number of elements in last block
+                        suff_len = seq_len % self.block_size
+                        sliding_seq_len = min(
+                            seq_len, block_aligned_sliding_window + suff_len)
+                        if suff_len > 0:
+                            curr_sliding_window_blocks += 1
+                    else:
+                        sliding_seq_len = min(seq_len, self.sliding_window)
+                    sliding_context_len = sliding_seq_len - 1
+
                 # TODO(sang): Combine chunked prefill and prefix caching by
                 # only allowing multiple of block_size chunk size.
                 # NOTE: This only works for oooooooxxx style attention.
@@ -316,6 +375,13 @@ class ModelRunner:
                     assert computed_block_nums is not None
                     context_len = len(computed_block_nums) * self.block_size
                     tokens = tokens[context_len:]
+
+                    # need to think what to set it to when we have both sliding
+                    # window and prefix caching...
+                    assert self.sliding_window is None, \
+                        "Prefix caching is not supported with sliding window"
+                    sliding_context_len = context_len
+
                     if self.attn_backend.get_name() == "flash-attn":
                         # NOTE(woosuk): For flash-attn, the block table should
                         # include the entries for the incoming prefill tokens.
@@ -329,14 +395,9 @@ class ModelRunner:
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
                         block_table = seq_group_metadata.block_tables[seq_id]
-                        if self.sliding_window is not None:
-                            # chunked prefill doesn't support sliding window.
-                            assert (not self.scheduler_config.
-                                    chunked_prefill_enabled)
-                            sliding_window_blocks = (self.sliding_window //
-                                                     self.block_size)
-                            block_table = block_table[-sliding_window_blocks:]
-
+                        if curr_sliding_window_blocks is not None:
+                            block_table = block_table[
+                                -curr_sliding_window_blocks:]
                         if self.attn_backend.get_name() == "flashinfer":
                             paged_kv_indices.extend(block_table)
                             paged_kv_indptr.append(paged_kv_indptr[-1] +
@@ -354,16 +415,9 @@ class ModelRunner:
                     block_table = []
                 block_tables.append(block_table)
 
-                # TODO(sang): This is a hack to make sliding window work with
-                # paged attn. We can remove it if we make paged attn kernel
-                # to properly handle slinding window attn.
-                if (self.sliding_window is not None and not is_prompt):
-                    seq_len = min(seq_len, self.sliding_window)
-                    context_len = seq_len - 1
-
-                seq_lens.append(seq_len)
-                context_lens.append(context_len)
-                query_len = seq_len - context_len
+                seq_lens.append(sliding_seq_len)
+                context_lens.append(sliding_context_len)
+                query_len = sliding_seq_len - sliding_context_len
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
@@ -380,22 +434,29 @@ class ModelRunner:
                         "seq_len: {}, context_len: {}, query_len: {}".format(
                             seq_len, context_len, query_len))
                     num_decode_tokens += query_len
-                    decode_seq_lens.append(seq_len)
+                    decode_seq_lens.append(sliding_seq_len)
 
                 if lora_id > 0:
                     lora_requests.add(seq_group_metadata.lora_request)
 
-                lora_index_mapping += [lora_id] * (seq_len - context_len)
+                lora_index_mapping += [lora_id] * query_len
                 lora_prompt_mapping.extend(
                     [lora_id] *
-                    (seq_len -
-                     context_len if seq_group_metadata.sampling_params
+                    (query_len if seq_group_metadata.sampling_params
                      and seq_group_metadata.sampling_params.prompt_logprobs
-                     else 1))
+                     is not None else 1))
 
-                if seq_group_metadata.multi_modal_data:
-                    multi_modal_input_list.append(
-                        seq_group_metadata.multi_modal_data.data)
+                mm_data = seq_group_metadata.multi_modal_data
+                if mm_data is not None:
+                    # Process multi-modal data
+                    if self.multi_modal_input_processor is None:
+                        raise ValueError(
+                            "Multi-modal inputs are only supported by "
+                            "vision language models.")
+
+                    mm_kwargs = self.multi_modal_input_processor(mm_data)
+                    for k, v in mm_kwargs.items():
+                        multi_modal_kwargs_list[k].append(v)
 
                 if _is_block_tables_empty(seq_group_metadata.block_tables):
                     # During memory profiling, the block tables are not
@@ -417,9 +478,10 @@ class ModelRunner:
                 start_idx = 0
                 if self.sliding_window is not None:
                     if is_prompt:
-                        assert context_len == 0, (
+                        assert self.scheduler_config.use_v2_block_manager \
+                            or context_len == 0, (
                             "Prefix caching is currently not supported with "
-                            "sliding window attention")
+                            "sliding window attention in V1 block manager")
                     # It is an optimization. When it is decoding, it is always
                     # 0. When prefill, we use it to not write slots to kv cache
                     # to save memory.
@@ -480,40 +542,12 @@ class ModelRunner:
             )
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int,
-                                           device=self.device)
-
-        if multi_modal_input_list:
-            assert self.vision_language_config, (
-                "Multi-modal inputs are only supported by "
-                "vision language models.")
-            multi_modal_input = torch.cat(multi_modal_input_list,
-                                          dim=0).to(self.device)
-        else:
-            multi_modal_input = None
-
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=self.device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=self.device)
-        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=self.device)
-
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.int,
                                        device=self.device)
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=self.device)
-
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=query_start_loc.dtype,
-                     out=query_start_loc[1:])
 
         torch.cumsum(seq_lens_tensor,
                      dim=0,
@@ -567,6 +601,21 @@ class ModelRunner:
                 seq_start_loc=seq_start_loc,
                 data_type=kv_cache_dtype)
         else:
+            context_lens_tensor = torch.tensor(context_lens,
+                                               dtype=torch.int,
+                                               device=self.device)
+            query_lens_tensor = torch.tensor(query_lens,
+                                             dtype=torch.long,
+                                             device=self.device)
+            query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
+                                          dtype=torch.int32,
+                                          device=self.device)
+
+            torch.cumsum(query_lens_tensor,
+                         dim=0,
+                         dtype=query_start_loc.dtype,
+                         out=query_start_loc[1:])
+
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=num_prefills,
                 slot_mapping=slot_mapping_tensor,
@@ -592,6 +641,11 @@ class ModelRunner:
         else:
             lora_mapping = None
 
+        multi_modal_kwargs = {
+            k: torch.cat(v, dim=0).to(self.device)
+            for k, v in multi_modal_kwargs_list.items()
+        }
+
         return ModelInput(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
@@ -600,7 +654,7 @@ class ModelRunner:
             query_lens=query_lens,
             lora_mapping=lora_mapping,
             lora_requests=lora_requests,
-            multi_modal_input=multi_modal_input,
+            multi_modal_kwargs=multi_modal_kwargs,
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -611,7 +665,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, torch.Tensor]:
+               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
@@ -623,7 +677,7 @@ class ModelRunner:
                 query_lens,
                 lora_mapping,
                 lora_requests,
-                multi_modal_input,
+                multi_modal_kwargs,
                 slot_mapping,
                 num_prefill_tokens,
                 num_decode_tokens,
@@ -640,7 +694,7 @@ class ModelRunner:
                 sampling_metadata.selected_token_indices,
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
-                "multi_modal_input": multi_modal_input,
+                "multi_modal_kwargs": multi_modal_kwargs,
                 "num_prefill_tokens": num_prefill_tokens,
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
@@ -657,7 +711,7 @@ class ModelRunner:
                 "selected_token_indices")
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
-            multi_modal_input = metadata_dict.pop("multi_modal_input")
+            multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
             if metadata_dict:
                 attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
@@ -672,7 +726,7 @@ class ModelRunner:
 
         return (input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_input)
+                multi_modal_kwargs)
 
     @torch.inference_mode()
     def execute_model(
@@ -681,7 +735,7 @@ class ModelRunner:
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_input
+         lora_requests, lora_mapping, multi_modal_kwargs
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
@@ -695,15 +749,14 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
-        execute_model_kwargs = {
-            "input_ids": input_tokens,
-            "positions": input_positions,
-            "kv_caches": kv_caches,
-            "attn_metadata": attn_metadata,
-        }
-        if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": multi_modal_input})
-        hidden_states = model_executable(**execute_model_kwargs)
+
+        hidden_states = model_executable(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+            **multi_modal_kwargs,
+        )
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
@@ -713,10 +766,18 @@ class ModelRunner:
             return None
 
         # Sample the next token.
-        output = self.model.sample(
+        output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
+
+        if self.return_hidden_states:
+            # we only need to pass hidden states of most recent token
+            assert seq_group_metadata_list is not None
+            if seq_group_metadata_list[0].is_prompt:
+                hidden_states = hidden_states.index_select(
+                    0, sampling_metadata.selected_token_indices)
+            output.hidden_states = hidden_states
 
         return output
 
@@ -730,8 +791,8 @@ class ModelRunner:
         # that will have unique loras, an therefore the max amount of memory
         # consumption create dummy lora request copies from the lora request
         # passed in, which contains a lora from the lora warmup path.
-        dummy_lora_requests = []
-        dummy_lora_requests_per_seq = []
+        dummy_lora_requests: List[LoRARequest] = []
+        dummy_lora_requests_per_seq: List[LoRARequest] = []
         if self.lora_config:
             assert self.lora_manager is not None
             with self.lora_manager.dummy_lora_cache():
@@ -759,16 +820,24 @@ class ModelRunner:
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
-        if self.vision_language_config:
+        model_config = self.model_config
+        vlm_config = self.vision_language_config
+
+        if vlm_config:
             max_num_seqs = min(
                 max_num_seqs,
-                int(max_num_batched_tokens /
-                    self.vision_language_config.image_feature_size))
+                int(max_num_batched_tokens / vlm_config.image_feature_size))
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_data, fake_multi_modal_input = _prepare_fake_inputs(
-                seq_len, self.vision_language_config)
+
+            if vlm_config is None:
+                seq_data = SequenceData([0] * seq_len)
+                dummy_multi_modal_data = None
+            else:
+                seq_data, dummy_multi_modal_data = MULTIMODAL_REGISTRY \
+                    .dummy_data_for_profiling(seq_len, model_config, vlm_config)
+
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -777,7 +846,7 @@ class ModelRunner:
                 block_tables=None,
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
-                multi_modal_data=fake_multi_modal_input,
+                multi_modal_data=dummy_multi_modal_data,
             )
             seqs.append(seq)
 
@@ -808,6 +877,11 @@ class ModelRunner:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         if not self.lora_manager:
@@ -849,6 +923,10 @@ class ModelRunner:
         seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
+        # Prepare buffer for outputs. These will be reused for all batch sizes.
+        # It will be filled after the first graph capture.
+        hidden_states: Optional[torch.Tensor] = None
+
         graph_batch_size = _get_graph_batch_size(
             self.scheduler_config.max_num_seqs)
         batch_size_capture_list = [
@@ -885,9 +963,11 @@ class ModelRunner:
                     self.set_active_loras(set(), lora_mapping)
 
                 graph_runner = CUDAGraphRunner(self.model)
-                graph_runner.capture(
+                hidden_states = graph_runner.capture(
                     input_tokens[:batch_size],
                     input_positions[:batch_size],
+                    hidden_states[:batch_size]
+                    if hidden_states is not None else None,
                     kv_caches,
                     attn_metadata,
                     memory_pool=self.graph_memory_pool,
@@ -924,35 +1004,46 @@ class CUDAGraphRunner:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        hidden_states: Optional[torch.Tensor],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         memory_pool: Optional[Tuple[int, int]],
         stream: torch.cuda.Stream,
         **kwargs,
-    ) -> None:
+    ) -> torch.Tensor:
         assert self._graph is None
-        # Run the model once without capturing the graph.
+        # Run the model a few times without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        self.model(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-            **kwargs,
-        )
-        torch.cuda.synchronize()
-
-        # Capture the graph.
-        self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
-            hidden_states = self.model(
+        # Note one iteration is not enough for torch.jit.script
+        for _ in range(_NUM_WARMUP_ITERS):
+            self.model(
                 input_ids,
                 positions,
                 kv_caches,
                 attn_metadata,
                 **kwargs,
             )
+        torch.cuda.synchronize()
+
+        # Capture the graph.
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
+            output_hidden_states = self.model(
+                input_ids,
+                positions,
+                kv_caches,
+                attn_metadata,
+                **kwargs,
+            )
+            if hidden_states is not None:
+                hidden_states.copy_(output_hidden_states)
+            else:
+                hidden_states = output_hidden_states
+            del output_hidden_states
+            # make sure `output_hidden_states` is deleted
+            # in the graph's memory pool
+            gc.collect()
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
@@ -965,7 +1056,7 @@ class CUDAGraphRunner:
             "block_tables": attn_metadata.decode_metadata.block_tables,
         }
         self.output_buffers = {"hidden_states": hidden_states}
-        return
+        return hidden_states
 
     def forward(
         self,
@@ -1010,24 +1101,6 @@ def _get_graph_batch_size(batch_size: int) -> int:
     else:
         return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-
-def _prepare_fake_inputs(
-        seq_len: int, vision_language_config: Optional[VisionLanguageConfig]):
-    """Prepare fake inputs for profile run."""
-    if vision_language_config:
-        prompt_tokens = [
-            vision_language_config.image_token_id
-        ] * vision_language_config.image_feature_size + [0] * (
-            seq_len - vision_language_config.image_feature_size)
-        fake_image_input = MultiModalData(
-            type=MultiModalData.Type.IMAGE,
-            data=torch.zeros(vision_language_config.image_input_shape,
-                             dtype=torch.float16))
-    else:
-        prompt_tokens = [0] * seq_len
-        fake_image_input = None
-    return SequenceData(prompt_tokens), fake_image_input
 
 
 def _is_block_tables_empty(block_tables: Union[None, Dict]):

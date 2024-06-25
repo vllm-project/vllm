@@ -1,0 +1,21 @@
+steps:
+  - block: "Build wheels"
+
+  - label: "Build wheel - Python {{matrix.python_version}}, CUDA {{matrix.cuda_version}}" 
+    agents:
+      queue: cpu_queue
+    commands:
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION={{matrix.cuda_version}} --build-arg PYTHON_VERSION={{matrix.python_version}} --tag vllm-ci:build-image --target build --progress plain ."
+      - "mkdir artifacts"
+      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image cp -r dist /artifacts_host"
+      - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/$BUILDKITE_COMMIT/"
+    matrix:
+      setup:
+        cuda_version:
+          - "11.8.0"
+          - "12.1.0"
+        python_version:
+          - "3.8"
+          - "3.9"
+          - "3.10"
+          - "3.11"
