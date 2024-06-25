@@ -21,4 +21,4 @@ aiohttp
 
 # quantization
 bitsandbytes==0.42.0
-sparseml-nightly
+sparseml[transformers]==1.8
