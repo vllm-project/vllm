@@ -91,12 +91,6 @@ class ModelRunnerInputBase(ABC):
     serialize/deserialize a ModelInput for broadcast between workers.
     """
 
-    def replace(self: T, **kwargs) -> T:
-        """
-        Replace current fields with fields in kwargs.
-        """
-        return dataclasses.replace(self, **kwargs)
-
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         """
         Extract broadcastable fields. Override for fields that require some
