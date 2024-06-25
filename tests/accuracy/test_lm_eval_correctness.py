@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     import lm_eval as lm_eval_t
 
 # requires a particular lm-evaluation-harness
-# pip install lm-eval==0.4.2
+# pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@9516087b81a61d0e220b22cc1b75be76de23bc10
 lm_eval: "lm_eval_t" = pytest.importorskip("lm_eval",
                                            reason="lm_eval required")
 
@@ -55,7 +55,7 @@ def launch_lm_eval(eval_config):
         model="local-completions",
         model_args=openai_args,
         tasks=[task["name"] for task in eval_config["tasks"]],
-        batch_size=16,
+        batch_size=32,
         num_fewshot=eval_config["num_fewshot"],
         limit=eval_config["limit"],
     )

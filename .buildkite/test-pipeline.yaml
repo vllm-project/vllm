@@ -193,7 +193,7 @@ steps:
 - label: LM Eval Small Models
   working_dir: "/vllm-workspace/.buildkite"
   commands:
-  - pip install lm-eval==0.4.2
+  - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@9516087b81a61d0e220b22cc1b75be76de23bc10
   - bash .buildkite/lm-eval-harness/run-lm-eval-vllm.sh -c .buildkite/lm-eval-harness/configs/small-models.txt
 
 - label: LM Eval Large Models
@@ -201,7 +201,7 @@ steps:
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite"
   commands:
-  - pip install lm-eval==0.4.2
+  - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@9516087b81a61d0e220b22cc1b75be76de23bc10
   - bash .buildkite/lm-eval-harness/run-lm-eval-vllm.sh -c .buildkite/lm-eval-harness/configs/large-models.txt
 
 - label: Documentation Build
