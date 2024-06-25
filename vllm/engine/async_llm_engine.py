@@ -19,11 +19,13 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, MultiModalData, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
-# from threading import Event
-# from queue import Queue
+from threading import Thread
+from threading import Event, Semaphore
+from queue import Queue
 from functools import wraps
 import traceback
 import os
+import time
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -361,9 +363,10 @@ class AsyncLLMEngine:
         # Lazy initialized fields
         self._request_tracker: RequestTracker
 
-        self.mb_event = asyncio.Event()
-        self.sched_event = asyncio.Event()
-        self.sched_queue = asyncio.Queue()
+        self.mb_event = Event()
+        self.sched_event = Event()
+        self.sched_queue = Queue()
+        self.mb_slot = Semaphore(2)
 
     @classmethod
     def from_engine_args(
@@ -524,9 +527,12 @@ class AsyncLLMEngine:
             self.engine.abort_request(request_ids)
     
     async def sched_timer_thread(self):
+        print('starting timer thread')
         while True:
         #     await self._request_tracker.wait_for_new_requests()
-            await asyncio.sleep(0.01)
+            # print('waiting on timer event')
+            time.sleep(2.01)
+            # print('after on timer event')
             self.sched_event.set()
         # print('ahhh')
         # await asyncio.sleep(5)
@@ -534,12 +540,12 @@ class AsyncLLMEngine:
     async def mb_watch_thread(self):
         print('starting mb watch')
         while True:
-            await self.mb_event.wait()
+            self.mb_event.wait()
             self.mb_event.clear()
 
             # print('waiting on mb watch get_output')
             output = self.engine.model_executor._run_worker(0, 'get_output')
-            # print('after mb watch get_output=====================')
+            print('after mb watch get_output=====================')
 
             self.sched_event.set()
 
@@ -547,10 +553,11 @@ class AsyncLLMEngine:
         virtual_engine = 0
         print('starting sched thread')
         while True:
-            # print('waiting on sched event')
-            await self.sched_event.wait()
+            print('waiting on sched event')
+            self.sched_event.wait()
             self.sched_event.clear()
-            # print('after watiing sched event')
+            print('after watiing sched event=========')
+
 
             new_requests, finished_requests = (
                 self._request_tracker.get_new_and_finished_requests())
@@ -573,7 +580,10 @@ class AsyncLLMEngine:
                     )
 
             if finished_requests:
+                # print('after watiing sched event==========2=')
                 await self._engine_abort(finished_requests)
+                # print('after watiing sched event==========1=')
+            print('after watiing sched event==========2=')
 
                 
 
@@ -583,9 +593,13 @@ class AsyncLLMEngine:
             # if scheduler_outputs.is_empty():
             #     continue
 
-            await self.sched_queue.put((seq_group_metadata_list, scheduler_outputs, virtual_engine))
+            print('sched thread after schedule()!!!!!!!!!!!!!')
 
+            # self.mb_slot.acquire()
+            self.sched_queue.put((seq_group_metadata_list, scheduler_outputs, virtual_engine))
+            print('sched thread after put')
             if not scheduler_outputs.is_empty():
+                print('sched thread not empty')
                 # Execute the model.
                 execute_model_req = ExecuteModelRequest(
                     seq_group_metadata_list=seq_group_metadata_list,
@@ -599,10 +613,19 @@ class AsyncLLMEngine:
                 self.mb_event.set()
                 # print('enqueue')
                 # self.engine.model_executor._run_workers('enqueue', execute_model_req)
-                output = await self.engine.model_executor.execute_model_async(
-                    execute_model_req)
+                print('after watiing sched event==========4=')
+                # import pdb; pdb.set_trace()
+                # output = await self.engine.model_executor.execute_model_async(
+                #     execute_model_req)
+                self.engine.model_executor._run_workers('enqueue', execute_model_req)
+                print('after watiing sched event==========5=')
+            # else:
+            #     print('empty')
+            #     print(seq_group_metadata_list)
+            #     print(scheduler_outputs)
+
                 # print('after enqueue')
-            virtual_engine = (virtual_engine + 1) % 2
+            # virtual_engine = (virtual_engine + 1) % 2
 
     async def output_loop(self):
         print('output_loop')
@@ -610,11 +633,12 @@ class AsyncLLMEngine:
             # print('sched wait output_loop')
             # await self.sched_event.wait()
             # self.sched_event.clear()
-            seq_group_metadata_list, scheduler_outputs, virtual_engine = await self.sched_queue.get()
+            seq_group_metadata_list, scheduler_outputs, virtual_engine = self.sched_queue.get()
             # print('|||||||||||sched wait output_loop')
 
             if not scheduler_outputs.is_empty():
                 output = self.engine.model_executor._run_worker(1, 'get_output')
+            # if not scheduler_outputs.is_empty():
                 # print('|||||||||||| after get_output')
             else:
                 output = []
@@ -625,6 +649,8 @@ class AsyncLLMEngine:
             request_outputs = self.engine._process_model_outputs(
                 output, scheduler_outputs.scheduled_seq_groups,
                 scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
+            # if not scheduler_outputs.is_empty():
+            self.engine.scheduler[virtual_engine].complete_mb()
             # print('|||||||||||| after process model') 
 
             # Log stats.
@@ -639,9 +665,19 @@ class AsyncLLMEngine:
                 self._request_tracker.process_request_output(
                     request_output, verbose=self.log_requests)
             # print("DONEEEEEEEEEEEEEEEE")
+            # self.mb_slot.release()
             self.sched_event.set()
 
             # return len(request_outputs) > 0
+    
+    @exit_on_error
+    def run_sched(self, func):
+        loop = asyncio.new_event_loop()
+        t = loop.run_until_complete(func())
+        assert False
+        print('got running loop')
+        #loop.run_forever()
+        #await asyncio.gather(t)
 
     async def run_engine_loop(self):
         # loop = asyncio.get_event_loop()
@@ -649,6 +685,18 @@ class AsyncLLMEngine:
         # print('starting driver threads in loop')
         # await self.engine.model_executor._start_driver_execution_loop()
         # print('done starting driver threads in loop')
+        sched_thread = Thread(target=self.run_sched, args=(self.sched_thread,), daemon=True)
+        output_thread = Thread(target=self.run_sched, args=(self.output_loop,), daemon=True)
+        timer_thread = Thread(target=self.run_sched, args=(self.sched_timer_thread,), daemon=True)
+        mb_thread = Thread(target=self.run_sched, args=(self.mb_watch_thread,), daemon=True)
+        sched_thread.start()
+        output_thread.start()
+        timer_thread.start()
+        mb_thread.start()
+        await asyncio.sleep(5000)
+        #while True:
+           # pass
+        return
 
         # sched_task = asyncio.create_task(self.sched_thread())
         # output_task = asyncio.create_task(self.output_loop())
