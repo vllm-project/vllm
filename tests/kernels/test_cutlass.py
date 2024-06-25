@@ -229,11 +229,6 @@ def test_cutlass_int8_azp():
     n = 16
     k = 64
 
-    # azp inside the scale, representable in int8
-    # do gemm in int32, add azp, then scale
-    # also do where azp is applied first (but not scale)
-    # TODO scale_a not per-token anymore, so that azp (if outside scales) is not per-token
-
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, n), device="cuda", dtype=torch.float32) / 10
 
