@@ -138,6 +138,10 @@ def create_dummy_logprobs(
         token_id + 1: Logprob(logprob=0.1)
     } for token_id in complete_sequence_token_ids]
 
+def create_dummy_prompt_logprobs(
+        complete_sequence_token_ids: List[int]) -> List[Dict[int, Logprob]]:
+    # logprob for the first prompt token is not defined.
+    return create_dummy_logprobs(complete_sequence_token_ids)[1:]
 
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
@@ -192,19 +196,23 @@ def test_decode_prompt_logprobs(complete_sequence: str,
                               seqs=[seq],
                               sampling_params=sampling_params,
                               arrival_time=0.0)
-    dummy_logprobs = create_dummy_logprobs(complete_sequence_token_ids)
+    dummy_logprobs = create_dummy_prompt_logprobs(complete_sequence_token_ids)
     detokenizer.decode_prompt_logprobs_inplace(seq_group, dummy_logprobs)
     decoded_prompt_logprobs = dummy_logprobs
 
     if skip_special_tokens:
+        # decoded_prompt_logprobs doesn't contain the first token.
+        token_ids = complete_sequence_token_ids[1:]
+        tokenzier = detokenizer.get_tokenizer_for_seq(seq)
+        text = tokenzier.decode(token_ids, skip_special_tokens=skip_special_tokens)
         # Text for logprobs for the chosen token should be the same as the
         # prompt text. Note that this will only be true if we skip
         # special tokens.
-        assert complete_sequence == "".join([
+        assert text == "".join([
             logprobs[token_id].decoded_token for token_id, logprobs in zip(
-                complete_sequence_token_ids, decoded_prompt_logprobs)
+                token_ids, decoded_prompt_logprobs)
         ])
-        assert complete_sequence != "".join([
+        assert text != "".join([
             logprobs[token_id + 1].decoded_token for token_id, logprobs in zip(
-                complete_sequence_token_ids, decoded_prompt_logprobs)
+                token_ids, decoded_prompt_logprobs)
         ])
