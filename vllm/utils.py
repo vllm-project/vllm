@@ -18,7 +18,6 @@ from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
                     Union)
 
-
 import psutil
 import torch
 import torch.types
@@ -584,6 +583,7 @@ def str_to_int_tuple(s: str) -> Tuple[int, ...]:
             "String must be a series of integers separated by commas "
             f"(e.g., 1, 2, 3). Given input: {s}") from e
 
+
 def async_tensor_h2d(
     data: list,
     dtype: torch.dtype,
@@ -777,6 +777,7 @@ def cuda_device_count_stateless() -> int:
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
 
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
 
 #From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f):

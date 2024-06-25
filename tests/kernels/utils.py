@@ -2,16 +2,16 @@
 
 import itertools
 import random
+from numbers import Number
 from typing import Any, List, NamedTuple, Optional, Tuple, Union
 
+import numpy as np
 import pytest
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.xformers import XFormersBackend
-import numpy as np
-from numbers import Number
 
 # String name of register which may be set in order to
 # force auto-selection of attention backend by Attention
@@ -138,6 +138,7 @@ class PhaseTestParameters(NamedTuple):
     packed_qkvo: PackedQKVO
     kv_mmap: Optional[KVMemoryMap]
 
+
 def make_tensor_with_pad(
     x: List[List[int]],
     max_len: int,
@@ -156,7 +157,7 @@ def make_tensor_with_pad(
         padded_x[ind, :len(blocktb)] = blocktb
     return torch.tensor(padded_x, dtype=dtype, device=device)
 
-def maybe_make_int_tensor(_list: List[int],
+def maybe_make_int_tensor(_list: Optional[List[int]],
                               device: Union[torch.device, str]) \
   -> torch.Tensor:
     '''
@@ -170,7 +171,7 @@ def maybe_make_int_tensor(_list: List[int],
     return None if _list is None else torch.tensor(
         _list, dtype=torch.int, device=device)
 
-def maybe_make_long_tensor(_list: List[int],
+def maybe_make_long_tensor(_list: Optional[List[int]],
                                device: Union[torch.device, str]) \
   -> torch.Tensor:
     '''
@@ -185,7 +186,7 @@ def maybe_make_long_tensor(_list: List[int],
         _list, dtype=torch.long, device=device)
 
 
-def maybe_max(_list: List) -> Optional[Number]:
+def maybe_max(_list: Optional[List]) -> Optional[Number]:
     '''
     Returns:
 
@@ -215,6 +216,7 @@ def make_causal_mask(q_max_seq_len: int, kv_max_seq_len: int) \
     mask = mask.masked_fill(mask == 1,
                             float('-inf')).masked_fill(mask == 0, 0.0)
     return mask
+
 
 def override_backend_env_variable(mpatch: pytest.MonkeyPatch,
                                   backend_name: str) -> None:

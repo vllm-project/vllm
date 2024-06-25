@@ -15,11 +15,11 @@ import pytest
 import torch
 
 from tests.kernels.utils import *
+from tests.kernels.utils import make_causal_mask, maybe_make_long_tensor
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
 from vllm.utils import is_hip
-from tests.kernels.utils import make_causal_mask, maybe_make_long_tensor
 
 HEAD_SIZES = [64, 256]
 
