@@ -326,7 +326,7 @@ class BartEncoderLayer(nn.Module):
         """
         residual = hidden_states
         hidden_states = self.self_attn(hidden_states=hidden_states,
-                                       kv_caches=kv_cache,
+                                       kv_cache=kv_cache,
                                        attn_metadata=attn_metadata)
 
         hidden_states = residual + hidden_states
@@ -418,7 +418,7 @@ class BartDecoderLayer(nn.Module):
 
         # Self Attention
         hidden_states = self.self_attn(hidden_states=decoder_hidden_states,
-                                       kv_caches=kv_cache,
+                                       kv_cache=kv_cache,
                                        attn_metadata=attn_metadata)
 
         hidden_states = residual + hidden_states
@@ -430,7 +430,7 @@ class BartDecoderLayer(nn.Module):
 
         hidden_states = self.encoder_attn(
             decoder_hidden_states=hidden_states,
-            kv_caches=kv_cache,
+            kv_cache=kv_cache,
             attn_metadata=attn_metadata,
             encoder_hidden_states=encoder_hidden_states,
         )
@@ -540,7 +540,7 @@ class BartEncoder(nn.Module):
         for idx, encoder_layer in enumerate(self.layers):
             hidden_states = encoder_layer(
                 hidden_states=hidden_states,
-                kv_caches=kv_caches[idx],
+                kv_cache=kv_caches[idx],
                 attn_metadata=attn_metadata,
             )
 
@@ -641,7 +641,7 @@ class BartDecoder(nn.Module):
         for idx, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 decoder_hidden_states=hidden_states,
-                kv_caches=kv_caches[idx],
+                kv_cache=kv_caches[idx],
                 attn_metadata=attn_metadata,
                 encoder_hidden_states=encoder_hidden_states,
             )
@@ -682,9 +682,8 @@ class BartModel(nn.Module):
     def get_decoder(self):
         return self.decoder
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                encoder_input_ids: torch.Tensor,
-                encoder_positions: torch.Tensor, kv_caches: List[torch.Tensor],
+    def forward(self, input_ids: torch.Tensor, encoder_input_ids: torch.Tensor,
+                kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
 
         encoder_hidden_states = None
@@ -766,8 +765,8 @@ class BartForConditionalGeneration(nn.Module):
         Returns:
             Output torch.Tensor
         """
-        hidden_states = self.model(input_ids, positions, encoder_input_ids,
-                                   encoder_positions, kv_caches, attn_metadata)
+        hidden_states = self.model(input_ids, encoder_input_ids, kv_caches,
+                                   attn_metadata)
         return hidden_states[0, :, :]
 
     def compute_logits(self, hidden_states: torch.Tensor,
