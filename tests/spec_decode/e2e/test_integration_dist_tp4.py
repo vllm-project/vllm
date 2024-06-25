@@ -91,7 +91,7 @@ def test_draft_model_tp_lt_target_model_tp4(test_llm_generator,
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",[
+@pytest.mark.parametrize("test_llm_kwargs", [
     {
         "speculative_draft_tensor_parallel_size": 1,
     },
