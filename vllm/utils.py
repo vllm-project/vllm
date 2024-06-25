@@ -27,6 +27,8 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
+import numpy as np
+
 logger = init_logger(__name__)
 
 STR_DTYPE_TO_TORCH_DTYPE = {
@@ -573,6 +575,23 @@ class CudaMemoryProfiler:
         # Force garbage collection
         gc.collect()
 
+def make_tensor_with_pad(
+    x: List[List[int]],
+    max_len: int,
+    pad: int,
+    dtype: torch.dtype,
+    device: Optional[Union[str, torch.device]],
+) -> torch.Tensor:
+    """Make a padded tensor of a 2D inputs.
+
+    The padding is applied to the end of each inner list until it reaches
+    `max_len`.
+    """
+    padded_x = np.zeros([len(x), max_len], dtype=np.int32) + pad
+    for ind, blocktb in enumerate(x):
+        assert len(blocktb) <= max_len
+        padded_x[ind, :len(blocktb)] = blocktb
+    return torch.tensor(padded_x, dtype=dtype, device=device)
 
 def str_to_int_tuple(s: str) -> Tuple[int, ...]:
     """Convert a string to a tuple of integers."""

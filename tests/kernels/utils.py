@@ -5,13 +5,14 @@ import random
 from numbers import Number
 from typing import Any, List, NamedTuple, Optional, Tuple, Union
 
-import numpy as np
 import pytest
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.xformers import XFormersBackend
+
+from vllm.utils import make_tensor_with_pad
 
 # String name of register which may be set in order to
 # force auto-selection of attention backend by Attention
@@ -137,25 +138,6 @@ class PhaseTestParameters(NamedTuple):
 
     packed_qkvo: PackedQKVO
     kv_mmap: Optional[KVMemoryMap]
-
-
-def make_tensor_with_pad(
-    x: List[List[int]],
-    max_len: int,
-    pad: int,
-    dtype: torch.dtype,
-    device: Optional[Union[str, torch.device]],
-) -> torch.Tensor:
-    """Make a padded tensor of a 2D inputs.
-
-    The padding is applied to the end of each inner list until it reaches
-    `max_len`.
-    """
-    padded_x = np.zeros([len(x), max_len], dtype=np.int32) + pad
-    for ind, blocktb in enumerate(x):
-        assert len(blocktb) <= max_len
-        padded_x[ind, :len(blocktb)] = blocktb
-    return torch.tensor(padded_x, dtype=dtype, device=device)
 
 def maybe_make_int_tensor(_list: Optional[List[int]],
                               device: Union[torch.device, str]) \
