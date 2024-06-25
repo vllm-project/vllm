@@ -17,7 +17,6 @@ MAX_TOKENS = 32
 NUM_LOGPROBS = 5
 
 
-# @pytest.mark.flaky(reruns=3)
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(
     vllm_runner,
