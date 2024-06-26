@@ -100,9 +100,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         scorer_worker: WorkerBase,
         draft_worker_kwargs: Dict[str, Any],
         disable_by_batch_size: Optional[int],
-        draft_token_sampling_method: Optional[str] = "rejection_sampler",
-        typical_acceptance_sampler_posterior_threshold: Optional[float] = 0.09, 
-        typical_acceptance_sampler_posterior_alpha: Optional[float] = 0.3, 
+        draft_token_sampling_method: str,
+        typical_acceptance_sampler_posterior_threshold: float, 
+        typical_acceptance_sampler_posterior_alpha: float, 
     ) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
@@ -133,9 +133,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         elif draft_token_sampling_method == "typical_acceptance_sampler":
             spec_decode_sampler = TypicalAcceptanceSampler(
                 disable_bonus_tokens=disable_bonus_tokens,
-                #posterior_threshold=\
-                #    typical_acceptance_sampler_posterior_threshold,
-                #posterior_alpha=typical_acceptance_sampler_posterior_alpha,
+                posterior_threshold=\
+                    typical_acceptance_sampler_posterior_threshold,
+                posterior_alpha=typical_acceptance_sampler_posterior_alpha,
         )
         logger.info("Configuring SpecDecodeWorker with sampler=%s",
                     type(spec_decode_sampler))
@@ -180,10 +180,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker = scorer_worker
         self.disable_by_batch_size = disable_by_batch_size or float("inf")
         self.spec_decode_sampler = spec_decode_sampler
-        assert (
-            self.spec_decode_sampler is not None,
-            "Sampler is Not set, which is not expected."
-        )
         self._metrics = AsyncMetricsCollector(
             self.spec_decode_sampler
         ) if metrics_collector is None else metrics_collector
@@ -502,17 +498,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
-        # Append output tokens from non-speculative sequences to
-        # the accepted token ids tensor.
-        non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
-                                                       1).clone()
-        non_spec_token_ids[:, 1:] = -1
         accepted_token_ids = self.spec_decode_sampler(
             target_probs=proposal_verifier_probs,
             bonus_token_ids=bonus_token_ids,
             draft_probs=proposal_probs,
             draft_token_ids=proposal_token_ids,
         )
+
+        # Append output tokens from non-speculative sequences to
+        # the accepted token ids tensor.
+        non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
+                                                       1).clone()
+        non_spec_token_ids[:, 1:] = -1
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
         logprobs = proposal_scores.logprobs

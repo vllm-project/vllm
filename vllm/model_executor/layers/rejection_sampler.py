@@ -76,7 +76,6 @@ class RejectionSampler(SpecDecodeBaseSampler):
         """
         # Only perform shape/dtype/device checking in strict mode, as it adds
         # overhead.
-        start = time.time()
         if self._strict_mode:
             self._raise_if_incorrect_input(target_probs, bonus_token_ids,
                                            draft_probs, draft_token_ids)
@@ -93,9 +92,7 @@ class RejectionSampler(SpecDecodeBaseSampler):
             draft_token_ids,
             bonus_token_ids,
         )
-        end = time.time()
-        self.total_time += (end - start)
-        self.total_calls += 1
+
         return output_token_ids
 
     def _batch_modified_rejection_sampling(

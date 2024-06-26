@@ -110,7 +110,7 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler):
             A tensor of shape (batch_size, k) representing the proposed
             token ids.
 
-        A draft token_id x_{n+k} is accepted if it satisifies the
+        A draft token_id x_{n+k} is accepted if it satisfies the
         following condition
     
         .. math::
