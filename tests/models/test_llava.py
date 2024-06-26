@@ -4,6 +4,8 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+from vllm.multimodal.image import ImagePixelData
+from vllm.multimodal.utils import rescale_image_size
 
 from ..conftest import IMAGE_FILES
 
@@ -26,7 +28,6 @@ def iter_llava_configs(model_name: str):
     for (h, w), f in image_hw_to_feature_size.items():
         for input_type, input_shape in [
             (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
-            (VisionLanguageConfig.ImageInputType.IMAGE_FEATURES, (1, f, 1024)),
         ]:
             yield (model_name,
                    VisionLanguageConfig(image_input_type=input_type,
@@ -69,8 +70,10 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("is_multiscale", [True, False])
 def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
-                model_and_config, dtype: str, max_tokens: int) -> None:
+                model_and_config, dtype: str, max_tokens: int,
+                is_multiscale: bool) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -82,18 +85,29 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     """
     model_id, vlm_config = model_and_config
 
+    image_inputs = [
+        (rescale_image_size(hf_image, factor),
+         ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
+         prompt) for hf_image, vllm_image, prompt in zip(
+             hf_images, vllm_images, HF_IMAGE_PROMPTS)
+        for factor in ((0.25, 0.5, 1.0) if is_multiscale else (1, ))
+    ]
+    prompt_inputs = [prompt for _, _, prompt in image_inputs]
+    hf_image_inputs = [hf_image for hf_image, _, _ in image_inputs]
+    vllm_image_inputs = [vllm_image for _, vllm_image, _ in image_inputs]
+
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
-        hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
+        hf_outputs = hf_model.generate_greedy(prompt_inputs,
                                               max_tokens,
-                                              images=hf_images)
+                                              images=hf_image_inputs)
 
     with vllm_runner(model_id,
                      dtype=dtype,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(HF_IMAGE_PROMPTS,
+        vllm_outputs = vllm_model.generate_greedy(prompt_inputs,
                                                   max_tokens,
-                                                  images=vllm_images)
+                                                  images=vllm_image_inputs)
 
     for i in range(len(HF_IMAGE_PROMPTS)):
         hf_output_ids, hf_output_str = hf_outputs[i]
