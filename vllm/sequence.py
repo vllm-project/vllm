@@ -918,5 +918,4 @@ class ExecuteModelRequest:
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
             previous_hidden_states=self.previous_hidden_states,
-            finished_request_ids=self.finished_request_ids
-        )
+            finished_request_ids=self.finished_request_ids)

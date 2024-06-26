@@ -1,7 +1,6 @@
 import dataclasses
 import gc
 import time
-from dataclasses import dataclass
 import warnings
 from collections import defaultdict
 from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
@@ -69,7 +68,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     lora_requests: Optional[Set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
-    request_ids_to_seq_ids : Optional[Dict[str, List[int]]] = None
+    request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -342,7 +341,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         block_tables: List[List[int]] = []
         multi_modal_kwargs_list: Dict[str,
                                       List[torch.Tensor]] = defaultdict(list)
-        request_ids_to_seq_ids: Dict[str,List[int]] = defaultdict(list)
+        request_ids_to_seq_ids: Dict[str, List[int]] = defaultdict(list)
         decode_only = True
         num_prefills = 0
         num_prefill_tokens = 0
@@ -730,8 +729,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             lora_mapping=lora_mapping,
             lora_requests=lora_requests,
             multi_modal_kwargs=multi_modal_kwargs,
-            request_ids_to_seq_ids=request_ids_to_seq_ids
-        )
+            request_ids_to_seq_ids=request_ids_to_seq_ids)
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -805,10 +803,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        # finished_request_ids = [seq.request_id for seq in seqs]
-        # self.execute_model(seqs, kv_caches, finished_request_ids)
         model_input = self.prepare_model_input(seqs)
-        self.execute_model(model_input, kv_caches)
+        finished_request_ids = [seq.request_id for seq in seqs]
+        self.execute_model(model_input, kv_caches, finished_request_ids)
         torch.cuda.synchronize()
         return
 
@@ -919,14 +916,21 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                 graph_runner = CUDAGraphRunner(self.model)
                 capture_inputs = {
-                    "input_ids": input_tokens[:batch_size],
-                    "positions": input_positions[:batch_size],
-                    "hidden_states": hidden_states[:batch_size]
+                    "input_ids":
+                    input_tokens[:batch_size],
+                    "positions":
+                    input_positions[:batch_size],
+                    "hidden_states":
+                    hidden_states[:batch_size]
                     if hidden_states is not None else None,
-                    "kv_caches": kv_caches,
-                    "attn_metadata": attn_metadata,
-                    "memory_pool": self.graph_memory_pool,
-                    "stream":graph_capture_context.stream
+                    "kv_caches":
+                    kv_caches,
+                    "attn_metadata":
+                    attn_metadata,
+                    "memory_pool":
+                    self.graph_memory_pool,
+                    "stream":
+                    graph_capture_context.stream
                 }
                 if self.has_seqlen_agnostic:
                     capture_inputs.update({
@@ -997,11 +1001,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
     @torch.inference_mode()
     def execute_model(
-        self,
-        model_input: ModelInputForGPUWithSamplingMetadata,
-        kv_caches: List[torch.Tensor],
-        finished_request_ids: List[str]
-    ) -> SamplerOutput:
+            self, model_input: ModelInputForGPUWithSamplingMetadata,
+            kv_caches: List[torch.Tensor],
+            finished_request_ids: Optional[List[str]]) -> SamplerOutput:
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None
@@ -1021,8 +1023,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         seqlen_agnostic_kwargs = {
-            "finished_request_ids":finished_request_ids,
-            "request_ids_to_seq_ids":model_input.request_ids_to_seq_ids,
+            "finished_request_ids": finished_request_ids,
+            "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         }
         hidden_states = model_executable(
             input_ids=model_input.input_tokens,
@@ -1030,8 +1032,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             kv_caches=kv_caches,
             attn_metadata=model_input.attn_metadata,
             **multi_modal_kwargs,
-            **seqlen_agnostic_kwargs
-        )
+            **seqlen_agnostic_kwargs)
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states,

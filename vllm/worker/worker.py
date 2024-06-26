@@ -257,8 +257,7 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            finished_request_ids=execute_model_req.finished_request_ids
-        )
+            finished_request_ids=execute_model_req.finished_request_ids)
 
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:

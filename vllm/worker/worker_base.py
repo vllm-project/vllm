@@ -124,7 +124,7 @@ class WorkerInput:
     blocks_to_swap_in: Optional[torch.Tensor] = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
-    finished_request_ids :Optional[List[str]] = None
+    finished_request_ids: Optional[List[str]] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -255,7 +255,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(model_input, self.kv_cache)
+        output = self.model_runner.execute_model(
+            model_input, self.kv_cache, worker_input.finished_request_ids)
         # Worker only supports single-step execution. Wrap the output in a
         # list to conform to interface.
         return [output]

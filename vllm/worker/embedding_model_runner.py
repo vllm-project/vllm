@@ -97,7 +97,6 @@ class EmbeddingModelRunner(
         return self.model.pooler(hidden_states=hidden_states,
                                  pooling_metadata=model_input.pooling_metadata)
 
-
     def make_model_input_from_broadcasted_tensor_dict(
             self,
             tensor_dict: Dict[str,
