@@ -7,9 +7,10 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme, CompressedTensorsW4A16,
-    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8DynamicToken,
-    CompressedTensorsW8A8StaticTensor)
+    W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
+    CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
+    CompressedTensorsW8A8DynamicToken, CompressedTensorsW8A8StaticTensor,
+    CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     find_first_name_or_class_match)
@@ -85,8 +86,11 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
-        is_tensor = (weight_quant.strategy == input_quant.strategy ==
-                     QuantizationStrategy.TENSOR.value)
+        weight_strategy = (
+            weight_quant.strategy == QuantizationStrategy.TENSOR.value
+            or weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
+        is_tensor = (weight_strategy and input_quant.strategy
+                     == QuantizationStrategy.TENSOR.value)
         is_symmetric = weight_quant.symmetric and input_quant.symmetric
         is_static = not weight_quant.dynamic and not input_quant.dynamic
 
@@ -95,45 +99,53 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_dynamic_token_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
-        is_token_tensor = (weight_quant.strategy
-                           == QuantizationStrategy.TENSOR.value) and (
-                               input_quant.strategy
-                               == QuantizationStrategy.TOKEN.value)
+        weight_strategy = (
+            weight_quant.strategy == QuantizationStrategy.TENSOR.value
+            or weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
+        is_token = (weight_strategy and input_quant.strategy
+                    == QuantizationStrategy.TOKEN.value)
         is_symmetric = weight_quant.symmetric and input_quant.symmetric
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
 
-        return is_8_bits and is_token_tensor and is_symmetric and is_dynamic
+        return is_8_bits and is_token and is_symmetric and is_dynamic
 
-    def _is_w4a16(self, weight_quant: BaseModel,
-                  input_quant: BaseModel) -> bool:
+    def _is_wNa16_group_channel(self, weight_quant: BaseModel,
+                                input_quant: BaseModel) -> bool:
         input_quant_none = input_quant is None
-        is_4_bits = weight_quant.num_bits == 4
         is_symmetric = weight_quant.symmetric
+        is_channel_group = (
+            weight_quant.strategy == QuantizationStrategy.CHANNEL.value
+            or weight_quant.strategy == QuantizationStrategy.GROUP.value)
         is_static = not weight_quant.dynamic
 
-        return is_4_bits and input_quant_none and is_symmetric and is_static
+        return (is_channel_group and input_quant_none and is_symmetric
+                and is_static)
 
     def _get_schema(self, weight_quant: BaseModel,
                     input_quant: BaseModel) -> "CompressedTensorsScheme":
 
-        if self._is_w4a16(weight_quant, input_quant):
-            if self.quant_format == CompressionFormat.marlin_24.value:
+        if self._is_wNa16_group_channel(weight_quant, input_quant):
+            if (self.quant_format == CompressionFormat.marlin_24.value
+                    and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS):
                 return CompressedTensorsW4A16Sparse24(
                     strategy=weight_quant.strategy,
                     num_bits=weight_quant.num_bits,
                     group_size=weight_quant.group_size)
-            if self.quant_format == CompressionFormat.pack_quantized.value:
-                return CompressedTensorsW4A16(
+            if (self.quant_format == CompressionFormat.pack_quantized.value
+                    and weight_quant.num_bits in WNA16_SUPPORTED_BITS):
+                return CompressedTensorsWNA16(
                     num_bits=weight_quant.num_bits,
                     strategy=weight_quant.strategy,
                     group_size=weight_quant.group_size)
 
         if self.quant_format == CompressionFormat.int_quantized.value:
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8StaticTensor()
+                return CompressedTensorsW8A8StaticTensor(
+                    strategy=weight_quant.strategy)
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8DynamicToken()
+                return CompressedTensorsW8A8DynamicToken(
+                    strategy=weight_quant.strategy)
 
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")

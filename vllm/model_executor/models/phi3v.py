@@ -13,26 +13,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Dict, Iterable, List, Literal, Optional, Tuple, TypedDict
 
+import numpy as np
 import torch
 import torch.nn as nn
-from transformers import CLIPVisionConfig, CLIPVisionModel, PretrainedConfig
+from PIL import Image
+from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import get_dummy_image_data
+from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
 from vllm.sequence import SamplerOutput
+
+logger = init_logger(__name__)
 
 _KEYS_TO_MODIFY_MAPPING = {
     "model.vision_embed_tokens": "vision_embed_tokens",
@@ -70,9 +76,10 @@ class Phi3ImageEmbeddingBase(nn.Module):
         LAYER_IDX = self.layer_idx
         TYPE_FEATURE = self.type_feature
 
-        img_processor_output = self.img_processor(img_embeds,
-                                                  output_hidden_states=True)
-        img_feature = img_processor_output.hidden_states[LAYER_IDX]
+        # NOTE: we skip the step to select the vision feature layer since
+        # this is already done inside the img_processor
+        img_feature = self.img_processor(img_embeds,
+                                         vision_feature_layer=LAYER_IDX)
 
         if TYPE_FEATURE == "patch":
             patch_feature = img_feature[:, 1:]
@@ -266,7 +273,63 @@ class Phi3VImagePixelInputs(TypedDict):
     """Shape: (batch_size, 2)"""
 
 
-@MULTIMODAL_REGISTRY.register_image_pixel_input()
+# FIXME(Isotr0py): Remove these after dynamic num_img_tokens is supported
+# copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
+def calc_padded_size(width, height, padding_unit=336):
+    target_height = int(np.ceil(height / padding_unit) * padding_unit)
+    top_padding = int((target_height - height) / 2)
+    bottom_padding = target_height - height - top_padding
+    padded_width = width
+    padded_height = height + top_padding + bottom_padding
+    return padded_width, padded_height
+
+
+# copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
+def calc_hd_transform_size(width, height, hd_num=16):
+    transposed = False
+    if width < height:
+        width, height = height, width
+        transposed = True
+
+    ratio = width / height
+    scale = 1
+    while scale * np.ceil(scale / ratio) <= hd_num:
+        scale += 1
+    scale -= 1
+
+    new_width = int(scale * 336)
+    new_height = int(new_width / ratio)
+
+    padded_width, padded_height = calc_padded_size(new_width, new_height)
+
+    if transposed:
+        padded_width, padded_height = padded_height, padded_width
+
+    return padded_width, padded_height
+
+
+def _image_processor(
+    data: ImagePixelData,
+    model_config: ModelConfig,
+    vlm_config: VisionLanguageConfig,
+) -> Dict[str, torch.Tensor]:
+    image = data.image
+
+    if isinstance(image, Image.Image):
+        # Temporary patch before dynamic number of image tokens is supported
+        _, _, h, w = vlm_config.image_input_shape
+        if (w, h) != calc_hd_transform_size(image.width, image.height):
+            logger.warning(
+                "Dynamic image shape is currently not supported. "
+                "Resizing input image to (%d, %d).", w, h)
+
+            data.image = image.resize((w, h))
+
+    return MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
+            ._default_input_processor(data, model_config, vlm_config)
+
+
+@MULTIMODAL_REGISTRY.register_image_pixel_input(_image_processor)
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class Phi3VForCausalLM(VisionLanguageModelBase):
 
@@ -351,6 +414,9 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            # post_layernorm is not needed in CLIPVisionModel
+            if "vision_model.post_layernorm" in name:
                 continue
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:
