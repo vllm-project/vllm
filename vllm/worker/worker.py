@@ -10,8 +10,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, PromptAdapterConfig,
                          SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
@@ -285,7 +284,7 @@ class Worker(LocalOrDistributedWorkerBase):
         return self.model_runner.remove_lora(lora_id)
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.model_runner.pin_adapter(lora_id)
+        return self.model_runner.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
@@ -298,7 +297,7 @@ class Worker(LocalOrDistributedWorkerBase):
         return self.model_runner.remove_lora(prompt_adapter_id)
 
     def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.model_runner.pin_adapter(prompt_adapter_id)
+        return self.model_runner.pin_prompt_adapter(prompt_adapter_id)
 
     def list_prompt_adapters(self) -> Set[int]:
         return self.model_runner.list_prompt_adapters()

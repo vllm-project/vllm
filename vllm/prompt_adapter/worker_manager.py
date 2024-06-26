@@ -82,6 +82,9 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
         return True
 
+    def pin_adapter(self, adapter_id: int) -> bool:
+        return self._adapter_manager.pin_adapter(adapter_id)
+
     def set_active_adapters(self, requests: Set[Any],
                             mapping: Optional[Any]) -> None:
         set_active_adapters_worker(requests, mapping, self._apply_adapters,

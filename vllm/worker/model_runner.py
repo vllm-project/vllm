@@ -14,7 +14,6 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, PromptAdapterConfig,
                          SchedulerConfig, VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import graph_capture
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -56,6 +55,7 @@ _NUM_WARMUP_ITERS = 2
 
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
+
 @dataclasses.dataclass(frozen=True)
 class ModelInputForGPU(ModelRunnerInputBase):
     """
@@ -73,7 +73,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
     prompt_adapter_mapping: Optional[PromptAdapterMapping] = None
-    prompt_adapter_requests: Set[PromptAdapterRequest] = None
+    prompt_adapter_requests: Optional[Set[PromptAdapterRequest]] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -82,7 +82,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
-            "prompt_adapter_mapping" : self.prompt_adapter_mapping,
+            "prompt_adapter_mapping": self.prompt_adapter_mapping,
             "prompt_adapter_requests": self.prompt_adapter_requests,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
@@ -117,7 +117,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
-            "prompt_adapter_mapping" : self.prompt_adapter_mapping,
+            "prompt_adapter_mapping": self.prompt_adapter_mapping,
             "prompt_adapter_requests": self.prompt_adapter_requests,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
@@ -265,7 +265,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.prompt_adapter_config)
             self.model = (
                 self.prompt_adapter_manager.create_prompt_adapter_manager(
-                                                            self.model))
+                    self.model))
 
         if self.kv_cache_dtype == "fp8" and is_hip():
             # Currently only ROCm accepts kv-cache scaling factors
@@ -881,7 +881,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def remove_all_prompt_adapters(self):
         if not self.prompt_adapter_manager:
             raise RuntimeError("PromptAdapter is not enabled.")
-        self.prompt_adapter_manager.remove_all_prompt_adapters()
+        self.prompt_adapter_manager.remove_all_adapters()
 
     def set_active_prompt_adapters(
             self, prompt_adapter_requests: Set[PromptAdapterRequest],
@@ -901,6 +901,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if not self.prompt_adapter_manager:
             raise RuntimeError("PromptAdapter is not enabled.")
         return self.prompt_adapter_manager.remove_adapter(prompt_adapter_id)
+
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        if not self.prompt_adapter_manager:
+            raise RuntimeError("PromptAdapter is not enabled.")
+        return self.prompt_adapter_manager.pin_adapter(prompt_adapter_id)
 
     def list_prompt_adapters(self) -> Set[int]:
         if not self.prompt_adapter_manager:
@@ -1063,13 +1068,14 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             assert model_input.lora_mapping is not None
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
-            
+
         if self.prompt_adapter_config:
             assert model_input.prompt_adapter_requests is not None
             assert model_input.prompt_adapter_mapping is not None
-            self.set_active_prompt_adapters(model_input.prompt_adapter_requests,
-                                            model_input.prompt_adapter_mapping)
-            
+            self.set_active_prompt_adapters(
+                model_input.prompt_adapter_requests,
+                model_input.prompt_adapter_mapping)
+
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
         prefill_meta = model_input.attn_metadata.prefill_metadata
