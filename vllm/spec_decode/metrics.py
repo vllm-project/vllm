@@ -4,7 +4,8 @@ from typing import Callable, Optional
 
 import torch
 
-from vllm.model_executor.layers.spec_decode_base_sampler import SpecDecodeBaseSampler
+from vllm.model_executor.layers.spec_decode_base_sampler import (
+    SpecDecodeBaseSampler)
 from vllm.utils import is_pin_memory_available
 
 
@@ -40,6 +41,7 @@ class SpecDecodeWorkerMetrics:
 
     # The number of speculative tokens per sequence.
     num_spec_tokens: int
+
 
 Timer = Callable[[], float]
 
@@ -116,7 +118,8 @@ class AsyncMetricsCollector:
 
         with torch.cuda.stream(self._copy_stream):
             self._aggregate_num_accepted_tokens.copy_(
-                self.spec_decode_sampler.num_accepted_tokens, non_blocking=True)
+                self.spec_decode_sampler.num_accepted_tokens,
+                non_blocking=True)
             self._aggregate_num_emitted_tokens.copy_(
                 self.spec_decode_sampler.num_emitted_tokens, non_blocking=True)
             # Number of draft tokens is calculated on CPU, so no copy is

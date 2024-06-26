@@ -1,7 +1,5 @@
 import torch
 import torch.jit
-import torch.nn as nn
-import time
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
@@ -13,6 +11,7 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler):
         Multiple Decoding Heads"
         https://arxiv.org/pdf/2401.10774
     """
+
     def __init__(
         self,
         posterior_threshold: float,
@@ -37,10 +36,8 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler):
         """
         self._posterior_threshold = posterior_threshold
         self._posterior_alpha = posterior_alpha
-        super().__init__(
-            disable_bonus_tokens=disable_bonus_tokens,
-            strict_mode=strict_mode)
-
+        super().__init__(disable_bonus_tokens=disable_bonus_tokens,
+                         strict_mode=strict_mode)
 
     def forward(
         self,

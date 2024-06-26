@@ -212,6 +212,7 @@ def test_ngram_disable_queue(baseline_llm_generator, test_llm_generator,
                                          max_output_len=output_len,
                                          force_output_len=True)
 
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -245,9 +246,9 @@ def test_ngram_disable_queue(baseline_llm_generator, test_llm_generator,
     ])
 @pytest.mark.parametrize("seed", [1])
 @pytest.mark.parametrize("batch_size", [1, 32])
-def test_ngram_typical_acceptance_sampling(
-    baseline_llm_generator, test_llm_generator,
-    batch_size: int, output_len: int):
+def test_ngram_typical_acceptance_sampling(baseline_llm_generator,
+                                           test_llm_generator, batch_size: int,
+                                           output_len: int):
     """Verify that ngram speculative decoding produces exact equality
     to without spec decode with many different values of k, batch_size and
     using TypicalAcceptanceSampler as the draft token acceptance method.

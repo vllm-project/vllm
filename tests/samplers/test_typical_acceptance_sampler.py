@@ -51,18 +51,18 @@ def get_draft_token_ids(batch_size: int, k: int, vocab_size: int,
                     break
     return draft_token_ids
 
+
 def get_acceptance_sampler(
-        posterior_threshold: float = 0.03,
-        posterior_alpha: float = 0.9,
-        disable_bonus_tokens: bool = False,
-        strict_mode: bool = False,
+    posterior_threshold: float = 0.03,
+    posterior_alpha: float = 0.9,
+    disable_bonus_tokens: bool = False,
+    strict_mode: bool = False,
 ) -> TypicalAcceptanceSampler:
     """
     Initializes and returns a TypicalAcceptanceSampler.
     """
-    return TypicalAcceptanceSampler(
-        posterior_threshold, posterior_alpha, disable_bonus_tokens, strict_mode)
-
+    return TypicalAcceptanceSampler(posterior_threshold, posterior_alpha,
+                                    disable_bonus_tokens, strict_mode)
 
 
 @pytest.mark.parametrize("k", list(range(1, 6)))
@@ -89,7 +89,8 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
                                     size=(batch_size, k),
                                     dtype=torch.int64)
     # Verify that sampling succeeds for all cases.
-    typical_acceptance_sampler(target_probs, bonus_token_ids,
+    typical_acceptance_sampler(target_probs,
+                               bonus_token_ids,
                                draft_probs=None,
                                draft_token_ids=draft_token_ids)
 
@@ -140,7 +141,8 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
     oob_token_ids[0][0] = rogue_token_id
 
     with pytest.raises(AssertionError):
-        typical_acceptance_sampler(target_probs, bonus_token_ids,
+        typical_acceptance_sampler(target_probs,
+                                   bonus_token_ids,
                                    draft_probs=None,
                                    draft_token_ids=draft_token_ids)
 
@@ -179,10 +181,11 @@ def test_uniform_target_distribution_accepts_all_tokens(
                                     high=vocab_size,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
-    output_token_ids = typical_acceptance_sampler(target_probs,
-                                                  bonus_token_ids,
-                                                  draft_probs=None,
-                                                  draft_token_ids=draft_token_ids)
+    output_token_ids = typical_acceptance_sampler(
+        target_probs,
+        bonus_token_ids,
+        draft_probs=None,
+        draft_token_ids=draft_token_ids)
     # We are using a uniform target probability distribution.
     # For a uniform distribution the entropy is very high and it
     # should lead to all draft tokens being accepted. Verify that.
@@ -241,10 +244,11 @@ def test_temperature_zero_target_distribution(seed: int,
     # 1.0 tokens in the target distribution we will reject all of them and
     # fallback to the greedy sampling for selecting 1 token for each sequence.
     # Verify the same.
-    output_token_ids = typical_acceptance_sampler(target_probs,
-                                                  bonus_token_ids,
-                                                  draft_probs=None,
-                                                  draft_token_ids=draft_token_ids)
+    output_token_ids = typical_acceptance_sampler(
+        target_probs,
+        bonus_token_ids,
+        draft_probs=None,
+        draft_token_ids=draft_token_ids)
     assert output_token_ids.shape[0] == batch_size
     assert output_token_ids.shape[1] == (k + 1)
     assert torch.all(output_token_ids[:, -1] == -1)
@@ -295,10 +299,11 @@ def test_mixed_target_distribution(seed: int, disable_bonus_tokens: bool,
                                     high=vocab_size,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
-    output_token_ids = typical_acceptance_sampler(target_probs,
-                                                  bonus_token_ids,
-                                                  draft_probs=None,
-                                                  draft_token_ids=draft_token_ids)
+    output_token_ids = typical_acceptance_sampler(
+        target_probs,
+        bonus_token_ids,
+        draft_probs=None,
+        draft_token_ids=draft_token_ids)
     # verify the shape of output_token_ids
     assert output_token_ids.shape[0] == batch_size
     assert output_token_ids.shape[1] == (k + 1)
@@ -358,10 +363,11 @@ def test_accept_tokens_partially(seed: int, disable_bonus_tokens: bool,
                                     high=vocab_size,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
-    output_token_ids = typical_acceptance_sampler(target_probs,
-                                                  bonus_token_ids,
-                                                  draft_probs=None,
-                                                  draft_token_ids=draft_token_ids)
+    output_token_ids = typical_acceptance_sampler(
+        target_probs,
+        bonus_token_ids,
+        draft_probs=None,
+        draft_token_ids=draft_token_ids)
     assert output_token_ids.shape[0] == batch_size
     assert output_token_ids.shape[1] == (k + 1)
     assert torch.all(output_token_ids[:, 0:-1] == draft_token_ids)
@@ -377,10 +383,11 @@ def test_accept_tokens_partially(seed: int, disable_bonus_tokens: bool,
         batch_size, k, vocab_size, zero_temperature_token_ids)
     draft_token_ids = torch.cat(
         (draft_token_ids[:, :2], draft_token_ids_to_replace[:, -3:]), dim=1)
-    output_token_ids = typical_acceptance_sampler(target_probs,
-                                                  bonus_token_ids,
-                                                  draft_probs=None,
-                                                  draft_token_ids=draft_token_ids)
+    output_token_ids = typical_acceptance_sampler(
+        target_probs,
+        bonus_token_ids,
+        draft_probs=None,
+        draft_token_ids=draft_token_ids)
     assert output_token_ids.shape[0] == batch_size
     assert output_token_ids.shape[1] == (k + 1)
     assert torch.all(output_token_ids[:, :2] == draft_token_ids[:, :2])
@@ -423,10 +430,11 @@ def test_accept_tokens_set_non_default_posteriors(seed: int,
                                     high=vocab_size,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
-    output_token_ids = typical_acceptance_sampler(target_probs,
-                                                  bonus_token_ids,
-                                                  draft_probs=None,
-                                                  draft_token_ids=draft_token_ids)
+    output_token_ids = typical_acceptance_sampler(
+        target_probs,
+        bonus_token_ids,
+        draft_probs=None,
+        draft_token_ids=draft_token_ids)
     assert output_token_ids.shape[0] == batch_size
     assert output_token_ids.shape[1] == (k + 1)
     assert torch.all(output_token_ids[:, 1:-1] == -1)
@@ -440,10 +448,11 @@ def test_accept_tokens_set_non_default_posteriors(seed: int,
         posterior_threshold=0.0,
         posterior_alpha=0.0)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
-    output_token_ids = typical_acceptance_sampler(target_probs,
-                                                  bonus_token_ids,
-                                                  draft_probs=None,
-                                                  draft_token_ids=draft_token_ids)
+    output_token_ids = typical_acceptance_sampler(
+        target_probs,
+        bonus_token_ids,
+        draft_probs=None,
+        draft_token_ids=draft_token_ids)
     assert output_token_ids.shape[0] == batch_size
     assert output_token_ids.shape[1] == (k + 1)
     assert torch.all(output_token_ids[:, 0:-1] == draft_token_ids)

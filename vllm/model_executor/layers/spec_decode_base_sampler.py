@@ -1,5 +1,5 @@
+from abc import abstractmethod
 from typing import Optional
-from abc import ABC, abstractmethod
 
 import torch
 import torch.jit
@@ -63,7 +63,6 @@ class SpecDecodeBaseSampler(nn.Module):
         draft_token_ids: torch.Tensor,
     ) -> torch.Tensor:
         raise NotImplementedError
-
 
     def _create_output(
             self,

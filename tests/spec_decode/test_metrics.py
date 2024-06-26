@@ -127,8 +127,8 @@ def test_initial_metrics_has_correct_values(has_data: bool):
                                                            dtype=torch.long,
                                                            device='cuda')
     spec_decode_sampler.num_emitted_tokens = torch.tensor(num_emitted_tokens,
-                                                  dtype=torch.long,
-                                                  device='cuda')
+                                                          dtype=torch.long,
+                                                          device='cuda')
     spec_decode_sampler.num_draft_tokens = num_draft_tokens
 
     collect_interval_s = 5.0

@@ -3,12 +3,10 @@ from typing import Tuple
 
 import torch
 import torch.jit
-import time
-import torch.nn as nn
-from vllm.model_executor.layers.spec_decode_base_sampler import SpecDecodeBaseSampler
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
+
 
 class RejectionSampler(SpecDecodeBaseSampler):
     """Apply modified rejection sampling as described in "Accelerating Large
@@ -29,9 +27,8 @@ class RejectionSampler(SpecDecodeBaseSampler):
             during sampling. This catches correctness issues but adds
             nontrivial latency.
         """
-        super().__init__(
-            disable_bonus_tokens=disable_bonus_tokens,
-            strict_mode=strict_mode)
+        super().__init__(disable_bonus_tokens=disable_bonus_tokens,
+                         strict_mode=strict_mode)
 
     def forward(
         self,
@@ -80,11 +77,12 @@ class RejectionSampler(SpecDecodeBaseSampler):
             self._raise_if_incorrect_input(target_probs, bonus_token_ids,
                                            draft_probs, draft_token_ids)
 
-        accepted, recovered_token_ids = self._batch_modified_rejection_sampling(
-            target_probs,
-            draft_probs,
-            draft_token_ids,
-        )
+        accepted, recovered_token_ids = (
+            self._batch_modified_rejection_sampling(
+                target_probs,
+                draft_probs,
+                draft_token_ids,
+            ))
 
         output_token_ids = self._create_output(
             accepted,
@@ -241,6 +239,7 @@ class RejectionSampler(SpecDecodeBaseSampler):
         See https://en.wikipedia.org/wiki/Subnormal_number for more information.
         """
         return torch.finfo(self.probs_dtype).tiny
+
 
 # torch.multinomial forces a GPU<->CPU sync.
 # Therefore, we use an optimized implementation instead that skips the sync.

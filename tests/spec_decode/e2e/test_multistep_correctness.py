@@ -17,7 +17,7 @@ expect greedy equality for the TypicalAcceptanceSampler at temp=0.
 
 For temp>0, we rely on unit tests on the rejection sampler to verify that the
 output distribution is the same with spec decode vs. no spec decode (this would
-be prohibitively expensive to run with a real model). Similary, for the
+be prohibitively expensive to run with a real model). Similarly, for the
 TypicalAcceptance sampler also, we rely on unit tests to validate temp>0
 test cases.
 
@@ -618,6 +618,7 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
                                          max_output_len=output_len,
                                          force_output_len=True)
 
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -650,9 +651,9 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_typical_acceptance_sampling(
-    baseline_llm_generator, test_llm_generator, batch_size: int,
-    output_len: int):
+def test_typical_acceptance_sampling(baseline_llm_generator,
+                                     test_llm_generator, batch_size: int,
+                                     output_len: int):
     """Verify that speculative decoding produces exact equality to without spec
     decode with TypicalAcceptanceSampler as the draft token acceptance
     sampling method.

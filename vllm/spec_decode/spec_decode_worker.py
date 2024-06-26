@@ -6,9 +6,11 @@ import torch
 from vllm.config import SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
-from vllm.model_executor.layers.spec_decode_base_sampler import SpecDecodeBaseSampler
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.model_executor.layers.typical_acceptance_sampler import TypicalAcceptanceSampler
+from vllm.model_executor.layers.spec_decode_base_sampler import (
+    SpecDecodeBaseSampler)
+from vllm.model_executor.layers.typical_acceptance_sampler import (
+    TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SamplerOutput, SequenceGroupMetadata,
                            get_all_seq_ids)
@@ -26,7 +28,6 @@ from vllm.spec_decode.util import (create_sequence_group_output,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
-import time
 
 logger = init_logger(__name__)
 
@@ -62,8 +63,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         typical_acceptance_sampler_posterior_threshold=speculative_config.
         typical_acceptance_sampler_posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
-        typical_acceptance_sampler_posterior_alpha
-    )
+        typical_acceptance_sampler_posterior_alpha)
 
     return spec_decode_worker
 
@@ -101,8 +101,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         draft_worker_kwargs: Dict[str, Any],
         disable_by_batch_size: Optional[int],
         draft_token_acceptance_method: str,
-        typical_acceptance_sampler_posterior_threshold: float, 
-        typical_acceptance_sampler_posterior_alpha: float, 
+        typical_acceptance_sampler_posterior_threshold: float,
+        typical_acceptance_sampler_posterior_alpha: float,
     ) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
@@ -125,7 +125,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
-        
+
         spec_decode_sampler: SpecDecodeBaseSampler = None
         if draft_token_acceptance_method == "rejection_sampler":
             spec_decode_sampler = RejectionSampler(
@@ -136,17 +136,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 posterior_threshold=\
                     typical_acceptance_sampler_posterior_threshold,
                 posterior_alpha=typical_acceptance_sampler_posterior_alpha,
-        )
+            )
         logger.info("Configuring SpecDecodeWorker with sampler=%s",
                     type(spec_decode_sampler))
 
- 
-        return SpecDecodeWorker(
-            proposer_worker,
-            scorer_worker,
-            disable_by_batch_size=disable_by_batch_size,
-            spec_decode_sampler=spec_decode_sampler)
-
+        return SpecDecodeWorker(proposer_worker,
+                                scorer_worker,
+                                disable_by_batch_size=disable_by_batch_size,
+                                spec_decode_sampler=spec_decode_sampler)
 
     def __init__(
         self,
@@ -206,7 +203,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         self._metrics.init_gpu_tensors(self.rank)
         self.spec_decode_sampler.init_gpu_tensors(self.rank)
-            
+
         self.scorer = BatchExpansionTop1Scorer(
             scorer_worker=self.scorer_worker,
             device=self.device,
@@ -216,7 +213,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     def load_model(self, *args, **kwargs):
         pass
-    
+
     def _configure_model_sampler_for_spec_decode(self):
         """Configure model sampler to emit GPU tensors. This allows spec decode
         to keep data on device without transferring to CPU and serializing,
@@ -532,7 +529,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                                        hidden_states)
 
         return accepted_token_ids, logprobs
- 
+
     def _create_output_sampler_list(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],

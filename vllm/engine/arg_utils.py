@@ -579,8 +579,9 @@ class EngineArgs:
             'routines are supported: '
             '1) RejectionSampler which does not allow changing the '
             'acceptance rate of draft tokens, '
-            '2) TypicalAcceptanceSampler which is configurable, allowing for a higher '
-            'acceptance rate at the cost of lower quality, and vice versa.')
+            '2) TypicalAcceptanceSampler which is configurable, allowing for '
+            'a higher acceptance rate at the cost of lower quality, '
+            'and vice versa.')
 
         parser.add_argument(
             '--typical-acceptance-sampler-posterior-threshold',
@@ -596,8 +597,9 @@ class EngineArgs:
             type=float,
             default=EngineArgs.typical_acceptance_sampler_posterior_alpha,
             help='A scaling factor for the entropy-based threshold for token '
-            'acceptance in the TypicalAcceptanceSampler. Typically defaults ' 
-            'to sqrt of --typical-acceptance-sampler-posterior-threshold i.e 0.3')
+            'acceptance in the TypicalAcceptanceSampler. Typically defaults '
+            'to sqrt of --typical-acceptance-sampler-posterior-threshold '
+            'i.e. 0.3')
 
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
@@ -731,7 +733,7 @@ class EngineArgs:
             typical_acceptance_sampler_posterior_threshold=self.
             typical_acceptance_sampler_posterior_threshold,
             typical_acceptance_sampler_posterior_alpha=self.
-            typical_acceptance_sampler_posterior_alpha, 
+            typical_acceptance_sampler_posterior_alpha,
         )
 
         scheduler_config = SchedulerConfig(
