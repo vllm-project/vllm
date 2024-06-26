@@ -2,11 +2,10 @@ from typing import Callable, List, Optional
 
 import torch
 import torch.nn.functional as F
-from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.parameter import vLLMParameter
 
 __all__ = ["CompressedTensorsUnquantized"]
 
@@ -32,14 +31,14 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
 
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=params_dtype),
-                           requires_grad=False)
+        weight = vLLMParameter(data=torch.empty(sum(output_partition_sizes),
+                                                input_size_per_partition,
+                                                dtype=params_dtype),
+                               input_dim=1,
+                               output_dim=0,
+                               weight_loader=weight_loader)
 
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
-        set_weight_attrs(weight, {"weight_loader": weight_loader})
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:

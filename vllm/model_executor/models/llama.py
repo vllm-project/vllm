@@ -491,7 +491,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     continue
 
                 param = params_dict[name]
-                print("HERE", type(param))
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
 

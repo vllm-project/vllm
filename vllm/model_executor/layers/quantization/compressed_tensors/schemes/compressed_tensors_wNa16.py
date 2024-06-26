@@ -2,7 +2,6 @@ from typing import Callable, List, Optional
 
 import torch
 from torch.nn import Parameter
-
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
@@ -10,7 +9,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
     marlin_permute_scales, replace_tensor, verify_gptq_marlin_supported,
     verify_marlin_supports_shape)
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.parameter import vLLMParameter, PackedParameter
 
 __all__ = ["CompressedTensorsWNA16"]
@@ -77,54 +75,18 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             weight_scale_dim = 1
             scales_and_zp_size = input_size_per_partition // group_size
 
-        print(output_partition_sizes, output_size_per_partition)
-        weight = PackedParameter(input_dim=1,
-                                 output_dim=0,
-                                 weight_loader=weight_loader,
-                                 packed_factor=pack_factor,
-                                 packed_dim=1,
-                                 data=torch.empty(
-                                     output_size_per_partition,
-                                     input_size_per_partition // pack_factor,
-                                     dtype=torch.int32,
-                                 ))
-        """
-        weight = Parameter(
-            torch.empty(
-                output_size_per_partition,
-                input_size_per_partition // self.pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
+        weight = PackedvLLMParameter(input_dim=1,
+                                     output_dim=0,
+                                     weight_loader=weight_loader,
+                                     packed_factor=pack_factor,
+                                     packed_dim=1,
+                                     data=torch.empty(
+                                         output_size_per_partition,
+                                         input_size_per_partition //
+                                         pack_factor,
+                                         dtype=torch.int32,
+                                     ))
 
-        set_weight_attrs(
-            weight, {
-                "input_dim": 1,
-                "output_dim": 0,
-                "packed_dim": 1,
-                "pack_factor": self.pack_factor,
-                "weight_loader": weight_loader
-            })
-        """
-        layer.register_parameter("weight_packed", weight)
-        """
-        weight_scale = Parameter(
-            torch.empty(
-                output_size_per_partition,
-                scales_and_zp_size,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-
-        set_weight_attrs(
-            weight_scale, {
-                "weight_loader": weight_loader,
-                "input_dim": weight_scale_dim,
-                "output_dim": 0
-            })
-        """
         weight_scale = vLLMParameter(input_dim=weight_scale_dim,
                                      output_dim=0,
                                      weight_loader=weight_loader,
@@ -133,22 +95,16 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                          scales_and_zp_size,
                                          dtype=params_dtype,
                                      ))
-        layer.register_parameter("weight_scale", weight_scale)
 
         # A 2D array defining the original shape of the weights
         # before packing
-        """
-        weight_shape = Parameter(torch.empty(2, dtype=torch.int64),
-                                 requires_grad=False)
-
-        set_weight_attrs(weight_shape, {
-            "weight_loader": weight_loader,
-            "ignore_warning": True,
-        })
-        """
         weight_shape = vLLMParameter(data=torch.empty(2, dtype=torch.int64),
                                      weight_loader=weight_loader)
+
+        layer.register_parameter("weight_packed", weight)
+        layer.register_parameter("weight_scale", weight_scale)
         layer.register_parameter("weight_shape", weight_shape)
+
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
