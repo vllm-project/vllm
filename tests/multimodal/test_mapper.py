@@ -12,7 +12,7 @@ from ..conftest import _STR_DTYPE_TO_TORCH_DTYPE
 
 @pytest.mark.parametrize("dtype", ["half", "float"])
 @pytest.mark.parametrize("size_factor", [0.25, 0.5, 1.0])
-def test_clip_image_processor(hf_images, dtype, size_factor):
+def test_clip_image_processor(image_assets, dtype, size_factor):
     MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
     IMAGE_HEIGHT = IMAGE_WIDTH = 560
 
@@ -37,8 +37,8 @@ def test_clip_image_processor(hf_images, dtype, size_factor):
         ),
     )
 
-    for image in hf_images:
-        image = rescale_image_size(image, size_factor)
+    for asset in image_assets:
+        image = rescale_image_size(asset.pil_image, size_factor)
 
         hf_result = hf_processor.preprocess(
             image,
@@ -60,7 +60,7 @@ def test_clip_image_processor(hf_images, dtype, size_factor):
 
 @pytest.mark.parametrize("dtype", ["half", "float"])
 @pytest.mark.parametrize("size_factor", [0.25, 0.5, 1.0])
-def test_llava_next_image_processor(hf_images, dtype, size_factor):
+def test_llava_next_image_processor(image_assets, dtype, size_factor):
     MODEL_NAME = "llava-hf/llava-v1.6-vicuna-7b-hf"
     IMAGE_HEIGHT = IMAGE_WIDTH = 560
 
@@ -85,8 +85,8 @@ def test_llava_next_image_processor(hf_images, dtype, size_factor):
         ),
     )
 
-    for image in hf_images:
-        image = rescale_image_size(image, size_factor)
+    for asset in image_assets:
+        image = rescale_image_size(asset.pil_image, size_factor)
 
         hf_result = hf_processor.preprocess(
             image,
@@ -109,7 +109,7 @@ def test_llava_next_image_processor(hf_images, dtype, size_factor):
 @pytest.mark.xfail(
     reason="Example image pixels were not processed using HuggingFace")
 @pytest.mark.parametrize("dtype", ["float"])
-def test_image_pixel_types(hf_images, vllm_image_tensors, dtype):
+def test_image_pixel_types(image_assets, dtype):
     MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
     IMAGE_HEIGHT = IMAGE_WIDTH = 560
 
@@ -130,14 +130,14 @@ def test_image_pixel_types(hf_images, vllm_image_tensors, dtype):
             image_processor_revision=None,
         ))
 
-    for image, tensor in zip(hf_images, vllm_image_tensors):
+    for asset in image_assets:
         image_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
-            ImagePixelData(image),
+            ImagePixelData(asset.pil_image),
         )
         tensor_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
-            ImagePixelData(tensor),
+            ImagePixelData(asset.pixel_values),
         )
 
         assert image_result.keys() == tensor_result.keys()

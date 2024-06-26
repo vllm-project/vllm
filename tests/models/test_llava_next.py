@@ -8,7 +8,7 @@ from vllm.config import VisionLanguageConfig
 from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import rescale_image_size
 
-from ..conftest import IMAGE_FILES
+from ..conftest import IMAGE_ASSETS
 
 pytestmark = pytest.mark.vlm
 
@@ -17,12 +17,12 @@ _PREFACE = (
     "The assistant gives helpful, detailed, and polite answers to the human's "
     "questions.")
 
-HF_IMAGE_PROMPTS = [
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    "stop_sign":
     f"{_PREFACE} USER: <image>\nWhat's the content of the image? ASSISTANT:",
+    "cherry_blossom":
     f"{_PREFACE} USER: <image>\nWhat is the season? ASSISTANT:",
-]
-
-assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
+})
 
 
 def iter_llava_next_configs(model_name: str):
@@ -77,10 +77,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("is_multiscale", [True, False])
-def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
-                model_and_config, dtype: str, max_tokens: int,
-                is_multiscale: bool) -> None:
+def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
+                dtype: str, max_tokens: int, is_multiscale: bool) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -91,6 +89,8 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     The text output is sanitized to be able to compare with hf.
     """
     model_id, vlm_config = model_and_config
+    hf_images = [asset.for_hf() for asset in image_assets]
+    vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
     image_inputs = [
         (rescale_image_size(hf_image, factor),
