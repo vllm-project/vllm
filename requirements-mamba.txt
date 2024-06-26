@@ -2,5 +2,5 @@
 -r requirements-common.txt
 -r requirements-cuda.txt
 
-mamba-ssm
-causal-conv1d >= 1.2.0
+mamba-ssm>=1.2.2
+causal-conv1d>=1.2.0
