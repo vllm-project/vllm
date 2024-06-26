@@ -167,7 +167,6 @@ class ModelRunner:
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
-    
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
