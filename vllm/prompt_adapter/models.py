@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type
 
 import torch
 from peft.utils import load_peft_weights
@@ -8,9 +8,14 @@ from torch import nn
 
 from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
                                          AdapterModelManager)
+from vllm.adapter_commons.utils import (deactivate_adapter, add_adapter, 
+        set_adapter_mapping, remove_adapter, list_adapters, get_adapter)
+
 from vllm.config import PromptAdapterConfig
 from vllm.prompt_adapter.layers import (
     PromptAdapterMapping, VocabParallelEmbeddingWithPromptAdapter)
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +27,26 @@ def get_prompt_adapter_id():
     _GLOBAL_PROMPT_ADAPTER_ID += 1
     return _GLOBAL_PROMPT_ADAPTER_ID
 
+def convert_mapping(
+    mapping: PromptAdapterMapping,
+    prompt_adapter_index_to_id: List[Optional[int]],
+) -> torch.Tensor:
+    """Converts PromptAdapterMapping to index tensors.
+
+    Args:
+        mapping: PromptAdapterMapping mapping rows in a batch to PromptAdapter ids.
+        prompt_adapter_index_to_id: List mapping PromptAdapter ids to PromptAdapter indices.
+        
+    Returns:
+        pa_indices: Tensor of shape [batch_size] mapping batch rows to
+            PromptAdapter indices.
+    """
+    id_to_index = {id_: idx for idx, id_ in enumerate(prompt_adapter_index_to_id) if id_ is not None}
+    pa_indices = [
+        id_to_index.get(id_, -1) if id_ > 0 else -1
+        for id_ in mapping.index_mapping
+    ]
+    return torch.tensor(pa_indices)
 
 class PromptAdapterModel(AdapterModel):
 
@@ -71,7 +96,7 @@ class PromptAdapterModelManager(AdapterModelManager):
         self.model.prompt_adapter_manager = self
         self.adapter_type = 'PromptAdapter'
 
-        self.base_indices = [0]
+        self.base_indices = torch.tensor([-1])
         self.modules: Dict[str, nn.Module] = {}
         self._create_prompt_adapter_modules()
         self._last_mapping: Optional[PromptAdapterMapping] = None
@@ -109,7 +134,7 @@ class PromptAdapterModelManager(AdapterModelManager):
                      prompt_adapter_model.id, index)
         self.prompt_adapter_index_to_id[index] = prompt_adapter_model.id
         for _, v in self.modules.items():
-            v.set_prompt_adapter(prompt_adapter_id, prompt_adapter_model)
+            v.set_prompt_adapter(index, prompt_adapter_model.prompt_embedding)
         return True
 
     def _deactivate_adapter(self, prompt_adapter_id: int):
@@ -117,7 +142,7 @@ class PromptAdapterModelManager(AdapterModelManager):
             index = self.prompt_adapter_index_to_id.index(prompt_adapter_id)
             self.prompt_adapter_index_to_id[index] = None
             for _, v in self.modules.items():
-                v.reset_prompt_adapter(prompt_adapter_id)
+                v.reset_prompt_adapter(index)
         except ValueError:
             pass
 
@@ -125,14 +150,17 @@ class PromptAdapterModelManager(AdapterModelManager):
         self._registered_adapters[prompt_adapter.id] = prompt_adapter
 
     def _set_adapter_mapping(self, mapping: PromptAdapterMapping) -> None:
+        base_indices = convert_mapping(mapping, 
+                                       self.prompt_adapter_index_to_id)
         for k, v in self.modules.items():
-            v.set_mapping(mapping.index_mapping)
+            v.set_mapping(base_indices)
 
     def _create_prompt_adapter_modules(self):
         for module_name, module in self.model.named_modules(
                 remove_duplicate=False):
             if "VocabParallel" in module.__class__.__name__:
                 new_module = VocabParallelEmbeddingWithPromptAdapter(module)
+                new_module.create_prompt_adapter_weights(self.prompt_adapter_config)
                 replaced_module = self.replace_submodule(
                     self.model, module_name, new_module)
                 self.register_module(module.__class__.__name__,
@@ -151,11 +179,35 @@ class PromptAdapterModelManager(AdapterModelManager):
     def register_module(self, module_name: str, module: nn.Module):
         self.modules[module_name] = module
 
+    def pin_adapter(self, prompt_adapter_id: int) -> bool:
+        """Pin a PromptAdapterModel in the manager cache."""
+        raise NotImplementedError(
+            "Pinning is not supported in PromptAdapterModelManager."
+            "Use LRUCachePromptAdapterModelManager for pinning")  # type: ignore
+        
     def remove_all_adapters(self):
         """Remove all PromptAdapterModel from the manager."""
         self._registered_adapters.clear()
         self.prompt_adapter_index_to_id = [None] * self.prompt_adapter_slots
         self._active_adapters.clear()
+        
+    def deactivate_adapter(self, adapter_id: int) -> bool:
+        return deactivate_adapter(adapter_id, self._active_adapters, self._deactivate_adapter)
+
+    def add_adapter(self, adapter: PromptAdapterModel) -> bool:
+        return add_adapter(adapter, self._registered_adapters, self.capacity, self._add_adapter)
+
+    def set_adapter_mapping(self, mapping: PromptAdapterMapping) -> None:
+        self._last_mapping = set_adapter_mapping(mapping, self._last_mapping, self._set_adapter_mapping)
+
+    def remove_adapter(self, adapter_id: int) -> bool:
+        return remove_adapter(adapter_id, self._registered_adapters, self.deactivate_adapter)
+
+    def list_adapters(self) -> Dict[int, Any]:
+        return list_adapters(self._registered_adapters)
+
+    def get_adapter(self, adapter_id: int) -> Optional[Any]:
+        return get_adapter(adapter_id, self._registered_adapters)
 
 
 class PromptAdapterLRUCache(AdapterLRUCache[PromptAdapterModel]):
@@ -215,6 +267,25 @@ class LRUCachePromptAdapterModelManager(PromptAdapterModelManager):
             self._registered_adapters.remove_oldest()
             return True
         return False
+
+    def pin_adapter(self, prompt_adapter_id: int) -> bool:
+        """Pin a PromptAdapterModel in the manager cache."""
+        self._pin_prompt_adapter_in_cpu_cache(prompt_adapter_id)
+        self._pin_prompt_adapter_in_gpu_cache(prompt_adapter_id)
+        return True
+
+    def _pin_prompt_adapter_in_cpu_cache(self, prompt_adapter_id: int):
+        try:
+            self._registered_adapters.pin(prompt_adapter_id)
+        except ValueError as err:
+            raise ValueError("Pinning failed. "
+                             f"Prompt Adapter {prompt_adapter_id} is not registered.") from err
+
+    def _pin_prompt_adapter_in_gpu_cache(self, prompt_adapter_id: int):
+        if lora_id not in self._active_adapters:
+            # move lora to gpu if not already active
+            self.activate_adapter(prompt_adapter_id)
+        self._active_adapters.pin(prompt_adapter_id)
 
 
 def create_prompt_adapter_manager(

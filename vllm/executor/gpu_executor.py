@@ -119,6 +119,10 @@ class GPUExecutor(ExecutorBase):
             "prompt_adapter_id must be greater than 0."
         return self.driver_worker.remove_prompt_adapter(prompt_adapter_id)
 
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        assert prompt_adapter_id > 0, "prompt_adapter_id must be greater than 0."
+        return self.driver_worker.pin_prompt_adapter(prompt_adapter_id)
+        
     def list_prompt_adapters(self) -> Set[int]:
         return self.driver_worker.list_prompt_adapters()
 

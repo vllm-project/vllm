@@ -4,7 +4,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Callable, Dict, List, Optional, Tuple, Type, Union, Any
 
 import safetensors.torch
 import torch
@@ -12,6 +12,8 @@ from torch import nn
 
 from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
                                          AdapterModelManager)
+from vllm.adapter_commons.utils import (deactivate_adapter, add_adapter, 
+        set_adapter_mapping, remove_adapter, list_adapters, get_adapter)
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
@@ -424,9 +426,7 @@ class LoRAModelManager(AdapterModelManager):
                 self.model.packed_modules_mapping)
         self.packed_modules: Dict[str, List[str]] = {}
         self.modules: Dict[str, "BaseLayerWithLoRA"] = {}
-        # self._registered_loras: Dict[int, LoRAModel] = {}
         # Dict instead of a Set for compatibility with LRUCache.
-        # self._active_loras: Dict[int, None] = {}
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
         self.model.lora_manager = self
@@ -502,14 +502,7 @@ class LoRAModelManager(AdapterModelManager):
         self._registered_adapters[lora.id] = lora
         self._set_long_lora_context(lora)
 
-    def add_adapter(self, lora: LoRAModel):
-        logger.debug(
-            "Adding lora. Model id: %d, "
-            "int id: %d, "
-            "scaling factor: %s", lora.id, lora.id, lora.scaling_factor)
-        return super().add_adapter(lora)
-
-    def pin_lora(self, lora_id: int) -> bool:
+    def pin_adapter(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
         raise NotImplementedError(
             "Pinning is not supported in LoRAModelManager."
@@ -685,6 +678,28 @@ class LoRAModelManager(AdapterModelManager):
                 replacement_loras[i] = None
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                 replacement_loras)
+    
+    def deactivate_adapter(self, adapter_id: int) -> bool:
+        return deactivate_adapter(adapter_id, self._active_adapters, self._deactivate_adapter)
+
+    def add_adapter(self, adapter: LoRAModel) -> bool:
+        logger.debug(
+            "Adding lora. Model id: %d, "
+            "int id: %d, "
+            "scaling factor: %s", adapter.id, adapter.id, adapter.scaling_factor)
+        return add_adapter(adapter, self._registered_adapters, self.capacity, self._add_adapter)
+
+    def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
+        self._last_mapping = set_adapter_mapping(mapping, self._last_mapping, self._set_adapter_mapping)
+
+    def remove_adapter(self, adapter_id: int) -> bool:
+        return remove_adapter(adapter_id, self._registered_adapters, self.deactivate_adapter)
+
+    def list_adapters(self) -> Dict[int, Any]:
+        return list_adapters(self._registered_adapters)
+
+    def get_adapter(self, adapter_id: int) -> Optional[Any]:
+        return get_adapter(adapter_id, self._registered_adapters)
 
 
 class LoRALRUCache(AdapterLRUCache[LoRAModel]):
@@ -749,7 +764,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             return True
         return False
 
-    def pin_lora(self, lora_id: int) -> bool:
+    def pin_adapter(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
         self._pin_lora_in_cpu_cache(lora_id)
         self._pin_lora_in_gpu_cache(lora_id)

@@ -209,7 +209,7 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model):
     assert manager.activate_adapter(3)
     assert manager.lora_index_to_id[0] == 2
     assert manager.lora_index_to_id[1] == 3
-    assert manager.pin_lora(2)
+    assert manager.pin_adapter(2)
     assert manager.lora_index_to_id[0] == 2
     assert manager.lora_index_to_id[1] == 3
     assert manager.activate_adapter(1)
@@ -221,22 +221,22 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model):
     assert manager.activate_adapter(3)
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 1
-    assert manager.pin_lora(3)
-    assert manager.pin_lora(1)
+    assert manager.pin_adapter(3)
+    assert manager.pin_adapter(1)
     with pytest.raises(RuntimeError):
-        assert manager.pin_lora(2)
+        assert manager.pin_adapter(2)
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 1
     with pytest.raises(RuntimeError):
         assert manager.activate_adapter(2)
 
     assert manager.deactivate_adapter(3)
-    assert manager.pin_lora(2)
+    assert manager.pin_adapter(2)
     assert manager.lora_index_to_id[0] == 2
     assert manager.lora_index_to_id[1] == 1
     assert manager.remove_adapter(3)
     with pytest.raises(ValueError):
-        assert manager.pin_lora(3)
+        assert manager.pin_adapter(3)
 
 
 def test_lru_lora_model_manager(dist_init, dummy_model):
@@ -323,8 +323,8 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     assert manager.activate_adapter(4)
     assert set(manager.list_adapters()) == {3, 4}
     with pytest.raises(ValueError):
-        assert manager.pin_lora(1)
-    assert manager.pin_lora(3)
+        assert manager.pin_adapter(1)
+    assert manager.pin_adapter(3)
     # Remove manually
     assert manager.remove_adapter(3)
     assert not manager.remove_adapter(3)
@@ -334,7 +334,7 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     assert manager.lora_index_to_id[1] == 4
 
     assert manager.add_adapter(model_lora1)
-    assert manager.pin_lora(1)
+    assert manager.pin_adapter(1)
     assert manager.add_adapter(model_lora2)
     assert manager.activate_adapter(2)
 

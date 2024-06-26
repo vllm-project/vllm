@@ -69,6 +69,7 @@ class EngineArgs:
     max_lora_rank: int = 16
     enable_prompt_adapter: bool = False
     max_prompt_adapters: int = 1
+    max_prompt_adapter_token: int = 10
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
@@ -513,6 +514,10 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_prompt_adapters,
                             help='Max number of PromptAdapters in a batch.')
+        parser.add_argument('--max-prompt-adapter-token',
+                            type=int,
+                            default=EngineArgs.max_prompt_adapter_token,
+                            help='Max number of PromptAdapters tokens')
         parser.add_argument(
             "--device",
             type=str,
@@ -743,7 +748,8 @@ class EngineArgs:
         )
 
         prompt_adapter_config = PromptAdapterConfig(
-            max_prompt_adapters=self.max_prompt_adapters) \
+            max_prompt_adapters=self.max_prompt_adapters,
+            max_prompt_adapter_token=self.max_prompt_adapter_token) \
                                         if self.enable_prompt_adapter else None
 
         if self.image_input_type:

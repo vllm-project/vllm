@@ -1135,10 +1135,17 @@ class LoRAConfig:
 @dataclass
 class PromptAdapterConfig:
     max_prompt_adapters: int
+    max_prompt_adapter_token: int = 10
     max_cpu_prompt_adapters: Optional[int] = None
     prompt_adapter_dtype: Optional[torch.dtype] = None
-
+    
     def __post_init__(self):
+        library_name = 'peft'
+        try:
+            __import__(library_name)
+        except ImportError:
+            raise ImportError(f"'{library_name}' is not installed for prompt adapter support. Please install it using 'pip install {library_name}'.")
+
         if self.max_prompt_adapters < 1:
             raise ValueError(f"max_prompt_adapters "
                              f"({self.max_prompt_adapters}) must be >= 1.")

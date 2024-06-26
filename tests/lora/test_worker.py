@@ -63,7 +63,7 @@ def test_worker_apply_lora(sql_lora_files):
         random.shuffle(iter_lora_requests)
         iter_lora_requests = iter_lora_requests[:-random.randint(0, n_loras)]
         worker.model_runner.set_active_loras(iter_lora_requests,
-                                                LoRAMapping([], []))
+                                            LoRAMapping([], []))
         assert worker.list_loras().issuperset(
             {lora_request.lora_int_id
              for lora_request in iter_lora_requests})

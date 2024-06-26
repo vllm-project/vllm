@@ -339,7 +339,7 @@ class Worker(WorkerBase):
         return self.model_runner.remove_lora(lora_id)
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.model_runner.pin_lora(lora_id)
+        return self.model_runner.pin_adapter(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
@@ -350,6 +350,9 @@ class Worker(WorkerBase):
 
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
         return self.model_runner.remove_lora(prompt_adapter_id)
+
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        return self.model_runner.pin_adapter(prompt_adapter_id)
 
     def list_prompt_adapters(self) -> Set[int]:
         return self.model_runner.list_prompt_adapters()

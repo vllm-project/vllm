@@ -103,6 +103,10 @@ class ExecutorBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError  # type: ignore
+
+    @abstractmethod
     def list_prompt_adapters(self) -> Set[int]:
         raise NotImplementedError
 

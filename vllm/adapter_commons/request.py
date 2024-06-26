@@ -1,12 +1,16 @@
 from dataclasses import dataclass
-
+from abc import abstractmethod
 
 @dataclass
 class AdapterRequest:
     """
     Base class for adapter requests.
     """
-
+    @property 
+    @abstractmethod
+    def adapter_id(self):
+        ...
+        
     def __post_init__(self):
         if self.adapter_id < 1:
             raise ValueError(f"id must be > 0, got {self.adapter_id}")

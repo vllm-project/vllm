@@ -1,9 +1,13 @@
 import logging
-from typing import Any, Set, Type
+from typing import Any, Set, Type, Optional
 
 import torch
 
 from vllm.adapter_commons.worker_manager import AbstractWorkerManager
+from vllm.adapter_commons.utils import (set_active_adapters_worker, 
+                            add_adapter_worker, list_adapters_worker, 
+                            apply_adapters_worker)
+
 from vllm.config import PromptAdapterConfig
 from vllm.prompt_adapter.models import (LRUCachePromptAdapterModelManager,
                                         PromptAdapterModel,
@@ -77,6 +81,26 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
     def add_dummy_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
         return True
+
+    def set_active_adapters(self, requests: Set[Any], mapping: Optional[Any]) -> None:
+        set_active_adapters_worker(requests, mapping, self._apply_adapters, self._adapter_manager.set_adapter_mapping)
+
+    def add_adapter(self, adapter_request: Any) -> bool:
+        return add_adapter_worker(adapter_request, self.list_adapters, self._load_adapter, 
+                           self._adapter_manager.add_adapter, self._adapter_manager.activate_adapter)
+
+    def _apply_adapters(self, adapter_requests: Set[Any]) -> None:
+        apply_adapters_worker(adapter_requests, self.list_adapters, self._adapter_manager.adapter_slots, 
+                       self.remove_adapter, self.add_adapter)
+
+    def remove_adapter(self, adapter_id: int) -> bool:
+        return self._adapter_manager.remove_adapter(adapter_id)
+
+    def remove_all_adapters(self):
+        self._adapter_manager.remove_all_adapters()
+
+    def list_adapters(self) -> Set[int]:
+        return list_adapters_worker(self._adapter_manager.list_adapters)
 
 
 class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
