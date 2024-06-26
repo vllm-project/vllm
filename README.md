@@ -14,7 +14,19 @@ Easy, fast, and cheap LLM serving for everyone
 
 </p>
 
+---
+
+**Ray Summit CPF is Open (June 4th to June 20th)!**
+
+There will be a track for vLLM at the Ray Summit (09/30-10/02, SF) this year!
+If you have cool projects related to vLLM or LLM inference, we would love to see your proposals.
+This will be a great chance for everyone in the community to get together and learn.
+Please submit your proposal [here](https://raysummit.anyscale.com/flow/anyscale/raysummit2024/landing/page/eventsite)
+
+---
+
 *Latest News* 🔥
+- [2024/06] We hosted [the fourth vLLM meetup](https://lu.ma/agivllm) with Cloudflare and BentoML! Please find the meetup slides [here](https://docs.google.com/presentation/d/1iJ8o7V2bQEi0BFEljLTwc5G1S10_Rhv3beed5oB0NJ4/edit?usp=sharing).
 - [2024/04] We hosted [the third vLLM meetup](https://robloxandvllmmeetup2024.splashthat.com/) with Roblox! Please find the meetup slides [here](https://docs.google.com/presentation/d/1A--47JAK4BJ39t954HyTkvtfwn0fkqtsL8NGFuslReM/edit?usp=sharing).
 - [2024/01] We hosted [the second vLLM meetup](https://lu.ma/ygxbpzhl) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/12mI2sKABnUw5RBWXDYY-HtHth4iMSNcEoQ10jDQbxgA/edit?usp=sharing).
 - [2024/01] Added ROCm 6.0 support to vLLM.
@@ -47,7 +59,7 @@ vLLM is flexible and easy to use with:
 - Tensor parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
-- Support NVIDIA GPUs and AMD GPUs
+- Support NVIDIA GPUs, AMD GPUs, Intel CPUs and GPUs
 - (Experimental) Prefix caching support
 - (Experimental) Multi-lora support
 
@@ -75,6 +87,34 @@ Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to learn more.
 
 We welcome and value any contributions and collaborations.
 Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
+
+## Sponsors
+
+vLLM is a community project. Our compute resources for development and testing are supported by the following organizations. Thank you for your support!
+
+<!-- Note: Please sort them in alphabetical order. -->
+<!-- Note: Please keep these consistent with docs/source/community/sponsors.md -->
+
+- a16z
+- AMD
+- Anyscale
+- AWS
+- Crusoe Cloud
+- Databricks
+- DeepInfra
+- Dropbox
+- Lambda Lab
+- NVIDIA
+- Replicate
+- Roblox
+- RunPod
+- Sequoia Capital
+- Trainy
+- UC Berkeley
+- UC San Diego
+- ZhenFund
+
+We also have an official fundraising venue through [OpenCollective](https://opencollective.com/vllm). We plan to use the fund to support the development, maintenance, and adoption of vLLM.
 
 ## Citation
 

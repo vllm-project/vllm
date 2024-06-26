@@ -28,6 +28,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+from vllm.utils import print_warning_once
 
 
 class QWenMLP(nn.Module):
@@ -106,7 +107,8 @@ class QWenAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -286,6 +288,15 @@ class QWenLMHeadModel(nn.Module):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+                # Skip loading visual weights to support Qwen-VL models
+                # in cases with text-only inputs
+                # TODO: add support for Qwen-VL
+                if (name not in params_dict
+                        and name.startswith("transformer.visual.")):
+                    print_warning_once(
+                        "Only text inputs are allowed. Images won't be handled "
+                        "until Qwen-VL models are fully supported.")
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",

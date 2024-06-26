@@ -14,7 +14,7 @@ def test_skip_tokenizer_initialization(model: str):
     with pytest.raises(ValueError) as err:
         llm.generate("abc", sampling_params)
     assert "prompts must be None if" in str(err.value)
-    outputs = llm.generate(prompt_token_ids=[[1, 2, 3]],
+    outputs = llm.generate({"prompt_token_ids": [1, 2, 3]},
                            sampling_params=sampling_params)
     assert len(outputs) > 0
     completions = outputs[0].outputs

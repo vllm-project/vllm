@@ -8,8 +8,7 @@ from vllm_flash_attn import flash_attn_varlen_func
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataPerStage)
+                                              AttentionMetadata)
 
 
 class FlashInferBackend(AttentionBackend):
@@ -23,8 +22,8 @@ class FlashInferBackend(AttentionBackend):
         return FlashInferImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "FlashInferMetadata":
-        return FlashInferMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return FlashInferMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -56,9 +55,10 @@ class FlashInferBackend(AttentionBackend):
 
 
 @dataclass
-class FlashInferMetadata(AttentionMetadataPerStage):
-
-    is_prompt: bool
+class FlashInferMetadata(AttentionMetadata):
+    # Maximum sequence length among prefill batch. 0 if there are decoding
+    # requests only.
+    max_prefill_seq_len: int
 
     use_cuda_graph: bool = False
 
@@ -67,7 +67,6 @@ class FlashInferMetadata(AttentionMetadataPerStage):
     # Metadata for the prefill stage since we still
     # use flash attention for prefill.
     seq_start_loc: Optional[torch.Tensor] = None
-    max_seq_len: Optional[int] = None
     block_tables: Optional[torch.Tensor] = None
 
     # Metadata for the decode stage
@@ -113,7 +112,8 @@ class FlashInferMetadata(AttentionMetadataPerStage):
         # When using flashinfer, we are also creating the FlashInferMetadata,
         # which will also call post_init by default, here we want to skip the
         # post_init if it's the prefill phase.
-        if not self.is_prompt:
+        if self.num_prefills == 0:
+            assert self.num_decode_tokens > 0
             self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
                 self.workspace_buffer, "NHD")
             self.decode_wrapper.begin_forward(
@@ -138,6 +138,24 @@ class FlashInferMetadata(AttentionMetadataPerStage):
         skip_fields.add('decode_wrapper')
         return super().asdict_zerocopy(skip_fields)
 
+    @property
+    def prefill_metadata(self) -> Optional["FlashInferMetadata"]:
+        # Currently chunked prefill is not supported
+        if self.num_decode_tokens == 0:
+            assert self.num_prefills > 0
+            return self
+
+        return None
+
+    @property
+    def decode_metadata(self) -> Optional["FlashInferMetadata"]:
+        # Currently chunked prefill is not supported
+        if self.num_prefills > 0:
+            assert self.num_decode_tokens == 0
+            return None
+
+        return self
+
 
 class FlashInferImpl(AttentionImpl):
 
@@ -146,15 +164,15 @@ class FlashInferImpl(AttentionImpl):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
-        kv_cache_dtype: str = "auto",
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.num_kv_heads = num_kv_heads
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
@@ -172,7 +190,7 @@ class FlashInferImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata[FlashInferMetadata],
+        attn_metadata: FlashInferMetadata,
         kv_scale: float = 1.0,
     ) -> torch.Tensor:
         assert kv_scale == 1.0
@@ -200,6 +218,7 @@ class FlashInferImpl(AttentionImpl):
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
+            # Prompt run.
             assert prefill_meta.block_tables is not None
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 output = flash_attn_varlen_func(
@@ -208,8 +227,8 @@ class FlashInferImpl(AttentionImpl):
                     v=value,
                     cu_seqlens_q=prefill_meta.seq_start_loc,
                     cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_q=prefill_meta.max_seq_len,
-                    max_seqlen_k=prefill_meta.max_seq_len,
+                    max_seqlen_q=prefill_meta.max_prefill_seq_len,
+                    max_seqlen_k=prefill_meta.max_prefill_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,

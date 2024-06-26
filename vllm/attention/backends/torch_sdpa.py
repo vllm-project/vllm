@@ -1,16 +1,23 @@
 """ Attention layer with torch scaled_dot_product_attention
     and PagedAttention."""
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataPerStage)
-from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata)
+                                              AttentionMetadata)
+from vllm.attention.ops.paged_attn import PagedAttentionMetadata
+from vllm.utils import is_cpu
+
+if is_cpu():
+    try:
+        from vllm.attention.ops.ipex_attn import PagedAttention
+    except ImportError:
+        from vllm.attention.ops.paged_attn import PagedAttention
+else:
+    from vllm.attention.ops.paged_attn import PagedAttention
 
 
 class TorchSDPABackend(AttentionBackend):
@@ -24,8 +31,8 @@ class TorchSDPABackend(AttentionBackend):
         return TorchSDPABackendImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "TorchSDPAMetadata":
-        return TorchSDPAMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return TorchSDPAMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -54,8 +61,7 @@ class TorchSDPABackend(AttentionBackend):
 
 
 @dataclass
-class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
-                        AttentionMetadataPerStage):
+class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     """Metadata for TorchSDPABackend.
     """
     # Currently, input sequences can only contain all prompts
@@ -72,23 +78,44 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
         # will not appear in the __repr__ and __init__
         self.attn_bias: Optional[List[torch.Tensor]] = None
 
+    @property
+    def prefill_metadata(self) -> Optional["TorchSDPAMetadata"]:
+        # Currently chunked prefill is not supported
+        if self.num_decode_tokens == 0:
+            assert self.num_prefills > 0
+            return self
 
-class TorchSDPABackendImpl(AttentionImpl):
+        return None
+
+    @property
+    def decode_metadata(self) -> Optional["TorchSDPAMetadata"]:
+        # Currently chunked prefill is not supported
+        if self.num_prefills > 0:
+            assert self.num_decode_tokens == 0
+            return None
+
+        return self
+
+
+class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
     def __init__(
         self,
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
-        kv_cache_dtype: str = "auto",
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
+        assert blocksparse_params is None, ValueError(
+            "Torch SPDA does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.num_kv_heads = num_kv_heads
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
@@ -178,13 +205,14 @@ class TorchSDPABackendImpl(AttentionImpl):
                                          attn_metadata.attn_bias):
                     end = start + seq_len
                     sub_out = scaled_dot_product_attention(
-                        query[:, start:end, :],
-                        key[:, start:end, :],
-                        value[:, start:end, :],
+                        query[None, :, start:end, :],
+                        key[None, :, start:end, :],
+                        value[None, :, start:end, :],
                         attn_mask=mask,
                         dropout_p=0.0,
                         is_causal=not self.need_mask,
-                        scale=self.scale).movedim(query.dim() - 2, 0)
+                        scale=self.scale).squeeze(0).movedim(
+                            query.dim() - 2, 0)
                     output[start:end, :, :] = sub_out
                     start = end
             else:
@@ -200,7 +228,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.block_tables,
                 attn_metadata.seq_lens_tensor,
-                attn_metadata.max_seq_len,
+                attn_metadata.max_decode_seq_len,
                 self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
@@ -217,7 +245,7 @@ def _make_alibi_bias(
     dtype: torch.dtype,
     seq_lens: List[int],
 ) -> List[torch.Tensor]:
-    attn_biases = []
+    attn_biases: List[torch.Tensor] = []
     for seq_len in seq_lens:
         bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
@@ -229,7 +257,7 @@ def _make_alibi_bias(
 
         num_heads = alibi_slopes.shape[0]
         bias = bias[None, :].repeat((num_heads, 1, 1))
-        bias.mul_(alibi_slopes[:, None, None])
+        bias.mul_(alibi_slopes[:, None, None]).unsqueeze_(0)
         inf_mask = torch.empty(
             (1, seq_len, seq_len),
             dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1)
@@ -243,7 +271,7 @@ def _make_sliding_window_bias(
     window_size: Optional[int],
     dtype: torch.dtype,
 ) -> List[torch.Tensor]:
-    attn_biases = []
+    attn_biases: List[torch.Tensor] = []
     for seq_len in seq_lens:
         tensor = torch.full(
             (1, seq_len, seq_len),

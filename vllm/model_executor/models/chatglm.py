@@ -86,13 +86,12 @@ class GLMAttention(nn.Module):
             base=10000 * rope_ratio,
             is_neox_style=False,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -348,6 +347,8 @@ class ChatGLMForCausalLM(nn.Module):
         super().__init__()
         self.config: ChatGLMConfig = config
         self.quant_config = quant_config
+        self.max_position_embeddings = getattr(config, "max_sequence_length",
+                                               8192)
         self.transformer = ChatGLMModel(config, cache_config, quant_config)
         self.lm_head_weight = self.transformer.output_layer.weight
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)

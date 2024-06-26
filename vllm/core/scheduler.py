@@ -50,8 +50,8 @@ class SchedulingBudget:
     """
     token_budget: int
     max_num_seqs: int
-    _requeset_ids_num_batched_tokens: Set[str] = field(default_factory=set)
-    _requeset_ids_num_curr_seqs: Set[str] = field(default_factory=set)
+    _request_ids_num_batched_tokens: Set[str] = field(default_factory=set)
+    _request_ids_num_curr_seqs: Set[str] = field(default_factory=set)
     _num_batched_tokens: int = 0
     _num_curr_seqs: int = 0
 
@@ -65,28 +65,28 @@ class SchedulingBudget:
         return self.token_budget - self.num_batched_tokens
 
     def add_num_batched_tokens(self, req_id: str, num_batched_tokens: int):
-        if req_id in self._requeset_ids_num_batched_tokens:
+        if req_id in self._request_ids_num_batched_tokens:
             return
 
-        self._requeset_ids_num_batched_tokens.add(req_id)
+        self._request_ids_num_batched_tokens.add(req_id)
         self._num_batched_tokens += num_batched_tokens
 
     def subtract_num_batched_tokens(self, req_id: str,
                                     num_batched_tokens: int):
-        if req_id in self._requeset_ids_num_batched_tokens:
-            self._requeset_ids_num_batched_tokens.remove(req_id)
+        if req_id in self._request_ids_num_batched_tokens:
+            self._request_ids_num_batched_tokens.remove(req_id)
             self._num_batched_tokens -= num_batched_tokens
 
     def add_num_seqs(self, req_id: str, num_curr_seqs: int):
-        if req_id in self._requeset_ids_num_curr_seqs:
+        if req_id in self._request_ids_num_curr_seqs:
             return
 
-        self._requeset_ids_num_curr_seqs.add(req_id)
+        self._request_ids_num_curr_seqs.add(req_id)
         self._num_curr_seqs += num_curr_seqs
 
     def subtract_num_seqs(self, req_id: str, num_curr_seqs: int):
-        if req_id in self._requeset_ids_num_curr_seqs:
-            self._requeset_ids_num_curr_seqs.remove(req_id)
+        if req_id in self._request_ids_num_curr_seqs:
+            self._request_ids_num_curr_seqs.remove(req_id)
             self._num_curr_seqs -= num_curr_seqs
 
     @property
@@ -264,13 +264,6 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        if self.scheduler_config.chunked_prefill_enabled:
-            self.prompt_limit = self.scheduler_config.max_model_len
-        else:
-            self.prompt_limit = min(
-                self.scheduler_config.max_model_len,
-                self.scheduler_config.max_num_batched_tokens)
-
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
             version = "v2"
@@ -307,6 +300,8 @@ class Scheduler:
         self.prev_prompt = False
         # Latency of the last prompt step
         self.last_prompt_latency = 0.0
+        # preemption mode, RECOMPUTE or SWAP
+        self.user_specified_preemption_mode = scheduler_config.preemption_mode
 
         # The following field is test-only. It is used to inject artificial
         # preemption.
@@ -437,7 +432,9 @@ class Scheduler:
                 num_running_seqs = seq_group.get_max_num_running_seqs()
                 budget.subtract_num_seqs(seq_group.request_id,
                                          num_running_seqs)
-                if curr_loras is not None and seq_group.lora_int_id > 0:
+
+                if (curr_loras is not None and seq_group.lora_int_id > 0
+                        and seq_group.lora_int_id in curr_loras):
                     curr_loras.remove(seq_group.lora_int_id)
 
                 if running_queue:
@@ -538,7 +535,9 @@ class Scheduler:
             seq_group = swapped_queue[0]
 
             # If the sequence group cannot be swapped in, stop.
-            alloc_status = self.block_manager.can_swap_in(seq_group)
+            is_prefill = seq_group.is_prefill()
+            alloc_status = self.block_manager.can_swap_in(
+                seq_group, self._get_num_lookahead_slots(is_prefill))
             if alloc_status == AllocStatus.LATER:
                 break
             elif alloc_status == AllocStatus.NEVER:
@@ -605,6 +604,21 @@ class Scheduler:
             infeasible_seq_groups=infeasible_seq_groups,
         )
 
+    def _get_prompt_limit(self, seq_group: SequenceGroup) -> int:
+        if self.scheduler_config.chunked_prefill_enabled:
+            prompt_limit = self.scheduler_config.max_model_len
+        else:
+            prompt_limit = min(self.scheduler_config.max_model_len,
+                               self.scheduler_config.max_num_batched_tokens)
+
+        # Model is fine tuned with long context. Return the fine tuned max_len.
+        if (seq_group.lora_request
+                and seq_group.lora_request.long_lora_max_len):
+            assert prompt_limit <= seq_group.lora_request.long_lora_max_len
+            return seq_group.lora_request.long_lora_max_len
+        else:
+            return prompt_limit
+
     def _schedule_prefills(
         self,
         waiting_queue: deque,
@@ -659,11 +673,11 @@ class Scheduler:
                 num_prompt_tokens = waiting_seqs[0].get_len()
                 assert num_new_tokens == num_prompt_tokens
 
-            if num_new_tokens > self.prompt_limit:
+            prompt_limit = self._get_prompt_limit(seq_group)
+            if num_new_tokens > prompt_limit:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
-                    " and exceeds limit of %d", num_new_tokens,
-                    self.prompt_limit)
+                    " and exceeds limit of %d", num_new_tokens, prompt_limit)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
@@ -745,8 +759,8 @@ class Scheduler:
             budget.add_num_seqs(seq_group.request_id,
                                 seq_group.get_max_num_running_seqs())
         curr_loras = set(
-            seq_group.lora_int_id
-            for seq_group in self.running) if self.lora_enabled else None
+            seq_group.lora_int_id for seq_group in self.running
+            if seq_group.lora_int_id > 0) if self.lora_enabled else None
 
         remaining_waiting, prefills = (self.waiting,
                                        SchedulerPrefillOutputs.create_empty())
@@ -902,7 +916,8 @@ class Scheduler:
             blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
             blocks_to_copy=running_scheduled.blocks_to_copy +
             swapped_in.blocks_to_copy,
-            ignored_seq_groups=prefills.ignored_seq_groups,
+            ignored_seq_groups=prefills.ignored_seq_groups +
+            swapped_in.infeasible_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
             running_queue_size=len(self.running),
             preempted=(len(running_scheduled.preempted) +
@@ -1072,11 +1087,16 @@ class Scheduler:
         # over sequence groups with a single sequence.
         # TODO(woosuk): Support recomputation for sequence groups with multiple
         # sequences. This may require a more sophisticated CUDA kernel.
-        if preemption_mode is None:
+        if self.user_specified_preemption_mode is None:
             if seq_group.get_max_num_running_seqs() == 1:
                 preemption_mode = PreemptionMode.RECOMPUTE
             else:
                 preemption_mode = PreemptionMode.SWAP
+
+        elif self.user_specified_preemption_mode == "swap":
+            preemption_mode = PreemptionMode.SWAP
+        else:
+            preemption_mode = PreemptionMode.RECOMPUTE
 
         if self.num_cumulative_preemption % 50 == 0:
             logger.warning(

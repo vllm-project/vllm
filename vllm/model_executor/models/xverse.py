@@ -88,7 +88,6 @@ class XverseAttention(nn.Module):
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
-        sliding_window: Optional[int] = None,
         cache_config: Optional[CacheConfig] = None,
     ) -> None:
         super().__init__()
@@ -134,8 +133,8 @@ class XverseAttention(nn.Module):
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
-                              sliding_window=sliding_window,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -166,7 +165,6 @@ class XverseDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        sliding_window = getattr(config, "sliding_window", None)
         self.self_attn = XverseAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -177,7 +175,6 @@ class XverseDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=getattr(config, "bias", False),
-            sliding_window=sliding_window,
             cache_config=cache_config,
         )
         self.mlp = XverseMLP(

@@ -241,7 +241,8 @@ class Qwen2MoeAttention(nn.Module):
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -283,8 +284,9 @@ class Qwen2MoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
         )
-        if (config.num_experts is not None
-                and (layer_idx + 1) % config.decoder_sparse_step == 0):
+        if (layer_idx not in config.mlp_only_layers) and (
+                config.num_experts > 0 and
+            (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = Qwen2MoeSparseMoeBlock(config=config,
                                               quant_config=quant_config)
         else:
@@ -439,6 +441,9 @@ class Qwen2MoeForCausalLM(nn.Module):
                 if (("mlp.experts." in name or "mlp.shared_expert." in name)
                         and name not in params_dict):
                     continue
+                if name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -451,6 +456,9 @@ class Qwen2MoeForCausalLM(nn.Module):
                 if (("mlp.experts." in name or "mlp.shared_expert." in name)
                         and name not in params_dict):
                     continue
+                if name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

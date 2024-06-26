@@ -268,7 +268,8 @@ class ArcticAttention(nn.Module):
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -452,8 +453,8 @@ class ArcticForCausalLM(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        mlp_params_mapping = []
-        expert_params_mapping = []
+        mlp_params_mapping: List[Tuple[str, str, int]] = []
+        expert_params_mapping: List[Tuple[str, str, int]] = []
         num_layers = self.config.num_hidden_layers
 
         for layer in range(num_layers):
