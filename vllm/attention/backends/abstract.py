@@ -47,7 +47,7 @@ class AttentionBackend(ABC):
     @abstractmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dst: torch.Tensor,
+        src_to_dists: torch.Tensor,
     ) -> None:
         raise NotImplementedError
 
