@@ -38,6 +38,8 @@ class PallasAttentionBackend(AttentionBackend):
         dst_k_cache, dst_v_cache = dst_kv_cache
         src_indices, dst_indices = src_to_dst
         device = dst_k_cache.device
+        torch.ops.xla.dynamo_set_buffer_donor_(dst_k_cache, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(dst_v_cache, True)
         dst_k_cache[:, dst_indices] = src_k_cache[:, src_indices].to(device)
         dst_v_cache[:, dst_indices] = src_v_cache[:, src_indices].to(device)
 
