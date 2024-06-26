@@ -224,6 +224,20 @@ def test_cutlass_int8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
                                      use_bias)
 
 
+def naive_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    m = a.shape[0]
+    n = b.shape[1]
+    k = a.shape[1]
+    assert k == b.shape[0]
+    out = torch.zeros((m, n), device=a.device, dtype=a.dtype)
+    for i in range(m):
+        for j in range(n):
+            for k2 in range(k):
+                out[i, j] += a[i, k2] * b[k2, j]
+
+    return out
+
+
 def test_cutlass_int8_azp():
     m = 32
     n = 16
@@ -259,14 +273,7 @@ def test_cutlass_int8_azp():
     assert azp_bias.shape == (1, n)
     assert azp_bias[0, :].shape == (n,)
 
-    baseline_q_i32 = torch.zeros((m, n), device="cuda", dtype=torch.int32)
-    aq_i32_no_azp = aq_i32 + azp_aq_i8
-    for i in range(m):
-        for j in range(n):
-            for k2 in range(k):
-                baseline_q_i32[i, j] += aq_i32_no_azp[i, k2] * bq_i32[k2, j]
-
-    baseline_q = (scale_a * scale_b * baseline_q_i32).to(dtype=out_dtype)
+    baseline_q = (scale_a * scale_b * naive_mm(aq_i32 + azp_aq_i8, bq_i32)).to(dtype=out_dtype)
 
     out = ops.cutlass_scaled_mm(aq_i8,
                                 bq_i8,
