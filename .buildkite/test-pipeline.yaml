@@ -194,7 +194,7 @@ steps:
   working_dir: "/vllm-workspace/.buildkite"
   commands:
   - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@9516087b81a61d0e220b22cc1b75be76de23bc10
-  - bash .buildkite/lm-eval-harness/run-lm-eval-vllm.sh -c .buildkite/lm-eval-harness/configs/small-models.txt
+  - bash ./lm-eval-harness/run-lm-eval-vllm.sh -c .buildkite/lm-eval-harness/configs/small-models.txt
 
 - label: LM Eval Large Models
   gpus: a100
@@ -202,7 +202,7 @@ steps:
   working_dir: "/vllm-workspace/.buildkite"
   commands:
   - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@9516087b81a61d0e220b22cc1b75be76de23bc10
-  - bash .buildkite/lm-eval-harness/run-lm-eval-vllm.sh -c .buildkite/lm-eval-harness/configs/large-models.txt
+  - bash ./lm-eval-harness/run-lm-eval-vllm.sh -c .buildkite/lm-eval-harness/configs/large-models.txt
 
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
