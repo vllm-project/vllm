@@ -272,14 +272,11 @@ class TPUModelRunner:
         input_positions: List[List[int]] = []
         slot_mapping: List[List[int]] = []
         context_lens: List[int] = []
-        num_seq_groups = len(seq_group_metadata_list)
-        batch_size = _get_padded_batch_size(num_seq_groups)
 
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+        batch_idx = 0
+        for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
-
             seq_ids = list(seq_group_metadata.seq_data.keys())
-
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
@@ -292,14 +289,16 @@ class TPUModelRunner:
 
                 assert seq_group_metadata.block_tables is not None
                 block_table = seq_group_metadata.block_tables[seq_id]
-                self.block_tables[i, :len(block_table)] = block_table
+                self.block_tables[batch_idx, :len(block_table)] = block_table
+                batch_idx += 1
 
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append([slot])
 
-        num_paddings = batch_size - num_seq_groups
+        batch_size = _get_padded_batch_size(batch_idx)
+        num_paddings = batch_size - batch_idx
         input_tokens = input_tokens + [[0]] * num_paddings
         input_positions = input_positions + [[0]] * num_paddings
         slot_mapping = slot_mapping + [[_PAD_SLOT_ID]] * num_paddings
@@ -343,9 +342,7 @@ class TPUModelRunner:
         p = []
         best_of = []
         for seq_group_metadata in seq_group_metadata_list:
-            assert seq_group_metadata.sampling_params is not None
             sampling_params = seq_group_metadata.sampling_params
-
             # NOTE(woosuk): Here we mimic argmax sampling by applying a very
             # low temperature. This is not accurate.
             t.append(sampling_params.temperature
@@ -375,7 +372,13 @@ class TPUModelRunner:
                     "prompt_logprobs is not currently supported by the TPU "
                     "backend.")
 
-        num_paddings = padded_batch_size - len(seq_group_metadata_list)
+            # Repeat the sampling params if the seq group has multiple seqs.
+            num_seqs = len(seq_group_metadata.seq_data)
+            t += [t[-1]] * (num_seqs - 1)
+            p += [p[-1]] * (num_seqs - 1)
+            best_of += [best_of[-1]] * (num_seqs - 1)
+
+        num_paddings = padded_batch_size - len(t)
         t += [1.0] * num_paddings
         p += [1.0] * num_paddings
 
@@ -411,18 +414,19 @@ class TPUModelRunner:
         # NOTE(woosuk): Minimal code to build the sampler outputs.
         # The TPU backend does not reuse the sampler, since the TPU backend
         # does not support the advanced sampling parameters such as logprobs.
+        zero_logprob = Logprob(0.0)
         if is_prompt:
-            batch_idx = 0
             sampler_outputs = []
-            for seq_group_metadata in seq_group_metadata_list:
+            for i, seq_group_metadata in enumerate(seq_group_metadata_list):
                 seq_outputs = []
                 seq_ids = list(seq_group_metadata.seq_data.keys())
-                for i, seq_id in enumerate(seq_ids):
-                    next_token_id = next_token_ids[batch_idx][i]
+                assert len(seq_ids) == 1
+                seq_id = seq_ids[0]
+                for j in range(best_of[i]):
+                    next_token_id = next_token_ids[i][j]
                     seq_outputs.append(
                         SequenceOutput(seq_id, next_token_id,
-                                    {next_token_id: Logprob(0.0)}))
-                batch_idx += 1
+                                       {next_token_id: zero_logprob}))
                 sampler_outputs.append(
                     CompletionSequenceGroupOutput(seq_outputs, None))
         else:
@@ -435,7 +439,7 @@ class TPUModelRunner:
                     next_token_id = next_token_ids[batch_idx][0]
                     seq_outputs.append(
                         SequenceOutput(seq_id, next_token_id,
-                                       {next_token_id: Logprob(0.0)}))
+                                       {next_token_id: zero_logprob}))
                     batch_idx += 1
                 sampler_outputs.append(
                     CompletionSequenceGroupOutput(seq_outputs, None))
