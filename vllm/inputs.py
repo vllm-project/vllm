@@ -1,10 +1,10 @@
-from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Optional,
-                    Sequence, TypedDict, Union, cast, overload)
+from typing import (TYPE_CHECKING, Dict, List, Literal, Optional, Sequence,
+                    TypedDict, Union, cast, overload)
 
 from typing_extensions import NotRequired
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalData
+    from vllm.multimodal import EXTERNAL_MM_DATA_TYPE, MultiModalData
 
 
 class ParsedText(TypedDict):
@@ -125,6 +125,7 @@ PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
 
 
 class LLMInputs(TypedDict):
+    """A structured class to construct :class:`Sequence` with. """
     prompt_token_ids: List[int]
     prompt: NotRequired[Optional[str]]
-    multi_modal_data: NotRequired[Optional[Dict[str, Any]]]
+    multi_modal_data: NotRequired[Optional[Dict[str, "EXTERNAL_MM_DATA_TYPE"]]]

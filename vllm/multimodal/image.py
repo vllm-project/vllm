@@ -61,8 +61,11 @@ class ImageData(MultiModalData):
 
 class ImagePlugin(MultiModalPlugin[ImageData]):
 
-    def get_data_type(self) -> Type[ImageData]:
+    def get_internal_data_type(self) -> Type[ImageData]:
         return ImageData
+
+    def get_external_data_type(self) -> Tuple[str, Type[Image.Image]]:
+        return ("image", Image.Image)
 
     def _get_hf_image_processor(self, model_config: ModelConfig):
         return cached_get_image_processor(

@@ -2,12 +2,10 @@ import functools
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence,
                     Tuple, Type, TypeVar, Union)
 
-from PIL import Image
-
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.logger import init_logger
 
-from .base import MultiModalData, MultiModalPlugin
+from .base import EXTERNAL_MM_DATA_TYPE, MultiModalData, MultiModalPlugin
 from .image import ImageData, ImagePlugin
 
 if TYPE_CHECKING:
@@ -31,6 +29,8 @@ class MultiModalRegistry:
     """
     This registry is used by model runners to dispatch data processing
     according to its modality and the target model.
+
+    The registry handles both external and internal data input.
     """
 
     DEFAULT_PLUGINS = (ImagePlugin(), )
@@ -39,34 +39,51 @@ class MultiModalRegistry:
                  *,
                  plugins: Sequence[MultiModalPlugin[Any]] = DEFAULT_PLUGINS
                  ) -> None:
-        self._plugins_by_data_type = {p.get_data_type(): p for p in plugins}
+        self._plugins_by_internal_data_type = {
+            p.get_internal_data_type(): p
+            for p in plugins
+        }
+        self._plugins_by_external_data_type = {
+            p.get_external_data_type(): p
+            for p in plugins
+        }
         self._dummy_factories_by_model_type: Dict[Type["nn.Module"],
                                                   MultiModalDummyFactory] = {}
 
     def register_plugin(self, plugin: MultiModalPlugin[Any]) -> None:
-        data_type = plugin.get_data_type()
+        data_type = plugin.get_internal_data_type()
 
-        if data_type in self._plugins_by_data_type:
+        if data_type in self._plugins_by_internal_data_type:
             logger.warning(
                 "A plugin is already registered for data type %s, "
                 "and will be overwritten by the new plugin %s.", data_type,
                 plugin)
 
-        self._plugins_by_data_type[data_type] = plugin
+        self._plugins_by_internal_data_type[data_type] = plugin
 
-    def _process_external_input(self, data, model_config: ModelConfig,
+    def _process_external_input(self, key, value, model_config: ModelConfig,
                                 vlm_config: VisionLanguageConfig):
-        if isinstance(data, Image.Image):
-            return self._get_plugin_for_internal_data_type(
-                ImageData).process_input(ImageData(data), model_config,
-                                         vlm_config)
-        msg = f"Unknown multi-modal data type: {type(data)}"
+        plugin = self._get_plugin_for_external_data_type(key, type(value))
+        if plugin:
+            return plugin.process_input(plugin.get_internal_data_type()(value),
+                                        model_config, vlm_config)
+        msg = f"Unknown multi-modal data type: {type(value)}"
+        raise NotImplementedError(msg)
+
+    def _get_plugin_for_external_data_type(self, key: str,
+                                           data_type: Type[Any]):
+        for typ in data_type.mro():
+            plugin = self._plugins_by_external_data_type.get((key, typ))
+            if plugin is not None:
+                return plugin
+
+        msg = f"Unknown multi-modal data type: {data_type}"
         raise NotImplementedError(msg)
 
     def _get_plugin_for_internal_data_type(self,
                                            data_type: Type[MultiModalData]):
         for typ in data_type.mro():
-            plugin = self._plugins_by_data_type.get(typ)
+            plugin = self._plugins_by_internal_data_type.get(typ)
             if plugin is not None:
                 return plugin
 
@@ -129,7 +146,8 @@ class MultiModalRegistry:
         """
         return self.register_input(ImageData, processor)
 
-    def process_input(self, data: Union[MultiModalData, Dict[str, Any]],
+    def process_input(self, data: Union[MultiModalData,
+                                        Dict[str, EXTERNAL_MM_DATA_TYPE]],
                       model_config: ModelConfig,
                       vlm_config: VisionLanguageConfig):
         """
@@ -146,8 +164,8 @@ class MultiModalRegistry:
                 .process_input(data, model_config, vlm_config)
         else:
             result_list = [
-                self._process_external_input(d, model_config, vlm_config)
-                for d in data.values()
+                self._process_external_input(k, v, model_config, vlm_config)
+                for k, v in data.items()
             ]
             return {k: v for d in result_list for k, v in d.items()}
 

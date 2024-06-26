@@ -3,7 +3,7 @@ import copy
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -14,7 +14,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalData
+    from vllm.multimodal import EXTERNAL_MM_DATA_TYPE, MultiModalData
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -257,7 +257,7 @@ class Sequence:
         return self.inputs["prompt_token_ids"]
 
     @property
-    def multi_modal_data(self) -> Dict[str, Any]:
+    def multi_modal_data(self) -> Dict[str, "EXTERNAL_MM_DATA_TYPE"]:
         return self.inputs.get("multi_modal_data") or {}
 
     @property
@@ -640,7 +640,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
-        multi_modal_data: Optional[Dict[str, Any]] = None,
+        multi_modal_data: Optional[Dict[str, "EXTERNAL_MM_DATA_TYPE"]] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
     ) -> None:

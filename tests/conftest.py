@@ -23,7 +23,6 @@ from vllm.distributed import (destroy_distributed_environment,
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
-from vllm.multimodal.image import ImageData
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
 

@@ -1,12 +1,13 @@
 from abc import ABC, abstractmethod
-from typing import (TYPE_CHECKING, Callable, Dict, Generic, Optional, Type,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Callable, Dict, Generic, Optional, Tuple,
+                    Type, TypeVar, Union)
 
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     import torch
+    from PIL import Image
     from torch import nn
 
 logger = init_logger(__name__)
@@ -22,7 +23,7 @@ class MultiModalData:
     :class:`~MultiModalPlugin`.
 
     Finally, register the new plugin to
-    :const:`vllm.multimodal.MULTIMODAL_REGISTRY`.
+    :const:`vllm.multimodal.MULTIMODAL_REGISTRY` (beyond the default plugins).
     This enables models to call :meth:`MultiModalRegistry.register_input` for
     the new modality.
     """
@@ -31,6 +32,8 @@ class MultiModalData:
 
 D = TypeVar("D", bound=MultiModalData)
 N = TypeVar("N", bound=Type["nn.Module"])
+
+EXTERNAL_MM_DATA_TYPE = Union["Image.Image", "torch.Tensor"]
 
 MultiModalInputProcessor = Callable[[D, ModelConfig, VisionLanguageConfig],
                                     Dict[str, "torch.Tensor"]]
@@ -62,10 +65,20 @@ class MultiModalPlugin(ABC, Generic[D]):
                                      MultiModalInputProcessor[D]] = {}
 
     @abstractmethod
-    def get_data_type(self) -> Type[D]:
+    def get_internal_data_type(self) -> Type[D]:
         """
         Get the modality (subclass of :class:`~MultiModalData`) served by
         this plugin.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_external_data_type(self) -> Tuple[str, EXTERNAL_MM_DATA_TYPE]:
+        """The data type that this plugin handles. 
+        
+        For `LLM.generate(multi_modal_data={"key": value})` will 
+        be handled by plugin with an external data type of
+        (key, type(value)). 
         """
         raise NotImplementedError
 
@@ -85,10 +98,11 @@ class MultiModalPlugin(ABC, Generic[D]):
         """
         Register an input processor to a model class.
         
-        When the model receives input data that matches the modality served by
-        this plugin (see :meth:`get_data_type`), the provided input processor is
-        applied to preprocess the data. If `None` is provided, then the default
-        input processor is applied instead.
+        When LLM receives input data that matches the modality served by
+        this plugin (see :meth:`get_internal_data_type`), the provided input
+        processor is applied to preprocess the data. 
+        If `None` is provided, then the default input processor is applied 
+        instead.
         """
 
         def wrapper(model_cls: N) -> N:
