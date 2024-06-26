@@ -54,8 +54,9 @@ class MultiModalInputs(UserDict[str, torch.Tensor]):
 
         for tensor in tensors:
             if tensor.shape[1:] != unbatched_shape:
-                return [tensor.squeeze(0).to(device=device)
-                        for tensor in tensors]
+                return [
+                    tensor.squeeze(0).to(device=device) for tensor in tensors
+                ]
 
         return torch.cat(tensors, dim=0).to(device=device)
 

@@ -1,4 +1,5 @@
-from typing import Callable, Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import (Callable, Iterable, List, Literal, Optional, Tuple,
+                    TypedDict)
 
 import torch
 import torch.nn as nn
@@ -383,8 +384,8 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
                 self.vision_tower, stacked_pixel_values)
             stacked_patch_embeddings = proj(stacked_image_features)
 
-            return stacked_patch_embeddings.view(b, num_patches,
-                                                 *stacked_patch_embeddings.shape[1:])
+            return stacked_patch_embeddings.view(
+                b, num_patches, *stacked_patch_embeddings.shape[1:])
 
         num_patches_per_batch = [v.shape[0] for v in pixel_values]
         stacked_pixel_values = torch.cat(pixel_values)
@@ -392,15 +393,14 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
             self.vision_tower, stacked_pixel_values)
 
         return [
-            proj(image_features)
-            for image_features in torch.split(stacked_image_features,
-                                              num_patches_per_batch)
+            proj(image_features) for image_features in torch.split(
+                stacked_image_features, num_patches_per_batch)
         ]
 
     def _process_image_input(
             self, image_input: LlavaNextImagePixelInputs) -> BatchedTensors:
-        patch_embeddings = self._process_image_pixels(image_input,
-                                                      proj=self.multi_modal_projector)
+        patch_embeddings = self._process_image_pixels(
+            image_input, proj=self.multi_modal_projector)
 
         image_sizes = image_input.get("image_sizes")
         if image_sizes is None:

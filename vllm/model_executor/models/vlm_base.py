@@ -14,8 +14,7 @@ class VisionLanguageModelBase(nn.Module):
         self.vision_language_config = vision_language_config
 
     @classmethod
-    def merge_vision_embeddings(cls,
-                                input_ids: torch.Tensor,
+    def merge_vision_embeddings(cls, input_ids: torch.Tensor,
                                 inputs_embeds: torch.Tensor,
                                 vision_embeddings: BatchedTensors,
                                 image_token_id: int) -> torch.Tensor:
@@ -32,8 +31,8 @@ class VisionLanguageModelBase(nn.Module):
                     f"Attempted to assign {expr} = {total_tokens} "
                     f"image tokens to {num_expected_tokens} placeholders")
 
-            inputs_embeds[mask] = vision_embeddings.view(total_tokens,
-                                                         embed_dim)
+            inputs_embeds[mask] = vision_embeddings.view(
+                total_tokens, embed_dim)
         else:
             size_per_batch = [t.shape[0] for t in vision_embeddings]
             total_tokens = sum(size_per_batch)
@@ -42,7 +41,7 @@ class VisionLanguageModelBase(nn.Module):
                 raise ValueError(
                     f"Attempted to assign {expr} = {total_tokens} "
                     f"image tokens to {num_expected_tokens} placeholders")
-            
+
             inputs_embeds[mask] = torch.cat(vision_embeddings)
 
         return inputs_embeds
