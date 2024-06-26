@@ -2,6 +2,8 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
+import numpy as np
+
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
@@ -82,7 +84,7 @@ class RequestOutput:
         self,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: List[int],
+        prompt_token_ids: Union[List[int], np.ndarray],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
@@ -135,7 +137,7 @@ class RequestOutput:
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = seq_group.prompt
-        prompt_token_ids = seq_group.prompt_token_ids.tolist()
+        prompt_token_ids = seq_group.prompt_token_ids
         prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
         finished_time = time.time() if finished else None
@@ -172,7 +174,8 @@ class EmbeddingRequestOutput:
     """
 
     def __init__(self, request_id: str, outputs: "EmbeddingOutput",
-                 prompt_token_ids: List[int], finished: bool):
+                 prompt_token_ids: Union[List[int],
+                                         np.ndarray], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished
@@ -185,7 +188,7 @@ class EmbeddingRequestOutput:
             raise ValueError(
                 "Embeddings are missing in seq_group for EmbeddingRequest.")
         output = EmbeddingOutput(seq_group.embeddings)
-        prompt_token_ids = seq_group.prompt_token_ids.tolist()
+        prompt_token_ids = seq_group.prompt_token_ids
         finished = seq_group.is_finished()
 
         return cls(seq_group.request_id, output, prompt_token_ids, finished)
