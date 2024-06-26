@@ -803,7 +803,7 @@ class JambaForCausalLM(nn.Module):
             input_buffers["seqlen_agnostic_capture_inputs"]
         )
 
-    def capture_inputs(self,batch_size):
+    def get_seqlen_agnostic_capture_inputs(self,batch_size):
         return (
             self.seqlen_agnostic_gc_cache_buffer[0][:, :batch_size],
             self.seqlen_agnostic_gc_cache_buffer[1][:, :batch_size],

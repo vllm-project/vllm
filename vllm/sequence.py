@@ -822,7 +822,7 @@ class ExecuteModelRequest:
     num_lookahead_slots: int = 0
     # The number of requests in the running queue.
     running_queue_size: int = 0
-    # The number of requests in the running queue.
+    # Finished request ids since last step.
     finished_request_ids: List[str] = field(default_factory=list)
 
     def clone(

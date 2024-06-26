@@ -1022,7 +1022,8 @@ class ModelRunner:
                     "memory_pool": self.graph_memory_pool,
                 }
                 if self.contains_seqlen_agnostic_layers:
-                    capture_inputs["seqlen_agnostic_capture_inputs"] = self.model.capture_inputs(batch_size)
+                    capture_inputs.update({"seqlen_agnostic_capture_inputs": self.model.get_seqlen_agnostic_capture_inputs(batch_size)}
+                    )
                 graph_runner.capture(**capture_inputs)
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[batch_size] = graph_runner
