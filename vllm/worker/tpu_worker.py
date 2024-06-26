@@ -152,8 +152,8 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
 
-        self.cpu_cache = []
-        self.tpu_cache = []
+        self.cpu_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        self.tpu_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
         tpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
             num_gpu_blocks, self.block_size, num_kv_heads, head_size)
         cpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
@@ -227,18 +227,27 @@ class TPUWorker(LoraNotSupportedWorkerBase):
 
         if blocks_to_swap_in:
             # Swap from CPU to TPU.
-            src_to_dst = _make_src_to_dst(blocks_to_swap_in, "cpu",
-                                          self.device)
+            src_indices, dst_indices = _make_src_to_dst(
+                blocks_to_swap_in, "cpu", self.device)
             for i in range(num_layers):
-                attn_backend.swap_blocks(self.cpu_cache[i], self.tpu_cache[i],
-                                         src_to_dst)
+                tpu_k_cache, tpu_v_cache = self.tpu_cache[i]
+                cpu_k_cache, cpu_v_cache = self.cpu_cache[i]
+                tpu_k_cache[:, dst_indices] = cpu_k_cache[:, src_indices].to(
+                    self.device)
+                tpu_v_cache[:, dst_indices] = cpu_v_cache[:, src_indices].to(
+                    self.device)
+            xm.mark_step()
+
         if blocks_to_swap_out:
             # Swap from TPU to CPU.
-            src_to_dst = _make_src_to_dst(blocks_to_swap_out, self.device,
-                                          "cpu")
+            src_indices, dst_indices = _make_src_to_dst(
+                blocks_to_swap_out, self.device, "cpu")
             for i in range(num_layers):
-                attn_backend.swap_blocks(self.tpu_cache[i], self.cpu_cache[i],
-                                         src_to_dst)
+                tpu_k_cache, tpu_v_cache = self.tpu_cache[i]
+                cpu_k_cache, cpu_v_cache = self.cpu_cache[i]
+                cpu_k_cache[:, dst_indices] = tpu_k_cache[:, src_indices].cpu()
+                cpu_v_cache[:, dst_indices] = tpu_v_cache[:, src_indices].cpu()
+
         if blocks_to_copy:
             src_to_dst = _make_src_to_dst(blocks_to_copy, self.device,
                                           self.device)
