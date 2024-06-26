@@ -3,13 +3,15 @@ import weakref
 from collections import defaultdict
 from typing import Dict, List
 
+import numpy as np
+
 from vllm.utils import Device
 
 _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
 
-TokensBlock = List[int]
+TokensBlock = np.ndarray
 
 
 class BlockPool:
@@ -30,7 +32,7 @@ class BlockPool:
     def alloc_block(self, block_size: int) -> TokensBlock:
         if block_size in self.pool and self.pool[block_size]:
             return self.pool[block_size].pop()
-        return [_BLANK_TOKEN_ID] * block_size
+        return np.full(block_size, _BLANK_TOKEN_ID, dtype=np.int64)
 
     def del_block(self, block: TokensBlock) -> None:
         self.pool[len(block)].append(block)
@@ -78,12 +80,12 @@ class LogicalTokenBlock:
         self.token_ids[curr_idx:curr_idx + len(token_ids)] = token_ids
         self.num_tokens += len(token_ids)
 
-    def get_token_ids(self) -> List[int]:
+    def get_token_ids(self) -> np.ndarray:
         return self.token_ids[:self.num_tokens]
 
     def get_last_token_id(self) -> int:
         assert self.num_tokens > 0
-        return self.token_ids[self.num_tokens - 1]
+        return int(self.token_ids[self.num_tokens - 1])
 
 
 class PhysicalTokenBlock:
