@@ -131,5 +131,5 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
             assert hf_output_ids == vllm_output_ids, (
                 f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
         except Exception as e:
-            msg = f"Wrong output for combination {image_inputs[i]}"
+            msg = f"Wrong output for inputs {image_inputs[i]}"
             raise AssertionError(msg) from e

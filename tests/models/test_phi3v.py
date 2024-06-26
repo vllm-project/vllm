@@ -4,6 +4,8 @@ from typing import List, Tuple
 import pytest
 
 from vllm.config import VisionLanguageConfig
+from vllm.multimodal.image import ImagePixelData
+from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_ASSETS
@@ -80,8 +82,9 @@ if is_cpu():
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("is_multiscale", [True, False])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
-                dtype: str, max_tokens: int) -> None:
+                dtype: str, max_tokens: int, is_multiscale: bool) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -95,14 +98,25 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     hf_images = [asset.for_hf() for asset in image_assets]
     vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
+    image_inputs = [
+        (rescale_image_size(hf_image, factor),
+         ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
+         prompt) for hf_image, vllm_image, prompt in zip(
+             hf_images, vllm_images, HF_IMAGE_PROMPTS)
+        for factor in ((0.25, 0.5, 1.0) if is_multiscale else (1, ))
+    ]
+    prompt_inputs = [prompt for _, _, prompt in image_inputs]
+    hf_image_inputs = [hf_image for hf_image, _, _ in image_inputs]
+    vllm_image_inputs = [vllm_image for _, vllm_image, _ in image_inputs]
+
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
     hf_model_kwargs = {"_attn_implementation": "eager"}
     with hf_runner(model_id, dtype=dtype,
                    model_kwargs=hf_model_kwargs) as hf_model:
         hf_outputs = hf_model.generate_greedy(
-            HF_IMAGE_PROMPTS,
+            prompt_inputs,
             max_tokens,
-            images=hf_images,
+            images=hf_image_inputs,
             eos_token_id=hf_model.processor.tokenizer.eos_token_id)
 
     with vllm_runner(model_id,
@@ -110,15 +124,19 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
                      dtype=dtype,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(HF_IMAGE_PROMPTS,
+        vllm_outputs = vllm_model.generate_greedy(prompt_inputs,
                                                   max_tokens,
-                                                  images=vllm_images)
+                                                  images=vllm_image_inputs)
 
     for i in range(len(HF_IMAGE_PROMPTS)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_to_hf_output(
-            vllm_outputs[i], vlm_config, model_id)
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+        try:
+            hf_output_ids, hf_output_str = hf_outputs[i]
+            vllm_output_ids, vllm_output_str = vllm_to_hf_output(
+                vllm_outputs[i], vlm_config, model_id)
+            assert hf_output_str == vllm_output_str, (
+                f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
+            assert hf_output_ids == vllm_output_ids, (
+                f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+        except Exception as e:
+            msg = f"Wrong output for inputs {image_inputs[i]}"
+            raise AssertionError(msg) from e
