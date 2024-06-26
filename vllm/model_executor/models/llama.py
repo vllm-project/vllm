@@ -419,7 +419,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
-                print("HERE", type(param))
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break

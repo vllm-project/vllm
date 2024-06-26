@@ -1,12 +1,11 @@
 from typing import Callable, List
 
 import torch
-from torch.nn import Parameter
 
 from vllm import _custom_ops as custom_ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8 import (  # noqa: E501
     CompressedTensorsW8A8)
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.parameter import vLLMParameter
 
 __all__ = ["CompressedTensorsW8A8StaticTensor"]
 
@@ -26,14 +25,9 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsW8A8):
             params_dtype=params_dtype,
             weight_loader=weight_loader)
 
-        input_scale = Parameter(torch.empty(1, dtype=torch.float32),
-                                requires_grad=False)
-
+        input_scale = vLLMParameter(data=torch.empty(1, dtype=torch.float32),
+                                    weight_loader=weight_loader)
         layer.register_parameter("input_scale", input_scale)
-        set_weight_attrs(input_scale, {
-            "weight_loader": weight_loader,
-            "ignore_warning": True,
-        })
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         weight = layer.weight
