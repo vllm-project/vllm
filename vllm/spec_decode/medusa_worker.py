@@ -9,7 +9,6 @@ from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.model_runner import ModelInput
 from vllm.worker.worker import Worker
 
 
@@ -72,7 +71,7 @@ class MedusaWorker(NonLLMProposerWorkerBase, Worker):
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[List[int], List[int]]:
         if not seq_group_metadata_list:
-            return ModelInput.empty(self.device)
+            return [], []
 
         seq_lens: List[int] = []
         query_lens: List[int] = []

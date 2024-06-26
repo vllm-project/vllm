@@ -1024,6 +1024,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 assert model_input.sampling_metadata is not None
                 hidden_states = hidden_states.index_select(
                     0, model_input.sampling_metadata.selected_token_indices)
+            elif decode_meta.use_cuda_graph:
+                assert model_input.sampling_metadata is not None
+                hidden_states = hidden_states[:len(
+                    model_input.sampling_metadata.selected_token_indices)]
+
             output.hidden_states = hidden_states
 
         return output
