@@ -222,8 +222,8 @@ def test_decode_prompt_logprobs(complete_sequence: str,
 
 
 @pytest.mark.parametrize("tokenizer_name", ["facebook/opt-125m"])
-def test_decode_prompt_logprobs_5846(detokenizer: Detokenizer):
-    """ Regression test for #5846. """
+def test_decode_prompt_logprobs_pr_5846(detokenizer: Detokenizer):
+    """ Regression test for PR #5846. """
 
     # This set of random input will generate incorrect output before #5846.
     prompt_token_ids = [3290, 1562, 8652, 3123, 1838, 9660]
