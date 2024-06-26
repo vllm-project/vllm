@@ -376,6 +376,10 @@ def get_open_port() -> int:
 
 
 def update_environment_variables(envs: Dict[str, str]):
+    if is_hip() and "CUDA_VISIBLE_DEVICES" in envs:
+        # Propagate changes to CUDA_VISIBLE_DEVICES to
+        # ROCm's HIP_VISIBLE_DEVICES as well
+        envs["HIP_VISIBLE_DEVICES"] = envs["CUDA_VISIBLE_DEVICES"]
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
@@ -779,9 +783,14 @@ def _cuda_device_count_stateless(
 
     if not torch.cuda._is_compiled():
         return 0
-    # bypass _device_count_nvml() if rocm (not supported)
-    nvml_count = -1 if torch.version.hip else torch.cuda._device_count_nvml()
-    r = torch._C._cuda_getDeviceCount() if nvml_count < 0 else nvml_count
+    if is_hip():
+        # ROCm uses amdsmi instead of nvml for stateless device count
+        # This requires a sufficiently modern version of Torch 2.4.0
+        raw_count = torch.cuda._device_count_amdsmi() if (hasattr(
+            torch.cuda, "_device_count_amdsmi")) else -1
+    else:
+        raw_count = torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
     return r
 
 
@@ -795,7 +804,6 @@ def cuda_device_count_stateless() -> int:
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
-
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
