@@ -104,10 +104,11 @@ class Fp8LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
+        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
+        # kernel for fast weight-only FP8 quantization
         capability = torch.cuda.get_device_capability()
         capability = capability[0] * 10 + capability[1]
-        # self.use_marlin = capability < 89
-        self.use_marlin = True
+        self.use_marlin = capability < 89
 
     def _create_scale_param(
         self,
@@ -211,9 +212,6 @@ class Fp8LinearMethod(LinearMethodBase):
         part_size_n = layer.output_size_per_partition
         part_size_k = layer.input_size_per_partition
 
-        # FP8 is always 8 bits
-        weight_bits = 8
-
         assert layer.marlin_state == GPTQMarlinState.REPACK
         layer.marlin_state = GPTQMarlinState.READY
 
@@ -244,27 +242,26 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # Repack weights to marlin format
         marlin_qweight = ops.gptq_marlin_repack(
-            packed_gptq_qweight,
-            torch.empty(0, dtype=torch.int, device=device),
-            part_size_k,
-            part_size_n,
-            weight_bits,
+            b_q_weight=packed_gptq_qweight,
+            perm=torch.empty(0, dtype=torch.int, device=device),
+            size_k=part_size_k,
+            size_n=part_size_n,
+            num_bits=8,
         )
         layer.weight = Parameter(marlin_qweight, requires_grad=False)
 
         # WEIGHT SCALES
         # Currently Marlin doesn't support per-tensor scales, so we
         # expand it to channelwise
-        group_size = -1
         scales = layer.weight_scale.repeat(1, part_size_n).to(
             layer.orig_dtype).to(device)
         # Permute scales
         marlin_scales = marlin_permute_scales(
-            scales,
-            part_size_k,
-            part_size_n,
-            group_size,
-            weight_bits,
+            s=scales,
+            size_k=part_size_k,
+            size_n=part_size_n,
+            group_size=-1,
+            num_bits=8,
         )
         layer.weight_scale = Parameter(marlin_scales, requires_grad=False)
 
@@ -343,24 +340,17 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.use_marlin:
             reshaped_x = x.reshape(-1, x.shape[-1])
-
-            # FP8 is always 8 bits
-            weight_bits = 8
-            size_m = reshaped_x.shape[0]
-            part_size_n = layer.output_size_per_partition
-            part_size_k = layer.input_size_per_partition
-
-            out_shape = x.shape[:-1] + (part_size_n, )
+            out_shape = x.shape[:-1] + (layer.output_size_per_partition, )
 
             output = ops.fp8_marlin_gemm(
-                reshaped_x,
-                layer.weight,
-                layer.weight_scale,
-                layer.workspace,
-                weight_bits,
-                size_m,
-                part_size_n,
-                part_size_k,
+                a=reshaped_x,
+                b_q_weight=layer.weight,
+                b_scales=layer.weight_scale,
+                workspace=layer.workspace,
+                num_bits=8,
+                size_m=reshaped_x.shape[0],
+                size_n=layer.output_size_per_partition,
+                size_k=layer.input_size_per_partition,
             )
 
             if bias is not None:
