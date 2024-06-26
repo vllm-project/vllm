@@ -1,3 +1,5 @@
+.. _input_processing:
+
 Input Processing
 ================
 
