@@ -8,6 +8,7 @@ main() {
     (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
     (which jq) || (apt-get update && apt-get -y install jq)
     pwd
+    ls
     df -h
     cd /workspace
     ls
