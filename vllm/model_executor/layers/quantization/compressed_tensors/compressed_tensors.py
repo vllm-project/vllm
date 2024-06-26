@@ -2,18 +2,19 @@ from typing import Any, Dict, List, Optional
 
 import torch
 from pydantic import BaseModel
+from torch.nn import Module
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
+    W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS, CompressedTensorsFp8,
     CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8DynamicToken, CompressedTensorsW8A8StaticTensor,
     CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
-    find_first_name_or_class_match)
+    QuantizationType, find_first_name_or_class_match)
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -121,6 +122,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         return (is_channel_group and input_quant_none and is_symmetric
                 and is_static)
 
+    def _is_fp8(self, weight_quant: BaseModel, input_quant: BaseModel) -> bool:
+        return weight_quant.type == QuantizationType.FLOAT
+
     def _get_schema(self, weight_quant: BaseModel,
                     input_quant: BaseModel) -> "CompressedTensorsScheme":
 
@@ -139,6 +143,9 @@ class CompressedTensorsConfig(QuantizationConfig):
                     group_size=weight_quant.group_size)
 
         if self.quant_format == CompressionFormat.int_quantized.value:
+            if self._is_fp8(weight_quant, input_quant):
+                return CompressedTensorsFp8()
+
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8StaticTensor(
                     strategy=weight_quant.strategy)
@@ -176,6 +183,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
     def __init__(self, quantization_config: CompressedTensorsConfig):
         self.quantization_config = quantization_config
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        layer.scheme.process_weights_after_loading(layer)
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
