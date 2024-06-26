@@ -1026,7 +1026,12 @@ class LLMEngine:
     def list_loras(self) -> Set[int]:
         return self.model_executor.list_loras()
 
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_executor.pin_lora(lora_id)
+
     def check_health(self) -> None:
+        if self.tokenizer:
+            self.tokenizer.check_health()
         self.model_executor.check_health()
 
     def is_tracing_enabled(self) -> bool:
