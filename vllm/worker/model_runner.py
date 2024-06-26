@@ -1,8 +1,10 @@
+import dataclasses
 import gc
 import time
 import warnings
 from collections import defaultdict
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
@@ -12,7 +14,6 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import graph_capture
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -26,6 +27,15 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
+from vllm.worker.model_runner_base import (
+    ModelRunnerBase, ModelRunnerInputBase,
+    _add_attn_metadata_broadcastable_dict,
+    _add_sampling_metadata_broadcastable_dict,
+    _init_attn_metadata_from_tensor_dict,
+    _init_sampling_metadata_from_tensor_dict)
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -39,40 +49,90 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 _NUM_WARMUP_ITERS = 2
 
+TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
-class ModelInput(NamedTuple):
-    input_tokens: torch.Tensor
-    input_positions: torch.Tensor
-    attn_metadata: Optional[AttentionMetadata]
-    seq_lens: List[int]
-    query_lens: List[int]
-    lora_mapping: Optional[LoRAMapping]
-    lora_requests: Set[LoRARequest]
-    multi_modal_kwargs: Dict[str, torch.Tensor]
-    slot_mapping: torch.Tensor
-    num_prefill_tokens: int
-    num_decode_tokens: int
-    num_prefills: int
+
+@dataclasses.dataclass(frozen=True)
+class ModelInputForGPU(ModelRunnerInputBase):
+    """
+    This base class contains metadata needed for the base model forward pass
+    but not metadata for possible additional steps, e.g., sampling. Model
+    runners that run additional steps should subclass this method to add
+    additional fields.
+    """
+    input_tokens: Optional[torch.Tensor] = None
+    input_positions: Optional[torch.Tensor] = None
+    seq_lens: Optional[List[int]] = None
+    query_lens: Optional[List[int]] = None
+    lora_mapping: Optional["LoRAMapping"] = None
+    lora_requests: Optional[Set[LoRARequest]] = None
+    attn_metadata: Optional["AttentionMetadata"] = None
+    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+            "lora_requests": self.lora_requests,
+            "lora_mapping": self.lora_mapping,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+        }
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        return tensor_dict
 
     @classmethod
-    def empty(cls, device):
-        return ModelInput(
-            input_tokens=torch.empty(0, device=device),
-            input_positions=torch.empty(0, device=device),
-            attn_metadata=None,
-            seq_lens=[],
-            query_lens=[],
-            lora_mapping=None,
-            lora_requests=set(),
-            multi_modal_kwargs={},
-            slot_mapping=torch.empty(0, device=device),
-            num_prefill_tokens=0,
-            num_decode_tokens=0,
-            num_prefills=0,
-        )
+    def from_broadcasted_tensor_dict(
+        cls: Type[TModelInputForGPU],
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> TModelInputForGPU:
+        if attn_backend is not None:
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
 
 
-class ModelRunner:
+@dataclasses.dataclass(frozen=True)
+class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
+    """
+    Used by the ModelRunner.
+    """
+    sampling_metadata: Optional["SamplingMetadata"] = None
+    # Used for speculative decoding. We do not broadcast it because it is only
+    # used by the driver worker.
+    is_prompt: Optional[bool] = None
+
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+            "lora_requests": self.lora_requests,
+            "lora_mapping": self.lora_mapping,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+        }
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                  self.sampling_metadata)
+        return tensor_dict
+
+    @classmethod
+    def from_broadcasted_tensor_dict(
+        cls,
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> "ModelInputForGPUWithSamplingMetadata":
+        tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
+        if attn_backend is not None:
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
+
+
+class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
+    """
+    Helper class for shared methods between GPU model runners.
+    """
+    _model_input_cls: Type[TModelInputForGPU]
 
     def __init__(
         self,
@@ -241,11 +301,13 @@ class ModelRunner:
         block_size = self.block_size
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
 
-    def _prepare_model_input(
+    def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> ModelInput:
-        """Prepare the model input based on a given sequence group.
+    ) -> TModelInputForGPU:
+        """Helper method to prepare the model input based on a given sequence
+        group. Prepares metadata needed for the base model forward pass but not
+        metadata for possible additional steps, e.g., sampling.
 
         The API assumes seq_group_metadata_list is sorted by prefill -> decode.
 
@@ -296,7 +358,7 @@ class ModelRunner:
         paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
-            return ModelInput.empty(self.device)
+            return self._model_input_cls()
 
         if self.sliding_window is not None:
             sliding_window_blocks = (self.sliding_window + self.block_size -
@@ -646,7 +708,7 @@ class ModelRunner:
             for k, v in multi_modal_kwargs_list.items()
         }
 
-        return ModelInput(
+        return self._model_input_cls(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
             attn_metadata=attn_metadata,
@@ -655,131 +717,7 @@ class ModelRunner:
             lora_mapping=lora_mapping,
             lora_requests=lora_requests,
             multi_modal_kwargs=multi_modal_kwargs,
-            slot_mapping=slot_mapping_tensor,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            num_prefills=num_prefills,
         )
-
-    def prepare_input_tensors(
-        self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            # Prepare input tensors.
-            (
-                input_tokens,
-                input_positions,
-                attn_metadata,
-                seq_lens,
-                query_lens,
-                lora_mapping,
-                lora_requests,
-                multi_modal_kwargs,
-                slot_mapping,
-                num_prefill_tokens,
-                num_decode_tokens,
-                num_prefills,
-            ) = self._prepare_model_input(seq_group_metadata_list)
-            sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list, seq_lens, query_lens, self.device,
-                self.pin_memory)
-
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-                "lora_requests": lora_requests,
-                "lora_mapping": lora_mapping,
-                "multi_modal_kwargs": multi_modal_kwargs,
-                "num_prefill_tokens": num_prefill_tokens,
-                "num_decode_tokens": num_decode_tokens,
-                "slot_mapping": slot_mapping,
-                "num_prefills": num_prefills,
-            }
-            if attn_metadata:
-                metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
-        else:
-            metadata_dict = broadcast_tensor_dict(src=0)
-            input_tokens = metadata_dict.pop("input_tokens")
-            input_positions = metadata_dict.pop("input_positions")
-            selected_token_indices = metadata_dict.pop(
-                "selected_token_indices")
-            lora_mapping = metadata_dict.pop("lora_mapping")
-            lora_requests = metadata_dict.pop("lora_requests")
-            multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
-            if metadata_dict:
-                attn_metadata = self.attn_backend.make_metadata(
-                    **metadata_dict)
-            else:
-                attn_metadata = None
-            sampling_metadata = SamplingMetadata(
-                seq_groups=None,
-                selected_token_indices=selected_token_indices,
-                categorized_sample_indices=None,
-                num_prompts=0,
-            )
-
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_kwargs)
-
-    @torch.inference_mode()
-    def execute_model(
-        self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        kv_caches: List[torch.Tensor],
-    ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_kwargs
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
-
-        if self.lora_config:
-            self.set_active_loras(lora_requests, lora_mapping)
-
-        # Currently cuda graph is only supported by the decode phase.
-        prefill_meta = attn_metadata.prefill_metadata
-        decode_meta = attn_metadata.decode_metadata
-        if prefill_meta is None and decode_meta.use_cuda_graph:
-            graph_batch_size = input_tokens.shape[0]
-            model_executable = self.graph_runners[graph_batch_size]
-        else:
-            model_executable = self.model
-
-        hidden_states = model_executable(
-            input_ids=input_tokens,
-            positions=input_positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-            **multi_modal_kwargs,
-        )
-
-        # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
-
-        # Only perform sampling in the driver worker.
-        if not self.is_driver_worker:
-            return None
-
-        # Sample the next token.
-        output: SamplerOutput = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
-
-        if self.return_hidden_states:
-            # we only need to pass hidden states of most recent token
-            assert seq_group_metadata_list is not None
-            if seq_group_metadata_list[0].is_prompt:
-                hidden_states = hidden_states.index_select(
-                    0, sampling_metadata.selected_token_indices)
-            output.hidden_states = hidden_states
-
-        return output
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -853,7 +791,8 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        self.execute_model(seqs, kv_caches)
+        model_input = self.prepare_model_input(seqs)
+        self.execute_model(model_input, kv_caches)
         torch.cuda.synchronize()
         return
 
@@ -984,6 +923,110 @@ class ModelRunner:
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+
+
+class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
+    """
+    GPU model runner with sampling step.
+    """
+    _model_input_cls: Type[ModelInputForGPUWithSamplingMetadata] = (
+        ModelInputForGPUWithSamplingMetadata)
+
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> ModelInputForGPUWithSamplingMetadata:
+        return (
+            ModelInputForGPUWithSamplingMetadata.from_broadcasted_tensor_dict(
+                tensor_dict,
+                attn_backend=self.attn_backend,
+            ))
+
+    def prepare_model_input(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> ModelInputForGPUWithSamplingMetadata:
+        """Prepare the model input based on a given sequence group, including
+        metadata for the sampling step.
+
+        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
+
+        The result tensors and data structure also batches input in prefill
+        -> decode order. For example,
+
+        - input_tokens[:num_prefill_tokens] contains prefill tokens.
+        - input_tokens[num_prefill_tokens:] contains decode tokens.
+
+        If cuda graph is required, this API automatically pads inputs.
+        """
+        model_input = self._prepare_model_input_tensors(
+            seq_group_metadata_list)
+        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                     model_input.seq_lens,
+                                                     model_input.query_lens,
+                                                     self.device,
+                                                     self.pin_memory)
+        is_prompt = (seq_group_metadata_list[0].is_prompt
+                     if seq_group_metadata_list else None)
+        return dataclasses.replace(model_input,
+                                   sampling_metadata=sampling_metadata,
+                                   is_prompt=is_prompt)
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        model_input: ModelInputForGPUWithSamplingMetadata,
+        kv_caches: List[torch.Tensor],
+    ) -> SamplerOutput:
+        if self.lora_config:
+            assert model_input.lora_requests is not None
+            assert model_input.lora_mapping is not None
+            self.set_active_loras(model_input.lora_requests,
+                                  model_input.lora_mapping)
+
+        # Currently cuda graph is only supported by the decode phase.
+        assert model_input.attn_metadata is not None
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+        decode_meta = model_input.attn_metadata.decode_metadata
+        if prefill_meta is None and decode_meta.use_cuda_graph:
+            assert model_input.input_tokens is not None
+            graph_batch_size = model_input.input_tokens.shape[0]
+            model_executable = self.graph_runners[graph_batch_size]
+        else:
+            model_executable = self.model
+
+        multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+        hidden_states = model_executable(
+            input_ids=model_input.input_tokens,
+            positions=model_input.input_positions,
+            kv_caches=kv_caches,
+            attn_metadata=model_input.attn_metadata,
+            **multi_modal_kwargs,
+        )
+
+        # Compute the logits.
+        logits = self.model.compute_logits(hidden_states,
+                                           model_input.sampling_metadata)
+
+        # Only perform sampling in the driver worker.
+        if not self.is_driver_worker:
+            return None
+
+        # Sample the next token.
+        output: SamplerOutput = self.model.sample(
+            logits=logits,
+            sampling_metadata=model_input.sampling_metadata,
+        )
+
+        if self.return_hidden_states:
+            # we only need to pass hidden states of most recent token
+            if model_input.is_prompt:
+                assert model_input.sampling_metadata is not None
+                hidden_states = hidden_states.index_select(
+                    0, model_input.sampling_metadata.selected_token_indices)
+            output.hidden_states = hidden_states
+
+        return output
 
 
 class CUDAGraphRunner:

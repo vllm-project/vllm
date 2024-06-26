@@ -306,7 +306,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                 self.shard_indices.added_vocab_end_index)
         else:
             masked_input = input_
-            # Get the embeddings.
+        # Get the embeddings.
         output_parallel = F.embedding(masked_input.long(), self.weight)
         # Mask the output embedding.
         if self.tp_size > 1:
