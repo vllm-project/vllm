@@ -142,14 +142,14 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
             try:
                 batch_data = image_processor \
                     .preprocess(image, return_tensors="pt") \
-                    .to(model_config.dtype).data
+                    .data
             except Exception:
                 logger.error("Failed to process image (%s)", image)
                 raise
 
             return MultiModalInputs(batch_data)
         elif isinstance(image, torch.Tensor):
-            pixel_values = image.to(model_config.dtype)
+            pixel_values = image
 
             return MultiModalInputs({"pixel_values": pixel_values})
 
@@ -180,7 +180,6 @@ class ImageFeaturePlugin(MultiModalPlugin[ImageFeatureData]):
 
     def _default_input_mapper(self, ctx: InputContext,
                               data: ImageFeatureData) -> MultiModalInputs:
-        model_config = ctx.model_config
-        image_features = data.image_features.to(model_config.dtype)
+        image_features = data.image_features
 
         return MultiModalInputs({"image_features": image_features})
