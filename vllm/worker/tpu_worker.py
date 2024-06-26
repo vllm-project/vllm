@@ -144,6 +144,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
 
+        self.cpu_cache = []
         self.tpu_cache = []
         tpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
             num_gpu_blocks, self.block_size, num_kv_heads, head_size)
@@ -153,6 +154,8 @@ class TPUWorker(LoraNotSupportedWorkerBase):
                                     device=self.device)
             value_cache = torch.zeros_like(key_cache)
             self.tpu_cache.append((key_cache, value_cache))
+            # FIXME(woosuk): Swapping is not implemented at the moment.
+            self.cpu_cache.append((None, None))
         self._warmup_model()
 
     def _warmup_model(self) -> None:
@@ -186,21 +189,47 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         if not self.is_driver_worker:
             self._execute_model_non_driver()
             return []
-
         assert execute_model_req is not None
-        # Currently, TPUWorker does not support swapping.
-        # TODO(woosuk): Support block copying.
-        assert len(execute_model_req.blocks_to_swap_in) == 0, (
-            "Swapping is not supported for the TPU backend.")
-        assert len(execute_model_req.blocks_to_swap_out) == 0, (
-            "Swapping is not supported for the TPU backend.")
-        assert len(execute_model_req.blocks_to_copy) == 0
-
+        # Issue cache operations.
+        self.cache_swap(
+            execute_model_req.blocks_to_swap_in,
+            execute_model_req.blocks_to_swap_out,
+            execute_model_req.blocks_to_copy,
+        )
+        # Run the model.
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         assert len(seq_group_metadata_list) > 0
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.tpu_cache)
         return [output]
+
+    def cache_swap(
+        self,
+        blocks_to_swap_in: List[Tuple[int, int]],
+        blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_copy: List[Tuple[int, int]],
+    ) -> None:
+        attn_backend = self.model_runner.attn_backend
+        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        if blocks_to_swap_in:
+            blocks_to_swap_in = torch.tensor(blocks_to_swap_in,
+                                             device="cpu",
+                                             dtype=torch.int64).view(-1, 2)
+            for i in range(num_layers):
+                attn_backend.swap_blocks(self.cpu_cache[i], self.tpu_cache[i],
+                                         blocks_to_swap_in)
+        if blocks_to_swap_out:
+            blocks_to_swap_out = torch.tensor(blocks_to_swap_out,
+                                              device="cpu",
+                                              dtype=torch.int64).view(-1, 2)
+            for i in range(num_layers):
+                attn_backend.swap_blocks(self.tpu_cache[i], self.cpu_cache[i],
+                                         blocks_to_swap_out)
+        if blocks_to_copy:
+            blocks_to_copy = torch.tensor(blocks_to_copy,
+                                          device=self.device,
+                                          dtype=torch.int64).view(-1, 2)
+            attn_backend.copy_blocks(self.tpu_cache, blocks_to_copy)
 
     def start_worker_execution_loop(self) -> None:
         while self._execute_model_non_driver():
