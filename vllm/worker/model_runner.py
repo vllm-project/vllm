@@ -52,10 +52,6 @@ _NUM_WARMUP_ITERS = 2
 
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
-@dataclass
-class RequestInfo:
-    request_id: str
-    seqs_id: List[int]
 
 @dataclasses.dataclass(frozen=True)
 class ModelInputForGPU(ModelRunnerInputBase):
@@ -73,6 +69,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     lora_requests: Optional[Set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+    request_ids_to_seq_ids : Optional[Dict[str, List[int]]] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -81,6 +78,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
+            "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         return tensor_dict
@@ -114,6 +112,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
+            "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -343,6 +342,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         block_tables: List[List[int]] = []
         multi_modal_kwargs_list: Dict[str,
                                       List[torch.Tensor]] = defaultdict(list)
+        request_ids_to_seq_ids: Dict[str,List[int]] = defaultdict(list)
         decode_only = True
         num_prefills = 0
         num_prefill_tokens = 0
@@ -716,17 +716,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             k: torch.cat(v, dim=0).to(self.device)
             for k, v in multi_modal_kwargs_list.items()
         }
-        # if self.vision_language_config:
-            # execute_model_kwargs.update({"image_input": multi_modal_input})
-        # if self.has_seqlen_agnostic:
-            # execute_model_kwargs.update({
-                # "requests_info":
-                # requests_info,
-                # "finished_request_ids":
-                # finished_request_ids,
-            # })
-        # hidden_states = model_executable(**execute_model_kwargs)
-
+        request_ids_to_seq_ids = {
+            seq_group_metadata.request_id:
+            list(seq_group_metadata.seq_data.keys())
+            for seq_group_metadata in seq_group_metadata_list
+        }
         return self._model_input_cls(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
@@ -736,6 +730,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             lora_mapping=lora_mapping,
             lora_requests=lora_requests,
             multi_modal_kwargs=multi_modal_kwargs,
+            request_ids_to_seq_ids=request_ids_to_seq_ids
         )
 
     @torch.inference_mode()
@@ -923,20 +918,23 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.set_active_loras(set(), lora_mapping)
 
                 graph_runner = CUDAGraphRunner(self.model)
-                # capture_inputs = {
-                    # "input_ids": input_tokens[:batch_size],
-                    # "positions": input_positions[:batch_size],
-                    # "kv_caches": kv_caches,
-                    # "attn_metadata": attn_metadata,
-                    # "memory_pool": self.graph_memory_pool,
-                # }
-                # if self.has_seqlen_agnostic:
-                    # capture_inputs.update({
-                        # "seqlen_agnostic_capture_inputs":
-                        # self.model.get_seqlen_agnostic_capture_inputs(
-                            # batch_size)
-                    # })
-                # graph_runner.capture(**capture_inputs)
+                capture_inputs = {
+                    "input_ids": input_tokens[:batch_size],
+                    "positions": input_positions[:batch_size],
+                    "hidden_states": hidden_states[:batch_size]
+                    if hidden_states is not None else None,
+                    "kv_caches": kv_caches,
+                    "attn_metadata": attn_metadata,
+                    "memory_pool": self.graph_memory_pool,
+                    "stream":graph_capture_context.stream
+                }
+                if self.has_seqlen_agnostic:
+                    capture_inputs.update({
+                        "seqlen_agnostic_capture_inputs":
+                        self.model.get_seqlen_agnostic_capture_inputs(
+                            batch_size)
+                    })
+                hidden_states = graph_runner.capture(**capture_inputs)
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[batch_size] = graph_runner
 
@@ -1002,6 +1000,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
+        finished_request_ids: List[str]
     ) -> SamplerOutput:
         if self.lora_config:
             assert model_input.lora_requests is not None
@@ -1021,12 +1020,17 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_executable = self.model
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+        seqlen_agnostic_kwargs = {
+            "finished_request_ids":finished_request_ids,
+            "request_ids_to_seq_ids":model_input.request_ids_to_seq_ids,
+        }
         hidden_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             kv_caches=kv_caches,
             attn_metadata=model_input.attn_metadata,
             **multi_modal_kwargs,
+            **seqlen_agnostic_kwargs
         )
 
         # Compute the logits.
