@@ -30,6 +30,9 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
+          - name: nvme-raid
+            hostpath:
+              path: /mnt/fast-disks/nvme-raid
   # - wait
   # - label: "A100 trt benchmark"
   #   agents:
