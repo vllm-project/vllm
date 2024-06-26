@@ -600,7 +600,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tokenizer",
         type=str,
-        help="Name or path of the tokenizer, if not using the default tokenizer.",
+        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
     )
     parser.add_argument(
         "--best-of",
@@ -626,19 +626,19 @@ if __name__ == "__main__":
         "--sonnet-input-len",
         type=int,
         default=550,
-        help="Number of input tokens per request, used only for sonnet dataset.",
+        help="Number of input tokens per request, used only for sonnet dataset.",  # noqa: E501
     )
     parser.add_argument(
         "--sonnet-output-len",
         type=int,
         default=150,
-        help="Number of output tokens per request, used only for sonnet dataset.",
+        help="Number of output tokens per request, used only for sonnet dataset.",  # noqa: E501
     )
     parser.add_argument(
         "--sonnet-prefix-len",
         type=int,
         default=200,
-        help="Number of prefix tokens per request, used only for sonnet dataset.",
+        help="Number of prefix tokens per request, used only for sonnet dataset.",  # noqa: E501
     )
     parser.add_argument(
         "--request-rate",
