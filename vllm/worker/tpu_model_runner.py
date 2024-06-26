@@ -415,34 +415,29 @@ class TPUModelRunner:
         # The TPU backend does not reuse the sampler, since the TPU backend
         # does not support the advanced sampling parameters such as logprobs.
         zero_logprob = Logprob(0.0)
-        if is_prompt:
-            sampler_outputs = []
-            for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-                seq_outputs = []
-                seq_ids = list(seq_group_metadata.seq_data.keys())
+        batch_idx = 0
+        sampler_outputs = []
+        for seq_group_metadata in seq_group_metadata_list:
+            seq_outputs = []
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            if is_prompt:
                 assert len(seq_ids) == 1
                 seq_id = seq_ids[0]
-                for j in range(best_of[i]):
-                    next_token_id = next_token_ids[i][j]
+                for i in range(best_of[batch_idx]):
+                    next_token_id = next_token_ids[batch_idx][i]
                     seq_outputs.append(
                         SequenceOutput(seq_id, next_token_id,
                                        {next_token_id: zero_logprob}))
-                sampler_outputs.append(
-                    CompletionSequenceGroupOutput(seq_outputs, None))
-        else:
-            batch_idx = 0
-            sampler_outputs = []
-            for seq_group_metadata in seq_group_metadata_list:
-                seq_outputs = []
-                seq_ids = list(seq_group_metadata.seq_data.keys())
+                batch_idx += 1
+            else:
                 for seq_id in seq_ids:
                     next_token_id = next_token_ids[batch_idx][0]
                     seq_outputs.append(
                         SequenceOutput(seq_id, next_token_id,
                                        {next_token_id: zero_logprob}))
                     batch_idx += 1
-                sampler_outputs.append(
-                    CompletionSequenceGroupOutput(seq_outputs, None))
+            sampler_outputs.append(
+                CompletionSequenceGroupOutput(seq_outputs, None))
         return sampler_outputs
 
     def execute_model(
