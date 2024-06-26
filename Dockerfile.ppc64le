@@ -7,7 +7,7 @@ RUN apt-get update  -y     && apt-get install -y git wget vim numactl gcc-12 g++
 # Some packages in requirements-cpu are installed here
 # IBM provides optimized packages for ppc64le processors in the open-ce project for mamba
 # Currently these may not be available for venv or pip directly
-RUN micromamba install -y -n base -c https://ftp.osuosl.org/pub/open-ce/1.11.0-p10/ -c defaults     python=3.10     pytorch-cpu=2.1.2    &&     micromamba clean --all --yes
+RUN micromamba install -y -n base -c https://ftp.osuosl.org/pub/open-ce/1.11.0-p10/ -c defaults     python=3.10     pytorch-cpu=2.1.2     torchvision-cpu=0.16.2    &&     micromamba clean --all --yes
 
 COPY ./ /workspace/vllm
 
