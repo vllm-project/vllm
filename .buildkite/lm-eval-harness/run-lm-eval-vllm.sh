@@ -40,8 +40,8 @@ do
     
     echo "=== RUNNING MODEL: $MODEL_CONFIG ==="
 
-    MODEL_CONFIG_PATH=$PWD/lm-eval-harness/configs/models/${MODEL_CONFIG}
-    LM_EVAL_TEST_DATA_FILE=$MODEL_CONFIG_PATH pytest -s tests/accuracy/test_lm_eval_correctness.py || LOCAL_SUCCESS=$?
+    MODEL_CONFIG_PATH=configs/models/${MODEL_CONFIG}
+    LM_EVAL_TEST_DATA_FILE=$MODEL_CONFIG_PATH pytest -s test_lm_eval_correctness.py || LOCAL_SUCCESS=$?
 
     if [[ $LOCAL_SUCCESS == 0 ]]; then
         echo "=== PASSED MODEL: ${MODEL_CONFIG} ==="

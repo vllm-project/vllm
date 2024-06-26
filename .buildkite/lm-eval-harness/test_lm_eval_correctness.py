@@ -9,6 +9,8 @@ import pytest
 import requests
 import yaml
 
+from vllm.utils import cuda_device_count_stateless
+
 if TYPE_CHECKING:
     import lm_eval as lm_eval_t
 
@@ -63,7 +65,7 @@ def launch_lm_eval(eval_config):
     return results
 
 
-def test_lm_eval_correctness(num_gpus_available):
+def test_lm_eval_correctness():
     eval_config = yaml.safe_load(
         Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
 
@@ -71,7 +73,7 @@ def test_lm_eval_correctness(num_gpus_available):
     server_args = {
         "model": eval_config["model_name"],
         "max-model-len": 4096,
-        "tensor-parallel-size": num_gpus_available,
+        "tensor-parallel-size": cuda_device_count_stateless(),
         # TODO (@robertgshaw2): understand why default (mp) does not
         # shut down cleanly (it works, but not clean).
         "distributed-executor-backend": "ray",
