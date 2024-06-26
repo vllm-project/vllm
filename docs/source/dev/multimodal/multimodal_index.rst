@@ -41,6 +41,10 @@ Base Classes
     :members:
     :show-inheritance:
 
+.. autoclass:: vllm.multimodal.MultiModalInputs
+    :members:
+    :show-inheritance:
+
 .. autoclass:: vllm.multimodal.MultiModalPlugin
     :members:
     :show-inheritance:
