@@ -16,8 +16,8 @@ class PallasAttentionBackend(AttentionBackend):
         return PallasAttentionBackendImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "PallasMetadata":
-        return PallasMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["PallasMetadata"]:
+        return PallasMetadata
 
     @staticmethod
     def get_kv_cache_shape(
