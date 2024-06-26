@@ -379,6 +379,15 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_num_seqs,
                             help='Maximum number of sequences per iteration.')
+                            help='maximum number of sequences per iteration')
+        parser.add_argument('--max-paddings',
+                            type=int,
+                            default=EngineArgs.max_paddings,
+                            help='maximum number of paddings in a batch')
+        parser.add_argument('--max-queue-length',
+                            type=int,
+                            default=EngineArgs.max_queue_length,
+                            help='maximum number of requests in waiting queue')
         parser.add_argument(
             '--max-logprobs',
             type=int,
@@ -716,6 +725,12 @@ class EngineArgs:
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             use_v2_block_manager=self.use_v2_block_manager,
+            self.max_num_batched_tokens,
+            self.max_num_seqs,
+            model_config.max_model_len,
+            self.max_paddings,
+            self.max_queue_length,
+            self.use_v2_block_manager,
             num_lookahead_slots=(self.num_lookahead_slots
                                  if speculative_config is None else
                                  speculative_config.num_lookahead_slots),

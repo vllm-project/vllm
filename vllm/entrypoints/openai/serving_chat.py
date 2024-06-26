@@ -295,8 +295,6 @@ class OpenAIServingChat(OpenAIServing):
                     conversation)
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
-                # krishna
-                print("QOE args param: ", e.args)
                 msg, status_code = e.args
                 return self.create_error_response(msg, status_code=status_code)
 

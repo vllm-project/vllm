@@ -568,8 +568,6 @@ class AsyncLLMEngine:
         curr_queue_len = len(self.engine.scheduler.waiting)
         max_queue_len = self.engine.scheduler.scheduler_config.get_max_queue_length(
         )
-        print("async llm engine add_request")
-        print(f"request_id: {request_id}, curr_queue_len {curr_queue_len}")
         if max_queue_len > -1 and curr_queue_len >= max_queue_len:
             raise QueueOverflowError(
                 message="Request would exceed the indicated maximum queue length.",

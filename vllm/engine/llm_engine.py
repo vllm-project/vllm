@@ -578,10 +578,6 @@ class LLMEngine:
                 f"Request {request_id} would exceed the indicated maximum "
                 f"queue length of {max_queue_len}", HTTPStatus.SERVICE_UNAVAILABLE
             )
-            # raise ValueError(
-            #     f"Request {request_id} would exceed the indicated maximum "
-            #     f"queue length of {max_queue_len}",
-            #     HTTPStatus.SERVICE_UNAVAILABLE)
 
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
