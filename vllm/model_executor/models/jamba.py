@@ -787,7 +787,7 @@ class JambaForCausalLM(nn.Module):
             )
 
 
-    def copy_outputs_after_cuda_grpahs(self, input_buffers, **kwargs):
+    def copy_outputs_after_cuda_graphs(self, input_buffers, **kwargs):
         self._copy_seqlen_agnostic_cache_by_indices(
             self.current_indices,
             input_buffers["seqlen_agnostic_capture_inputs"]

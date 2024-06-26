@@ -1141,7 +1141,7 @@ class CUDAGraphRunner:
         # Run the graph.
         self.graph.replay()
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
-            self.model.copy_outputs_after_cuda_grpahs(
+            self.model.copy_outputs_after_cuda_graphs(
                 self.input_buffers,
                 **kwargs
             )
