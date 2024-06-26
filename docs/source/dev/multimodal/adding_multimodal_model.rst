@@ -70,7 +70,10 @@ In such cases, you can define your own dummy data by registering a factory metho
     + @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
     class YourModelForImage2Seq(nn.Module):
 
-Refer to :class:`vllm.multimodal.image.DummyImageDataFactories` for some examples of dummy data factories.
+Here are some examples:
+
+- Image inputs (static feature size): `LLaVA-1.5 Model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava.py>`__
+- Image inputs (dynamic feature size): `LLaVA-NeXT Model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava_next.py>`__
 
 
 3. (Optional) Register input processor
@@ -89,6 +92,8 @@ You can register input processors via :meth:`vllm.inputs.INPUT_REGISTRY.register
     + @INPUT_REGISTRY.register_input_processor(<your_input_processor>)
     class YourModelForImage2Seq(nn.Module):
 
-A common use case of input processors is inserting extra image tokens to leverage the vLLM framework for attention mask generation.
-More details can be found in :class:`vllm.multimodal.image.ImageInputProcessors`.
+A common use case of input processors is inserting placeholder tokens to leverage the vLLM framework for attention mask generation.
+Here are some examples:
 
+- Insert static number of image tokens: `LLaVA-1.5 Model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava.py>`__
+- Insert dynamic number of image tokens: `LLaVA-NeXT Model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava_next.py>`__
