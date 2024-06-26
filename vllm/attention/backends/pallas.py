@@ -40,12 +40,10 @@ class PallasAttentionBackend(AttentionBackend):
         torch.ops.xla.dynamo_set_buffer_donor_(dst_k_cache, True)
         torch.ops.xla.dynamo_set_buffer_donor_(dst_v_cache, True)
 
-        dst_device = dst_k_cache.device
+        device = dst_k_cache.device
         src_indices, dst_indices = src_to_dst
-        k_blocks = src_k_cache[:, src_indices].to(dst_device)
-        dst_k_cache[:, dst_indices] = k_blocks
-        v_blocks = src_v_cache[:, src_indices].to(dst_device)
-        dst_v_cache[:, src_indices] = v_blocks
+        dst_k_cache[:, dst_indices] = src_k_cache[:, src_indices].to(device)
+        dst_v_cache[:, dst_indices] = src_v_cache[:, src_indices].to(device)
 
     @torch.compile(backend="openxla")
     @staticmethod
