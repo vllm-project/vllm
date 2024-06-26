@@ -103,8 +103,8 @@ class ResponseFormat(OpenAIBaseModel):
 
 
 class StreamOptions(OpenAIBaseModel):
-    include_usage: Optional[bool] = False
-    continuous_usage_stats: Optional[bool] = False
+    include_usage: Optional[bool] = True
+    continuous_usage_stats: Optional[bool] = True
 
 
 class FunctionDefinition(OpenAIBaseModel):
