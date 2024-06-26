@@ -20,6 +20,8 @@ _DEFAULT_LAST_ACCESSED_TIME = -1
 
 
 class BlockTracker:
+    """Used to track the status of a block inside the prefix caching allocator
+    """
     __slots__ = ("active", "last_accessed", "computed")
 
     def reset(self):
@@ -73,7 +75,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._cached_blocks: Dict[PrefixHash, BlockId] = {}
 
         # Used to track status of each physical block id
-        self._block_tracker = {}
+        self._block_tracker: Dict[BlockId, BlockTracker] = {}
         for block_id in block_ids:
             self._block_tracker[block_id] = BlockTracker()
 
@@ -129,23 +131,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             computed=computed,
         )
 
-    def _fetch_from_cache(self, prev_block: Optional[Block],
-                          token_ids: Optional[List[int]]) -> Optional[Block]:
-        block = self._block_pool.init_block(prev_block=prev_block,
-                                            token_ids=token_ids,
-                                            block_size=self._block_size,
-                                            physical_block_id=None)
-        assert block.content_hash is not None
-
-        cached_block_id = self._cached_blocks.get(block.content_hash, None)
-        if cached_block_id is None:
-            self._block_pool.free_block(block)
-            return None
-
-        block.block_id = cached_block_id
-        self._incr_refcount_cached_block(block)
-        return block
-
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: Optional[List[int]],
@@ -163,21 +148,23 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
-        cached_block = self._fetch_from_cache(prev_block=prev_block,
-                                              token_ids=token_ids)
-        if cached_block:
-            return cached_block
+        # First, try to create a block that points to cached data
+        block = self._block_pool.init_block(prev_block=prev_block,
+                                            token_ids=token_ids,
+                                            block_size=self._block_size,
+                                            physical_block_id=None)
+        assert block.content_hash is not None
+
+        cached_block_id = self._maybe_allocate_cached_block_id(
+            block.content_hash)
+        if cached_block_id is not None:
+            block.block_id = cached_block_id
+            return block
+        self._block_pool.free_block(block)
 
         # No cached block => Allocate a new block
         block = self.allocate_mutable_block(prev_block)
         block.append_token_ids(token_ids)
-
-        # Here we add the block content hash to cached_blocks,
-        # without yet setting its state to computed
-        # (It will be in computed state after it is freed)
-        new_block = self.promote_to_immutable_block(block)
-        assert new_block == block  # Ensure was only cached
-
         return block
 
     def allocate_immutable_blocks(
@@ -209,43 +196,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
-        try:
-            block = self._hashless_allocator.allocate_mutable_block(
-                prev_block=prev_block)
-            self._track_block_id(block.block_id, computed=False)
-            return block
-        except BlockAllocator.NoFreeBlocksError:
-            # We must check the unused cached blocks before raising OOM.
-            pass
-
-        # If the evictor has blocks available for eviction, evict a block
-        # and return it.
-        if self.evictor.num_blocks > 0:
-            # here we get an evicted block, which is only added
-            # into evictor if its ref counter is 0
-            # and since its content would be changed, we need
-            # to remove it from _cached_blocks's tracking list
-            block_id, content_hash_to_evict = self.evictor.evict()
-
-            _block_id = self._cached_blocks[content_hash_to_evict]
-            assert self._refcounter.get(_block_id) == 0
-            assert _block_id == block_id
-
-            self._cached_blocks.pop(content_hash_to_evict)
-
-            self._refcounter.incr(block_id)
-
-            block = self._block_pool.init_block(prev_block=prev_block,
-                                                token_ids=None,
-                                                block_size=self._block_size,
-                                                physical_block_id=block_id)
-            assert not block.computed
-            assert block.content_hash is None
-            self._track_block_id(block.block_id, computed=False)
-            return block
-
-        # No block available in hashless allocator, nor in unused cache blocks.
-        raise BlockAllocator.NoFreeBlocksError()
+        block_id = self.allocate_block_id()
+        block = self._block_pool.init_block(prev_block=prev_block,
+                                            token_ids=None,
+                                            block_size=self._block_size,
+                                            physical_block_id=block_id)
+        assert not block.computed
+        assert block.content_hash is None
+        return block
 
     def _incr_refcount_cached_block(self, block: Block) -> None:
         # Set this block to be "computed" since it is pointing to a
@@ -261,7 +219,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             if block_id in self.evictor:
                 self.evictor.remove(block_id)
 
-            self._track_block_id(block.block_id, computed=True)
+            self._track_block_id(block_id, computed=True)
 
     def _decr_refcount_cached_block(self, block: Block) -> None:
         # Ensure this is immutable/cached block
@@ -272,7 +230,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         refcount = self._refcounter.decr(block_id)
         if refcount > 0:
-            # Still in use
+            block.block_id = None
             return
 
         # No longer used
@@ -287,26 +245,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # Stop tracking the block
         self._untrack_block_id(block_id)
 
-    def free(self, block: Block) -> None:
-        """Decrement the refcount of the block. If the decremented refcount is
-        zero, store the block in the freelist.
+        block.block_id = None
 
-        If the block has a content hash (meaning it is immutable), then we will
-        keep the block around in case future allocations require it.
-        """
-        assert (block.block_id
-                is not None), "freeing unallocated block is undefined"
-
-        if block.content_hash is not None:
-            # Immutable
-            self._decr_refcount_cached_block(block)
-            block.block_id = None
-            self._block_pool.free_block(block)
-        else:
-            # Mutable
-            self._free_hashless_block(block)
-
-    def _free_hashless_block(self, block: Block) -> None:
+    def _decr_refcount_hashless_block(self, block: Block) -> None:
         block_id = block.block_id
         assert block_id is not None
 
@@ -316,8 +257,92 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         if refcount == 1:
             self._untrack_block_id(block_id)
 
-        # Decrement refcount and free to block pool
-        self._hashless_allocator.free(block)
+        # Decrement refcount
+        self._hashless_allocator.free_block_id(block)
+
+    def allocate_block_id(self) -> BlockId:
+        """First tries to allocate a block id from the hashless allocator,
+        and if there are no blocks, then tries to evict an unused cached block.  
+        """
+        hashless_block_id = self._maybe_allocate_hashless_block_id()
+        if hashless_block_id is not None:
+            return hashless_block_id
+
+        evicted_block_id = self._maybe_allocate_evicted_block_id()
+        if evicted_block_id is not None:
+            return evicted_block_id
+
+        # No block available in hashless allocator, nor in unused cache blocks.
+        raise BlockAllocator.NoFreeBlocksError()
+
+    def _maybe_allocate_hashless_block_id(self) -> Optional[BlockId]:
+        try:
+            block_id = self._hashless_allocator.allocate_block_id()
+            self._track_block_id(block_id, computed=False)
+        except BlockAllocator.NoFreeBlocksError:
+            return None
+
+        return block_id
+
+    def _maybe_allocate_evicted_block_id(self) -> Optional[BlockId]:
+        if self.evictor.num_blocks == 0:
+            return None
+
+        # Here we get an evicted block, which is only added
+        # into evictor if its ref counter is 0
+        # and since its content would be changed, we need
+        # to remove it from _cached_blocks's tracking list
+        block_id, content_hash_to_evict = self.evictor.evict()
+
+        # Sanity checks
+        assert content_hash_to_evict in self._cached_blocks
+        _block_id = self._cached_blocks[content_hash_to_evict]
+        assert self._refcounter.get(_block_id) == 0
+        assert _block_id == block_id
+
+        self._cached_blocks.pop(content_hash_to_evict)
+
+        self._refcounter.incr(block_id)
+        self._track_block_id(block_id, computed=False)
+
+        return block_id
+
+    def _maybe_allocate_cached_block_id(
+            self, content_hash: int) -> Optional[BlockId]:
+        cached_block_id = self._cached_blocks.get(content_hash, None)
+        if cached_block_id is None:
+            return None
+
+        self._incr_refcount_cached_block(cached_block_id)
+        return cached_block_id
+
+    def free_block_id(self, block: Block) -> None:
+        """Decrements the refcount of the block. The block may be in two 
+        possible states: (1) immutable/cached or (2) mutable/hashless. 
+        In the first case, the refcount is decremented directly and the block
+        may be possibly added to the evictor. In other case, hashless 
+        allocator free_block_id(..) is used and the block tracking is 
+        updated if necessary.
+        """
+        block_id = block.block_id
+        assert block_id is not None, "Freeing unallocated block is undefined"
+
+        if block.content_hash is not None:
+            # Immutable
+            self._decr_refcount_cached_block(block)
+        else:
+            # Mutable
+            self._decr_refcount_hashless_block(block)
+
+        assert block.block_id is None
+
+    def free(self, block: Block) -> None:
+        """Release the block (look at free_block_id(..) docs)
+        """
+        # Release the physical block index
+        self.free_block_id(block)
+        # Release the block object to the pool
+        self._block_pool.free_block(block)
 
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
@@ -387,29 +412,24 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             return True
         return False
 
-    def promote_to_immutable_block(self, block: Block) -> Optional[Block]:
+    def promote_to_immutable_block(self, block: Block) -> BlockId:
         """Once a mutable block is full, it can be promoted to an immutable
         block. This means that its content can be referenced by future blocks
         having the same prefix.
 
         Note that if we already have a cached block with the same content, we
         will replace the newly-promoted block's mapping with the existing cached
-        block.
+        block id.
 
         Args:
             block: The mutable block to be promoted.
 
         Returns:
-            BlockId: None if the block was not promoted. Otherwise, either the 
-                original block, or the cached block that points to previously 
-                cached block id (that matches the same content)
+            BlockId: Either the original block index, or the block index of
+                the previously cached block matching the same content.
         """
-        if block.content_hash is None:
-            # No promotion
-            return None
-
-        # Can promote
-
+        # Ensure block can be promoted
+        assert block.content_hash is not None
         assert block.block_id is not None
         assert self._refcounter.get(block.block_id) > 0
 
@@ -418,39 +438,25 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # (Note that this block is not computed yet =>
             #  Will be computed after free())
             self._cached_blocks[block.content_hash] = block.block_id
-            return block
+            return block.block_id
 
         # Reuse the cached content hash
-        cached_block_id = self._cached_blocks[block.content_hash]
-
-        # Store block data
-        prev_block = block.prev_block
-        # Duplicate token_ids here, since we free the block next
-        token_ids = block.token_ids[:] if block.token_ids is not None else None
-
-        # Release the hashless block
-        self._free_hashless_block(block)
-
-        # Get a new (promoted) block that will hold old block's data
-        # and point to the cached block id
-        cached_block = self._block_pool.init_block(prev_block=prev_block,
-                                                   token_ids=token_ids,
-                                                   block_size=self._block_size,
-                                                   physical_block_id=None)
-        cached_block.block_id = cached_block_id
+        self._decr_refcount_hashless_block(block)
+        block.block_id = self._cached_blocks[block.content_hash]
 
         # Increment refcount of the cached block and (possibly) restore
-        # it from the evictor
-        self._incr_refcount_cached_block(cached_block)
+        # it from the evictor.
+        # Note that in this case, the block is marked as computed
+        self._incr_refcount_cached_block(block)
 
-        return cached_block
+        return block.block_id
 
     def is_appendable(self, block: Block) -> bool:
         """Checks if the block is not shared
         """
         return self._cow_tracker.is_appendable(block)
 
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[Block]:
+    def cow_block_if_not_appendable(self, block: Block) -> BlockId:
         """Performs a copy-on-write operation on the given block if it is not
         appendable.
 
@@ -577,27 +583,37 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             blocks: List of blocks to be swapped out.
         """
         for block in blocks:
-            self.free(block)
+            self.free_block_id(block)
 
-    def swap_in(self, blocks: List[Block]) -> List[Block]:
-        """Execute the swap int actions. Change the block id from 
+    def swap_in(self, blocks: List[Block]) -> None:
+        """Execute the swap in actions. Change the block id from 
         old allocator to current allocator for each block to finish 
         the block table update. 
 
         Args:
             blocks: List of blocks to be swapped in.
         """
-        new_blocks = []
         for block in blocks:
             if block.is_full:
-                alloc = self.allocate_immutable_block(block.prev_block,
-                                                      block.token_ids)
-            else:
-                alloc = self.allocate_mutable_block(block.prev_block)
-                alloc.append_token_ids(block.token_ids)
-            new_blocks.append(alloc)
+                # When the block is full, it can be either cached or needs to be cached.
 
-        return new_blocks
+                # First try to reuse an existing cached block id
+                assert block.content_hash is not None
+                cached_block_id = self._maybe_allocate_cached_block_id(
+                    block.content_hash)
+                if cached_block_id is not None:
+                    block.block_id = cached_block_id
+                    continue
+
+                # There is no cached block id => Allocate a new block and promote current
+                # block object by caching its block id (since it is full)
+                block.block_id = self.allocate_block_id()
+                promoted_block_id = self.promote_to_immutable_block(block)
+                assert promoted_block_id == block.block_id  # Must be cached directly
+            else:
+                # When the block is not full, we simply allocate a new block
+                # (No promotion is required since tokens will be added later)
+                block.block_id = self.allocate_block_id()
 
 
 class PrefixCachingBlock(Block):
@@ -693,27 +709,28 @@ class PrefixCachingBlock(Block):
         Args:
             token_ids (List[int]): The token IDs to be appended to the block.
         """
+        # Ensure this is mutable block (not promoted)
+        assert self.content_hash is None
+        assert not self.computed
+
         if token_ids is None:
             return
 
         if len(token_ids) == 0:
             return
 
-        assert self._allocator.is_appendable(
-            self
-        ), "Block with id = {} is not appendable for token_ids = {}".format(
-            self.block_id, token_ids)
-
-        # Ensure this is mutable block (not promoted)
-        assert self.content_hash is None
-        assert not self.computed
-
         # Ensure there are input tokens
         assert token_ids, "Got token_ids = {}".format(token_ids)
 
-        # Add new tokens
+        # Naive block handles CoW.
         self._block.append_token_ids(token_ids)
         self._update_num_token_ids()
+
+        # If the content hash is present, then the block can be made immutable.
+        # Register ourselves with the allocator, potentially replacing the
+        # physical block index.
+        if self.content_hash is not None:
+            self.block_id = self._allocator.promote_to_immutable_block(self)
 
     @property
     def block_id(self) -> Optional[int]:

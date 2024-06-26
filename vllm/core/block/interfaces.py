@@ -98,6 +98,10 @@ class Block(ABC):
 class BlockAllocator(ABC):
 
     @abstractmethod
+    def allocate_block_id(self) -> BlockId:
+        pass
+
+    @abstractmethod
     def allocate_mutable_block(self, prev_block: Optional[Block]) -> Block:
         pass
 
@@ -110,6 +114,10 @@ class BlockAllocator(ABC):
     def allocate_immutable_blocks(
             self, prev_block: Optional[Block],
             block_token_ids: List[List[int]]) -> List[Block]:
+        pass
+
+    @abstractmethod
+    def free_block_id(self, block: Block) -> None:
         pass
 
     @abstractmethod
@@ -137,7 +145,7 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def swap_in(self, blocks: List[Block]) -> List[Block]:
+    def swap_in(self, blocks: List[Block]) -> None:
         pass
 
     @property
@@ -174,11 +182,11 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[Block]:
+    def cow_block_if_not_appendable(self, block: Block) -> BlockId:
         pass
 
     @abstractmethod
-    def promote_to_immutable_block(self, block: Block) -> Optional[Block]:
+    def promote_to_immutable_block(self, block: Block) -> BlockId:
         pass
 
     @abstractmethod
@@ -263,7 +271,7 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def swap(self, src_blocks: List[Block], src_device: Device,
-             dst_device: Device) -> Tuple[List[Block], Dict[int, int]]:
+             dst_device: Device) -> Dict[int, int]:
         pass
 
     @abstractmethod
@@ -280,9 +288,9 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[Block]:
+    def cow_block_if_not_appendable(self, block: Block) -> BlockId:
         pass
 
     @abstractmethod
-    def promote_to_immutable_block(self, block: Block) -> Optional[Block]:
+    def promote_to_immutable_block(self, block: Block) -> BlockId:
         pass

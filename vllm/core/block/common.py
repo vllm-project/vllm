@@ -1,4 +1,5 @@
-from typing import Dict, Iterable, List, Optional, Protocol, Tuple
+from collections import deque
+from typing import Dict, Deque, Iterable, List, Optional, Protocol, Tuple
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
@@ -114,7 +115,7 @@ class CopyOnWriteTracker:
         self._refcounter = refcounter
         self._allocator = allocator
 
-    def is_appendable(self, block: Block) -> bool:
+    def _is_appendable(self, block: Block) -> bool:
         block_id = block.block_id
         if block_id is None:
             return True
@@ -122,49 +123,42 @@ class CopyOnWriteTracker:
         refcount = self._refcounter.get(block_id)
         return refcount <= 1
 
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[Block]:
+    def cow_block_if_not_appendable(self, block: Block) -> BlockId:
         """Performs a copy-on-write operation on the given block if it is not
         appendable.
 
         This method checks the reference count of the given block. If the
         reference count is greater than 1, indicating that the block is shared,
-        a copy-on-write operation is performed. The original block is freed,
-        and a new block is allocated with the same content.
+        a copy-on-write operation is performed. The original block id is freed,
+        and a new block id is allocated (which will hold the same content)
 
         Args:
             block (Block): The block to check for copy-on-write.
 
         Returns:
-            Optional[BlockId]: The block index of the new block if a copy-on
-                -write operation was performed, or the original block index if
+            BlockId: The block index of the new block if a copy-on-write 
+                operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
-        if self.is_appendable(block):
-            return None
+        if self._is_appendable(block):
+            # No CoW needed
+            return block.block_id
 
-        # Get data from old block
-        prev_block = block.prev_block
-        old_block_id = block.block_id
-        # Duplicate token_ids here, since we free the block next
-        token_ids = block.token_ids[:] if block.token_ids is not None else None
+        # Perform CoW
+        src_block_id = block.block_id
 
-        # Mark the block as free and decrement its refcount
-        self._allocator.free(block)
+        # Decrement refcount of the source block id
+        self._allocator.free_block_id(block)
 
-        # Allocate a new block
-        new_block = self._allocator.allocate_mutable_block(
-            prev_block=prev_block)
-        # Copy the tokens to the new block
-        new_block.append_token_ids(token_ids)
+        # Allocate a new target block id
+        trg_block_id = self._allocator.allocate_block_id()
 
-        new_block_id = new_block.block_id
+        # Track src => trg block id mapping (for the CoW GPU kernel)
+        assert src_block_id is not None
+        assert trg_block_id is not None
+        self._copy_on_writes.append((src_block_id, trg_block_id))
 
-        # Track src/dst copy.
-        assert old_block_id is not None
-        assert new_block_id is not None
-        self._copy_on_writes.append((old_block_id, new_block_id))
-
-        return new_block
+        return trg_block_id
 
     def clear_cows(self) -> List[Tuple[BlockId, BlockId]]:
         """Clears the copy-on-write tracking information and returns the current
@@ -182,6 +176,73 @@ class CopyOnWriteTracker:
         cows = self._copy_on_writes
         self._copy_on_writes = []
         return cows
+
+
+class BlockPool:
+    """Used to pre-allocate block objects, in order to avoid excessive python
+    object allocations/deallocations.
+    The pool starts from "pool_size" objects and will increase to more objects
+    if necessary
+
+    Note that multiple block objects may point to the same physical block id,
+    which is why this pool is needed, so that it will be easier to support
+    prefix caching and more complicated sharing of physical blocks.
+    """
+
+    def __init__(self, block_size: int, create_block: Block.Factory,
+                 allocator: BlockAllocator, pool_size: int):
+        self._block_size = block_size
+        self._create_block = create_block
+        self._allocator = allocator
+        self._pool_size = pool_size
+        assert self._pool_size >= 0
+
+        self._free_ids: Deque[int] = deque(range(self._pool_size))
+        self._pool = []
+        for i in range(self._pool_size):
+            self._pool.append(
+                self._create_block(prev_block=None,
+                                   token_ids=None,
+                                   block_size=self._block_size,
+                                   allocator=self._allocator,
+                                   block_id=None))
+
+    def increase_pool(self):
+        cur_pool_size = self._pool_size
+        new_pool_size = cur_pool_size * 2
+        self._pool_size = new_pool_size
+
+        self._free_ids += deque(range(cur_pool_size, new_pool_size))
+
+        for i in range(cur_pool_size, new_pool_size):
+            self._pool.append(
+                self._create_block(prev_block=None,
+                                   token_ids=None,
+                                   block_size=self._block_size,
+                                   allocator=self._allocator,
+                                   block_id=None))
+
+    def init_block(self, prev_block: Optional[Block],
+                   token_ids: Optional[List[int]], block_size: int,
+                   physical_block_id: Optional[int]) -> Block:
+        if len(self._free_ids) == 0:
+            self.increase_pool()
+            assert len(self._free_ids) > 0
+
+        pool_id = self._free_ids.popleft()
+
+        block = self._pool[pool_id]
+        block.__init__(  # type: ignore[misc]
+            prev_block=prev_block,
+            token_ids=token_ids,
+            block_size=block_size,
+            allocator=block._allocator,  # type: ignore[attr-defined] 
+            block_id=physical_block_id)
+        block.pool_id = pool_id  # type: ignore[attr-defined]
+        return block
+
+    def free_block(self, block: Block) -> None:
+        self._free_ids.appendleft(block.pool_id)  # type: ignore[attr-defined]
 
 
 def get_all_blocks_recursively(last_block: Block) -> List[Block]:
