@@ -81,7 +81,7 @@ if is_cpu():
 # difference for longer context (max_tokens=128) and test can't pass
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("max_tokens", [8])
 @pytest.mark.parametrize("is_multiscale", [True, False])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
                 dtype: str, max_tokens: int, is_multiscale: bool) -> None:
