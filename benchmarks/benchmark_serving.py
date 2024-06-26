@@ -40,11 +40,12 @@ from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
 try:
-    from vllm
-  .transformers_utils.tokenizer import get_tokenizer except ImportError
-      : from backend_request_func import get_tokenizer
+    from vllm.transformers_utils.tokenizer import get_tokenizer
+except ImportError:
+    from backend_request_func import get_tokenizer
 
-        try : from vllm.utils import FlexibleArgumentParser
+try:
+    from vllm.utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
@@ -76,25 +77,25 @@ def sample_sharegpt_requests(
 ) -> List[Tuple[str, int, int]]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
-#Load the dataset.
+# Load the dataset.
     with open(dataset_path) as f:
         dataset = json.load(f)
-#Filter out the conversations with less than 2 turns.
+# Filter out the conversations with less than 2 turns.
     dataset = [data for data in dataset if len(data["conversations"]) >= 2]
-#Only keep the first two turns of each conversation.
+# Only keep the first two turns of each conversation.
     dataset = [(data["conversations"][0]["value"],
                 data["conversations"][1]["value"]) for data in dataset]
 
-#Shuffle the dataset.
+# Shuffle the dataset.
     random.shuffle(dataset)
 
-#Filter out sequences that are too long or too short
+# Filter out sequences that are too long or too short
     filtered_dataset: List[Tuple[str, int, int]] = []
     for i in range(len(dataset)):
         if len(filtered_dataset) == num_requests:
             break
 
-#Tokenize the prompts and completions.
+# Tokenize the prompts and completions.
         prompt = dataset[i][0]
         prompt_token_ids = tokenizer(prompt).input_ids
         completion = dataset[i][1]
@@ -103,10 +104,10 @@ def sample_sharegpt_requests(
         output_len = len(completion_token_ids
                          ) if fixed_output_len is None else fixed_output_len
         if prompt_len < 4 or output_len < 4:
-#Prune too short sequences.
+            # Prune too short sequences.
             continue
         if prompt_len > 1024 or prompt_len + output_len > 2048:
-#Prune too long sequences.
+            # Prune too long sequences.
             continue
         filtered_dataset.append((prompt, prompt_len, output_len))
 
@@ -125,16 +126,16 @@ def sample_sonnet_requests(
         input_len > prefix_len
     ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
 
-#Load the dataset.
+# Load the dataset.
     with open(dataset_path) as f:
         poem_lines = f.readlines()
 
-#Tokenize the poem lines.
+# Tokenize the poem lines.
     poem_token_ids = tokenizer(poem_lines).input_ids
     average_poem_len = sum(
         len(token_ids) for token_ids in poem_token_ids) / len(poem_token_ids)
 
-#Base prefix for all requests.
+# Base prefix for all requests.
     base_prompt = "Pick as many lines as you can from these poem lines:\n"
     base_message = [{
         "role": "user",
@@ -150,8 +151,8 @@ def sample_sonnet_requests(
     num_input_lines = round(
         (input_len - base_prompt_offset) / average_poem_len)
 
-#First approximately `prefix_len` number of tokens in the
-#prompt are fixed poem lines.
+# First approximately `prefix_len` number of tokens in the
+# prompt are fixed poem lines.
     assert (
         prefix_len > base_prompt_offset
     ), f"Please set 'args.sonnet-prefix-len' higher than {base_prompt_offset}."
@@ -160,7 +161,7 @@ def sample_sonnet_requests(
         (prefix_len - base_prompt_offset) / average_poem_len)
     prefix_lines = poem_lines[:num_prefix_lines]
 
-#Sample the rest of lines per request.
+# Sample the rest of lines per request.
     sampled_requests: List[Tuple[str, int, int]] = []
     for _ in range(num_requests):
         sampled_lines = "".join(
@@ -183,18 +184,19 @@ def sample_sonnet_requests(
     return sampled_requests
 
 
-def sample_random_requests(input_len,output_len,num_prompts,range_ratio, tokenizer: PreTrainedTokenizerBase):
+def sample_random_requests(input_len, output_len, num_prompts, range_ratio,
+                           tokenizer: PreTrainedTokenizerBase):
     input_lens = np.random.randint(
-            int(input_len * range_ratio),
-            input_len + 1,
-            size=num_prompts,
-        )
+        int(input_len * range_ratio),
+        input_len + 1,
+        size=num_prompts,
+    )
     output_lens = np.random.randint(
         int(output_len * range_ratio),
         output_len + 1,
-        size= num_prompts,
+        size=num_prompts,
     )
-    offsets = np.random.randint(0, tokenizer.vocab_size, size= num_prompts)
+    offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
     input_requests = []
     for i in range(args.num_prompts):
         prompt = tokenizer.decode(
@@ -203,8 +205,9 @@ def sample_random_requests(input_len,output_len,num_prompts,range_ratio, tokeniz
                 for j in range(input_lens[i])
             ]
         )
-        input_requests.append((prompt, int(input_lens[i]), int(output_lens[i])))
-    
+        input_requests.append(
+            (prompt, int(input_lens[i]), int(output_lens[i])))
+
     return input_requests
 
 
@@ -217,11 +220,11 @@ async def get_request(
         yield request
 
         if request_rate == float("inf"):
-#If the request rate is infinity, then we don't need to wait.
+            # If the request rate is infinity, then we don't need to wait.
             continue
-#Sample the request interval from the exponential distribution.
+# Sample the request interval from the exponential distribution.
         interval = np.random.exponential(1.0 / request_rate)
-#The next request will be sent after the interval.
+# The next request will be sent after the interval.
         await asyncio.sleep(interval)
 
 
@@ -239,10 +242,10 @@ def calculate_metrics(
     ttfts: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
-#We use the tokenizer to count the number of output tokens for all
-#serving backends instead of looking at len(outputs[i].itl) since
-#multiple output tokens may be bundled together
-#Note : this may inflate the output token count slightly
+            # We use the tokenizer to count the number of output tokens for all
+            # serving backends instead of looking at len(outputs[i].itl) since
+            # multiple output tokens may be bundled together
+            # Note : this may inflate the output token count slightly
             output_len = len(
                 tokenizer(outputs[i].generated_text,
                           add_special_tokens=False).input_ids)
@@ -450,7 +453,7 @@ def main(args: argparse.Namespace):
         )
 
     elif args.dataset_name == "sonnet":
-#Do not format the prompt, pass to message directly
+        # Do not format the prompt, pass to message directly
         if args.backend == "openai-chat":
             input_requests = sample_sonnet_requests(
                 dataset_path=args.dataset_path,
@@ -481,8 +484,8 @@ def main(args: argparse.Namespace):
 
     elif args.dataset_name == "random":
         input_requests = sample_random_requests(
-            input_len= args.input_len,
-            output_len= args.output_len,
+            input_len=args.input_len,
+            output_len=args.output_len,
             num_prompts=args.num_prompts,
             range_ratio=args.range_ratio,
             tokenizer=tokenizer,
@@ -504,11 +507,11 @@ def main(args: argparse.Namespace):
             disable_tqdm=args.disable_tqdm,
         ))
 
-#Save config and results to json
+# Save config and results to json
     if args.save_result:
         result_json: Dict[str, Any] = {}
 
-#Setup
+# Setup
         current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
         result_json["date"] = current_dt
         result_json["backend"] = backend
@@ -518,7 +521,7 @@ def main(args: argparse.Namespace):
         result_json["use_beam_search"] = args.use_beam_search
         result_json["num_prompts"] = args.num_prompts
 
-#Metadata
+# Metadata
         if args.metadata:
             for item in args.metadata:
                 if "=" in item:
@@ -529,16 +532,16 @@ def main(args: argparse.Namespace):
                         "Invalid metadata format. Please use KEY=VALUE format."
                     )
 
-#Traffic
+# Traffic
         result_json["request_rate"] = (
             args.request_rate if args.request_rate < float("inf") else "inf")
 
-#Merge with benchmark result
+# Merge with benchmark result
         result_json = {**result_json, **benchmark_result}
 
-#Save to file
+# Save to file
         base_model_id = model_id.split("/")[-1]
-        file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"  #noqa
+        file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"  # noqa
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:
@@ -581,7 +584,7 @@ if __name__ == "__main__":
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "sonnet","random"],
+        choices=["sharegpt", "sonnet", "random"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument("--dataset-path",
@@ -597,8 +600,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tokenizer",
         type=str,
-        help=
-        "Name or path of the tokenizer, if not using the default tokenizer.",
+        help="Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--best-of",
@@ -624,22 +626,19 @@ if __name__ == "__main__":
         "--sonnet-input-len",
         type=int,
         default=550,
-        help=
-        "Number of input tokens per request, used only for sonnet dataset.",
+        help="Number of input tokens per request, used only for sonnet dataset.",
     )
     parser.add_argument(
         "--sonnet-output-len",
         type=int,
         default=150,
-        help=
-        "Number of output tokens per request, used only for sonnet dataset.",
+        help="Number of output tokens per request, used only for sonnet dataset.",
     )
     parser.add_argument(
         "--sonnet-prefix-len",
         type=int,
         default=200,
-        help=
-        "Number of prefix tokens per request, used only for sonnet dataset.",
+        help="Number of prefix tokens per request, used only for sonnet dataset.",
     )
     parser.add_argument(
         "--request-rate",
@@ -691,11 +690,11 @@ if __name__ == "__main__":
         " format.",
     )
 
-    parser.add_argument("--random-input-len",type=int,default=1024, 
+    parser.add_argument("--random-input-len", type=int, default=1024,
                         help="random sample input length")
-    parser.add_argument("--random-output-len",type=int,default=128, 
+    parser.add_argument("--random-output-len", type=int, default=128,
                         help="random sample output length")
-    parser.add_argument("--random-range-ratio",type=float,default=1.0,
+    parser.add_argument("--random-range-ratio", type=float, default=1.0,
                         help="random sample range ratio")
 
     args = parser.parse_args()
