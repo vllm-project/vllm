@@ -60,6 +60,28 @@ struct enable_sm90_or_later : Kernel {
 };
 
 /*
+ * This class provides the common ScaleA and ScaleB descriptors for the
+ * ScaledEpilogue and ScaledEpilogueBias classes.
+ */
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueBase {
+ protected:
+  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
+
+  using ScaleA = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, float,
+      Stride<Int<1>, Int<0>, Int<0>>>;
+
+  using ScaleBDescriptor =
+      cutlass::epilogue::collective::detail::RowBroadcastDescriptor<
+          EpilogueDescriptor, float>;
+
+  using ScaleB = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
+      ScaleBDescriptor::Stages, typename EpilogueDescriptor::TileShape,
+      typename ScaleBDescriptor::Element, Stride<Int<0>, Int<1>, Int<0>>>;
+};
+
+/*
    This epilogue function defines a quantized GEMM operation similar to
    torch.scaled_mm_.
 
@@ -76,21 +98,13 @@ struct enable_sm90_or_later : Kernel {
    per row or column.
 */
 template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
-struct ScaledEpilogue {
+struct ScaledEpilogue
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
  private:
-  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
-
-  using ScaleA = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, float,
-      Stride<Int<1>, Int<0>, Int<0>>>;
-
-  using ScaleBDescriptor =
-      cutlass::epilogue::collective::detail::RowBroadcastDescriptor<
-          EpilogueDescriptor, float>;
-
-  using ScaleB = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
-      ScaleBDescriptor::Stages, typename EpilogueDescriptor::TileShape,
-      typename ScaleBDescriptor::Element, Stride<Int<0>, Int<1>, Int<0>>>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::ScaleA;
+  using ScaleB = typename SUPER::ScaleB;
 
   using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
       cutlass::multiplies, float, float,
@@ -117,6 +131,54 @@ struct ScaledEpilogue {
     ScaleB_Args b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
 
     return ArgumentType{a_args, {b_args}};
+  }
+};
+
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueBias
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::ScaleA;
+  using ScaleB = typename SUPER::ScaleB;
+
+  using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, ElementD, ElementD,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTCompute0 =
+      cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
+
+  using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiply_add, ElementD, ElementD,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using BiasDescriptor =
+      cutlass::epilogue::collective::detail::RowBroadcastDescriptor<
+          EpilogueDescriptor, ElementD>;
+
+  using Bias = cutlass::epilogue::fusion::Sm90RowBroadcast<
+      BiasDescriptor::Stages, typename EpilogueDescriptor::TileShape, ElementD,
+      Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<ElementD>, false>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<Compute1, ScaleA, EVTCompute0, Bias>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales,
+                                   torch::Tensor const& bias) {
+    using ScaleA_Args = typename ScaleA::Arguments;
+    using ScaleB_Args = typename ScaleB::Arguments;
+    using Bias_Args = typename Bias::Arguments;
+
+    ScaleA_Args a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
+    ScaleB_Args b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
+    Bias_Args bias_args{static_cast<ElementD*>(bias.data_ptr())};
+
+    return ArgumentType{a_args, {b_args}, bias_args};
   }
 };
 
@@ -440,40 +502,55 @@ void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   }
 }
 
-void cutlass_scaled_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
-                            torch::Tensor const& b,
-                            torch::Tensor const& a_scales,
-                            torch::Tensor const& b_scales) {
-  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
-  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
-
+template <template <typename, typename, typename> typename Epilogue,
+          typename... EpilogueArgs>
+void cutlass_scaled_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor const& a,
+                                     torch::Tensor const& b,
+                                     EpilogueArgs&&... epilogue_args) {
   if (a.dtype() == torch::kInt8) {
     TORCH_CHECK(b.dtype() == torch::kInt8);
 
     if (out.dtype() == torch::kBFloat16) {
       return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::bfloat16_t,
-                                             ScaledEpilogue>(
-          out, a, b, a_scales, b_scales);
+                                             Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
-      return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::half_t,
-                                             ScaledEpilogue>(
-          out, a, b, a_scales, b_scales);
+      return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::half_t, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   } else {
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
     TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
     if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_sm90_fp8_dispatch<
-          cutlass::float_e4m3_t, cutlass::bfloat16_t, ScaledEpilogue>(
-          out, a, b, a_scales, b_scales);
+      return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
+                                            cutlass::bfloat16_t, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
-                                            cutlass::half_t, ScaledEpilogue>(
-          out, a, b, a_scales, b_scales);
+                                            cutlass::half_t, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     }
+  }
+}
+
+void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
+                            torch::Tensor const& b,
+                            torch::Tensor const& a_scales,
+                            torch::Tensor const& b_scales,
+                            c10::optional<torch::Tensor> const& bias) {
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+  if (bias) {
+    TORCH_CHECK(bias->dtype() == c.dtype(),
+                "currently bias dtype must match output dtype ", c.dtype());
+    return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBias>(
+        c, a, b, a_scales, b_scales, *bias);
+  } else {
+    return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogue>(c, a, b, a_scales,
+                                                           b_scales);
   }
 }
 
