@@ -674,14 +674,14 @@ class JambaForCausalLM(nn.Module):
             self._prepare_mamba_cache()
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
-            requests_info = kwargs["requests_info"]
+            request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
             batch_size = input_ids.shape[0]
             if attn_metadata.prefill_metadata:
-                batch_size = len(requests_info)
+                batch_size = len(request_ids_to_seq_ids)
             (
                 current_seqlen_agnostic_cache,
                 indices,
-            ) = self._prepare_current_run_mamba_cache(requests_info,
+            ) = self._prepare_current_run_mamba_cache(request_ids_to_seq_ids,
                                                       batch_size)
             finished_request_ids = kwargs["finished_request_ids"]
             self._release_seqlen_agnostic_cache(finished_request_ids)
@@ -744,13 +744,12 @@ class JambaForCausalLM(nn.Module):
         return indices_for_current_run
 
     def _prepare_current_run_mamba_cache(
-        self, requests_info: List[RequestInfo], batch_size: int
+        self, request_ids_to_seq_ids: Dict[str, list[int]], batch_size: int
     ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], List[int]]:
         indices_for_current_run = []
-        for request_info in requests_info:
-            cur_rid = request_info.request_id
+        for request_id,seqs_id in request_ids_to_seq_ids.items():
             indices_for_current_run += self._assign_seq_id_to_mamba_cache(
-                cur_rid, request_info.seqs_id)
+                request_id, seqs_id)
         ## Pad the batch in case of running batch that was not captured via CG
         padded_indices = indices_for_current_run.copy()
         pad_index = self._first_free_index_in_mamba_cache()
