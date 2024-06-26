@@ -24,7 +24,7 @@ class MultiModalData:
 
     Finally, register the new plugin to
     :const:`vllm.multimodal.MULTIMODAL_REGISTRY`.
-    This enables models to call :meth:`MultiModalRegistry.register_input` for
+    This enables models to call :meth:`MultiModalRegistry.map_input` for
     the new modality.
     """
     pass
