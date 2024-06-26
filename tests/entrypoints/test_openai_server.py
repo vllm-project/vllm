@@ -1367,37 +1367,51 @@ async def test_long_seed(client: openai.AsyncOpenAI):
                 or "less_than_equal" in exc_info.value.message)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
 async def test_tokenize(server, client: openai.AsyncOpenAI, model_name: str):
+    base_url = str(client.base_url)[:-3]
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
 
     for add_special in [False, True]:
         prompt = "This is a test prompt."
         tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
 
-        response = requests.post("http://localhost:8000/tokenize",
+        response = requests.post(base_url + "/tokenize",
                                  json={
                                      "add_special_tokens": add_special,
+                                     "model": model_name,
                                      "prompt": prompt
                                  })
-        assert response.json() == {"tokens": tokens}
+        response.raise_for_status()
+        assert response.json() == {
+            "tokens": tokens,
+            "count": len(tokens),
+            "max_model_len": 8192
+        }
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
 async def test_detokenize(server, client: openai.AsyncOpenAI, model_name: str):
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+    base_url = str(client.base_url)[:-3]
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
 
     prompt = "This is a test prompt."
     tokens = tokenizer.encode(prompt, add_special_tokens=False)
 
-    response = requests.post("http://localhost:8000/detokenize",
-                             json={"tokens": tokens})
+    response = requests.post(base_url + "detokenize",
+                             json={
+                                 "model": model_name,
+                                 "tokens": tokens
+                             })
+    response.raise_for_status()
     assert response.json() == {"prompt": prompt}
 
 

@@ -94,16 +94,24 @@ async def health() -> Response:
 
 @app.post("/tokenize")
 async def tokenize(request: TokenizeRequest):
-    response = openai_serving_completion.create_tokenize(request)
-    assert isinstance(response, TokenizeResponse)
-    return JSONResponse(content=response.model_dump())
+    generator = openai_serving_completion.create_tokenize(request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        assert isinstance(generator, TokenizeResponse)
+        return JSONResponse(content=generator.model_dump())
 
 
 @app.post("/detokenize")
 async def detokenize(request: DetokenizeRequest):
-    response = openai_serving_completion.create_detokenize(request)
-    assert isinstance(response, DetokenizeResponse)
-    return JSONResponse(content=response.model_dump())
+    generator = openai_serving_completion.create_detokenize(request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        assert isinstance(generator, DetokenizeResponse)
+        return JSONResponse(content=generator.model_dump())
 
 
 @app.get("/v1/models")
