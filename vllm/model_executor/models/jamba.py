@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
-from vllm.worker.model_runner import RequestInfo
+from vllm.worker.model_runner import _BATCH_SIZES_TO_CAPTURE
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -661,7 +661,6 @@ class JambaForCausalLM(nn.Module):
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
-        self._capture = False
         self.current_indices = []
         self.mamba_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
@@ -672,7 +671,7 @@ class JambaForCausalLM(nn.Module):
                 kv_caches: List[KVCache], attn_metadata: AttentionMetadata,
                 **kwargs):
         if getattr(self, "mamba_cache", None) is None:
-            self._prepare_seqlen_agnostic_cache()
+            self._prepare_mamba_cache()
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             requests_info = kwargs["requests_info"]
@@ -824,15 +823,13 @@ class JambaForCausalLM(nn.Module):
         )
         return conv_state_shape, temporal_state_shape
 
-    def _prepare_seqlen_agnostic_cache(self):
-        # dtype = torch.get_default_dtype()
+    def _prepare_mamba_cache(self):
         dtype = self.lm_head.weight.dtype
         layers_type = self.config.layers_block_type
         mamba_layers = sum(
             [layer_type == "mamba" for layer_type in layers_type])
         num_seqlen_agnostic_layers = mamba_layers
-        # TODO: get from config
-        max_batch_size = 256
+        max_batch_size = _BATCH_SIZES_TO_CAPTURE[-1] + 10
         conv_state_shape, temporal_state_shape = self._get_mamba_cache_shape()
         assert conv_state_shape is not None and temporal_state_shape is not None
         for buffername in ["mamba_cache", "mamba_gc_cache_buffer"]:
