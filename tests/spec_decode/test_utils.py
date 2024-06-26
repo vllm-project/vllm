@@ -115,25 +115,19 @@ def test_all_non_zero_with_zero_filter(fake_sequence_group_metadata):
     assert indices == []
 
 
-@pytest.fixture
-def mock_spec_decode_sampler(request):
+def mock_spec_decode_sampler(acceptance_sampler_method):
     """
     Returns either a RejectionSampler or TypicalAcceptanceSampler
-    object depending on whether value is 'rejection_sampler' or 
-    'typical_acceptance_sampler' respectively.
+    object depending on whether acceptance_sampler_method is 
+    'rejection_sampler' or 'typical_acceptance_sampler' respectively.
     """
-
-    def create_samplers(value):
-        if value == "rejection_sampler":
-            sampler = MagicMock(spec=RejectionSampler)
-            sampler.token_id_dtype = torch.int64
-            return sampler
-        elif value == "typical_acceptance_sampler":
-            sampler = MagicMock(spec=TypicalAcceptanceSampler)
-            sampler.token_id_dtype = torch.int64
-            return sampler
-        else:
-            raise ValueError(f"Invalid sampler name {value}")
-
-    value = request.param  # Get the value passed to the fixture
-    return create_samplers(value)
+    if acceptance_sampler_method == "rejection_sampler":
+        sampler = MagicMock(spec=RejectionSampler)
+        sampler.token_id_dtype = torch.int64
+        return sampler
+    elif acceptance_sampler_method == "typical_acceptance_sampler":
+        sampler = MagicMock(spec=TypicalAcceptanceSampler)
+        sampler.token_id_dtype = torch.int64
+        return sampler
+    else:
+        raise ValueError(f"Invalid sampler name {acceptance_sampler_method}")
