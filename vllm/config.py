@@ -1,7 +1,7 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Union, Tuple
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
 
 import torch
 from transformers import PretrainedConfig
@@ -322,33 +322,30 @@ class ModelConfig:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
 
-    def contains_seqlen_agnostic_layers(self, parallel_config: "ParallelConfig") -> bool:
+    def contains_seqlen_agnostic_layers(
+            self, parallel_config: "ParallelConfig") -> bool:
         return self.get_num_seqlen_agnostic_layers(parallel_config) > 0
 
     def get_layers_block_type(self,
-        parallel_config: "ParallelConfig") -> List[str]:
+                              parallel_config: "ParallelConfig") -> List[str]:
         num_layers = self.get_num_layers(parallel_config)
         # Transformers supports layers_block_type @property
-        return getattr(
-            self.hf_config,
-            "layers_block_type",
-            ["attention"] * num_layers
-        )
+        return getattr(self.hf_config, "layers_block_type",
+                       ["attention"] * num_layers)
 
-    def get_num_attention_layers(self, parallel_config: "ParallelConfig") -> int:
-        return len([t for t in self.get_layers_block_type(
-            parallel_config
-        ) if t == "attention"])
+    def get_num_attention_layers(self,
+                                 parallel_config: "ParallelConfig") -> int:
+        return len([
+            t for t in self.get_layers_block_type(parallel_config)
+            if t == "attention"
+        ])
 
     def get_num_seqlen_agnostic_layers(
-        self,
-        parallel_config: "ParallelConfig"
-    ) -> int:
-        return len([t for t in self.get_layers_block_type(
-            parallel_config
-        ) if t != "attention"])
-
-
+            self, parallel_config: "ParallelConfig") -> int:
+        return len([
+            t for t in self.get_layers_block_type(parallel_config)
+            if t != "attention"
+        ])
 
 
 class CacheConfig:

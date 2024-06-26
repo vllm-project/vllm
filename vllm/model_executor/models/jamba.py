@@ -1,21 +1,23 @@
 # coding=utf-8
 """Inference-only Jurassic model."""
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
+from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+from mamba_ssm.ops.triton.selective_state_update import selective_state_update
 from torch import nn
+from torch.nn.parameter import Parameter
+from transformers import JambaConfig
 
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig
-from transformers import JambaConfig
-from torch.nn.parameter import Parameter
-from vllm.config import LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -24,20 +26,19 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import SamplerOutput
-from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
-from mamba_ssm.ops.triton.selective_state_update import selective_state_update
-from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from vllm.worker.model_runner import RequestInfo
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
+
 
 @dataclass
 class MambaCacheParams:
@@ -127,9 +128,12 @@ class JambaMambaMixer(nn.Module):
         )
         self.activation = config.hidden_act
 
-        self.dt_layernorm = RMSNorm(self.time_step_rank, eps=config.rms_norm_eps)
-        self.b_layernorm = RMSNorm(self.ssm_state_size, eps=config.rms_norm_eps)
-        self.c_layernorm = RMSNorm(self.ssm_state_size, eps=config.rms_norm_eps)
+        self.dt_layernorm = RMSNorm(self.time_step_rank,
+                                    eps=config.rms_norm_eps)
+        self.b_layernorm = RMSNorm(self.ssm_state_size,
+                                   eps=config.rms_norm_eps)
+        self.c_layernorm = RMSNorm(self.ssm_state_size,
+                                   eps=config.rms_norm_eps)
 
     def mamba_forward(self,
                       hidden_states: torch.Tensor,
@@ -223,36 +227,33 @@ class JambaMambaMixer(nn.Module):
     ):
         if attn_metadata.prefill_metadata is not None:
             offset = 0
-            for i,prompt_len in enumerate(attn_metadata.prefill_metadata.seq_lens):
-                cache = MambaCacheParams(
-                    True,
-                    conv_state=conv_state[i].unsqueeze(0),
-                    ssm_state=ssm_state[i].unsqueeze(0)
-                )
+            for i, prompt_len in enumerate(
+                    attn_metadata.prefill_metadata.seq_lens):
+                cache = MambaCacheParams(True,
+                                         conv_state=conv_state[i].unsqueeze(0),
+                                         ssm_state=ssm_state[i].unsqueeze(0))
                 hidden_states[offset:offset + prompt_len].copy_(
-                    self.mamba_forward(
-                        hidden_states[offset:offset + prompt_len].unsqueeze(0),
-                        cache_params=cache
-                    )[0]
-                )
+                    self.mamba_forward(hidden_states[offset:offset +
+                                                     prompt_len].unsqueeze(0),
+                                       cache_params=cache)[0])
                 offset += prompt_len
         else:
-            cache = MambaCacheParams(
-                False,
-                conv_state=conv_state,
-                ssm_state=ssm_state
-            )
-            hidden_states = self.mamba_forward(hidden_states.unsqueeze(1), cache_params=cache)
+            cache = MambaCacheParams(False,
+                                     conv_state=conv_state,
+                                     ssm_state=ssm_state)
+            hidden_states = self.mamba_forward(hidden_states.unsqueeze(1),
+                                               cache_params=cache)
             hidden_states = hidden_states.squeeze(1)
 
         return hidden_states
 
 
 class JambaMLP(nn.Module):
+
     def __init__(
-            self,
-            config: JambaConfig,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        config: JambaConfig,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         hidden_size = config.hidden_size
@@ -288,11 +289,11 @@ class JambaMoE(nn.Module):
     """
 
     def __init__(
-            self,
-            config: JambaConfig,
-            params_dtype: Optional[torch.dtype] = None,
-            tp_size: Optional[int] = None,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        config: JambaConfig,
+        params_dtype: Optional[torch.dtype] = None,
+        tp_size: Optional[int] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
@@ -384,11 +385,12 @@ class JambaMoE(nn.Module):
 
 
 class JambaMambaDecoderLayer(nn.Module):
-    def __init__(
-            self, config: JambaConfig, layer_idx: int,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None
-    ) -> None:
+
+    def __init__(self,
+                 config: JambaConfig,
+                 layer_idx: int,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.config = config
@@ -397,8 +399,10 @@ class JambaMambaDecoderLayer(nn.Module):
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
         self.feed_forward = ffn_layer_class(config, quant_config=quant_config)
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.pre_ff_layernorm = RMSNorm(config.hidden_size,
+                                        eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -419,7 +423,8 @@ class JambaMambaDecoderLayer(nn.Module):
         hidden_states = self.mamba(hidden_states, attn_metadata, conv_state,
                                    ssm_state)
         # Fully Connected
-        hidden_states, residual = self.pre_ff_layernorm(hidden_states, residual)
+        hidden_states, residual = self.pre_ff_layernorm(
+            hidden_states, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
@@ -427,9 +432,11 @@ class JambaMambaDecoderLayer(nn.Module):
 class JambaAttentionDecoderLayer(nn.Module):
 
     def __init__(
-            self, config: JambaConfig, layer_idx: int,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        config: JambaConfig,
+        layer_idx: int,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -450,7 +457,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         self.head_dim = config.hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
         self.sliding_window = config.sliding_window
 
         self.qkv_proj = QKVParallelLinear(
@@ -478,8 +485,10 @@ class JambaAttentionDecoderLayer(nn.Module):
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
         self.feed_forward = ffn_layer_class(config, quant_config=quant_config)
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.pre_ff_layernorm = RMSNorm(config.hidden_size,
+                                        eps=config.rms_norm_eps)
 
     def self_attention(
         self,
@@ -518,12 +527,16 @@ class JambaAttentionDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
         )
         # Fully Connected
-        hidden_states, residual = self.pre_ff_layernorm(hidden_states, residual)
+        hidden_states, residual = self.pre_ff_layernorm(
+            hidden_states, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
 
-ALL_DECODER_LAYER_TYPES = {"attention": JambaAttentionDecoderLayer, "mamba": JambaMambaDecoderLayer}
+ALL_DECODER_LAYER_TYPES = {
+    "attention": JambaAttentionDecoderLayer,
+    "mamba": JambaMambaDecoderLayer
+}
 
 
 class JambaModel(nn.Module):
@@ -552,11 +565,14 @@ class JambaModel(nn.Module):
         decoder_layers = []
         for i in range(config.num_hidden_layers):
             layer_class = ALL_DECODER_LAYER_TYPES[config.layers_block_type[i]]
-            decoder_layers.append(layer_class(config, layer_idx=i,
-                                              cache_config=cache_config,
-                                              quant_config=quant_config))
+            decoder_layers.append(
+                layer_class(config,
+                            layer_idx=i,
+                            cache_config=cache_config,
+                            quant_config=quant_config))
         self.layers = nn.ModuleList(decoder_layers)
-        self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.final_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -579,7 +595,9 @@ class JambaModel(nn.Module):
                 kv_cache = kv_caches[(i - self.config.attn_layer_offset) //
                                      self.config.attn_layer_period]
             if isinstance(layer, JambaMambaDecoderLayer):
-                current_state_layer = i - (1 + (i - self.config.attn_layer_offset) // self.config.attn_layer_period)
+                current_state_layer = i - (1 +
+                                           (i - self.config.attn_layer_offset)
+                                           // self.config.attn_layer_period)
                 current_ssm_state = ssm_state[current_state_layer]
                 current_conv_state = conv_state[current_state_layer]
 
@@ -627,12 +645,10 @@ class JambaForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        self.model = JambaModel(
-            config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            lora_config=lora_config
-        )
+        self.model = JambaModel(config,
+                                cache_config=cache_config,
+                                quant_config=quant_config,
+                                lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -647,34 +663,27 @@ class JambaForCausalLM(nn.Module):
         )
         self._capture = False
         self.current_indices = []
-        self.seqlen_agnostic_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
+        self.mamba_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        attn_metadata: AttentionMetadata,
-        **kwargs
-    ):
-        if getattr(self, "seqlen_agnostic_cache", None) is None:
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+                kv_caches: List[KVCache], attn_metadata: AttentionMetadata,
+                **kwargs):
+        if getattr(self, "mamba_cache", None) is None:
             self._prepare_seqlen_agnostic_cache()
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             requests_info = kwargs["requests_info"]
             batch_size = input_ids.shape[0]
             if attn_metadata.prefill_metadata:
-                 batch_size = len(requests_info)
+                batch_size = len(requests_info)
             (
                 current_seqlen_agnostic_cache,
                 indices,
-            ) = self._prepare_current_run_seqlen_agnostic_cache(
-                requests_info,
-                batch_size
-            )
+            ) = self._prepare_current_run_mamba_cache(requests_info,
+                                                      batch_size)
             finished_request_ids = kwargs["finished_request_ids"]
             self._release_seqlen_agnostic_cache(finished_request_ids)
         else:
@@ -685,85 +694,75 @@ class JambaForCausalLM(nn.Module):
             )
         self.current_indices = indices
 
-        hidden_states = self.model(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-            current_seqlen_agnostic_cache[0],
-            current_seqlen_agnostic_cache[1]
-        )
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata,
+                                   current_seqlen_agnostic_cache[0],
+                                   current_seqlen_agnostic_cache[1])
         if "seqlen_agnostic_capture_inputs" not in kwargs:
-            self._copy_seqlen_agnostic_cache_by_indices(self.current_indices, current_seqlen_agnostic_cache)
+            self._copy_mamba_cache_by_indices(self.current_indices,
+                                              current_seqlen_agnostic_cache)
 
         return hidden_states
 
-
-    def _copy_seqlen_agnostic_cache_by_indices(self, indices, current_seqlen_agnostic_cache):
+    def _copy_mamba_cache_by_indices(self, indices,
+                                     current_seqlen_agnostic_cache):
         for i, offset in enumerate(indices):
-            self._copy_seqlen_agnostic_cache(offset, i, current_seqlen_agnostic_cache)
+            self._copy_mamba_cache(offset, i, current_seqlen_agnostic_cache)
 
+    def _copy_mamba_cache(self, index_to, index_from, from_buffer):
+        assert self.mamba_cache is not None
+        for i in [0, 1]:
+            self.mamba_cache[i][:, index_to].copy_(from_buffer[i][:,
+                                                                  index_from],
+                                                   non_blocking=True)
 
-    def _copy_seqlen_agnostic_cache(self, index_to, index_from, from_buffer):
-        assert self.seqlen_agnostic_cache is not None
-        for i in [0,1]:
-            self.seqlen_agnostic_cache[i][:,index_to].copy_(from_buffer[i][:,index_from],non_blocking=True)
-
-
-    def _assign_seq_id_to_seqlen_agnostic_cache(
-        self,
-        cur_rid: str,
-        seqs_id: List[int]
-    ) -> List[int]:
+    def _assign_seq_id_to_mamba_cache(self, cur_rid: str,
+                                      seqs_id: List[int]) -> List[int]:
         indices_for_current_run = []
         for seq_id in seqs_id:
-            if cur_rid not in self.seqlen_agnostic_cache_indices_mapping:
-                self.seqlen_agnostic_cache_indices_mapping[cur_rid] = {}
-                first_free_index = self._first_free_index_in_seqlen_agnostic_cache()
-                self.seqlen_agnostic_cache_indices_mapping[cur_rid][seq_id] = first_free_index
+            if cur_rid not in self.mamba_cache_indices_mapping:
+                self.mamba_cache_indices_mapping[cur_rid] = {}
+                first_free_index = self._first_free_index_in_mamba_cache()
+                self.mamba_cache_indices_mapping[cur_rid][
+                    seq_id] = first_free_index
                 index_for_current_run = first_free_index
             ## case of decoding n>1, copy prefill cache to decoding indices
-            elif seq_id not in (seq_ids2indices := self.seqlen_agnostic_cache_indices_mapping[cur_rid]):
-                first_free_index = self._first_free_index_in_seqlen_agnostic_cache()
+            elif seq_id not in (seq_ids2indices :=
+                                self.mamba_cache_indices_mapping[cur_rid]):
+                first_free_index = self._first_free_index_in_mamba_cache()
                 index_exist = list(seq_ids2indices.values())[0]
-                self._copy_seqlen_agnostic_cache(
-                    index_from=index_exist,
-                    index_to=first_free_index,
-                    from_buffer=self.seqlen_agnostic_cache
-                )
-                self.seqlen_agnostic_cache_indices_mapping[cur_rid][seq_id] = first_free_index
+                self._copy_mamba_cache(index_from=index_exist,
+                                       index_to=first_free_index,
+                                       from_buffer=self.mamba_cache)
+                self.mamba_cache_indices_mapping[cur_rid][
+                    seq_id] = first_free_index
                 index_for_current_run = first_free_index
             else:
-                index_for_current_run = self.seqlen_agnostic_cache_indices_mapping[cur_rid][seq_id]
+                index_for_current_run = self.mamba_cache_indices_mapping[
+                    cur_rid][seq_id]
 
             indices_for_current_run.append(index_for_current_run)
         return indices_for_current_run
 
-
-    def _prepare_current_run_seqlen_agnostic_cache(
-        self,
-        requests_info: List[RequestInfo],
-        batch_size: int
-    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor] ,List[int]]:
+    def _prepare_current_run_mamba_cache(
+        self, requests_info: List[RequestInfo], batch_size: int
+    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], List[int]]:
         indices_for_current_run = []
         for request_info in requests_info:
             cur_rid = request_info.request_id
-            indices_for_current_run += self._assign_seq_id_to_seqlen_agnostic_cache(
-                cur_rid,
-                request_info.seqs_id
-            )
+            indices_for_current_run += self._assign_seq_id_to_mamba_cache(
+                cur_rid, request_info.seqs_id)
         ## Pad the batch in case of running batch that was not captured via CG
         padded_indices = indices_for_current_run.copy()
-        pad_index = self._first_free_index_in_seqlen_agnostic_cache()
+        pad_index = self._first_free_index_in_mamba_cache()
 
         for _ in range(batch_size - len(indices_for_current_run)):
             padded_indices.append(pad_index)
 
-        conv_state = self.seqlen_agnostic_cache[0][:,padded_indices]
-        temporal_state = self.seqlen_agnostic_cache[1][:,padded_indices]
+        conv_state = self.mamba_cache[0][:, padded_indices]
+        temporal_state = self.mamba_cache[1][:, padded_indices]
 
         return (conv_state, temporal_state), indices_for_current_run
-
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         requests_info = kwargs["requests_info"]
@@ -771,43 +770,38 @@ class JambaForCausalLM(nn.Module):
         (
             current_seqlen_agnostic_cache,
             indices,
-        ) = self._prepare_current_run_seqlen_agnostic_cache(requests_info, batch_size)
+        ) = self._prepare_current_run_mamba_cache(requests_info, batch_size)
         self.current_indices = indices
 
         finished_request_ids = kwargs["finished_request_ids"]
         self._release_seqlen_agnostic_cache(finished_request_ids)
 
-        for i in [0,1]:
+        for i in [0, 1]:
             input_buffers["seqlen_agnostic_capture_inputs"][i].copy_(
-                current_seqlen_agnostic_cache[i],
-                non_blocking=True
-            )
-
+                current_seqlen_agnostic_cache[i], non_blocking=True)
 
     def copy_outputs_after_cuda_graphs(self, input_buffers, **kwargs):
-        self._copy_seqlen_agnostic_cache_by_indices(
+        self._copy_mamba_cache_by_indices(
             self.current_indices,
-            input_buffers["seqlen_agnostic_capture_inputs"]
-        )
+            input_buffers["seqlen_agnostic_capture_inputs"])
 
-    def get_seqlen_agnostic_capture_inputs(self,batch_size):
+    def get_seqlen_agnostic_capture_inputs(self, batch_size):
         return (
-            self.seqlen_agnostic_gc_cache_buffer[0][:, :batch_size],
-            self.seqlen_agnostic_gc_cache_buffer[1][:, :batch_size],
+            self.mamba_gc_cache_buffer[0][:, :batch_size],
+            self.mamba_gc_cache_buffer[1][:, :batch_size],
         )
 
-
-    def _release_seqlen_agnostic_cache(self, finished_seq_groups_req_ids: List[str]):
+    def _release_seqlen_agnostic_cache(self,
+                                       finished_seq_groups_req_ids: List[str]):
         for req_id in finished_seq_groups_req_ids:
-            if req_id in self.seqlen_agnostic_cache_indices_mapping:
-                self.seqlen_agnostic_cache_indices_mapping.pop(req_id)
+            if req_id in self.mamba_cache_indices_mapping:
+                self.mamba_cache_indices_mapping.pop(req_id)
 
-
-    def _first_free_index_in_seqlen_agnostic_cache(self) -> int:
-        if self.seqlen_agnostic_cache is not None:
-            max_possible_bs = self.seqlen_agnostic_cache[0].shape[1]
+    def _first_free_index_in_mamba_cache(self) -> int:
+        if self.mamba_cache is not None:
+            max_possible_bs = self.mamba_cache[0].shape[1]
             occupied = [
-                id for seq_ids in self.seqlen_agnostic_cache_indices_mapping.values()
+                id for seq_ids in self.mamba_cache_indices_mapping.values()
                 for id in seq_ids.values()
             ]
             first_free_index = [
@@ -816,9 +810,8 @@ class JambaForCausalLM(nn.Module):
             return first_free_index
         return 0
 
-    def _get_seqlen_agnostic_cache_shape(
-        self,
-        ) -> Tuple[Optional[Tuple[int,int]],Optional[Tuple[int,int]]]:
+    def _get_mamba_cache_shape(
+        self, ) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = self.config.hidden_size
         conv_state_shape = (
@@ -829,36 +822,31 @@ class JambaForCausalLM(nn.Module):
             self.config.mamba_expand * self.config.hidden_size // world_size,
             self.config.mamba_d_state,
         )
-
         return conv_state_shape, temporal_state_shape
-
 
     def _prepare_seqlen_agnostic_cache(self):
         # dtype = torch.get_default_dtype()
         dtype = self.lm_head.weight.dtype
         layers_type = self.config.layers_block_type
-        mamba_layers = sum([layer_type == "mamba" for layer_type in layers_type])
+        mamba_layers = sum(
+            [layer_type == "mamba" for layer_type in layers_type])
         num_seqlen_agnostic_layers = mamba_layers
         # TODO: get from config
         max_batch_size = 256
-        conv_state_shape, temporal_state_shape = self._get_seqlen_agnostic_cache_shape()
+        conv_state_shape, temporal_state_shape = self._get_mamba_cache_shape()
         assert conv_state_shape is not None and temporal_state_shape is not None
-        for buffername in [
-            "seqlen_agnostic_cache",
-            "seqlen_agnostic_gc_cache_buffer",
-        ]:
-            buffer = (
-                torch.empty(
-                size=(num_seqlen_agnostic_layers,max_batch_size)
-                        + conv_state_shape, dtype=dtype,
+        for buffername in ["mamba_cache", "mamba_gc_cache_buffer"]:
+            buffer = (torch.empty(
+                size=(num_seqlen_agnostic_layers, max_batch_size) +
+                conv_state_shape,
+                dtype=dtype,
                 device="cuda"),
-                torch.empty(
-                size=(num_seqlen_agnostic_layers,max_batch_size) +
-                        temporal_state_shape, dtype=dtype,
-                device="cuda")
-            )
-            setattr(self,buffername, buffer)
-
+                      torch.empty(
+                          size=(num_seqlen_agnostic_layers, max_batch_size) +
+                          temporal_state_shape,
+                          dtype=dtype,
+                          device="cuda"))
+            setattr(self, buffername, buffer)
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
@@ -874,7 +862,7 @@ class JambaForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights( self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),

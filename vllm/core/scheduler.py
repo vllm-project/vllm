@@ -373,7 +373,7 @@ class Scheduler:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
     def flush_last_step_finished_req_ids(self) -> List[str]:
-        """Flushs the list of request ids of previously finished seq_groups."""
+        """Flushes the list of request ids of previously finished seq_groups."""
         finished_request_ids = self.previously_finished_request_id
         self.previously_finished_request_id = []
         return finished_request_ids
@@ -1021,10 +1021,12 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
-        self.previously_finished_request_id += [seq_group.request_id for seq_group in self.running
-                                     if seq_group.is_finished()]
+        self.previously_finished_request_id += [
+            seq_group.request_id for seq_group in self.running
+            if seq_group.is_finished()
+        ]
         self.running = deque(seq_group for seq_group in self.running
-                                     if not seq_group.is_finished())
+                             if not seq_group.is_finished())
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)

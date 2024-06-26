@@ -13,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
-from vllm.worker.model_runner import BatchType, ModelRunner
+from vllm.worker.model_runner import BatchType, ModelRunner, RequestInfo
 
 logger = init_logger(__name__)
 
@@ -52,8 +52,8 @@ class EmbeddingModelRunner(ModelRunner):
         finished_request_ids: Optional[List[str]] = None
     ) -> Optional[PoolerOutput]:
         (input_tokens, input_positions, attn_metadata, pooling_metadata,
-         lora_requests, lora_mapping, multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+         lora_requests, lora_mapping, multi_modal_input,
+         _) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -87,7 +87,8 @@ class EmbeddingModelRunner(ModelRunner):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
-               Set[LoRARequest], LoRAMapping, torch.Tensor]:
+               Set[LoRARequest], LoRAMapping, torch.Tensor,
+               Optional[List[RequestInfo]]]:
         if self.is_driver_worker:
             prefill_reqs = []
             decode_reqs = []
@@ -239,7 +240,7 @@ class EmbeddingModelRunner(ModelRunner):
         )
 
         return (input_tokens, input_positions, attn_metadata, pooling_metadata,
-                lora_requests, lora_mapping, multi_modal_input)
+                lora_requests, lora_mapping, multi_modal_input, None)
 
     def _prepare_pooling(
         self,

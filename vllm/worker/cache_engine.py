@@ -30,7 +30,8 @@ class CacheEngine:
         self.parallel_config = parallel_config
 
         self.head_size = model_config.get_head_size()
-        self.num_layers = model_config.get_num_attention_layers(parallel_config)
+        self.num_layers = model_config.get_num_attention_layers(
+            parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
 
         self.block_size = cache_config.block_size

@@ -1,5 +1,5 @@
-from dataclasses import dataclass
 import time
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
@@ -36,6 +36,7 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
+
 
 @dataclass
 class RequestInfo:
@@ -139,7 +140,8 @@ class ModelRunner:
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
 
-        self.contains_seqlen_agnostic_layers = self.model_config.contains_seqlen_agnostic_layers(parallel_config)
+        self.has_seqlen_agnostic = model_config.contains_seqlen_agnostic_layers(
+            parallel_config)
 
         # When using CUDA graph, the input block tables must be padded to
         # max_seq_len_to_capture. However, creating the block table in
@@ -166,7 +168,6 @@ class ModelRunner:
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
-
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -625,7 +626,8 @@ class ModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, torch.Tensor, List[RequestInfo]]:
+               Set[LoRARequest], LoRAMapping, torch.Tensor,
+               Optional[List[RequestInfo]]]:
         if self.is_driver_worker:
             prefill_reqs = []
             decode_reqs = []
@@ -821,10 +823,12 @@ class ModelRunner:
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
-        if self.contains_seqlen_agnostic_layers:
+        if self.has_seqlen_agnostic:
             execute_model_kwargs.update({
-                "requests_info": requests_info,
-                "finished_request_ids": finished_request_ids,
+                "requests_info":
+                requests_info,
+                "finished_request_ids":
+                finished_request_ids,
             })
         hidden_states = model_executable(**execute_model_kwargs)
 
@@ -908,7 +912,7 @@ class ModelRunner:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
         finished_request_ids = [seq.request_id for seq in seqs]
-        self.execute_model(seqs, kv_caches,finished_request_ids)
+        self.execute_model(seqs, kv_caches, finished_request_ids)
         torch.cuda.synchronize()
         return
 
@@ -1020,9 +1024,12 @@ class ModelRunner:
                     "attn_metadata": attn_metadata,
                     "memory_pool": self.graph_memory_pool,
                 }
-                if self.contains_seqlen_agnostic_layers:
-                    capture_inputs.update({"seqlen_agnostic_capture_inputs": self.model.get_seqlen_agnostic_capture_inputs(batch_size)}
-                    )
+                if self.has_seqlen_agnostic:
+                    capture_inputs.update({
+                        "seqlen_agnostic_capture_inputs":
+                        self.model.get_seqlen_agnostic_capture_inputs(
+                            batch_size)
+                    })
                 graph_runner.capture(**capture_inputs)
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[batch_size] = graph_runner
@@ -1133,18 +1140,14 @@ class CUDAGraphRunner:
         self.input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
-            self.model.copy_inputs_before_cuda_graphs(
-                self.input_buffers,
-                **kwargs
-            )
+            self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
+                                                      **kwargs)
 
         # Run the graph.
         self.graph.replay()
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
-            self.model.copy_outputs_after_cuda_graphs(
-                self.input_buffers,
-                **kwargs
-            )
+            self.model.copy_outputs_after_cuda_graphs(self.input_buffers,
+                                                      **kwargs)
         # Return the output tensor.
         return self.output_buffers["hidden_states"]
 
