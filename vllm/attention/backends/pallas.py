@@ -28,27 +28,37 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         return (num_kv_heads, num_blocks, block_size, head_size)
 
+    @torch.compile(backend="openxla")
     @staticmethod
     def swap_blocks(
         src_kv_cache: Tuple[torch.Tensor, torch.Tensor],
         dst_kv_cache: Tuple[torch.Tensor, torch.Tensor],
-        src_to_dst: torch.Tensor,
+        src_to_dst: Tuple[torch.Tensor, torch.Tensor],
     ) -> None:
-        raise NotImplementedError("swap_blocks is not implemented.")
+        src_k_cache, src_v_cache = src_kv_cache
+        dst_k_cache, dst_v_cache = dst_kv_cache
+        torch.ops.xla.dynamo_set_buffer_donor_(dst_k_cache, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(dst_v_cache, True)
+
+        dst_device = dst_k_cache.device
+        src_indices, dst_indices = src_to_dst
+        k_blocks = src_k_cache[:, src_indices].to(dst_device)
+        dst_k_cache[:, dst_indices] = k_blocks
+        v_blocks = src_v_cache[:, src_indices].to(dst_device)
+        dst_v_cache[:, src_indices] = v_blocks
 
     @torch.compile(backend="openxla")
     @staticmethod
     def copy_blocks(
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        src_to_dsts: torch.Tensor,
+        src_to_dists: Tuple[torch.Tensor, torch.Tensor],
     ) -> None:
-        src = src_to_dsts[:, 0]
-        dst = src_to_dsts[:, 1]
+        src_indices, dst_indices = src_to_dists
         for k_cache, v_cache in kv_caches:
             torch.ops.xla.dynamo_set_buffer_donor_(k_cache, True)
-            k_cache[:, dst] = k_cache[:, src]
+            k_cache[:, dst_indices] = k_cache[:, src_indices]
             torch.ops.xla.dynamo_set_buffer_donor_(v_cache, True)
-            v_cache[:, dst] = v_cache[:, src]
+            v_cache[:, dst_indices] = v_cache[:, src_indices]
 
 
 @dataclass

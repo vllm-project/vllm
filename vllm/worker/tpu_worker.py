@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch_xla.core.xla_model as xm
@@ -211,25 +211,25 @@ class TPUWorker(LoraNotSupportedWorkerBase):
     ) -> None:
         attn_backend = self.model_runner.attn_backend
         num_layers = self.model_config.get_num_layers(self.parallel_config)
+
         if blocks_to_swap_in:
-            blocks_to_swap_in = torch.tensor(blocks_to_swap_in,
-                                             device="cpu",
-                                             dtype=torch.int64).view(-1, 2)
+            # Swap from CPU to TPU.
+            src_to_dst = _make_src_to_dst(blocks_to_swap_in, "cpu",
+                                          self.device)
             for i in range(num_layers):
                 attn_backend.swap_blocks(self.cpu_cache[i], self.tpu_cache[i],
-                                         blocks_to_swap_in)
+                                         src_to_dst)
         if blocks_to_swap_out:
-            blocks_to_swap_out = torch.tensor(blocks_to_swap_out,
-                                              device="cpu",
-                                              dtype=torch.int64).view(-1, 2)
+            # Swap from TPU to CPU.
+            src_to_dst = _make_src_to_dst(blocks_to_swap_out, self.device,
+                                          "cpu")
             for i in range(num_layers):
-                attn_backend.swap_blocks(self.tpu_cache[i], self.cpu_cache[i],
-                                         blocks_to_swap_out)
+                attn_backend.swap_blocks(self.cpu_cache[i], self.tpu_cache[i],
+                                         src_to_dst)
         if blocks_to_copy:
-            blocks_to_copy = torch.tensor(blocks_to_copy,
-                                          device=self.device,
-                                          dtype=torch.int64).view(-1, 2)
-            attn_backend.copy_blocks(self.tpu_cache, blocks_to_copy)
+            src_to_dst = _make_src_to_dst(blocks_to_copy, self.device,
+                                          self.device)
+            attn_backend.copy_blocks(self.tpu_cache, src_to_dst)
 
     def start_worker_execution_loop(self) -> None:
         while self._execute_model_non_driver():
@@ -238,3 +238,19 @@ class TPUWorker(LoraNotSupportedWorkerBase):
     def _execute_model_non_driver(self) -> bool:
         self.model_runner.execute_model(None, self.tpu_cache)
         return True
+
+
+def _make_src_to_dst(
+    mapping: List[Tuple[int, int]],
+    src_device: Union[torch.device, str],
+    dst_device: Union[torch.device, str],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    src_indices = [i for i, _ in mapping]
+    dst_indices = [i for _, i in mapping]
+    src_indices = torch.tensor(src_indices,
+                               device=src_device,
+                               dtype=torch.int64)
+    dst_indices = torch.tensor(dst_indices,
+                               device=dst_device,
+                               dtype=torch.int64)
+    return src_indices, dst_indices
