@@ -1159,8 +1159,6 @@ class LoRAConfig:
 class VisionLanguageConfig:
     """Configs the input data format and how models should run for
     vision language models."""
-
-    image_input_type: None
     # The input id corresponding to image token.
     image_token_id: int
     # Used for running `run_prefill_max_token`.
@@ -1186,8 +1184,6 @@ class VisionLanguageConfig:
         """
         result: Dict[str, Any] = {}
         for f in fields(self):
-            if f.name == "image_input_type":
-                continue
             value = getattr(self, f.name)
             if isinstance(value, enum.Enum):
                 result[f.name] = value.name.lower()

@@ -718,7 +718,6 @@ class EngineArgs:
                     '`image_feature_size` together with `image_token_id`.')
 
             vision_language_config = VisionLanguageConfig(
-                image_input_type=None,
                 image_token_id=self.image_token_id,
                 image_input_shape=str_to_int_tuple(self.image_input_shape),
                 image_feature_size=self.image_feature_size,

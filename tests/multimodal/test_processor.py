@@ -27,7 +27,6 @@ def test_clip_image_processor(image_assets, dtype):
         revision=None,
     )
     vlm_config = VisionLanguageConfig(
-        image_input_type=None,
         image_token_id=32000,
         image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
         image_feature_size=576,
@@ -73,8 +72,7 @@ def test_llava_next_image_processor(image_assets, dtype):
         dtype=dtype,
         revision=None,
     )
-    vlm_config = VisionLanguageConfig(image_input_type=None,
-                                      image_token_id=64000,
+    vlm_config = VisionLanguageConfig(image_token_id=64000,
                                       image_input_shape=(1, 3, IMAGE_HEIGHT,
                                                          IMAGE_WIDTH),
                                       image_feature_size=2928)
@@ -115,8 +113,7 @@ def test_image_pixel_types(image_assets, dtype):
         dtype=dtype,
         revision=None,
     )
-    vlm_config = VisionLanguageConfig(image_input_type=None,
-                                      image_token_id=32000,
+    vlm_config = VisionLanguageConfig(image_token_id=32000,
                                       image_input_shape=(1, 3, IMAGE_HEIGHT,
                                                          IMAGE_WIDTH),
                                       image_feature_size=576)

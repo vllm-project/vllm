@@ -35,7 +35,6 @@ def iter_llava_next_configs(model_name: str):
         input_shape = (1, 3, h, w)
         yield (model_name,
                VisionLanguageConfig(
-                   image_input_type=None,
                    image_feature_size=f,
                    image_token_id=32000,
                    image_input_shape=input_shape,

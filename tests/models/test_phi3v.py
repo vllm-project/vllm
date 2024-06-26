@@ -28,8 +28,7 @@ def iter_phi3v_configs(model_name: str):
     for (h, w), f in image_hw_to_feature_size.items():
         input_shape = (1, 3, h, w)
         yield (model_name,
-               VisionLanguageConfig(image_input_type=None,
-                                    image_feature_size=f,
+               VisionLanguageConfig(image_feature_size=f,
                                     image_token_id=32044,
                                     image_input_shape=input_shape))
 
