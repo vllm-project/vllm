@@ -832,6 +832,7 @@ class HabanaModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
+        warmup_mode=False,
     ) -> Optional[SamplerOutput]:
         if self.is_driver_worker:
             event_start = self.profiler.get_timestamp_us()
@@ -872,7 +873,7 @@ class HabanaModelRunner:
         else:
             model_event_name = 'model_executable'
         with self.profiler.record_event('internal', model_event_name):
-            hidden_states = self.model.forward(**execute_model_kwargs, selected_token_indices=sampling_metadata.selected_token_indices, bypass_hpu_graphs=not use_graphs)
+            hidden_states = self.model.forward(**execute_model_kwargs, selected_token_indices=sampling_metadata.selected_token_indices, bypass_hpu_graphs=not use_graphs, warmup_mode=warmup_mode)
 
         # Compute the logits.
         with self.profiler.record_event('internal', f'compute_logits_{"prompt" if is_prompt else "decode"}_bs{batch_size}_seq{seq_len}'):
@@ -949,7 +950,7 @@ class HabanaModelRunner:
         seqs = [self.create_dummy_seq_group_metadata(i, seq_len, is_prompt) for i in range(batch_size)]
         torch.hpu.synchronize()
         for _ in range(times):
-            self.execute_model(seqs, kv_caches)
+            self.execute_model(seqs, kv_caches, warmup_mode=True)
             torch.hpu.synchronize()
         self.profiler.end()
         gc.collect()
