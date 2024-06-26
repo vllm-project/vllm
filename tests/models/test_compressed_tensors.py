@@ -19,8 +19,9 @@ MAX_TOKENS = 32
 NUM_LOGPROBS = 5
 
 
-@pytest.mark.skipif(not is_quant_method_supported("compressed-tensors"),
-                    reason="compressed-tensors is not supported on this machine type.")
+@pytest.mark.skipif(
+    not is_quant_method_supported("compressed-tensors"),
+    reason="compressed-tensors is not supported on this machine type.")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(
     vllm_runner,
