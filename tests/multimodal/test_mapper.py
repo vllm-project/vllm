@@ -5,12 +5,14 @@ from transformers import CLIPImageProcessor, LlavaNextImageProcessor
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import ImagePixelData
+from vllm.multimodal.utils import rescale_image_size
 
 from ..conftest import _STR_DTYPE_TO_TORCH_DTYPE
 
 
 @pytest.mark.parametrize("dtype", ["half", "float"])
-def test_clip_image_processor(hf_images, dtype):
+@pytest.mark.parametrize("size_factor", [0.25, 0.5, 1.0])
+def test_clip_image_processor(hf_images, dtype, size_factor):
     MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
     IMAGE_HEIGHT = IMAGE_WIDTH = 560
 
@@ -36,6 +38,8 @@ def test_clip_image_processor(hf_images, dtype):
     )
 
     for image in hf_images:
+        image = rescale_image_size(image, size_factor)
+
         hf_result = hf_processor.preprocess(
             image,
             return_tensors="pt",
@@ -55,7 +59,8 @@ def test_clip_image_processor(hf_images, dtype):
 
 
 @pytest.mark.parametrize("dtype", ["half", "float"])
-def test_llava_next_image_processor(hf_images, dtype):
+@pytest.mark.parametrize("size_factor", [0.25, 0.5, 1.0])
+def test_llava_next_image_processor(hf_images, dtype, size_factor):
     MODEL_NAME = "llava-hf/llava-v1.6-vicuna-7b-hf"
     IMAGE_HEIGHT = IMAGE_WIDTH = 560
 
@@ -81,6 +86,8 @@ def test_llava_next_image_processor(hf_images, dtype):
     )
 
     for image in hf_images:
+        image = rescale_image_size(image, size_factor)
+
         hf_result = hf_processor.preprocess(
             image,
             return_tensors="pt",

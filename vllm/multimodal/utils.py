@@ -75,7 +75,8 @@ def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     return Image.open(BytesIO(base64.b64decode(image)))
 
 
-def rescale_image(image: Image.Image, factor: float) -> Image.Image:
-    new_width = int(image.width * factor)
-    new_height = int(image.height * factor)
+def rescale_image_size(image: Image.Image, size_factor: float) -> Image.Image:
+    """Rescale the dimensions of an image by a constant factor."""
+    new_width = int(image.width * size_factor)
+    new_height = int(image.height * size_factor)
     return image.resize((new_width, new_height))

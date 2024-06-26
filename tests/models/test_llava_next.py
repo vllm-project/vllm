@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
 from vllm.multimodal.image import ImagePixelData
-from vllm.multimodal.utils import rescale_image
+from vllm.multimodal.utils import rescale_image_size
 
 from ..conftest import IMAGE_FILES
 
@@ -93,16 +93,16 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     """
     model_id, vlm_config = model_and_config
 
-    combinations = [
-        (rescale_image(hf_image, image_scale),
-         ImagePixelData(image=rescale_image(vllm_image.image, image_scale)),
+    image_inputs = [
+        (rescale_image_size(hf_image, factor),
+         ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
          prompt) for hf_image, vllm_image, prompt in zip(
              hf_images, vllm_images, HF_IMAGE_PROMPTS)
-        for image_scale in ((0.25, 0.5, 1.0) if is_multiscale else (1, ))
+        for factor in ((0.25, 0.5, 1.0) if is_multiscale else (1, ))
     ]
-    prompt_inputs = [prompt for _, _, prompt in combinations]
-    hf_image_inputs = [hf_image for hf_image, _, _ in combinations]
-    vllm_image_inputs = [vllm_image for _, vllm_image, _ in combinations]
+    prompt_inputs = [prompt for _, _, prompt in image_inputs]
+    hf_image_inputs = [hf_image for hf_image, _, _ in image_inputs]
+    vllm_image_inputs = [vllm_image for _, vllm_image, _ in image_inputs]
 
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
         hf_outputs = hf_model.generate_greedy(prompt_inputs,
@@ -121,7 +121,7 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
                                                   max_tokens,
                                                   images=vllm_image_inputs)
 
-    for i in range(len(combinations)):
+    for i in range(len(image_inputs)):
         try:
             hf_output_ids, hf_output_str = hf_outputs[i]
             vllm_output_ids, vllm_output_str = vllm_to_hf_output(
@@ -131,5 +131,5 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
             assert hf_output_ids == vllm_output_ids, (
                 f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
         except Exception as e:
-            msg = f"Wrong output for combination {combinations[i]}"
+            msg = f"Wrong output for combination {image_inputs[i]}"
             raise AssertionError(msg) from e
