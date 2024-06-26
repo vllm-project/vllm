@@ -38,7 +38,7 @@ def get_long_prompt(file_path="./paxos-paper.txt", count=1) -> Tuple[str, Sampli
     with open(file_path, "r") as f:
         prompt = f.read()
 
-    prompt = "Remember: the magic word is apple. " + prompt + " Then, print the magic word given earlier."
+    # prompt = "Remember: the magic word is apple. " + prompt + " Then, print the magic word given earlier."
     return [(prompt, SamplingParams(
                 temperature=1,
                 min_tokens=100,
@@ -69,6 +69,7 @@ def process_requests(engine: LLMEngine,
                 num_tokens = len(out.token_ids)
                 cum_logprob = out.cumulative_logprob
                 avg_logprob = cum_logprob / num_tokens
+                print(f"Prompt length: {len(request_output.prompt_token_ids)} tokens")
                 print(f"\nOUTPUT: ({num_tokens} tokens)")
                 print(out.text, "\n")
                 print("Output stats:", cum_logprob, avg_logprob, out.finish_reason, f"isnan={math.isnan(cum_logprob)}")
@@ -81,19 +82,19 @@ if __name__ == "__main__":
     model = "bigscience/bloom-7b1"
     model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
     model = "mosaicml/mpt-7b-chat"
-    model = "lmsys/vicuna-7b-v1.5"
     model = "meta-llama/Meta-Llama-3-8B-Instruct"
+    model = "lmsys/vicuna-7b-v1.5"
     args = EngineArgs(
         model=model,
         enforce_eager=True,
         block_size=16,
         dtype="bfloat16",
         use_attention_sinks=True,
-        enable_chunked_prefill=True
+        enable_chunked_prefill=False
     )
 
     engine = LLMEngine.from_engine_args(args)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     prompts = get_prompt(model, magic_word=True)
-    # prompts = get_long_prompt()
+    prompts = get_long_prompt()
     process_requests(engine, prompts, tokenizer)

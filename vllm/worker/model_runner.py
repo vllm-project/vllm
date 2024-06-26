@@ -770,8 +770,8 @@ class ModelRunner:
         else:
             model_executable = self.model
 
-        # torch.set_printoptions(threshold=10)
-        # print(f"\texecute model: positions={input_positions}, context_lens={attn_metadata.context_lens_tensor.tolist()}, seq_lens={attn_metadata.seq_lens}")
+        torch.set_printoptions(threshold=10)
+        print(f"\texecute model: input_ids={input_tokens.tolist()}, positions={input_positions.tolist()}, context_lens={attn_metadata.context_lens_tensor.tolist()}")
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
