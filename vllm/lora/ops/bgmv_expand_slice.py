@@ -110,7 +110,7 @@ def bgmv_expand_slice(
         slice_size (int): current output_tensor's size
         batchs (int): batch size
         add_inputs (bool, optional): Defaults to False.
-        override_config (Optional[Dict[str, int]], optional): Defaults to None. 
+        override_config (Optional[Dict[str, int]], optional): Defaults to None.
             Triton grid config
     """
 
@@ -138,6 +138,7 @@ def bgmv_expand_slice(
     N, K = lora_b_weights.shape[-2:]  # K= rank,N=hidden_size
     # BLOCK_N = 256
     BLOCK_K = triton.next_power_of_2(K)
+
     # SPLIT_N = 64
     EVEN_K = K % BLOCK_K == 0
     ADD_INPUTS = add_inputs

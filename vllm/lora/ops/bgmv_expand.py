@@ -124,15 +124,11 @@ def bgmv_expand(
         lora_b_weights = lora_b_weights.squeeze(dim=1)
     else:
         assert lora_b_weights.ndim == 3  # shape:(lora_num,size,rank)
-
     assert lora_b_weights.is_contiguous()
 
     # TODO tuning this config
-
     N, K = lora_b_weights.shape[-2:]  # K= rank,N=hidden_size
-    # BLOCK_N =64
     BLOCK_K = triton.next_power_of_2(K)
-    # SPLIT_N = 8
     EVEN_K = K % BLOCK_K == 0
     ADD_INPUTS = add_inputs
     CAST_TYPE = False
@@ -142,7 +138,6 @@ def bgmv_expand(
     ]:
         CAST_TYPE = True
     batchs = lora_indices_tensor.size(0)
-
     if override_config:
         config = override_config
     else:

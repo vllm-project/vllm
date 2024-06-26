@@ -48,7 +48,6 @@ def _bgmv_shrink_kernel(
     offset_k = tl.arange(0, BLOCK_K) + pid_sk * BLOCK_K
     a_ptr = input_ptr + cur_batch * xm_stride
     b_ptr = lora_ptr + l0_stride * lora_index
-    rank_mask = offset_n[:, None] < N
     accumulator = tl.zeros((BLOCK_N, ), dtype=tl.float32)
     for k in range(0, K, BLOCK_K * SPLIT_K):
         current_k = k + offset_k
@@ -59,7 +58,7 @@ def _bgmv_shrink_kernel(
             mask=current_k < K,
             other=0.0,
         )  # [BLOCK_K]
-        b_ptr_mask = (rank_mask < N) & (current_k[None, :] < K)
+        b_ptr_mask = (offset_n[:, None] < N) & (current_k[None, :] < K)
 
         tiled_b = tl.load(
             b_ptr + offset_n[:, None] * lora_k_stride +
@@ -119,7 +118,7 @@ def bgmv_shrink(
     # TODO tuning this config
     batchs = lora_indices_tensor.size(0)
     N, K = lora_a_weights.shape[-2:]  # K=hidden_size,N=rank
-    BLOCK_N = triton.next_power_of_2(output_tensor.size(1))
+    BLOCK_N = triton.next_power_of_2(N)
     if override_config:
         config = override_config
     else:
