@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <torch/library.h>
 
 void paged_attention_v1(
