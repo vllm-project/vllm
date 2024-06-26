@@ -26,6 +26,10 @@ COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-cuda.txt
 
+COPY requirements-mamba.txt requirements-mamba.txt
+RUN pip install packaging
+RUN pip install -r requirements-mamba.txt
+
 # install development dependencies
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -87,6 +91,22 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip cache remove vllm_nccl*
 #################### EXTENSION Build IMAGE ####################
 
+#################### MAMBA Build IMAGE ####################
+FROM dev as mamba-builder
+# max jobs used for build
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+
+WORKDIR /usr/src/mamba
+
+COPY requirements-mamba.txt requirements-mamba.txt
+
+# Download the wheel or build it if a pre-compiled release doesn't exist
+RUN pip --verbose wheel -r requirements-mamba.txt \
+    --no-build-isolation --no-deps --no-cache-dir
+
+#################### MAMBA Build IMAGE ####################
+
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS vllm-base
@@ -105,6 +125,10 @@ RUN ldconfig /usr/local/cuda-12.4/compat/
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     pip install dist/*.whl --verbose
+
+RUN --mount=type=bind,from=mamba-builder,src=/usr/src/mamba,target=/usr/src/mamba \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install /usr/src/mamba/*.whl --no-cache-dir
 #################### vLLM installation IMAGE ####################
 
 
