@@ -20,10 +20,10 @@ from vllm.utils import make_tensor_with_pad
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = 0  # FIXME(woosuk)
+# FIXME(woosuk): Temporarily disabled top-p sampling since it's too slow.
+_ENABLE_TOP_P = False
 # FIXME(woosuk): A temporary hack to support `n > 1`.
 _MAX_NUM_SAMPLES = 128
-# FIXME(woosuk): Disabled top-p sampling since it's too slow.
-_ENABLE_TOP_P = False
 
 
 class TPUModelRunner:
@@ -37,6 +37,7 @@ class TPUModelRunner:
         cache_config: CacheConfig,
         load_config: LoadConfig,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        is_driver_worker: bool = False,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -45,6 +46,7 @@ class TPUModelRunner:
         self.cache_config = cache_config
         self.load_config = load_config
         self.vision_language_config = vision_language_config
+        self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
         self.max_num_blocks_per_seq = (self.model_config.max_model_len //
@@ -366,10 +368,11 @@ class TPUModelRunner:
                     "Beam search is not supported by the TPU backend.")
             if sampling_params.logprobs is not None:
                 raise NotImplementedError(
-                    "logprobs is not supported by the TPU backend.")
+                    "logprobs is not currently supported by the TPU backend.")
             if sampling_params.prompt_logprobs is not None:
                 raise NotImplementedError(
-                    "prompt_logprobs is not supported by the TPU backend.")
+                    "prompt_logprobs is not currently supported by the TPU "
+                    "backend.")
 
         num_paddings = padded_batch_size - len(seq_group_metadata_list)
         t += [1.0] * num_paddings
