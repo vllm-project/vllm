@@ -7,8 +7,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import rescale_image_size
 
-from ..conftest import _STR_DTYPE_TO_TORCH_DTYPE
-
 
 @pytest.mark.parametrize("dtype", ["half", "float"])
 @pytest.mark.parametrize("size_factor", [0.25, 0.5, 1.0])
@@ -43,7 +41,7 @@ def test_clip_image_processor(image_assets, dtype, size_factor):
         hf_result = hf_processor.preprocess(
             image,
             return_tensors="pt",
-        ).to(dtype=_STR_DTYPE_TO_TORCH_DTYPE[dtype])
+        )
         vllm_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
             ImagePixelData(image),
@@ -91,7 +89,7 @@ def test_llava_next_image_processor(image_assets, dtype, size_factor):
         hf_result = hf_processor.preprocess(
             image,
             return_tensors="pt",
-        ).to(dtype=_STR_DTYPE_TO_TORCH_DTYPE[dtype])
+        )
         vllm_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
             ImagePixelData(image),
