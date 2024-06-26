@@ -57,7 +57,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         draft_worker_kwargs=draft_worker_kwargs,
         disable_by_batch_size=speculative_config.
         speculative_disable_by_batch_size,
-        draft_token_sampling_method=speculative_config.
+        draft_token_acceptance_method=speculative_config.
         draft_token_acceptance_method,
         typical_acceptance_sampler_posterior_threshold=speculative_config.
         typical_acceptance_sampler_posterior_threshold,
@@ -100,7 +100,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         scorer_worker: WorkerBase,
         draft_worker_kwargs: Dict[str, Any],
         disable_by_batch_size: Optional[int],
-        draft_token_sampling_method: str,
+        draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: float, 
         typical_acceptance_sampler_posterior_alpha: float, 
     ) -> "SpecDecodeWorker":
@@ -127,10 +127,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     type(proposer_worker))
         
         spec_decode_sampler: SpecDecodeBaseSampler = None
-        if draft_token_sampling_method == "rejection_sampler":
+        if draft_token_acceptance_method == "rejection_sampler":
             spec_decode_sampler = RejectionSampler(
                 disable_bonus_tokens=disable_bonus_tokens, )
-        elif draft_token_sampling_method == "typical_acceptance_sampler":
+        elif draft_token_acceptance_method == "typical_acceptance_sampler":
             spec_decode_sampler = TypicalAcceptanceSampler(
                 disable_bonus_tokens=disable_bonus_tokens,
                 posterior_threshold=\
@@ -165,7 +165,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             scorer_worker: A worker that produces probabilities of speculative
                 tokens according to some base model. Typically a vanilla vLLM
                 Worker.
-            spec_decode_sampler: A Torch module used to perform modified
+            spec_decode_sampler: A Torch module used to perform acceptance
                 sampling of the draft tokens in the verification step of
                 speculative decoding. Currently we support two different 
                 types of sampler namely RejectionSampler and

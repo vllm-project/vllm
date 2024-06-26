@@ -249,8 +249,8 @@ def test_ngram_typical_acceptance_sampling(
     baseline_llm_generator, test_llm_generator,
     batch_size: int, output_len: int):
     """Verify that ngram speculative decoding produces exact equality
-    to without spec decode with many different values of k and
-    different ngram_prompt_lookup_max.
+    to without spec decode with many different values of k, batch_size and
+    using TypicalAcceptanceSampler as the draft token acceptance method.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
