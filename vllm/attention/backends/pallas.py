@@ -30,16 +30,16 @@ class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
     def swap_blocks(
-        src_kv_cache: torch.Tensor,
-        dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_kv_cache: Tuple[torch.Tensor, torch.Tensor],
+        dst_kv_cache: Tuple[torch.Tensor, torch.Tensor],
+        src_to_dst: torch.Tensor,
     ) -> None:
         raise NotImplementedError("swap_blocks is not implemented.")
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        src_to_dists: torch.Tensor,
     ) -> None:
         # TODO(woosuk): Implement this.
         raise NotImplementedError("copy_blocks is not implemented.")
