@@ -48,9 +48,14 @@ class LlavaNextImagePixelInputs(TypedDict):
     """
 
     image_sizes: NotRequired[torch.Tensor]
-    """Shape: `(batch_size, 2)`"""
+    """
+    Shape: `(batch_size, 2)`
+
+    This should be in `(height, width)` format.
+    """
 
 
+# Taken from: https://github.com/huggingface/text-generation-inference/blob/v2.0.4/server/text_generation_server/models/vlm_causal_lm.py#L91
 def _get_llava_next_num_unpadded_features(
     height: int,
     width: int,
@@ -58,7 +63,6 @@ def _get_llava_next_num_unpadded_features(
     num_patch_height: int,
     num_patch_width: int,
 ) -> Tuple[int, int]:
-    # Taken from: https://github.com/huggingface/text-generation-inference/blob/799a193b109662743bed1b18a09af1fdcd508c8b/server/text_generation_server/models/vlm_causal_lm.py#L111
     current_height = npatches * num_patch_height
     current_width = npatches * num_patch_width
 
@@ -76,6 +80,7 @@ def _get_llava_next_num_unpadded_features(
     return (unpadded_features, newline_features)
 
 
+# Based on: https://github.com/huggingface/text-generation-inference/blob/v2.0.4/server/text_generation_server/models/vlm_causal_lm.py#L111
 def _get_llava_next_image_feature_size(
     hf_config: LlavaNextConfig,
     *,
@@ -91,7 +96,9 @@ def _get_llava_next_image_feature_size(
         )
         base_feature_size = num_patches * num_patches
 
-        num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+        # Note: We follow the "wrong" width/height order
+        # [ref: PR huggingface/transformers#31588]
+        num_patch_width, num_patch_height = get_anyres_image_grid_shape(
             image_size=(input_height, input_width),
             grid_pinpoints=hf_config.image_grid_pinpoints,
             patch_size=vision_config.image_size,
@@ -302,7 +309,6 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
             return patch_embeddings.flatten(0, 1)
 
         if strategy.startswith("spatial"):
-            orig_width, orig_height = image_size
             height = width = self.config.vision_config.image_size \
                 // self.config.vision_config.patch_size
 
@@ -316,8 +322,10 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
                 other_patch_embeds = patch_embeddings[1:]
 
                 # image_aspect_ratio == "anyres"
-                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-                    (orig_height, orig_width),
+                # Note: We follow the "wrong" width/height order
+                # [ref: PR huggingface/transformers#31588]
+                num_patch_width, num_patch_height = get_anyres_image_grid_shape(
+                    image_size,
                     self.config.image_grid_pinpoints,
                     self.config.vision_config.image_size,
                 )
@@ -329,7 +337,7 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
                         .permute(4, 0, 2, 1, 3).contiguous() \
                         .flatten(1, 2).flatten(2, 3)
                     other_patch_embeds = unpad_image(other_patch_embeds,
-                                                     (orig_height, orig_width))
+                                                     image_size)
                     other_patch_embeds = torch.cat((
                         other_patch_embeds,
                         self.image_newline[:, None, None] \
@@ -398,8 +406,8 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         if image_sizes is None:
             batch_size = len(image_input["data"])
             vision_config = self.config.vision_config
-            default_width = default_height = vision_config.image_size
-            image_sizes = torch.as_tensor([[default_width, default_height]
+            default_height = default_width = vision_config.image_size
+            image_sizes = torch.as_tensor([[default_height, default_width]
                                            for _ in range(batch_size)])
 
         return [
@@ -441,8 +449,8 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values: The pixels in each grid patch for each input image.
-                Expects a batch with shape `[1, num_patches, 3, 336, 336]`.
-            image_sizes: The original `(width, height)` for each input image.
+                Expects a batch with shape `[1, num_patches, 3, h, w]`.
+            image_sizes: The original `(height, width)` for each input image.
                 Expects a batch with shape `[1, 2]`.
 
         See also:

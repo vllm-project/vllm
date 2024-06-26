@@ -275,7 +275,11 @@ class Phi3VImagePixelInputs(TypedDict):
     """
 
     image_sizes: torch.Tensor
-    """Shape: `(batch_size, 2)`"""
+    """
+    Shape: `(batch_size, 2)`
+
+    This should be in `(height, width)` format.
+    """
 
 
 def _get_phi3v_image_feature_size(
