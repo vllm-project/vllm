@@ -13,7 +13,8 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils import (cuda_device_count_stateless,
+                        update_environment_variables)
 
 logger = init_logger(__name__)
 
@@ -24,7 +25,8 @@ def producer(batch_src: Sequence[int],
              result_queue,
              cuda_visible_devices: Optional[str] = None):
     if cuda_visible_devices is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+        update_environment_variables(
+            {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
 
     lib = CudaRTLibrary()
     for i in batch_src:
@@ -56,7 +58,8 @@ def consumer(batch_tgt: Sequence[int],
              result_queue,
              cuda_visible_devices: Optional[str] = None):
     if cuda_visible_devices is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+        update_environment_variables(
+            {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
 
     lib = CudaRTLibrary()
     for j in batch_tgt:
@@ -123,7 +126,7 @@ def can_actually_p2p(
     processes for testing all pairs of GPUs in batch. The trick is to reset
     the device after each test (which is not available in PyTorch).
     """  # noqa
-    cuda_visible_devices = os.getenv('CUDA_VISIBLE_DEVICES', None)
+    cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
     # pass the CUDA_VISIBLE_DEVICES to the child process
     # to make sure they see the same set of GPUs
 

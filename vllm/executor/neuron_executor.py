@@ -48,15 +48,14 @@ class NeuronExecutor(ExecutorBase):
     def execute_model(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        assert (execute_model_req.blocks_to_swap_in == {}
-                and execute_model_req.blocks_to_swap_out == {}
-                and execute_model_req.blocks_to_copy == {}), (
+        assert (not execute_model_req.blocks_to_swap_in
+                and not execute_model_req.blocks_to_swap_out
+                and not execute_model_req.blocks_to_copy), (
                     "Cache operations are not supported for Neuron backend.")
         assert execute_model_req.num_lookahead_slots == 0, (
             "lookahead not supported for Neuron backend.")
 
-        output = self.driver_worker.execute_model(
-            execute_model_req.seq_group_metadata_list)
+        output = self.driver_worker.execute_model(execute_model_req)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
