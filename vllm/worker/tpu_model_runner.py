@@ -411,7 +411,7 @@ class TPUModelRunner:
         # Retrieve the outputs to CPU.
         next_token_ids = next_token_ids.cpu().tolist()
 
-        # NOTE(woosuk): Minimal code to build the sampler outputs.
+        # NOTE(woosuk): Minimal code to construct the sampler outputs.
         # The TPU backend does not reuse the sampler, since the TPU backend
         # does not support the advanced sampling parameters such as logprobs.
         zero_logprob = Logprob(0.0)
