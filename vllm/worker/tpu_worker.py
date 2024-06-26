@@ -232,7 +232,6 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             for i in range(num_layers):
                 attn_backend.swap_blocks(self.cpu_cache[i], self.tpu_cache[i],
                                          src_to_dst)
-            xm.mark_step()
         if blocks_to_swap_out:
             # Swap from TPU to CPU.
             src_to_dst = _make_src_to_dst(blocks_to_swap_out, self.device,
@@ -240,7 +239,6 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             for i in range(num_layers):
                 attn_backend.swap_blocks(self.tpu_cache[i], self.cpu_cache[i],
                                          src_to_dst)
-            xm.mark_step()
         if blocks_to_copy:
             src_to_dst = _make_src_to_dst(blocks_to_copy, self.device,
                                           self.device)
