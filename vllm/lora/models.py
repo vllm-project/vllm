@@ -615,6 +615,7 @@ class LoRAModelManager:
         self._registered_loras.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_loras.clear()
+        punica.reset_params_cache()
 
     def _create_lora_modules(self):
         for module_name, module in self.model.named_modules(

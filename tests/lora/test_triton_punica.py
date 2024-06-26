@@ -469,11 +469,3 @@ def test_punica_expand_nslices(
 
         slice_offset += hidden_size
     assert_close(our_outputs, ref_outputs)
-
-
-if __name__ == "__main__":
-    # cuda:0-0-bgmv-dtype1-3-32-16-24
-    for _ in range(1000):
-        test_punica_expand_nslices(24, 16, 32, 3, torch.bfloat16, "bgmv", 0,
-                                   "cuda:0")
-        print("ssss")

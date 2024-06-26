@@ -44,6 +44,7 @@ def reset_params_cache():
     cache explicitly
     """
     #TODO release gpu memory
+    torch.cuda.empty_cache()
     _PARAMS_CACHE.clear()
 
 
