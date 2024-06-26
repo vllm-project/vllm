@@ -117,19 +117,26 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
 
+        dtype_btyes = get_dtype_size(self.cache_dtype)
+        block_size = self.cache_config.block_size
+        block_size_bytes = (dtype_btyes * block_size * num_layers * 2 *
+                            head_size * num_kv_heads)
+
+        # Calculate the TPU KV cache size based on profiling.
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
         usable_memory_size = int(total_memory_size *
                                  self.cache_config.gpu_memory_utilization)
         profiled = m["bytes_used"]  # Weights + intermediate activations.
-        kv_cache_bytes = max(usable_memory_size - profiled, 0)
-        dtype_btyes = get_dtype_size(self.cache_dtype)
-        block_size = self.cache_config.block_size
-        num_tpu_blocks = (kv_cache_bytes //
-                          (dtype_btyes * block_size * num_layers * 2 *
-                           head_size * num_kv_heads))
+        tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
+        num_tpu_blocks = tpu_kv_cache_bytes // block_size_bytes
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
-        return num_tpu_blocks, 0
+
+        # Calculate the CPU KV cache size based on the config.
+        num_cpu_blocks = (self.cache_config.swap_space_bytes //
+                          block_size_bytes)
+        num_tpu_blocks = 100
+        return num_tpu_blocks, num_cpu_blocks
 
     def initialize_cache(
         self,
@@ -150,13 +157,14 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         tpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
             num_gpu_blocks, self.block_size, num_kv_heads, head_size)
         for _ in range(num_layers):
-            key_cache = torch.zeros(tpu_cache_shape,
-                                    dtype=dtype,
-                                    device=self.device)
-            value_cache = torch.zeros_like(key_cache)
-            self.tpu_cache.append((key_cache, value_cache))
-            # FIXME(woosuk): Swapping is not implemented at the moment.
-            self.cpu_cache.append((None, None))
+            tpu_k_cache = torch.zeros(tpu_cache_shape,
+                                      dtype=dtype,
+                                      device=self.device)
+            tpu_v_cache = torch.zeros_like(tpu_k_cache)
+            self.tpu_cache.append((tpu_k_cache, tpu_v_cache))
+            cpu_k_cache = torch.zeros_like(tpu_k_cache, device="cpu")
+            cpu_v_cache = torch.zeros_like(tpu_v_cache, device="cpu")
+            self.cpu_cache.append((cpu_k_cache, cpu_v_cache))
         self._warmup_model()
 
     def _warmup_model(self) -> None:
@@ -225,7 +233,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             src_to_dst = _make_src_to_dst(blocks_to_swap_out, self.device,
                                           "cpu")
             for i in range(num_layers):
-                attn_backend.swap_blocks(self.cpu_cache[i], self.tpu_cache[i],
+                attn_backend.swap_blocks(self.tpu_cache[i], self.cpu_cache[i],
                                          src_to_dst)
         if blocks_to_copy:
             src_to_dst = _make_src_to_dst(blocks_to_copy, self.device,
