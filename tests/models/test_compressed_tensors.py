@@ -7,6 +7,8 @@ tokens of the are in the top 5 selections of each other.
 
 import pytest
 
+from tests.quantization.utils import is_quant_method_supported
+
 from .utils import check_logprobs_close
 
 MODELS = [
@@ -17,6 +19,8 @@ MAX_TOKENS = 32
 NUM_LOGPROBS = 5
 
 
+@pytest.mark.skipif(not is_quant_method_supported("compressed-tensors"),
+                    reason="compressed-tensors is not supported on this machine type.")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(
     vllm_runner,
