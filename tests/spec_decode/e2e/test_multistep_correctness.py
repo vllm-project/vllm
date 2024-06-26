@@ -512,7 +512,7 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
-    
+
             # Artificially limit the draft model max model len; this forces vLLM
             # to skip speculation once the sequences grow beyond 32-k tokens.
             "speculative_max_model_len": 32,
