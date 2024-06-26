@@ -266,6 +266,8 @@ class Sequence:
         self.lora_request = lora_request
 
         self.data = SequenceData(self.inputs["prompt_token_ids"])
+        self.prompt_token_ids: np.ndarray = self.data.get_prompt_token_ids()
+        self.prompt: Optional[str] = self.inputs.get("prompt")
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -280,14 +282,6 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
-
-    @property
-    def prompt(self) -> Optional[str]:
-        return self.inputs.get("prompt")
-
-    @property
-    def prompt_token_ids(self) -> np.ndarray:
-        return self.data.get_prompt_token_ids()
 
     @property
     def multi_modal_data(self) -> Optional["MultiModalData"]:
