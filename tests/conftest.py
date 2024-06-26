@@ -165,7 +165,7 @@ class HfRunner:
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
-            if is_sparseml_model:
+            elif is_sparseml_model:
                 from sparseml.transformers import SparseAutoModelForCausalLM
                 auto_cls = SparseAutoModelForCausalLM
             else:
