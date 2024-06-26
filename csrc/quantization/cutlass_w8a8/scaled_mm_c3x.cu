@@ -134,6 +134,14 @@ struct ScaledEpilogue
   }
 };
 
+/*
+ * This epilogue performs the same operation as ScaledEpilogue, but adds a bias.
+ * This bias can also be used in the per-tensor azp case, where the activation
+ * zero point (azp) is folded into the bias.
+ *
+ * The bias tensor must be per-output channel.
+ * ScaleA and ScaleB can be per-tensor or per-token/per-channel.
+ */
 template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
 struct ScaledEpilogueBias
     : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
