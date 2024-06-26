@@ -180,7 +180,7 @@ def build_app(args):
 def run_server(args, llm_engine=None):
     app = build_app(args)
 
-    logger.info("vLLM API server version %s", vllm.__version__)
+    logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
     if args.served_model_name is not None:
