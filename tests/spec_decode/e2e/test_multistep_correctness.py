@@ -183,9 +183,7 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "speculative_draft_token_sampling_method": method
     }
-    for method in ["rejection_sampler", "typical_acceptance_sampler"]
 ])
 @pytest.mark.parametrize(
     "output_len",
@@ -239,9 +237,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 3,
-        "speculative_draft_token_sampling_method": method
     }
-    for method in ["rejection_sampler", "typical_acceptance_sampler"]
 ])
 @pytest.mark.parametrize(
     "output_len",
@@ -289,9 +285,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "speculative_draft_token_sampling_method": method
     }
-    for method in ["rejection_sampler", "typical_acceptance_sampler"]
 ])
 @pytest.mark.parametrize("max_output_len", [
     256,
@@ -332,9 +326,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "speculative_draft_token_sampling_method": method
     }
-    for method in ["rejection_sampler", "typical_acceptance_sampler"]
 ])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize(
@@ -378,9 +370,7 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "speculative_draft_token_sampling_method": method
     }
-    for method in ["rejection_sampler", "typical_acceptance_sampler"]
 ])
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize(
@@ -427,9 +417,7 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "speculative_draft_token_sampling_method": method
     }
-    for method in ["rejection_sampler", "typical_acceptance_sampler"]
 ])
 @pytest.mark.parametrize(
     "output_len",
@@ -483,9 +471,7 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "speculative_draft_token_sampling_method": method
     }
-    for method in ["rejection_sampler", "typical_acceptance_sampler"]
 ])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
@@ -530,9 +516,7 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
             # Artificially limit the draft model max model len; this forces vLLM
             # to skip speculation once the sequences grow beyond 32-k tokens.
             "speculative_max_model_len": 32,
-            "speculative_draft_token_sampling_method": method
         }
-        for method in ["rejection_sampler", "typical_acceptance_sampler"]
     ])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
@@ -576,9 +560,7 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
         "speculative_disable_by_batch_size": 2,
-        "speculative_draft_token_sampling_method": method
     }
-    for method in ["rejection_sampler", "typical_acceptance_sampler"]
 ])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("output_len", [10])
@@ -613,12 +595,9 @@ def test_disable_speculation(baseline_llm_generator, test_llm_generator,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": k,
-            "speculative_draft_token_sampling_method": method,
         }
         # Try a range of common k, as well as large speculation.
         for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, 63]
-        # Try both methods of sampling in the verifier.
-        for method in ["rejection_sampler", "typical_acceptance_sampler"]
     ])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
@@ -630,6 +609,50 @@ def test_disable_speculation(baseline_llm_generator, test_llm_generator,
 @pytest.mark.parametrize("seed", [1])
 def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
                 output_len: int):
+    """Verify that speculative decoding produces exact equality to without spec
+    decode with many different values of k.
+    """
+    run_greedy_equality_correctness_test(baseline_llm_generator,
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len=output_len,
+                                         force_output_len=True)
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "model": "JackFram/llama-68m",
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize(
+    "test_llm_kwargs",
+    [
+        {
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": k,
+            "spec_decoding_acceptance_method": "typical_acceptance_sampler"
+        }
+        # Try a range of common k, as well as large speculation.
+        for k in [1, 2, 63]
+    ])
+@pytest.mark.parametrize("batch_size", [1, 64])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        32,
+    ])
+@pytest.mark.parametrize("seed", [1])
+def test_typical_acceptance_sampling(
+    baseline_llm_generator, test_llm_generator, batch_size: int,
+    output_len: int):
     """Verify that speculative decoding produces exact equality to without spec
     decode with many different values of k.
     """

@@ -58,7 +58,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         disable_by_batch_size=speculative_config.
         speculative_disable_by_batch_size,
         draft_token_sampling_method=speculative_config.
-        draft_token_sampling_method,
+        draft_token_acceptance_method,
         typical_acceptance_sampler_posterior_threshold=speculative_config.
         typical_acceptance_sampler_posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
@@ -133,9 +133,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         elif draft_token_sampling_method == "typical_acceptance_sampler":
             spec_decode_sampler = TypicalAcceptanceSampler(
                 disable_bonus_tokens=disable_bonus_tokens,
-                posterior_threshold=\
-                    typical_acceptance_sampler_posterior_threshold,
-                posterior_alpha=typical_acceptance_sampler_posterior_alpha,
+                #posterior_threshold=\
+                #    typical_acceptance_sampler_posterior_threshold,
+                #posterior_alpha=typical_acceptance_sampler_posterior_alpha,
         )
         logger.info("Configuring SpecDecodeWorker with sampler=%s",
                     type(spec_decode_sampler))

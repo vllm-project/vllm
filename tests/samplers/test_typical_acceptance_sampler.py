@@ -51,6 +51,16 @@ def get_draft_token_ids(batch_size: int, k: int, vocab_size: int,
                     break
     return draft_token_ids
 
+def get_acceptance_sampler(
+        posterior_threshold: float = 0.03,
+        posterior_alpha: float = 0.9,
+        disable_bonus_tokens: bool = False,
+        strict_mode: bool = False,
+) -> TypicalAcceptanceSampler:
+  return TypicalAcceptanceSampler(
+    posterior_threshold, posterior_alpha, disable_bonus_tokens, strict_mode)
+
+
 
 @pytest.mark.parametrize("k", list(range(1, 6)))
 @pytest.mark.parametrize("vocab_size", [30_000, 50_000])
@@ -64,7 +74,7 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
     different combinations of k, vocab_size, batch_size and num devices.
     """
     torch.set_default_device(device)
-    typical_acceptance_sampler = TypicalAcceptanceSampler()
+    typical_acceptance_sampler = get_acceptance_sampler()
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     bonus_token_ids = torch.randint(low=0,
@@ -96,7 +106,7 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
     batch_size = 5
     vocab_size = 30_000
     torch.set_default_device(device)
-    typical_acceptance_sampler = TypicalAcceptanceSampler(strict_mode=True)
+    typical_acceptance_sampler = get_acceptance_sampler(strict_mode=True)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     bonus_token_ids = torch.randint(low=0,
@@ -154,7 +164,7 @@ def test_uniform_target_distribution_accepts_all_tokens(
     batch_size = 5
     vocab_size = 30_000
     torch.set_default_device(device)
-    typical_acceptance_sampler = TypicalAcceptanceSampler(
+    typical_acceptance_sampler = get_acceptance_sampler(
         strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
@@ -207,7 +217,7 @@ def test_temperature_zero_target_distribution(seed: int,
     vocab_size = 30_000
     torch.set_default_device(device)
 
-    typical_acceptance_sampler = TypicalAcceptanceSampler(
+    typical_acceptance_sampler = get_acceptance_sampler(
         strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     # Simulate temperature 0 probability distribution for target probabilities
@@ -266,7 +276,7 @@ def test_mixed_target_distribution(seed: int, disable_bonus_tokens: bool,
     batch_size = 4
     vocab_size = 30_000
     torch.set_default_device(device)
-    typical_acceptance_sampler = TypicalAcceptanceSampler(
+    typical_acceptance_sampler = get_acceptance_sampler(
         strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     # For sequences 0 and 2 set the distribution to a temperature
@@ -332,7 +342,7 @@ def test_accept_tokens_partially(seed: int, disable_bonus_tokens: bool,
     batch_size = 1
     vocab_size = 30_000
     torch.set_default_device(device)
-    typical_acceptance_sampler = TypicalAcceptanceSampler(
+    typical_acceptance_sampler = get_acceptance_sampler(
         strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     # Create a temperature zero target probability distribution and ensure
@@ -392,7 +402,7 @@ def test_accept_tokens_set_non_default_posteriors(seed: int,
     batch_size = 1
     vocab_size = 30_000
     torch.set_default_device(device)
-    typical_acceptance_sampler = TypicalAcceptanceSampler(
+    typical_acceptance_sampler = get_acceptance_sampler(
         strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     # Simulate temperature 0 probability distribution for target
@@ -461,7 +471,7 @@ def test_replacement_token_ids(seed: int, disable_bonus_tokens: bool,
     batch_size = 5
     vocab_size = 30_000
     torch.set_default_device(device)
-    typical_acceptance_sampler = TypicalAcceptanceSampler(
+    typical_acceptance_sampler = get_acceptance_sampler(
         strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)

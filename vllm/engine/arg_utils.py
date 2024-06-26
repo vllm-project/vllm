@@ -99,9 +99,9 @@ class EngineArgs:
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
-    speculative_draft_token_sampling_method: str = 'rejection_sampler'
-    typical_acceptance_sampler_posterior_threshold: float = 0.09
-    typical_acceptance_sampler_posterior_alpha: float = 0.3
+    spec_decoding_acceptance_method: str = 'rejection_sampler'
+    typical_acceptance_sampler_posterior_threshold: Optional[float] = None
+    typical_acceptance_sampler_posterior_alpha: Optional[float] = None
     qlora_adapter_name_or_path: Optional[str] = None
 
     otlp_traces_endpoint: Optional[str] = None
@@ -570,12 +570,13 @@ class EngineArgs:
             'decoding.')
 
         parser.add_argument(
-            '--speculative-draft-token-sampling-method',
+            '--spec-decoding-acceptance-routine',
             type=str,
-            default=EngineArgs.speculative_draft_token_sampling_method,
+            default=EngineArgs.spec_decoding_acceptance_method,
             choices=['rejection_sampler', 'typical_acceptance_sampler'],
-            help='Specify the draft token sampling method for speculative decoding. '
-            'Two types of samplers are supported: '
+            help='Specify the acceptance method to use during draft token '
+            'verification in speculative decoding. Two types of acceptance '
+            'routines are supported: '
             '1) RejectionSampler which does not allow changing the '
             'acceptance rate of draft tokens, '
             '2) TypicalAcceptanceSampler which is configurable, allowing for a higher '
@@ -725,8 +726,8 @@ class EngineArgs:
             use_v2_block_manager=self.use_v2_block_manager,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
-            draft_token_sampling_method=self.
-            speculative_draft_token_sampling_method,
+            draft_token_acceptance_method=\
+                self.spec_decoding_acceptance_method,
             typical_acceptance_sampler_posterior_threshold=self.
             typical_acceptance_sampler_posterior_threshold,
             typical_acceptance_sampler_posterior_alpha=self.

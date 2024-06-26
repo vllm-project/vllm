@@ -15,10 +15,10 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler):
     """
     def __init__(
         self,
+        posterior_threshold: float,
+        posterior_alpha: float,
         disable_bonus_tokens: bool = False,
         strict_mode: bool = False,
-        posterior_threshold: float = 0.09,
-        posterior_alpha: float = 0.3,
     ):
         """Create a Typical Acceptance Sampler.
 
@@ -142,14 +142,7 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler):
         device = target_probs.device
         candidates_prob = torch.gather(
             target_probs, dim=-1,
-            index=draft_token_ids.unsqueeze(-1), ).squeeze(-1)
-        posterior_entropy = -torch.sum(
-            target_probs * torch.log(target_probs + 1e-5), dim=-1)
-        threshold = torch.minimum(
-            torch.ones_like(posterior_entropy, device=device) *
-            self._posterior_threshold,
-            torch.exp(-posterior_entropy) * self._posterior_alpha,
-        )
+            index=draft_token_ids.unsqueeze(-1)).squeeze(-1)
         # A small constant added to prevent computing the logarithm of zero,
         # which can lead to undefined values.
         epsilon = 1e-5
