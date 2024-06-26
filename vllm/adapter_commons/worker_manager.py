@@ -18,7 +18,7 @@ class AbstractWorkerManager(ABC):
     def set_active_adapters(self, requests: Set[Any],
                             mapping: Optional[Any]) -> None:
         ...
-        
+
     @abstractmethod
     def add_adapter(self, adapter_request: Any) -> bool:
         ...

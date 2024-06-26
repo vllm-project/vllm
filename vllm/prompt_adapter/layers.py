@@ -1,17 +1,19 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 import torch
 from torch import nn
 
 from vllm.adapter_commons.layers import AdapterMapping
+from vllm.config import PromptAdapterConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.config import PromptAdapterConfig
+
 
 @dataclass
 class PromptAdapterMapping(AdapterMapping):
     pass
+
 
 class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
 
@@ -21,9 +23,9 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
         self.emb_layer = self.base_layer
         if 'LoRA' in base_layer.__class__.__name__:
             self.emb_layer = self.base_layer.base_layer
-    
-    def create_prompt_adapter_weights(self, 
-                                      prompt_adapter_config: PromptAdapterConfig):
+
+    def create_prompt_adapter_weights(
+            self, prompt_adapter_config: PromptAdapterConfig):
         self.embeddings_tensors = torch.zeros(
             (
                 prompt_adapter_config.max_prompt_adapters,
@@ -34,8 +36,9 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
             device=self.emb_layer.weight.device,
         )
         self.adapter_lengths = torch.zeros(
-                            prompt_adapter_config.max_prompt_adapters, 
-                            dtype=torch.long, device=self.emb_layer.weight.device)
+            prompt_adapter_config.max_prompt_adapters,
+            dtype=torch.long,
+            device=self.emb_layer.weight.device)
         self.indices_gpu: torch.Tensor
         self.flag: bool = False
 
@@ -55,18 +58,20 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
 
     def set_mapping(
         self,
-        base_indices: List[int],
+        base_indices: torch.Tensor,
     ):
         self.indices_gpu = base_indices.to(device=self.emb_layer.weight.device)
-        self.flag = True if torch.sum(self.indices_gpu)/self.indices_gpu.shape[0]!=-1 else False
-        
+        self.flag = torch.sum(
+            self.indices_gpu) / self.indices_gpu.shape[0] != -1
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         hidden_states = self.base_layer(x)
         if self.flag:
             unique_indices = torch.unique(self.indices_gpu)
             for idx in unique_indices:
                 if idx != -1:
-                    pa_idx = self.embeddings_tensors[idx][:self.adapter_lengths[idx]]
+                    pa_idx = self.embeddings_tensors[idx][:self.
+                                                          adapter_lengths[idx]]
                     mask = (self.indices_gpu == idx)
                     n_adapters = sum(mask) // pa_idx.shape[0]
                     hidden_states[mask] = pa_idx.repeat(n_adapters, 1)

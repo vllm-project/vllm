@@ -1138,13 +1138,16 @@ class PromptAdapterConfig:
     max_prompt_adapter_token: int = 10
     max_cpu_prompt_adapters: Optional[int] = None
     prompt_adapter_dtype: Optional[torch.dtype] = None
-    
+
     def __post_init__(self):
         library_name = 'peft'
         try:
             __import__(library_name)
-        except ImportError:
-            raise ImportError(f"'{library_name}' is not installed for prompt adapter support. Please install it using 'pip install {library_name}'.")
+        except ImportError as e:
+            raise ImportError(
+                f"'{library_name}' is not installed for prompt adapter support."
+                f"Please install it using 'pip install {library_name}'."
+            ) from e
 
         if self.max_prompt_adapters < 1:
             raise ValueError(f"max_prompt_adapters "

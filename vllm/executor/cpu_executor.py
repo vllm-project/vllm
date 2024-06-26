@@ -104,7 +104,7 @@ class CPUExecutor(ExecutorBase):
 
     def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
         return self.driver_worker.pin_prompt_adapter(prompt_adapter_id)
-     
+
     def check_health(self) -> None:
         # CPUExecutor will always be healthy as long as
         # it's running.

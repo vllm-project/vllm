@@ -66,11 +66,11 @@ class AdapterModelManager(ABC):
     @abstractmethod
     def capacity(self):
         ...
-    
+
     @abstractmethod
     def activate_adapter(self, adapter_id: int) -> bool:
         ...
-    
+
     @abstractmethod
     def deactivate_adapter(self, adapter_id: int) -> bool:
         ...

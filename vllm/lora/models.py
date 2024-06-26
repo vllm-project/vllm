@@ -4,7 +4,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, Type, Union, Any
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import safetensors.torch
 import torch
@@ -12,8 +12,9 @@ from torch import nn
 
 from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
                                          AdapterModelManager)
-from vllm.adapter_commons.utils import (deactivate_adapter, add_adapter, 
-        set_adapter_mapping, remove_adapter, list_adapters, get_adapter)
+from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
+                                        get_adapter, list_adapters,
+                                        remove_adapter, set_adapter_mapping)
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
@@ -479,9 +480,6 @@ class LoRAModelManager(AdapterModelManager):
         except ValueError:
             pass
 
-    def deactivate_adapter(self, lora_id: int) -> bool:
-        return super().deactivate_adapter(lora_id)
-
     def _set_long_lora_context(self, lora: LoRAModel):
         if self.long_lora_context is None:
             return
@@ -678,22 +676,27 @@ class LoRAModelManager(AdapterModelManager):
                 replacement_loras[i] = None
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                 replacement_loras)
-    
+
     def deactivate_adapter(self, adapter_id: int) -> bool:
-        return deactivate_adapter(adapter_id, self._active_adapters, self._deactivate_adapter)
+        return deactivate_adapter(adapter_id, self._active_adapters,
+                                  self._deactivate_adapter)
 
     def add_adapter(self, adapter: LoRAModel) -> bool:
         logger.debug(
             "Adding lora. Model id: %d, "
             "int id: %d, "
-            "scaling factor: %s", adapter.id, adapter.id, adapter.scaling_factor)
-        return add_adapter(adapter, self._registered_adapters, self.capacity, self._add_adapter)
+            "scaling factor: %s", adapter.id, adapter.id,
+            adapter.scaling_factor)
+        return add_adapter(adapter, self._registered_adapters, self.capacity,
+                           self._add_adapter)
 
     def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
-        self._last_mapping = set_adapter_mapping(mapping, self._last_mapping, self._set_adapter_mapping)
+        self._last_mapping = set_adapter_mapping(mapping, self._last_mapping,
+                                                 self._set_adapter_mapping)
 
     def remove_adapter(self, adapter_id: int) -> bool:
-        return remove_adapter(adapter_id, self._registered_adapters, self.deactivate_adapter)
+        return remove_adapter(adapter_id, self._registered_adapters,
+                              self.deactivate_adapter)
 
     def list_adapters(self) -> Dict[int, Any]:
         return list_adapters(self._registered_adapters)

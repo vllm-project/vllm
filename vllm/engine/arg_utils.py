@@ -7,9 +7,10 @@ from typing import List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
+                         ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig,
-                         VisionLanguageConfig, ObservabilityConfig)
+                         VisionLanguageConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser, str_to_int_tuple
 
@@ -796,21 +797,18 @@ class EngineArgs:
                 "Chunked prefill is not supported with sliding window. "
                 "Set --disable-sliding-window to disable sliding window.")
 
-        return EngineConfig(
-            model_config=model_config,
-            cache_config=cache_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            lora_config=lora_config,
-            vision_language_config=vision_language_config,
-            speculative_config=speculative_config,
-            load_config=load_config,
-            decoding_config=decoding_config,
-            observability_config=observability_config,
-            prompt_adapter_config=prompt_adapter_config
-        )
-
+        return EngineConfig(model_config=model_config,
+                            cache_config=cache_config,
+                            parallel_config=parallel_config,
+                            scheduler_config=scheduler_config,
+                            device_config=device_config,
+                            lora_config=lora_config,
+                            vision_language_config=vision_language_config,
+                            speculative_config=speculative_config,
+                            load_config=load_config,
+                            decoding_config=decoding_config,
+                            observability_config=observability_config,
+                            prompt_adapter_config=prompt_adapter_config)
 
 
 @dataclass
