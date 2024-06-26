@@ -1734,7 +1734,7 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
         self.aligner = aligner_cls(aligner_config.params)
 
         language_config = config.language_config
-        self.language_model = LlamaModel(language_config)
+        self.language_model = LlamaModel(language_config, cache_config, quant_config)
         self.image_processor = VLMImageProcessor(self.image_size)
         self.logits_processor = LogitsProcessor(language_config.vocab_size)
         self.sampler = Sampler()
