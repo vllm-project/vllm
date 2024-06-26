@@ -98,12 +98,13 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     hf_images = [asset.for_hf() for asset in image_assets]
     vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
+    size_factors = (0.25, 0.5, 1.0) if is_multiscale else (1, )
     image_inputs = [
         (rescale_image_size(hf_image, factor),
          ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
          prompt) for hf_image, vllm_image, prompt in zip(
              hf_images, vllm_images, HF_IMAGE_PROMPTS)
-        for factor in ((0.25, 0.5, 1.0) if is_multiscale else (1, ))
+        for factor in size_factors
     ]
     prompt_inputs = [prompt for _, _, prompt in image_inputs]
     hf_image_inputs = [hf_image for hf_image, _, _ in image_inputs]
@@ -138,5 +139,5 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
             assert hf_output_ids == vllm_output_ids, (
                 f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
         except Exception as e:
-            msg = f"Wrong output for inputs {image_inputs[i]}"
+            msg = f"Wrong output for size factor {size_factors[i]}"
             raise AssertionError(msg) from e
