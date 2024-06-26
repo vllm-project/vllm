@@ -1,7 +1,7 @@
+import math
 import os
 import subprocess
 
-import math
 from PIL import Image
 
 from vllm import LLM, SamplingParams
@@ -10,8 +10,7 @@ from vllm.multimodal.image import ImagePixelData
 
 def run_fuyu_pixel_values():
     llm = LLM(
-        # model="adept/fuyu-8b",
-        model="/data/LLM-model/fuyu-8b",
+        model="adept/fuyu-8b",
         max_model_len=4096,
         image_input_type="pixel_values",
         image_token_id=71011,
@@ -20,15 +19,16 @@ def run_fuyu_pixel_values():
     )
 
     # load and create image prompt
-    image = Image.open("images/cherry_blossom.jpg")
+    image = Image.open("images/stop_sign.jpg")
     W, H = image.size
 
-    nrow = math.ceil(min(H, 1080)/30)
-    ncol = math.ceil(min(W, 1920)/30)
+    nrow = math.ceil(min(H, 1080) / 30)
+    ncol = math.ceil(min(W, 1920) / 30)
 
     # single-image prompt
     prompt = "<image>\nWhat is the content of this image?\n"
-    prompt = prompt.replace("<image>", ("|SPEAKER|" * ncol + "|NEWLINE|") * nrow)
+    prompt = prompt.replace("<image>",
+                            ("|SPEAKER|" * ncol + "|NEWLINE|") * nrow)
 
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
 

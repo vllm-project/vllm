@@ -15,8 +15,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch Fuyu model."""
-from typing import Iterable, List, Optional, Tuple, Literal, TypedDict, Dict
 import math
+from typing import Dict, Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.utils.checkpoint
@@ -24,11 +24,11 @@ from PIL import Image
 from transformers import FuyuConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import VisionLanguageConfig, CacheConfig, ModelConfig
+from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
@@ -43,7 +43,10 @@ logger = init_logger(__name__)
 class FuyuImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: (batch_size, num_patches, patch_size_x * patch_size_y * num_channels)"""
+    """
+    Shape: 
+    (batch_size, num_patches, patch_size_x * patch_size_y * num_channels)
+    """
 
 
 def _image_processor(
@@ -55,22 +58,24 @@ def _image_processor(
 
     if isinstance(image, Image.Image):
         # Temporary patch before dynamic number of image tokens is supported
-        # It's difficult to infer number of image tokens from image size simply if the
-        # image is larger than (1920, 1080)
+        # It's difficult to infer number of image tokens from image size for
+        # image larger than (1920, 1080)
         _, _, h, w = vlm_config.image_input_shape
         if image.width > w or image.height > h:
             h, w = min(h, image.height), min(w, image.width)
             logger.warning(
-                "Dynamic image shape larger than (1920, 1080) is currently not supported. "
+                "Dynamic image larger than (1920, 1080) currently unsupported. "
                 "Resizing input image to (%d, %d).", w, h)
             data.image = image.resize((w, h))
-    
-    img_processor = MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
+
+    img_processor = MULTIMODAL_REGISTRY \
+                    ._get_plugin_for_data_type(ImagePixelData) \
                     ._get_hf_image_processor(model_config, vlm_config)
 
     # FuyuImageProcessor's preprocess returns unpatched image,
     # we need to call patchify_image manually
-    processor_outputs = MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
+    processor_outputs = MULTIMODAL_REGISTRY \
+            ._get_plugin_for_data_type(ImagePixelData) \
             ._default_input_processor(data, model_config, vlm_config)
 
     image = torch.stack(processor_outputs["images"][0])
@@ -88,12 +93,11 @@ def _image_processor(
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class FuyuForCausalLM(VisionLanguageModelBase):
 
-    def __init__(
-        self,
-        config: FuyuConfig,
-        vision_language_config: VisionLanguageConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self,
+                 config: FuyuConfig,
+                 vision_language_config: VisionLanguageConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__(vision_language_config)
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -132,10 +136,11 @@ class FuyuForCausalLM(VisionLanguageModelBase):
                 f"Unexpected image input type: {expected_input_type}."
                 "Phi3v only support pixel_values input currently.")
 
-        if image_patches is not None:
-            image_patches = image_patches.to(self.vision_embed_tokens.weight.dtype)
+        if isinstance(image_patches, torch.Tensor):
+            image_patches = image_patches.to(
+                self.vision_embed_tokens.weight.dtype)
             return FuyuImagePixelInputs(type="pixel_values",
-                                         data=image_patches)
+                                        data=image_patches)
         return None
 
     def forward(
@@ -149,7 +154,8 @@ class FuyuForCausalLM(VisionLanguageModelBase):
         image_input = self._parse_and_validate_image_input(**kwargs)
 
         if image_input is not None:
-            vision_embeddings, _ = self.vision_embed_tokens(image_input["data"])
+            vision_embeddings, _ = self.vision_embed_tokens(
+                image_input["data"])
             inputs_embeds = self.language_model.model.embed_tokens(input_ids)
             inputs_embeds = self.merge_embeddings(
                 input_ids,
