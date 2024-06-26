@@ -6,7 +6,8 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.inputs import (PromptInputs, PromptStrictInputs, TextPrompt,
+from vllm.inputs import (PromptInputs, PromptStrictInputs,
+                         PromptStrictInputsOptions, TextPrompt,
                          TextTokensPrompt, TokensPrompt,
                          parse_and_batch_prompt)
 from vllm.logger import init_logger
@@ -243,8 +244,7 @@ class LLM:
                       "instead.")
     def generate(
         self,
-        prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
-                       Optional[Union[str, List[str]]]] = None,
+        prompts: PromptStrictInputsOptions = None,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,

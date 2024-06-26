@@ -1,4 +1,4 @@
-from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
+from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence, Tuple,
                     TypedDict, Union, cast, overload)
 
 from typing_extensions import NotRequired
@@ -79,11 +79,43 @@ class TextPrompt(TypedDict):
     """
 
 
+class EncoderDecoderTextPrompt(TypedDict):
+    """Schema for a dual text prompt (encoder & decoder prompts.)"""
+
+    encoder_prompt: str
+    """The input text to be tokenized before passing to the encoder model."""
+
+    decoder_prompt: str
+    """The input text to be tokenized before passing to the decoder model."""
+
+    multi_modal_data: NotRequired["MultiModalData"]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """
+
+
 class TokensPrompt(TypedDict):
     """Schema for a tokenized prompt."""
 
     prompt_token_ids: List[int]
     """A list of token IDs to pass to the model."""
+
+    multi_modal_data: NotRequired["MultiModalData"]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """
+
+
+class EncoderDecoderTokensPrompt(TypedDict):
+    """Schema for a dual tokenized prompt (encoder & decoder prompts)"""
+
+    encoder_prompt_token_ids: List[int]
+    """A list of token IDs to pass to the encoder model."""
+
+    decoder_prompt_token_ids: List[int]
+    """A list of token IDs to pass to the decoder model."""
 
     multi_modal_data: NotRequired["MultiModalData"]
     """
@@ -111,7 +143,49 @@ class TextTokensPrompt(TypedDict):
     """
 
 
-PromptStrictInputs = Union[str, TextPrompt, TokensPrompt]
+class EncoderDecoderTextTokensPrompt(TypedDict):
+    """It is assumed that :attr:`encoder_prompt` and :attr:`decoder_prompt`
+    are consistent with :attr:`encoder_prompt_token_ids` and 
+    :attr:`decoder_prompt_token_ids`, respectively. This is currently used in
+    :class:`AsyncLLMEngine` for logging both the text and token IDs."""
+
+    encoder_prompt: str
+    """The encoder prompt text."""
+
+    encoder_prompt_token_ids: List[int]
+    """The token IDs of the encoder prompt. If None, we use the
+    tokenizer to convert the prompts to token IDs."""
+
+    decoder_prompt: str
+    """The decoder prompt text."""
+
+    decoder_prompt_token_ids: List[int]
+    """The token IDs of the decoder prompt. If None, we use the
+    tokenizer to convert the prompts to token IDs."""
+
+    multi_modal_data: NotRequired["MultiModalData"]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """
+
+
+EncoderDecoderStringPrompts = Tuple[str, str]
+
+EncoderDecoderPromptStrictInputs = Union[EncoderDecoderStringPrompts,
+                                         EncoderDecoderTextPrompt,
+                                         EncoderDecoderTokensPrompt]
+"""
+The inputs to the encoder/decoder LLM, 
+which can take one of the following forms:
+
+- A pair of encoder & decoder text prompts (:class:`tuple` of two :class:`str`
+  i.e. (encoder_prompt,decoder_prompt) or :class:`EncoderDecoderTextPrompt`)
+- Tokenized encoder & decoder prompts (:class:`EncoderDecoderTokensPrompt`)
+"""
+
+PromptStrictInputs = Union[str, TextPrompt, TokensPrompt,
+                           EncoderDecoderPromptStrictInputs]
 """
 The inputs to the LLM, which can take one of the following forms:
 
@@ -119,12 +193,36 @@ The inputs to the LLM, which can take one of the following forms:
 - A tokenized prompt (:class:`TokensPrompt`)
 """
 
-PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
+EncoderDecoderPromptInputs = Union[EncoderDecoderStringPrompts,
+                                   EncoderDecoderTextPrompt,
+                                   EncoderDecoderTokensPrompt,
+                                   EncoderDecoderTextTokensPrompt]
+"""Same as :const:`EncoderDecoderPromptStrictInputs` but additionally accepts
+:class:`EncoderDecoderTextTokensPrompt`."""
+
+PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt,
+                     EncoderDecoderPromptInputs]
 """Same as :const:`PromptStrictInputs` but additionally accepts
 :class:`TextTokensPrompt`."""
+
+PromptStrictInputsOptions = Union[
+    Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+    Optional[Union[str, EncoderDecoderStringPrompts, List[str],
+                   List[EncoderDecoderStringPrompts]]]]
 
 
 class LLMInputs(TypedDict):
     prompt_token_ids: List[int]
     prompt: NotRequired[Optional[str]]
     multi_modal_data: NotRequired[Optional["MultiModalData"]]
+
+
+class EncoderDecoderLLMInputs(TypedDict):
+    encoder_prompt_token_ids: List[int]
+    encoder_prompt: NotRequired[Optional[str]]
+    decoder_prompt_token_ids: NotRequired[Optional[List[int]]]
+    decoder_prompt: NotRequired[Optional[str]]
+    multi_modal_data: NotRequired[Optional["MultiModalData"]]
+
+
+LLMInputsOptions = Union[LLMInputs, EncoderDecoderLLMInputs]

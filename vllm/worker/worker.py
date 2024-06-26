@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
@@ -17,8 +17,11 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
+from vllm.utils import (is_embedding_model_config,
+                        is_encoder_decoder_model_config)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
+from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
 
@@ -78,8 +81,15 @@ class Worker(WorkerBase):
               or (speculative_config.draft_model_config.hf_config.model_type !=
                   "mlp_speculator") else {"return_hidden_states": True}
 
-        ModelRunnerClass = (EmbeddingModelRunner if
-                            self.model_config.embedding_mode else ModelRunner)
+        ModelRunnerClass: Union[Type[EmbeddingModelRunner],
+                                Type[EncoderDecoderModelRunner],
+                                Type[ModelRunner]] = ModelRunner
+
+        if is_embedding_model_config(self.model_config):
+            ModelRunnerClass = EmbeddingModelRunner
+        elif is_encoder_decoder_model_config(self.model_config):
+            ModelRunnerClass = EncoderDecoderModelRunner
+
         self.model_runner = ModelRunnerClass(
             model_config,
             parallel_config,
@@ -98,6 +108,12 @@ class Worker(WorkerBase):
         self.cache_engine: CacheEngine
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[torch.tensor]] = None
+
+    def _is_encoder_decoder_model(self) -> bool:
+        return is_encoder_decoder_model_config(self.model_config)
+
+    def _is_embedding_model(self) -> bool:
+        return is_embedding_model_config(self.model_config)
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":

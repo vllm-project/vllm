@@ -356,6 +356,7 @@ class Scheduler:
                         continue
                     seq.status = SequenceStatus.FINISHED_ABORTED
                     self.free_seq(seq)
+                self.free_seq_group(aborted_group)
 
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
@@ -960,6 +961,17 @@ class Scheduler:
             seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
+            # Encoder associated with SequenceGroup
+            encoder_seq_data: SequenceData = \
+                seq_group.get_encoder_seq().data \
+                    if seq_group.is_encoder_decoder() else \
+                        None
+            # Block table for cross-attention
+            # Also managed at SequenceGroup level
+            cross_block_table: List[int] = \
+                self.block_manager.get_cross_block_table(seq_group) \
+                    if seq_group.is_encoder_decoder() else \
+                        None
 
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
@@ -1000,6 +1012,8 @@ class Scheduler:
                 lora_request=seq_group.lora_request,
                 computed_block_nums=common_computed_block_nums,
                 state=seq_group.state,
+                encoder_seq_data=encoder_seq_data,
+                cross_block_table=cross_block_table,
                 # `multi_modal_data` will only be present for the 1st comm
                 # between engine and worker.
                 # the subsequent comms can still use delta, but
@@ -1026,9 +1040,27 @@ class Scheduler:
         """Free a sequence from a block table."""
         self.block_manager.free(seq)
 
+    def free_seq_group(self, seq_group: SequenceGroup) \
+        -> None:
+        """
+        Free a sequence group from a cross-attention block table.
+        Has no effect on decoder-only models.
+        """
+        self.block_manager.free_cross(seq_group)
+
     def free_finished_seq_groups(self) -> None:
-        self.running = deque(seq_group for seq_group in self.running
-                             if not seq_group.is_finished())
+        new_running: deque = deque()
+        for seq_group in self.running:
+            if seq_group.is_finished():
+                # For encoder/decoder models, free cross-
+                # attention block table associated with finished
+                # seq_group
+                self.free_seq_group(seq_group)
+            else:
+                # Maintain `running` deque without finished
+                # sequence groups
+                new_running.append(seq_group)
+        self.running = new_running
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
