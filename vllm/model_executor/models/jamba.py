@@ -771,7 +771,7 @@ class JambaForCausalLM(nn.Module):
         return (conv_state, temporal_state), indices_for_current_run
 
 
-    def copy_inputs_before_cuda_grpahs(self, input_buffers, **kwargs):
+    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         requests_info = kwargs["requests_info"]
         batch_size = len(requests_info)
         (
