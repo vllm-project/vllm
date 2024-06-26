@@ -269,13 +269,11 @@ def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 # fp8 marlin
 def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                    b_scales: torch.Tensor, g_idx: torch.Tensor,
-                    perm: torch.Tensor, workspace: torch.Tensor, num_bits: int,
-                    size_m: int, size_n: int, size_k: int,
-                    is_k_full: bool) -> torch.Tensor:
-    return torch.ops._C.fp8_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
-                                        workspace, num_bits, size_m, size_n,
-                                        size_k, is_k_full)
+                    b_scales: torch.Tensor, workspace: torch.Tensor,
+                    num_bits: int, size_m: int, size_n: int,
+                    size_k: int) -> torch.Tensor:
+    return torch.ops._C.fp8_marlin_gemm(a, b_q_weight, b_scales, workspace,
+                                        num_bits, size_m, size_n, size_k)
 
 
 # fp8
@@ -316,14 +314,6 @@ def scaled_fp8_quant(
     else:
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
     return output, scale
-
-
-def pack_fp8_to_int32(input: torch.Tensor) -> torch.Tensor:
-    assert input.shape[0] % 4 == 0
-    shape = (input.shape[0] // 4, *input.shape[1:])
-    output = torch.empty(shape, device=input.device, dtype=torch.int32)
-    torch.ops._C.pack_fp8_to_int32(output, input)
-    return output
 
 
 # int8

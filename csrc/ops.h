@@ -93,10 +93,9 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t num_bits);
 
 torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                              torch::Tensor& b_scales, torch::Tensor& g_idx,
-                              torch::Tensor& perm, torch::Tensor& workspace,
+                              torch::Tensor& b_scales, torch::Tensor& workspace,
                               int64_t num_bits, int64_t size_m, int64_t size_n,
-                              int64_t size_k, bool is_k_full);
+                              int64_t size_k);
 
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 
@@ -127,8 +126,6 @@ void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
 
 void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                               torch::Tensor& scale);
-
-void pack_fp8_to_int32(torch::Tensor& out, torch::Tensor& input);
 
 void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                           int64_t block_size, torch::Tensor sorted_token_ids,

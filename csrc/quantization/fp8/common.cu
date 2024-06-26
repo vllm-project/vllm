@@ -124,28 +124,6 @@ __global__ void scaled_fp8_quant_kernel(c10::Float8_e4m3fn* __restrict__ out,
   }
 }
 
-__global__ void pack_fp8_to_int32_kernel(
-    int32_t* __restrict__ out, const c10::Float8_e4m3fn* __restrict__ input,
-    int64_t rows, int64_t cols) {
-  int tid = blockDim.x * blockIdx.x + threadIdx.x;
-  int stride = blockDim.x * gridDim.x;
-  int64_t num_packed_elems = (rows / 4) * cols;
-
-  for (int64_t i = tid; i < num_packed_elems; i += stride) {
-    int64_t out_row = i / cols;
-    int64_t col = i % cols;
-
-    uint32_t packed = 0;
-    for (int j = 0; j < 4; ++j) {
-      int64_t input_row = out_row * 4 + j;
-      int64_t input_idx = input_row * cols + col;
-      uint32_t fp8_bits = *reinterpret_cast<const uint8_t*>(&input[input_idx]);
-      packed |= (fp8_bits << (j * 8));
-    }
-    out[i] = static_cast<int32_t>(packed);
-  }
-}
-
 }  // namespace vllm
 
 void static_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
@@ -184,39 +162,4 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
             out.data_ptr<c10::Float8_e4m3fn>(), input.data_ptr<scalar_t>(),
             scale.data_ptr<float>(), num_elems);
       });
-}
-
-void pack_fp8_to_int32(torch::Tensor& out,    // [d/4, ...]
-                       torch::Tensor& input)  // [d, ...]
-{
-  TORCH_CHECK(input.scalar_type() == torch::kFloat8_e4m3fn,
-              "Input tensor must be of type Float8_e4m3fn");
-  TORCH_CHECK(out.scalar_type() == torch::kInt32,
-              "Output tensor must be of type Int32");
-  TORCH_CHECK(input.size(0) % 4 == 0,
-              "First dimension of input tensor must be divisible by 4");
-  TORCH_CHECK(input.size(0) / 4 == out.size(0),
-              "First dimension of output tensor must be 1/4 of input tensor's "
-              "first dimension");
-  for (int64_t i = 1; i < input.dim(); ++i) {
-    TORCH_CHECK(
-        input.size(i) == out.size(i),
-        "All dimensions except the first must match between input and output");
-  }
-
-  int64_t rows = input.size(0);
-  int64_t cols = input.numel() / rows;
-
-  int64_t num_threads = 1024;
-  int64_t num_blocks = ((rows / 4) * cols + num_threads - 1) / num_threads;
-
-  dim3 grid(num_blocks);
-  dim3 block(num_threads);
-
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  vllm::pack_fp8_to_int32_kernel<<<grid, block, 0, stream>>>(
-      out.data_ptr<int32_t>(), input.data_ptr<c10::Float8_e4m3fn>(), rows,
-      cols);
 }
