@@ -106,18 +106,26 @@ Just add the following lines in your code:
 
 .. code-block:: python
 
+    # The file containing the model code is located at /path/to/your_code.py
+    class YourModelForCausalLM:
+        # Your model code here
+
+    # Add the following lines at the end of your code
+    # the first argument is the `architectures` key in the model config file
+    # the second argument is the class of your model
     from vllm import ModelRegistry
-    from your_code import YourModelForCausalLM
     ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
 
-If you are running api server with `python -m vllm.entrypoints.openai.api_server args`, you can wrap the entrypoint with the following code:
+If you are running api server with ``python -m vllm.entrypoints.openai.api_server args``, just add ``--worker_init_callback_script /path/to/your_code.py`` to the command line arguments.
+
+If you use ``LLM`` class, just add a keyword argument ``worker_init_callback_script`` to the constructor.
 
 .. code-block:: python
 
-    from vllm import ModelRegistry
-    from your_code import YourModelForCausalLM
-    ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
-    import runpy
-    runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
+    from vllm import LLM
+    llm = LLM("path or huggingface repo to load the model",
+        worker_init_callback_script="/path/to/your_code.py",
+        ...
+    )
 
-Save the above code in a file and run it with `python your_file.py args`.
+That's it! When vLLM launches a worker, it will execute the script and register your model. Later, when it reads the config file, it will use the ``architectures`` key to find the model class, which is the class you registered.

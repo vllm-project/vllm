@@ -1,6 +1,5 @@
 import torch
 
-from vllm import ModelRegistry
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
@@ -18,4 +17,6 @@ class MyOPTForCausalLM(OPTForCausalLM):
 
 
 # register our dummy model
+from vllm import ModelRegistry  # noqa: E402
+
 ModelRegistry.register_model("OPTForCausalLM", MyOPTForCausalLM)
