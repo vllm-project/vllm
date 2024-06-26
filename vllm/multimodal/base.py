@@ -161,6 +161,8 @@ class MultiModalPlugin(ABC, Generic[D]):
         Apply an input mapper to a :class:`~MultiModalData` instance passed
         to the model, transforming the data into a dictionary of model inputs.
 
+        The model is identified by ``model_config``.
+
         TODO: Add guide [ref: PR #5276]
         """
         # Avoid circular import

@@ -134,7 +134,13 @@ class InputRegistry:
 
     def dummy_data_for_profiling(self, model_config: "ModelConfig",
                                  seq_len: int):
-        """Create dummy data for memory profiling."""
+        """
+        Create dummy data for profiling the memory usage of a model.
+
+        The model is identified by ``model_config``.
+
+        TODO: Add guide [ref: PR #5276]
+        """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
 
@@ -177,9 +183,7 @@ class InputRegistry:
         """
         Apply an input processor to an instance of model inputs.
 
-        The model is identified by ``model_config``. ``vlm_config`` is
-        for compatibility purposes and may be merged into ``model_config``
-        in the near future.
+        The model is identified by ``model_config``.
 
         TODO: Add guide [ref: PR #5276]
         """
