@@ -265,7 +265,7 @@ class Sequence:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
 
-        self.data = SequenceData(self.prompt_token_ids)
+        self.data = SequenceData(self.inputs["prompt_token_ids"])
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -286,8 +286,8 @@ class Sequence:
         return self.inputs.get("prompt")
 
     @property
-    def prompt_token_ids(self) -> List[int]:
-        return self.inputs["prompt_token_ids"]
+    def prompt_token_ids(self) -> np.ndarray:
+        return self.data.get_prompt_token_ids()
 
     @property
     def multi_modal_data(self) -> Optional["MultiModalData"]:
@@ -327,7 +327,7 @@ class Sequence:
         )
         self.logical_token_blocks.append(block)
 
-    def _append_tokens_to_blocks(self, token_ids: List[int]) -> None:
+    def _append_tokens_to_blocks(self, token_ids: np.ndarray) -> None:
         cursor = 0
         while cursor < len(token_ids):
             if not self.logical_token_blocks:
@@ -343,13 +343,24 @@ class Sequence:
                                                num_empty_slots])
             cursor += num_empty_slots
 
+    def _append_token_to_blocks(self, token_id: int) -> None:
+        if not self.logical_token_blocks:
+            self._append_logical_block()
+
+        last_block = self.logical_token_blocks[-1]
+        if last_block.is_full():
+            self._append_logical_block()
+            last_block = self.logical_token_blocks[-1]
+
+        last_block.append_token(token_id)
+
     def append_token_id(
         self,
         token_id: int,
         logprobs: Dict[int, Logprob],
     ) -> None:
         assert token_id in logprobs
-        self._append_tokens_to_blocks([token_id])
+        self._append_token_to_blocks(token_id)
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
@@ -485,7 +496,7 @@ class SequenceGroup:
         return next(iter(self.seqs_dict.values())).prompt
 
     @property
-    def prompt_token_ids(self) -> List[int]:
+    def prompt_token_ids(self) -> np.ndarray:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).prompt_token_ids

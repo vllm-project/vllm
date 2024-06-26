@@ -135,7 +135,7 @@ class RequestOutput:
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = seq_group.prompt
-        prompt_token_ids = seq_group.prompt_token_ids
+        prompt_token_ids = seq_group.prompt_token_ids.tolist()
         prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
         finished_time = time.time() if finished else None
@@ -185,7 +185,7 @@ class EmbeddingRequestOutput:
             raise ValueError(
                 "Embeddings are missing in seq_group for EmbeddingRequest.")
         output = EmbeddingOutput(seq_group.embeddings)
-        prompt_token_ids = seq_group.prompt_token_ids
+        prompt_token_ids = seq_group.prompt_token_ids.tolist()
         finished = seq_group.is_finished()
 
         return cls(seq_group.request_id, output, prompt_token_ids, finished)

@@ -74,11 +74,16 @@ class LogicalTokenBlock:
     def is_full(self) -> bool:
         return self.num_tokens == self.block_size
 
-    def append_tokens(self, token_ids: List[int]) -> None:
+    def append_tokens(self, token_ids: np.ndarray) -> None:
         assert len(token_ids) <= self.get_num_empty_slots()
         curr_idx = self.num_tokens
         self.token_ids[curr_idx:curr_idx + len(token_ids)] = token_ids
         self.num_tokens += len(token_ids)
+
+    def append_token(self, token_id: int) -> None:
+        assert self.get_num_empty_slots() > 0
+        self.token_ids[self.num_tokens] = token_id
+        self.num_tokens += 1
 
     def get_token_ids(self) -> np.ndarray:
         return self.token_ids[:self.num_tokens]
