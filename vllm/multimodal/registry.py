@@ -77,7 +77,7 @@ class MultiModalRegistry:
             if plugin is not None:
                 return plugin
 
-        msg = f"Unknown multi-modal data type: {data_type}"
+        msg = f"No plugin found for key {key} and type {data_type}"
         raise NotImplementedError(msg)
 
     def _get_plugin_for_internal_data_type(self,

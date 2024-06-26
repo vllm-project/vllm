@@ -73,7 +73,7 @@ class MultiModalPlugin(ABC, Generic[D]):
         raise NotImplementedError
 
     @abstractmethod
-    def get_external_data_type(self) -> Tuple[str, EXTERNAL_MM_DATA_TYPE]:
+    def get_external_data_type(self) -> Tuple[str, Type[EXTERNAL_MM_DATA_TYPE]]:
         """The data type that this plugin handles. 
         
         For `LLM.generate(multi_modal_data={"key": value})` will 
