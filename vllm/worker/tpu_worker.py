@@ -34,6 +34,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        is_driver_worker: bool,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -45,6 +46,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+        self.is_driver_worker = is_driver_worker
 
         assert self.device_config.device_type == "tpu"
         if self.cache_config.cache_dtype == "auto":
@@ -53,10 +55,14 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
 
-        self.model_runner = TPUModelRunner(model_config, parallel_config,
-                                           scheduler_config, device_config,
-                                           cache_config, load_config,
-                                           vision_language_config)
+        self.model_runner = TPUModelRunner(model_config,
+                                           parallel_config,
+                                           scheduler_config,
+                                           device_config,
+                                           cache_config,
+                                           load_config,
+                                           vision_language_config,
+                                           is_driver_worker=is_driver_worker)
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
@@ -112,14 +118,15 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         xm.wait_device_ops()
 
         m = xm.get_memory_info(self.device)
-        program_size = 1024 * 1024 * 1024  # 1GB
-        free_bytes = max(m["bytes_limit"] - m["bytes_used"] - program_size, 0)
-        kv_cache_bytes = int(free_bytes *
-                             self.cache_config.gpu_memory_utilization)
-        kv_cache_dtype_btyes = get_dtype_size(self.cache_dtype)
+        total_memory_size = m["bytes_limit"]
+        usable_memory_size = int(total_memory_size *
+                                 self.cache_config.gpu_memory_utilization)
+        profiled = m["bytes_used"]  # Weights + intermediate activations.
+        kv_cache_bytes = max(usable_memory_size - profiled, 0)
+        dtype_btyes = get_dtype_size(self.cache_dtype)
         block_size = self.cache_config.block_size
         num_tpu_blocks = (kv_cache_bytes //
-                          (kv_cache_dtype_btyes * block_size * num_layers * 2 *
+                          (dtype_btyes * block_size * num_layers * 2 *
                            head_size * num_kv_heads))
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
         return num_tpu_blocks, 0
@@ -175,16 +182,13 @@ class TPUWorker(LoraNotSupportedWorkerBase):
 
     def execute_model(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> List[SamplerOutput]:
-        if execute_model_req is None:
+        if not self.is_driver_worker:
+            self._execute_model_non_driver()
             return []
 
-        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-        num_seq_groups = len(seq_group_metadata_list)
-        if num_seq_groups == 0:
-            return []
-
+        assert execute_model_req is not None
         # Currently, TPUWorker does not support swapping.
         # TODO(woosuk): Support block copying.
         assert len(execute_model_req.blocks_to_swap_in) == 0, (
@@ -193,6 +197,16 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             "Swapping is not supported for the TPU backend.")
         assert len(execute_model_req.blocks_to_copy) == 0
 
+        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+        assert len(seq_group_metadata_list) > 0
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.tpu_cache)
         return [output]
+
+    def start_worker_execution_loop(self) -> None:
+        while self._execute_model_non_driver():
+            pass
+
+    def _execute_model_non_driver(self) -> bool:
+        self.model_runner.execute_model(None, self.tpu_cache)
+        return True
