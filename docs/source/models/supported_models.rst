@@ -163,6 +163,10 @@ Alongside each architecture, we include some popular models that use it.
     - Xverse
     - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.
     -
+  * - :code:`DeepSeekMultiModalityCausalLM`
+    - deepseek-ai
+    - :code:`deepseek-ai/deepseek-vl-1.3b-chat`, :code:`deepseek-ai/deepseek-vl-7b-chat`, etc.
+    -
 
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.

@@ -167,7 +167,7 @@ class VLMImageProcessor(BaseImageProcessor):
             0.27577711,
         ),
         rescale_factor: float = 1.0 / 255.0,
-        do_normalize: bool = True,
+        do_normalize: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -228,7 +228,6 @@ class VLMImageProcessor(BaseImageProcessor):
                    **kwargs) -> BatchFeature:
         # resize and pad to [self.image_size, self.image_size]
         # then convert from [H, W, 3] to [3, H, W]
-        # print(images)
         if not isinstance(images, List):
             images = [
                 images,
@@ -1773,10 +1772,6 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
         bs, n = pixel_values.shape[0:2]
         p_b, p_n, p_c, p_h, p_w = pixel_values.shape
         images = pixel_values.reshape(p_b * p_n, p_c, p_h, p_w)
-        # [b x n, T2, D]
-        # images = images.to(self.vision_model.high_layer_norm.weight.dtype).to(
-        #     self.vision_model.high_layer_norm.weight.device
-        # )
         images_embeds = self.aligner(self.vision_model(images))
 
         # [b x n, T2, D] -> [b, n x T2, D]
@@ -1805,7 +1800,7 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
     ):
         pixel_values = kwargs.pop("pixel_values", None)
         image_features = kwargs.pop("image_features", None)
-        if image_features and not pixel_values:
+        if image_features is not None and pixel_values is None:
             pixel_values = image_features
         if pixel_values is not None:
             image_token_id = 100015
@@ -1879,10 +1874,6 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                # if name.endswith(".bias") and name not in params_dict:
-                #     continue
-                # Skip experts that are not assigned to this worker.
                 if ("mlp.experts." in name or "mlp.shared_experts."
                         in name) and name not in params_dict:
                     continue
