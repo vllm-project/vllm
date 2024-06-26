@@ -570,7 +570,7 @@ class EngineArgs:
             'decoding.')
 
         parser.add_argument(
-            '--spec-decoding-acceptance-routine',
+            '--spec-decoding-acceptance-method',
             type=str,
             default=EngineArgs.spec_decoding_acceptance_method,
             choices=['rejection_sampler', 'typical_acceptance_sampler'],
