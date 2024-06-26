@@ -673,10 +673,13 @@ class JambaForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
         **kwargs
     ):
-        self.prepare_seqlen_agnostic_cache()
+        if getattr(self, "seqlen_agnostic_cache", None) is None:
+            self._prepare_seqlen_agnostic_cache()
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             requests_info = kwargs["requests_info"]
+            finished_seq_groups_req_ids = kwargs["finished_seq_groups_req_ids"]
+            self._release_seqlen_agnostic_cache(finished_seq_groups_req_ids)
             batch_size = input_ids.shape[0]
             if attn_metadata.prefill_metadata:
                  batch_size = len(requests_info)
@@ -688,7 +691,11 @@ class JambaForCausalLM(nn.Module):
                 batch_size
             )
         else:
-            current_seqlen_agnostic_cache, indices = kwargs["seqlen_agnostic_capture_inputs"],[]
+            ## CG capturing runs
+            current_seqlen_agnostic_cache, indices = (
+                kwargs["seqlen_agnostic_capture_inputs"],
+                [],
+            )
         self.current_indices = indices
 
         hidden_states = self.model(
@@ -773,6 +780,8 @@ class JambaForCausalLM(nn.Module):
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         requests_info = kwargs["requests_info"]
+        finished_seq_groups_req_ids = kwargs["finished_seq_groups_req_ids"]
+        self._release_seqlen_agnostic_cache(finished_seq_groups_req_ids)
         batch_size = len(requests_info)
         (
             current_seqlen_agnostic_cache,
@@ -800,6 +809,12 @@ class JambaForCausalLM(nn.Module):
         )
 
 
+    def _release_seqlen_agnostic_cache(self, finished_seq_groups_req_ids: List[str]):
+        for req_id in finished_seq_groups_req_ids:
+            if req_id in self.seqlen_agnostic_cache_indices_mapping:
+                self.seqlen_agnostic_cache_indices_mapping.pop(req_id)
+
+
     def _first_free_index_in_seqlen_agnostic_cache(self) -> int:
         if self.seqlen_agnostic_cache is not None:
             max_possible_bs = self.seqlen_agnostic_cache[0].shape[1]
@@ -813,7 +828,7 @@ class JambaForCausalLM(nn.Module):
             return first_free_index
         return 0
 
-    def get_seqlen_agnostic_cache_shape(
+    def _get_seqlen_agnostic_cache_shape(
         self,
         ) -> Tuple[Optional[Tuple[int,int]],Optional[Tuple[int,int]]]:
         world_size = get_tensor_model_parallel_world_size()
@@ -830,16 +845,15 @@ class JambaForCausalLM(nn.Module):
         return conv_state_shape, temporal_state_shape
 
 
-    def prepare_seqlen_agnostic_cache(self):
-        if getattr(self, "seqlen_agnostic_cache", None) is not None:
-            return 
+    def _prepare_seqlen_agnostic_cache(self):
         # dtype = torch.get_default_dtype()
         dtype = self.lm_head.weight.dtype
         layers_type = self.config.layers_block_type
         mamba_layers = sum([layer_type == "mamba" for layer_type in layers_type])
         num_seqlen_agnostic_layers = mamba_layers
+        # TODO: get from config
         max_batch_size = 256
-        conv_state_shape, temporal_state_shape = self.get_seqlen_agnostic_cache_shape()
+        conv_state_shape, temporal_state_shape = self._get_seqlen_agnostic_cache_shape()
         assert conv_state_shape is not None and temporal_state_shape is not None
         for buffername in [
             "seqlen_agnostic_cache",

@@ -792,16 +792,12 @@ class ModelRunner:
                 sampling_metadata, lora_requests, lora_mapping,
                 multi_modal_input, requests_info)
 
-    def release_seqlen_agnostic_cache(self, finished_seq_groups_req_ids: List[str]):
-        for req_id in finished_seq_groups_req_ids:
-            if req_id in self.seqlen_agnostic_cache_indices_mapping:
-                self.seqlen_agnostic_cache_indices_mapping.pop(req_id)
-
     @torch.inference_mode()
     def execute_model(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
+        finished_seq_groups_req_ids: Optional[List[str]] = None
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input,
@@ -827,7 +823,10 @@ class ModelRunner:
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
         if self.contains_seqlen_agnostic_layers:
-            execute_model_kwargs.update({"requests_info": requests_info})
+            execute_model_kwargs.update({
+                "requests_info": requests_info,
+                "finished_seq_groups_req_ids": finished_seq_groups_req_ids,
+            })
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
@@ -909,7 +908,8 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        self.execute_model(seqs, kv_caches)
+        finished_seq_groups_req_ids = []
+        self.execute_model(seqs, kv_caches,finished_seq_groups_req_ids)
         torch.cuda.synchronize()
         return
 

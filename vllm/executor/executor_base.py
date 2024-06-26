@@ -92,10 +92,6 @@ class ExecutorBase(ABC):
         exception."""
         raise NotImplementedError
 
-    @abstractmethod
-    def release_seqlen_agnostic_cache(self, requests_id: List[str]) -> None:
-        raise NotImplementedError
-
     def shutdown(self) -> None:
         """Shutdown the executor."""
         return

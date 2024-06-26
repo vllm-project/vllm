@@ -822,6 +822,8 @@ class ExecuteModelRequest:
     num_lookahead_slots: int = 0
     # The number of requests in the running queue.
     running_queue_size: int = 0
+    # The number of requests in the running queue.
+    finished_request_ids: List[str] = field(default_factory=list)
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -834,4 +836,5 @@ class ExecuteModelRequest:
             blocks_to_copy=self.blocks_to_copy.copy(),
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
+            finished_request_ids=self.finished_request_ids
         )

@@ -218,7 +218,7 @@ class Worker(WorkerBase):
             seq_group_metadata_list = None
         else:
             seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-
+        finished_seq_group_req_ids: List[str]
         blocks_to_swap_in: torch.Tensor
         blocks_to_swap_out: torch.Tensor
         blocks_to_copy: torch.Tensor
@@ -242,11 +242,13 @@ class Worker(WorkerBase):
             blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                           device=self.device,
                                           dtype=torch.int64).view(-1, 2)
+            finished_seq_group_req_ids = execute_model_req.finished_request_ids
             data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
+                "finished_seq_group_req_ids": finished_seq_group_req_ids
             }
             broadcast_tensor_dict(data, src=0)
         else:
@@ -255,7 +257,7 @@ class Worker(WorkerBase):
             blocks_to_swap_in = data["blocks_to_swap_in"]
             blocks_to_swap_out = data["blocks_to_swap_out"]
             blocks_to_copy = data["blocks_to_copy"]
-
+            finished_seq_group_req_ids = data["finished_seq_group_req_ids"]
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
@@ -263,7 +265,8 @@ class Worker(WorkerBase):
             return []
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
+                                                 self.gpu_cache,
+                                                 finished_seq_group_req_ids)
 
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.
@@ -292,10 +295,6 @@ class Worker(WorkerBase):
         return CacheEngine.get_cache_block_size(self.cache_config,
                                                 self.model_config,
                                                 self.parallel_config)
-
-    def release_seqlen_agnostic_cache(self, requests_id: List[str]):
-        self.model_runner.release_seqlen_agnostic_cache(requests_id)
-
 
 def init_worker_distributed_environment(
     parallel_config: ParallelConfig,

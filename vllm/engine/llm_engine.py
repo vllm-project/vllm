@@ -597,14 +597,6 @@ class LLMEngine:
                 self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
-        finished_seq_groups_req_ids = [
-            seq_group.request_id for seq_group in self.scheduler.running
-            if seq_group.is_finished()
-        ]
-
-        if len(finished_seq_groups_req_ids) > 0:
-            self.model_executor.release_seqlen_agnostic_cache(
-                finished_seq_groups_req_ids)
         self.scheduler.free_finished_seq_groups()
 
         # Create the outputs.
@@ -681,6 +673,7 @@ class LLMEngine:
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
+                finished_request_ids=self.scheduler.get_last_step_finished_seq_groups()
             )
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
