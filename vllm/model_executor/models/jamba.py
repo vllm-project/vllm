@@ -458,7 +458,6 @@ class JambaAttentionDecoderLayer(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.sliding_window = config.sliding_window
 
         self.qkv_proj = QKVParallelLinear(
             config.hidden_size,
@@ -479,7 +478,6 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
-            sliding_window=self.sliding_window,
         )
 
         num_experts = config.layers_num_experts[layer_idx]
@@ -747,7 +745,7 @@ class JambaForCausalLM(nn.Module):
         self, request_ids_to_seq_ids: Dict[str, list[int]], batch_size: int
     ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], List[int]]:
         indices_for_current_run = []
-        for request_id,seqs_id in request_ids_to_seq_ids.items():
+        for request_id, seqs_id in request_ids_to_seq_ids.items():
             indices_for_current_run += self._assign_seq_id_to_mamba_cache(
                 request_id, seqs_id)
         ## Pad the batch in case of running batch that was not captured via CG
@@ -763,12 +761,13 @@ class JambaForCausalLM(nn.Module):
         return (conv_state, temporal_state), indices_for_current_run
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        requests_info = kwargs["requests_info"]
-        batch_size = len(requests_info)
+        request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
+        batch_size = len(request_ids_to_seq_ids)
         (
             current_seqlen_agnostic_cache,
             indices,
-        ) = self._prepare_current_run_mamba_cache(requests_info, batch_size)
+        ) = self._prepare_current_run_mamba_cache(request_ids_to_seq_ids,
+                                                  batch_size)
         self.current_indices = indices
 
         finished_request_ids = kwargs["finished_request_ids"]
