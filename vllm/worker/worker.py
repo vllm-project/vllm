@@ -219,7 +219,7 @@ class Worker(WorkerBase):
         else:
             seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
-        finished_seq_group_req_ids: List[str]
+        finished_request_ids: List[str]
         blocks_to_swap_in: torch.Tensor
         blocks_to_swap_out: torch.Tensor
         blocks_to_copy: torch.Tensor
@@ -243,13 +243,13 @@ class Worker(WorkerBase):
             blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                           device=self.device,
                                           dtype=torch.int64).view(-1, 2)
-            finished_seq_group_req_ids = execute_model_req.finished_request_ids
+            finished_request_ids = execute_model_req.finished_request_ids
             data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
-                "finished_seq_group_req_ids": finished_seq_group_req_ids
+                "finished_request_ids": finished_request_ids
             }
             broadcast_tensor_dict(data, src=0)
         else:
@@ -258,7 +258,7 @@ class Worker(WorkerBase):
             blocks_to_swap_in = data["blocks_to_swap_in"]
             blocks_to_swap_out = data["blocks_to_swap_out"]
             blocks_to_copy = data["blocks_to_copy"]
-            finished_seq_group_req_ids = data["finished_seq_group_req_ids"]
+            finished_request_ids = data["finished_request_ids"]
 
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
@@ -268,7 +268,7 @@ class Worker(WorkerBase):
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.gpu_cache,
-                                                 finished_seq_group_req_ids)
+                                                 finished_request_ids)
 
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.

@@ -797,7 +797,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
-        finished_seq_groups_req_ids: Optional[List[str]] = None
+        finished_request_ids: Optional[List[str]] = None
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input,
@@ -825,7 +825,7 @@ class ModelRunner:
         if self.contains_seqlen_agnostic_layers:
             execute_model_kwargs.update({
                 "requests_info": requests_info,
-                "finished_seq_groups_req_ids": finished_seq_groups_req_ids,
+                "finished_request_ids": finished_request_ids,
             })
         hidden_states = model_executable(**execute_model_kwargs)
 
@@ -908,8 +908,8 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        finished_seq_groups_req_ids = [seq.request_id for seq in seqs]
-        self.execute_model(seqs, kv_caches,finished_seq_groups_req_ids)
+        finished_request_ids = [seq.request_id for seq in seqs]
+        self.execute_model(seqs, kv_caches,finished_request_ids)
         torch.cuda.synchronize()
         return
 

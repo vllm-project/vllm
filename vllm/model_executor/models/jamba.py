@@ -688,8 +688,8 @@ class JambaForCausalLM(nn.Module):
                 requests_info,
                 batch_size
             )
-            finished_seq_groups_req_ids = kwargs["finished_seq_groups_req_ids"]
-            self._release_seqlen_agnostic_cache(finished_seq_groups_req_ids)
+            finished_request_ids = kwargs["finished_request_ids"]
+            self._release_seqlen_agnostic_cache(finished_request_ids)
         else:
             ## CG capturing runs
             current_seqlen_agnostic_cache, indices = (
@@ -787,8 +787,8 @@ class JambaForCausalLM(nn.Module):
         ) = self._prepare_current_run_seqlen_agnostic_cache(requests_info, batch_size)
         self.current_indices = indices
 
-        finished_seq_groups_req_ids = kwargs["finished_seq_groups_req_ids"]
-        self._release_seqlen_agnostic_cache(finished_seq_groups_req_ids)
+        finished_request_ids = kwargs["finished_request_ids"]
+        self._release_seqlen_agnostic_cache(finished_request_ids)
 
         for i in [0,1]:
             input_buffers["seqlen_agnostic_capture_inputs"][i].copy_(
