@@ -61,8 +61,8 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
         base_indices: torch.Tensor,
     ):
         self.indices_gpu = base_indices.to(device=self.emb_layer.weight.device)
-        self.flag = torch.sum(
-            self.indices_gpu) / self.indices_gpu.shape[0] != -1
+        self.flag = (torch.sum(
+            self.indices_gpu) / self.indices_gpu.shape[0] != -1).item()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         hidden_states = self.base_layer(x)
