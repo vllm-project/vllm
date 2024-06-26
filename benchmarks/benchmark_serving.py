@@ -530,8 +530,8 @@ def main(args: argparse.Namespace):
                     )
 
         # Traffic
-        result_json["request_rate"] = (args.request_rate if args.request_rate
-                                       < float("inf") else "inf")
+        result_json["request_rate"] = (  # noqa
+            args.request_rate if args.request_rate < float("inf") else "inf")
 
         # Merge with benchmark result
         result_json = {**result_json, **benchmark_result}
