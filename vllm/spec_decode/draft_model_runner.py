@@ -13,7 +13,27 @@ from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
 logger = init_logger(__name__)
 
 
-class DraftModelRunner(ModelRunner):
+class TP1DraftModelRunner(ModelRunner):
+    """Specialized model runner for speculative decoding draft model.
+    Since the draft model always execute k forward passes consecutively to
+    generate k speculative tokens in a single speculative decoding step,
+    we could get rid of most CPU-GPU synchronization and data transfer
+    overheads by keeping model input and output tensors on GPU all the time.
+
+    This runner is still under development so there's no performance gain
+    at this moment. Currently we adopt a temporary solution that caches the
+    seq_group_metadata_list for multi-step execution, so that we can
+    leverage existing prepare_model_input to be compatible with the current
+    execution flow, but we plan to remove this cache and avoid calling
+    prepare_model_input in execute_model at all.
+    
+    The detail development plan includes:
+    1. Use "update_model_input" to update existing model_input without
+       creating a new one.
+    2. Improve the performance of "update_model_input" with a GPU kernel.
+    3. Support TP > 1 (this requires some designs because we do not expect
+       any broadcasting inside execute_model).
+    """
 
     def __init__(
         self,
@@ -31,7 +51,8 @@ class DraftModelRunner(ModelRunner):
     ):
         if return_hidden_states:
             raise ValueError(
-                "return_hidden_states is not supported for DraftModelRunner.")
+                "return_hidden_states is not supported for TP1DraftModelRunner."
+            )
 
         super().__init__(
             model_config=model_config,
@@ -63,7 +84,7 @@ class DraftModelRunner(ModelRunner):
         self.cached_seq_group_metadata_list = seq_group_metadata_list
         return super().prepare_model_input(seq_group_metadata_list)
 
-    def advance_step(
+    def update_model_input(
             self, model_input: ModelInputForGPUWithSamplingMetadata,
             last_output: SamplerOutput
     ) -> ModelInputForGPUWithSamplingMetadata:
@@ -101,7 +122,7 @@ class DraftModelRunner(ModelRunner):
         # case, because we will at least need to broadcast the sampled
         # tokens to all workers.
         if not self.is_driver_worker:
-            raise ValueError("DraftModelRunner only supports TP=1 for now.")
+            raise ValueError("TP1DraftModelRunner only supports TP=1.")
 
         if self.lora_config:
             assert model_input.lora_requests is not None
@@ -144,6 +165,6 @@ class DraftModelRunner(ModelRunner):
 
             # Prepare the inputs for the next step.
             if step != num_steps - 1:
-                model_input = self.advance_step(model_input, outputs[-1])
+                model_input = self.update_model_input(model_input, outputs[-1])
 
         return outputs
