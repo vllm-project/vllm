@@ -68,6 +68,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("is_multiscale", [True, False])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
                 dtype: str, max_tokens: int, is_multiscale: bool) -> None:
     """Inference result should be the same between hf and vllm.
@@ -117,6 +118,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
                 f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
             assert hf_output_ids == vllm_output_ids, (
                 f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
-        except Exception as e:
+        except AssertionError as e:
             msg = f"Wrong output for size factor {size_factors[i]}"
             raise AssertionError(msg) from e
