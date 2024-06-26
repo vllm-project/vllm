@@ -156,14 +156,18 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.tpu_cache = []
         tpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
             num_gpu_blocks, self.block_size, num_kv_heads, head_size)
+        cpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
+            num_cpu_blocks, self.block_size, num_kv_heads, head_size)
         for _ in range(num_layers):
             tpu_k_cache = torch.zeros(tpu_cache_shape,
                                       dtype=dtype,
                                       device=self.device)
             tpu_v_cache = torch.zeros_like(tpu_k_cache)
             self.tpu_cache.append((tpu_k_cache, tpu_v_cache))
-            cpu_k_cache = torch.zeros_like(tpu_k_cache, device="cpu")
-            cpu_v_cache = torch.zeros_like(tpu_v_cache, device="cpu")
+            cpu_k_cache = torch.zeros(cpu_cache_shape,
+                                      dtype=dtype,
+                                      device="cpu")
+            cpu_v_cache = torch.zeros_like(cpu_k_cache)
             self.cpu_cache.append((cpu_k_cache, cpu_v_cache))
         self._warmup_model()
 
