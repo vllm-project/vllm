@@ -290,19 +290,13 @@ class OpenAIServingChat(OpenAIServing):
                 request, result_generator, request_id, conversation)
         else:
             try:
-<<<<<<< HEAD
                 return await self.chat_completion_full_generator(
                     request, raw_request, result_generator, request_id,
                     conversation)
-=======
-                # print("serving_chat.py after generate, is NOT stream")
-                result = await self.chat_completion_full_generator(
-                    request, raw_request, result_generator, request_id)
-                print(result)
-                return result
->>>>>>> 45b4cb2f (done with max_queue_length)
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
+                # krishna
+                print("QOE args param: ", e.args)
                 msg, status_code = e.args
                 return self.create_error_response(msg, status_code=status_code)
 

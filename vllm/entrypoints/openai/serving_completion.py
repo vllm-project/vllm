@@ -185,7 +185,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 final_res_batch, request, request_id, created_time, model_name)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            msg, status_code = e.args
+            return self.create_error_response(msg, status_code=status_code)
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.

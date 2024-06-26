@@ -12,7 +12,7 @@ from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
-from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.llm_engine import LLMEngine, QueueOverflowError
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
@@ -30,8 +30,6 @@ ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
 class AsyncEngineDeadError(RuntimeError):
     pass
 
-
-<<<<<<< HEAD
 def _log_task_completion(task: asyncio.Task,
                          error_callback: Callable[[Exception], None]) -> None:
     """This function is only intended for the `engine.run_engine_loop()` task.
@@ -39,20 +37,6 @@ def _log_task_completion(task: asyncio.Task,
     In particular, that task runs a `while True` loop that can only exit if
     there is an exception.
     """
-=======
-class QueueOverflowError(BaseException):
-
-    def __init__(self, message, status_code):
-        super().__init__(message)
-        self.status_code = status_code
-
-
-def _raise_exception_on_finish(
-        task: asyncio.Task, error_callback: Callable[[Exception],
-                                                     None]) -> None:
-    msg = ("Task finished unexpectedly. This should never happen! "
-           "Please open an issue on Github.")
->>>>>>> 45b4cb2f (done with max_queue_length)
 
     exception = None
     try:
@@ -313,7 +297,6 @@ class _AsyncLLMEngine(LLMEngine):
         if arrival_time is None:
             arrival_time = time.time()
 
-<<<<<<< HEAD
         processed_inputs = await self.process_model_inputs_async(
             request_id=request_id, inputs=inputs, lora_request=lora_request)
 
@@ -325,19 +308,6 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request=lora_request,
             trace_headers=trace_headers,
         )
-=======
-        try:
-            self.add_request(
-                request_id,
-                prompt=prompt,
-                prompt_token_ids=prompt_token_ids,
-                sampling_params=sampling_params,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-            )
-        except Exception as e:
-            raise e
->>>>>>> 45b4cb2f (done with max_queue_length)
 
     async def check_health_async(self) -> None:
         if self.tokenizer:
@@ -533,14 +503,8 @@ class AsyncLLMEngine:
             # TODO: Maybe add add_request_batch to reduce Ray overhead
             try:
                 if self.engine_use_ray:
-<<<<<<< HEAD
                     await self.engine.add_request.remote(  # type: ignore
                         **new_request)
-=======
-                    logger.info(
-                        "going from async add_request to synch add_request")
-                    await self.engine.add_request.remote(**new_request)
->>>>>>> 45b4cb2f (done with max_queue_length)
                 else:
                     result = await self.engine.add_request_async(**new_request)
             except ValueError as e:
@@ -604,10 +568,12 @@ class AsyncLLMEngine:
         curr_queue_len = len(self.engine.scheduler.waiting)
         max_queue_len = self.engine.scheduler.scheduler_config.get_max_queue_length(
         )
+        print("async llm engine add_request")
+        print(f"request_id: {request_id}, curr_queue_len {curr_queue_len}")
         if max_queue_len > -1 and curr_queue_len >= max_queue_len:
             raise QueueOverflowError(
-                "Request would exceed the indicated maximum queue length.",
-                HTTPStatus.SERVICE_UNAVAILABLE)
+                message="Request would exceed the indicated maximum queue length.",
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE)
         if self.log_requests:
             if isinstance(inputs, str):
                 shortened_prompt = inputs

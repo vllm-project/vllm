@@ -1,17 +1,13 @@
 import pytest
 import argparse
 from typing import List, Tuple
+from vllm.engine.llm_engine import QueueOverflowError
 from vllm.logger import init_logger
 
 from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 
 # initialize constants
 logger = init_logger(__name__)
-
-
-class QueueOverflowError(Exception):
-    pass
-
 
 @pytest.fixture
 def test_prompts() -> List[Tuple[str, SamplingParams]]:
@@ -90,7 +86,7 @@ def test_max_queue_length(max_wait_q_len, expect_error, test_prompts):
         "--max-num-batched-tokens",
         "2048",
         "--gpu-memory-utilization",
-        "1",
+        "0.7",
         "--max-model-len",
         "1024",
     ]
@@ -101,6 +97,9 @@ def test_max_queue_length(max_wait_q_len, expect_error, test_prompts):
     # Test engine against request
     try:
         process_requests(engine, test_prompts)
-        assert not expect_error, "QueueOverflowError did not occur as expected."
+        assert not expect_error
+        print("QueueOverflowError did not occur as expected.")
+        "QueueOverflowError did not occur as expected."
     except QueueOverflowError as e:
-        assert expect_error, f" QueueOverflowError occurred as expected: {e}"
+        assert expect_error
+        print(f" QueueOverflowError occurred as expected: {e}")
