@@ -38,16 +38,14 @@ from .conftest import run_greedy_equality_correctness_test
     },
 ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize(
-    "test_llm_kwargs",
-    [
-        {
-            "speculative_draft_tensor_parallel_size": 2,
-        },
-        {
-            "speculative_draft_tensor_parallel_size": 1,
-        },
-    ])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_draft_tensor_parallel_size": 2,
+    },
+    {
+        "speculative_draft_tensor_parallel_size": 1,
+    },
+])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seed", [1])
 def test_draft_model_tp_lt_target_model_tp4(test_llm_generator,
