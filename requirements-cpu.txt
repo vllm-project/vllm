@@ -2,6 +2,6 @@
 -r requirements-common.txt
 
 # Dependencies for x86_64 CPUs
-torch == 2.3.0+cpu
+torch == 2.4.0.dev20240522+cpu
 triton >= 2.2.0  # FIXME(woosuk): This is a hack to avoid import error.
 ray >= 2.9

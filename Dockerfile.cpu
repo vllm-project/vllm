@@ -6,10 +6,17 @@ RUN apt-get update  -y \
     && apt-get install -y git wget vim numactl gcc-12 g++-12 python3 python3-pip libtcmalloc-minimal4 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+RUN git clone https://github.com/intel/intel-extension-for-pytorch \
+    && cp intel-extension-for-pytorch/scripts/compile_bundle.sh . \
+    && sed -i "s/VER_IPEX=main/VER_IPEX=a6d3a14c49e6d018381a72ce59af239330c323ff/g" compile_bundle.sh \
+    && bash compile_bundle.sh
+
+
+RUN pip install intel-extension-for-pytorch/dist/intel_extension_for_pytorch*linux_x86_64.whl
 RUN echo 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD' >> ~/.bashrc
 
-# TODO: Remove it after the 2.3.1 official release
-RUN pip install https://intel-extension-for-pytorch.s3.amazonaws.com/ipex_dev/cpu/intel_extension_for_pytorch-2.3.0%2Bgitac44227-cp310-cp310-linux_x86_64.whl
 
 RUN pip install --upgrade pip \
     && pip install wheel packaging ninja setuptools>=49.4.0
@@ -20,7 +27,8 @@ COPY ./ /workspace/vllm
 
 WORKDIR /workspace/vllm
 
-RUN pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+RUN pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/nightly
+RUN pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly
 
 RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install
 
