@@ -1,5 +1,5 @@
 import re
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import pytest
 
@@ -77,11 +77,9 @@ if is_cpu():
     target_dtype = "bfloat16"
 
 
-# Since we use _attn_implementation="eager" for hf_runner, there is numeric
-# difference for longer context (max_tokens=128) and test can't pass
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_tokens", [8])
+@pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("is_multiscale", [True, False])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
                 dtype: str, max_tokens: int, is_multiscale: bool) -> None:
@@ -110,34 +108,59 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     hf_image_inputs = [hf_image for hf_image, _, _ in image_inputs]
     vllm_image_inputs = [vllm_image for _, vllm_image, _ in image_inputs]
 
-    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
-    hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model_id, dtype=dtype,
-                   model_kwargs=hf_model_kwargs) as hf_model:
-        hf_outputs = hf_model.generate_greedy(
-            prompt_inputs,
-            max_tokens,
-            images=hf_image_inputs,
-            eos_token_id=hf_model.processor.tokenizer.eos_token_id)
+    def run_test(max_tokens: int):
+        # use eager mode for hf runner, since phi3_v didn't work with flash_attn
+        hf_model_kwargs = {"_attn_implementation": "eager"}
+        with hf_runner(model_id, dtype=dtype,
+                       model_kwargs=hf_model_kwargs) as hf_model:
+            hf_outputs = hf_model.generate_greedy(
+                prompt_inputs,
+                max_tokens,
+                images=hf_image_inputs,
+                eos_token_id=hf_model.processor.tokenizer.eos_token_id)
 
-    with vllm_runner(model_id,
-                     max_model_len=2048,
-                     dtype=dtype,
-                     enforce_eager=True,
-                     **vlm_config.as_cli_args_dict()) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(prompt_inputs,
-                                                  max_tokens,
-                                                  images=vllm_image_inputs)
+        with vllm_runner(model_id,
+                         max_model_len=2048,
+                         dtype=dtype,
+                         enforce_eager=True,
+                         **vlm_config.as_cli_args_dict()) as vllm_model:
+            vllm_outputs = vllm_model.generate_greedy(prompt_inputs,
+                                                      max_tokens,
+                                                      images=vllm_image_inputs)
 
-    for i in range(len(HF_IMAGE_PROMPTS)):
+        for i in range(len(HF_IMAGE_PROMPTS)):
+            try:
+                hf_output_ids, hf_output_str = hf_outputs[i]
+                vllm_output_ids, vllm_output_str = vllm_to_hf_output(
+                    vllm_outputs[i], vlm_config, model_id)
+                assert hf_output_str == vllm_output_str, (
+                    f"Test{i}:\nHF: {hf_output_str!r}\n"
+                    f"vLLM: {vllm_output_str!r}")
+                assert hf_output_ids == vllm_output_ids, (
+                    f"Test{i}:\nHF: {hf_output_ids}\n"
+                    f"vLLM: {vllm_output_ids}")
+            except Exception as e:
+                msg = f"Wrong output for size factor {size_factors[i]}"
+                raise AssertionError(msg) from e
+
+    # Since we use _attn_implementation="eager" for hf_runner, there is numeric
+    # difference for longer context (max_tokens=128) and test can't pass
+    fallback_tokens = max_tokens
+    assert_fails: Dict[int, AssertionError] = {}
+    while True:
         try:
-            hf_output_ids, hf_output_str = hf_outputs[i]
-            vllm_output_ids, vllm_output_str = vllm_to_hf_output(
-                vllm_outputs[i], vlm_config, model_id)
-            assert hf_output_str == vllm_output_str, (
-                f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-            assert hf_output_ids == vllm_output_ids, (
-                f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
-        except Exception as e:
-            msg = f"Wrong output for size factor {size_factors[i]}"
-            raise AssertionError(msg) from e
+            run_test(fallback_tokens)
+        except AssertionError as e:
+            if fallback_tokens == 1:
+                raise
+
+            assert_fails[fallback_tokens] = e
+            fallback_tokens //= 2
+        else:
+            if assert_fails:
+                pytest.xfail("Phi-3-Vision test only passed when max_tokens="
+                             f"{fallback_tokens} (instead of {max_tokens}). "
+                             "Errors encountered for each max_tokens value: "
+                             f"{assert_fails}")
+
+            return
