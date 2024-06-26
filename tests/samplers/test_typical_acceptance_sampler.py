@@ -57,8 +57,11 @@ def get_acceptance_sampler(
         disable_bonus_tokens: bool = False,
         strict_mode: bool = False,
 ) -> TypicalAcceptanceSampler:
-  return TypicalAcceptanceSampler(
-    posterior_threshold, posterior_alpha, disable_bonus_tokens, strict_mode)
+    """
+    Initializes and returns a TypicalAcceptanceSampler.
+    """
+    return TypicalAcceptanceSampler(
+        posterior_threshold, posterior_alpha, disable_bonus_tokens, strict_mode)
 
 
 

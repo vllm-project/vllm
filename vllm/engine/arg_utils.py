@@ -589,7 +589,7 @@ class EngineArgs:
             help='Set the lower bound threshold for the posterior '
             'probability of a token to be accepted. This threshold is '
             'used by the TypicalAcceptanceSampler to make sampling decisions '
-            'during speculative decoding.')
+            'during speculative decoding. Defaults to 0.09')
 
         parser.add_argument(
             '--typical-acceptance-sampler-posterior-alpha',
@@ -597,7 +597,7 @@ class EngineArgs:
             default=EngineArgs.typical_acceptance_sampler_posterior_alpha,
             help='A scaling factor for the entropy-based threshold for token '
             'acceptance in the TypicalAcceptanceSampler. Typically defaults ' 
-            'to sqrt of --typical-acceptance-sampler-posterior-threshold.')
+            'to sqrt of --typical-acceptance-sampler-posterior-threshold i.e 0.3')
 
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
