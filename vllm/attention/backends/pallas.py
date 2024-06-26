@@ -36,13 +36,19 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> None:
         raise NotImplementedError("swap_blocks is not implemented.")
 
+    @torch.compile(backend="openxla")
     @staticmethod
     def copy_blocks(
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        src_to_dists: torch.Tensor,
+        src_to_dsts: torch.Tensor,
     ) -> None:
-        # TODO(woosuk): Implement this.
-        raise NotImplementedError("copy_blocks is not implemented.")
+        src = src_to_dsts[:, 0]
+        dst = src_to_dsts[:, 1]
+        for k_cache, v_cache in kv_caches:
+            torch.ops.xla.dynamo_set_buffer_donor_(k_cache, True)
+            k_cache[:, dst] = k_cache[:, src]
+            torch.ops.xla.dynamo_set_buffer_donor_(v_cache, True)
+            v_cache[:, dst] = v_cache[:, src]
 
 
 @dataclass
