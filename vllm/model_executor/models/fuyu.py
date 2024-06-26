@@ -74,9 +74,7 @@ def _image_processor(
 
     # FuyuImageProcessor's preprocess returns unpatched image,
     # we need to call patchify_image manually
-    processor_outputs = MULTIMODAL_REGISTRY \
-            ._get_plugin_for_data_type(ImagePixelData) \
-            ._default_input_processor(data, model_config, vlm_config)
+    processor_outputs = img_processor(data.image)
 
     image = torch.stack(processor_outputs["images"][0])
     _, _, h, w = image.shape
