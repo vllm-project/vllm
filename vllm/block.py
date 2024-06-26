@@ -11,8 +11,6 @@ _BLANK_TOKEN_ID = -1
 
 DEFAULT_LAST_ACCESSED_TIME = -1
 
-TokensBlock = np.ndarray
-
 
 class BlockPool:
     """A pool of logical blocks.
@@ -27,14 +25,14 @@ class BlockPool:
 
     def __init__(self) -> None:
         # block size to list of token blocks
-        self.pool: Dict[int, List[TokensBlock]] = defaultdict(list)
+        self.pool: Dict[int, List[np.ndarray]] = defaultdict(list)
 
-    def alloc_block(self, block_size: int) -> TokensBlock:
+    def alloc_block(self, block_size: int) -> np.ndarray:
         if block_size in self.pool and self.pool[block_size]:
             return self.pool[block_size].pop()
         return np.full(block_size, _BLANK_TOKEN_ID, dtype=np.int64)
 
-    def del_block(self, block: TokensBlock) -> None:
+    def del_block(self, block: np.ndarray) -> None:
         self.pool[len(block)].append(block)
 
 
