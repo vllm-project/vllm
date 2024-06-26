@@ -28,6 +28,7 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         return (num_kv_heads, num_blocks, block_size, head_size)
 
+    @torch.compile(backend="openxla")
     @staticmethod
     def swap_blocks(
         src_kv_cache: Tuple[torch.Tensor, torch.Tensor],
