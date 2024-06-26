@@ -299,7 +299,7 @@ class Scheduler:
         self.swapped: Deque[SequenceGroup] = deque()
 
         # Sequence groups finished in after the last step iter.
-        self.finished: List[SequenceGroup] = list()
+        self.previously_finished_request_id: List[str] = list()
 
         # Time at previous scheduling step
         self.prev_time = 0.0
@@ -372,11 +372,11 @@ class Scheduler:
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
-    def get_last_step_finished_seq_groups(self) -> List[str]:
-        """Returns list of the finished request ids."""
-        finisehd_req_ids = [seq_group.request_id for seq_group in self.finished] 
-        self.finished = []
-        return finisehd_req_ids
+    def flush_last_step_finished_req_ids(self) -> List[str]:
+        """Flushs the list of request ids of previously finished seq_groups."""
+        finished_request_ids = self.previously_finished_request_id
+        self.previously_finished_request_id = []
+        return finished_request_ids
 
     def _schedule_running(
         self,
@@ -1021,10 +1021,10 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
-        self.finished += [seq_group for seq_group in self.running
+        self.previously_finished_request_id += [seq_group.request_id for seq_group in self.running
                                      if seq_group.is_finished()]
         self.running = deque(seq_group for seq_group in self.running
-                                     if seq_group not in self.finished)
+                                     if not seq_group.is_finished())
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
