@@ -139,7 +139,8 @@ class InputRegistry:
 
         The model is identified by ``model_config``.
 
-        TODO: Add guide [ref: PR #5276]
+        See also:
+            :ref:`adding_a_new_multimodal_model`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
@@ -162,7 +163,8 @@ class InputRegistry:
         The provided function is invoked on each input to the model. This
         happens before :meth:`~vllm.multimodal.MultiModalRegistry.map_input`.
 
-        TODO: Add guide [ref: PR #5276]
+        See also:
+            :ref:`input_processing_pipeline`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -185,7 +187,8 @@ class InputRegistry:
 
         The model is identified by ``model_config``.
 
-        TODO: Add guide [ref: PR #5276]
+        See also:
+            :ref:`input_processing_pipeline`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture

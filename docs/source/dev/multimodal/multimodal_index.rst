@@ -20,10 +20,6 @@ Guides
 
    adding_multimodal_model
 
-.. contents::
-   :local:
-   :backlinks: none
-
 Module Contents
 +++++++++++++++
 

@@ -141,6 +141,7 @@ class MultiModalPlugin(ABC, Generic[D]):
         If `None` is provided, then the default input mapper is used instead.
 
         See also:
+            :ref:`input_processing_pipeline`
             :ref:`adding_a_new_multimodal_model`
         """
 
