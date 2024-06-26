@@ -17,10 +17,9 @@ _PREFACE = (
     "The assistant gives helpful, detailed, and polite answers to the human's "
     "questions.")
 
-# The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = [
-    f"{_PREFACE} <image>\nUSER: What's the content of the image? ASSISTANT:",
-    f"{_PREFACE} <image>\nUSER: What is the season? ASSISTANT:",
+    f"{_PREFACE} USER: <image>\nWhat's the content of the image? ASSISTANT:",
+    f"{_PREFACE} USER: <image>\nWhat is the season? ASSISTANT:",
 ]
 
 assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
@@ -70,7 +69,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
         token_id for idx, token_id in enumerate(output_ids)
         if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
-    hf_output_str = re.sub(fr"({image_token_str})+", " ", output_str)
+    hf_output_str = re.sub(fr"({image_token_str})+", "", output_str)
 
     return hf_output_ids, hf_output_str
 

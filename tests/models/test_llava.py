@@ -13,8 +13,8 @@ pytestmark = pytest.mark.vlm
 
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = [
-    "<image>\nUSER: What's the content of the image?\nASSISTANT:",
-    "<image>\nUSER: What is the season?\nASSISTANT:",
+    "USER: <image>\nWhat's the content of the image?\nASSISTANT:",
+    "USER: <image>\nWhat is the season?\nASSISTANT:",
 ]
 
 assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
@@ -61,7 +61,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
         if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
     hf_output_str = output_str \
-        .replace(image_token_str * vlm_config.image_feature_size, "")
+        .replace(image_token_str * vlm_config.image_feature_size, " ")
 
     return hf_output_ids, hf_output_str
 

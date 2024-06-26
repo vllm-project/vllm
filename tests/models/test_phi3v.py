@@ -10,7 +10,6 @@ from ..conftest import IMAGE_FILES
 
 pytestmark = pytest.mark.vlm
 
-# The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = [
     "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
     "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
