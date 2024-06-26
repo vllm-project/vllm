@@ -190,9 +190,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                           max_parallel_loading_workers)
 
     def _driver_execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution

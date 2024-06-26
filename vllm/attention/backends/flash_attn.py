@@ -25,8 +25,8 @@ class FlashAttentionBackend(AttentionBackend):
         return FlashAttentionImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "FlashAttentionMetadata":
-        return FlashAttentionMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return FlashAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(

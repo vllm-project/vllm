@@ -55,8 +55,7 @@ class NeuronExecutor(ExecutorBase):
         assert execute_model_req.num_lookahead_slots == 0, (
             "lookahead not supported for Neuron backend.")
 
-        output = self.driver_worker.execute_model(
-            execute_model_req.seq_group_metadata_list)
+        output = self.driver_worker.execute_model(execute_model_req)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

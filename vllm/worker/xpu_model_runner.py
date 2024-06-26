@@ -1,4 +1,5 @@
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -14,6 +15,15 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import CudaMemoryProfiler, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
+from vllm.worker.model_runner_base import (
+    ModelRunnerBase, ModelRunnerInputBase,
+    _add_attn_metadata_broadcastable_dict,
+    _add_sampling_metadata_broadcastable_dict,
+    _init_attn_metadata_from_tensor_dict,
+    _init_sampling_metadata_from_tensor_dict)
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -24,7 +34,42 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 
 
-class XPUModelRunner:
+@dataclass(frozen=True)
+class ModelInputForXPU(ModelRunnerInputBase):
+    """
+    Used by the NeuronModelRunner.
+    """
+    input_tokens: Optional[torch.Tensor] = None
+    input_positions: Optional[torch.Tensor] = None
+    attn_metadata: Optional["AttentionMetadata"] = None
+    sampling_metadata: Optional["SamplingMetadata"] = None
+    multi_modal_input: Optional[Dict[str, torch.Tensor]] = None
+
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+        }
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                  self.sampling_metadata)
+        return tensor_dict
+
+    @classmethod
+    def from_broadcasted_tensor_dict(
+        cls: Type["ModelInputForXPU"],
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> "ModelInputForXPU":
+        tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
+        if attn_backend is not None:
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
+
+
+class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
 
     def __init__(
         self,
@@ -130,15 +175,22 @@ class XPUModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        self.execute_model(seqs, kv_caches)
+        model_input = self.prepare_model_input(seqs)
+        self.execute_model(model_input, kv_caches)
         torch.xpu.synchronize()
         return
 
-    def prepare_input_tensors(
+    def make_model_input_from_broadcasted_tensor_dict(
+            self, tensor_dict: Dict[str, Any]) -> ModelInputForXPU:
+        return (ModelInputForXPU.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        ))
+
+    def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Optional[torch.Tensor]]:
+    ) -> ModelInputForXPU:
         multi_modal_input = None
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
@@ -185,8 +237,11 @@ class XPUModelRunner:
                 num_prompts=0,
             )
 
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, multi_modal_input)
+        return ModelInputForXPU(input_tokens=input_tokens,
+                                input_positions=input_positions,
+                                attn_metadata=attn_metadata,
+                                sampling_metadata=sampling_metadata,
+                                multi_modal_input=multi_modal_input)
 
     def _prepare_decode(
         self,
@@ -277,27 +332,25 @@ class XPUModelRunner:
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        model_input: ModelInputForXPU,
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
-
         model_executable = self.model
         execute_model_kwargs = {
-            "input_ids": input_tokens,
-            "positions": input_positions,
+            "input_ids": model_input.input_tokens,
+            "positions": model_input.input_positions,
             "kv_caches": kv_caches,
-            "attn_metadata": attn_metadata,
+            "attn_metadata": model_input.attn_metadata,
         }
         if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": multi_modal_input})
+            execute_model_kwargs.update(
+                {"image_input": model_input.multi_modal_input})
 
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        logits = self.model.compute_logits(hidden_states,
+                                           model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
@@ -306,7 +359,7 @@ class XPUModelRunner:
         # Sample the next token.
         output = self.model.sample(
             logits=logits,
-            sampling_metadata=sampling_metadata,
+            sampling_metadata=model_input.sampling_metadata,
         )
         return output
 

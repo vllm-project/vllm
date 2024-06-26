@@ -87,7 +87,7 @@ class GPUExecutor(ExecutorBase):
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
-    ) -> List[Union[SamplerOutput, PoolerOutput]]:
+    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 

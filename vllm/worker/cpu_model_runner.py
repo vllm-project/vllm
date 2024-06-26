@@ -1,5 +1,6 @@
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from torch import nn
@@ -8,20 +9,64 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
+from vllm.worker.model_runner_base import (
+    ModelRunnerBase, ModelRunnerInputBase,
+    _add_attn_metadata_broadcastable_dict,
+    _add_sampling_metadata_broadcastable_dict,
+    _init_attn_metadata_from_tensor_dict,
+    _init_sampling_metadata_from_tensor_dict)
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
 
 
-class CPUModelRunner:
+@dataclass(frozen=True)
+class CPUModelInput(ModelRunnerInputBase):
+    """
+    Used by the CPUModelRunner.
+    """
+    input_tokens: Optional[torch.Tensor] = None
+    input_positions: Optional[torch.Tensor] = None
+    attn_metadata: Optional["AttentionMetadata"] = None
+    sampling_metadata: Optional["SamplingMetadata"] = None
+    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+        }
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                  self.sampling_metadata)
+        return tensor_dict
+
+    @classmethod
+    def from_broadcasted_tensor_dict(
+            cls: Type["CPUModelInput"],
+            tensor_dict: Dict[str, Any],
+            attn_backend: Optional["AttentionBackend"] = None
+    ) -> "CPUModelInput":
+        tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
+        if attn_backend is not None:
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
+
+
+class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
 
     def __init__(
         self,
@@ -270,86 +315,70 @@ class CPUModelRunner:
             attn_metadata,
         )
 
-    def prepare_input_tensors(
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> CPUModelInput:
+        return CPUModelInput.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
+
+    def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Optional[Dict[str, torch.Tensor]]]:
+    ) -> CPUModelInput:
         multi_modal_kwargs = None
-        if self.is_driver_worker:
-            # NOTE: We assume that all sequences in the group are all prompts or
-            # all decodes.
-            is_prompt = seq_group_metadata_list[0].is_prompt
-            # Prepare input tensors.
-            if is_prompt:
-                (input_tokens, input_positions, attn_metadata, seq_lens,
-                 multi_modal_kwargs
-                 ) = self._prepare_prompt(seq_group_metadata_list)
-            else:
-                (input_tokens, input_positions,
-                 attn_metadata) = self._prepare_decode(seq_group_metadata_list)
-                seq_lens = []
-            sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list,
-                seq_lens,
-                # query_lens is not needed if chunked prefill is not
-                # supported. Since CPU worker doesn't support chunked prefill
-                # just use seq_lens instead.
-                seq_lens,
-                self.device,
-                pin_memory=False)
-            # Broadcast the metadata.
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-            }
-            metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
+        # NOTE: We assume that all sequences in the group are all prompts or
+        # all decodes.
+        is_prompt = seq_group_metadata_list[0].is_prompt
+        # Prepare input tensors.
+        if is_prompt:
+            (input_tokens, input_positions, attn_metadata, seq_lens,
+             multi_modal_kwargs
+             ) = self._prepare_prompt(seq_group_metadata_list)
         else:
-            metadata_dict = broadcast_tensor_dict(src=0)
-            input_tokens = metadata_dict.pop("input_tokens")
-            input_positions = metadata_dict.pop("input_positions")
-            selected_token_indices = metadata_dict.pop(
-                "selected_token_indices")
-            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
-            sampling_metadata = SamplingMetadata(
-                seq_groups=None,
-                seq_data=None,
-                seq_lens=None,
-                selected_token_indices=selected_token_indices,
-                categorized_sample_indices=None,
-                generators=None,
-            )
-
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, multi_modal_kwargs)
+            (input_tokens, input_positions,
+             attn_metadata) = self._prepare_decode(seq_group_metadata_list)
+            seq_lens = []
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            seq_lens,
+            # query_lens is not needed if chunked prefill is not
+            # supported. Since CPU worker doesn't support chunked prefill
+            # just use seq_lens instead.
+            seq_lens,
+            self.device,
+            pin_memory=False)
+        return CPUModelInput(
+            input_tokens=input_tokens,
+            input_positions=input_positions,
+            attn_metadata=attn_metadata,
+            sampling_metadata=sampling_metadata,
+        )
 
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        model_input: CPUModelInput,
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
-
         model_executable = self.model
         execute_model_kwargs = {
-            "input_ids": input_tokens,
-            "positions": input_positions,
+            "input_ids": model_input.input_tokens,
+            "positions": model_input.input_positions,
             "kv_caches": kv_caches,
-            "attn_metadata": attn_metadata,
+            "attn_metadata": model_input.attn_metadata,
         }
-        if self.vision_language_config and multi_modal_input is not None:
-            execute_model_kwargs.update(multi_modal_input)
+        if (self.vision_language_config
+                and model_input.multi_modal_kwargs is not None):
+            execute_model_kwargs.update(model_input.multi_modal_kwargs)
 
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        logits = self.model.compute_logits(hidden_states,
+                                           model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
@@ -358,6 +387,6 @@ class CPUModelRunner:
         # Sample the next token.
         output = self.model.sample(
             logits=logits,
-            sampling_metadata=sampling_metadata,
+            sampling_metadata=model_input.sampling_metadata,
         )
         return output

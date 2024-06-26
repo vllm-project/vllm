@@ -1,5 +1,5 @@
 """A Neuron worker class."""
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.distributed
@@ -7,12 +7,13 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.model_executor import set_random_seed
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest
 from vllm.worker.neuron_model_runner import NeuronModelRunner
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
+                                     LoraNotSupportedWorkerBase, WorkerInput)
 
 
-class NeuronWorker(LoraNotSupportedWorkerBase):
+class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
     """
 
@@ -34,8 +35,9 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner = NeuronModelRunner(model_config, parallel_config,
-                                              scheduler_config, device_config)
+        self.model_runner: NeuronModelRunner = NeuronModelRunner(
+            model_config, parallel_config, scheduler_config, device_config)
+        self.is_driver_worker = True
 
     def init_device(self) -> None:
         # Set random seed.
@@ -73,22 +75,19 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return False
+
+    @property
+    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+        return None
+
     @torch.inference_mode()
-    def execute_model(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> List[SamplerOutput]:
-        num_seq_groups = len(seq_group_metadata_list)
-
-        # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
-            return []
-
-        output = self.model_runner.execute_model(seq_group_metadata_list)
-
-        # Neuron worker only supports single-step output. Wrap the output in a
-        # list to conform to interface.
-        return [output]
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        return WorkerInput(num_seq_groups=len(
+            execute_model_req.seq_group_metadata_list), )
 
     def get_cache_block_size_bytes(self) -> int:
         """Determine the size in bytes of a cache block.
