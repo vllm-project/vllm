@@ -30,6 +30,7 @@ ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
 class AsyncEngineDeadError(RuntimeError):
     pass
 
+
 def _log_task_completion(task: asyncio.Task,
                          error_callback: Callable[[Exception], None]) -> None:
     """This function is only intended for the `engine.run_engine_loop()` task.
@@ -570,7 +571,8 @@ class AsyncLLMEngine:
         )
         if max_queue_len > -1 and curr_queue_len >= max_queue_len:
             raise QueueOverflowError(
-                message="Request would exceed the indicated maximum queue length.",
+                message=
+                "Request would exceed the indicated maximum queue length.",
                 status_code=HTTPStatus.SERVICE_UNAVAILABLE)
         if self.log_requests:
             if isinstance(inputs, str):

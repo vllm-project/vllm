@@ -77,7 +77,6 @@ TEST_CHOICE = [
 
 pytestmark = pytest.mark.openai
 
-
 # @pytest.fixture(scope="session")
 # def zephyr_lora_files():
 #     return snapshot_download(repo_id=LORA_NAME)
@@ -111,13 +110,12 @@ def server(ray_ctx):
         # "64",
         # "--max-cpu-loras",
         # "2",
-        "--max-num-seqs",
-        "128",
-        # "--max-queue-length",
-        # "1",
         # "--max-num-seqs",
-        # "1",
-        
+        # "128",
+        "--max-queue-length",
+        "1",
+        "--max-num-seqs",
+        "1",
     ])
 
 
@@ -713,7 +711,6 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
         assert texts[0] == texts[1]
 
 
-
 @pytest.mark.asyncio
 async def test_logits_bias(client: openai.AsyncOpenAI):
     prompt = "Hello, my name is"
@@ -760,6 +757,7 @@ async def test_logits_bias(client: openai.AsyncOpenAI):
     )
     assert first_response != completion.choices[0].text
 
+
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_max_queue_length(server, client: openai.AsyncOpenAI,
                                 model_name: str):
@@ -778,8 +776,7 @@ async def test_max_queue_length(server, client: openai.AsyncOpenAI,
             temperature=0.8,
             presence_penalty=0.2,
             max_tokens=400,
-        )
-        for sample_prompt in sample_prompts
+        ) for sample_prompt in sample_prompts
     ]
 
     responses = await asyncio.gather(*coroutines, return_exceptions=True)
@@ -791,8 +788,7 @@ async def test_max_queue_length(server, client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_max_queue_length(client: openai.AsyncOpenAI,
-                                model_name: str):
+async def test_max_queue_length(client: openai.AsyncOpenAI, model_name: str):
     sample_prompts = [
         "Who won the world series in 2020?",
         "Where was the 2020 world series played?",
@@ -804,19 +800,19 @@ async def test_max_queue_length(client: openai.AsyncOpenAI,
     coroutines = [
         asyncio.create_task(
             client.completions.create(
-            prompt=sample_prompt,
-            model=model_name,
-            temperature=0.8,
-            presence_penalty=0.2,
-            max_tokens=400,
-        )
-        ) for sample_prompt in sample_prompts
+                prompt=sample_prompt,
+                model=model_name,
+                temperature=0.8,
+                presence_penalty=0.2,
+                max_tokens=400,
+            )) for sample_prompt in sample_prompts
     ]
     responses = await asyncio.gather(*coroutines, return_exceptions=True)
 
     for response in responses:
         if hasattr(response, 'status_code') and response.status_code != 200:
             assert response.status_code == 503
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",

@@ -379,7 +379,6 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_num_seqs,
                             help='Maximum number of sequences per iteration.')
-                            help='maximum number of sequences per iteration')
         parser.add_argument('--max-paddings',
                             type=int,
                             default=EngineArgs.max_paddings,
@@ -394,10 +393,12 @@ class EngineArgs:
             default=EngineArgs.max_logprobs,
             help=('Max number of log probs to return logprobs is specified in'
                   ' SamplingParams.'))
-        parser.add_argument('--max-queue-length',
-                            type=int,
-                            default=EngineArgs.max_queue_length,
-                            help='The maximum number of requests allowed in the waiting queue.')
+        parser.add_argument(
+            '--max-queue-length',
+            type=int,
+            default=EngineArgs.max_queue_length,
+            help='The maximum number of requests allowed in the waiting queue.'
+        )
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
@@ -723,14 +724,9 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
+            max_queue_length=self.max_queue_length,
             max_model_len=model_config.max_model_len,
             use_v2_block_manager=self.use_v2_block_manager,
-            self.max_num_batched_tokens,
-            self.max_num_seqs,
-            model_config.max_model_len,
-            self.max_paddings,
-            self.max_queue_length,
-            self.use_v2_block_manager,
             num_lookahead_slots=(self.num_lookahead_slots
                                  if speculative_config is None else
                                  speculative_config.num_lookahead_slots),
@@ -738,7 +734,6 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
-            max_queue_length=self.max_queue_length
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

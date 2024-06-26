@@ -59,8 +59,12 @@ def _load_generation_config_dict(model_config: ModelConfig):
 
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
+
 class QueueOverflowError(ValueError):
-    def __init__(self, message="Current request would exceed the max queue length.", status_code=503):
+
+    def __init__(self,
+                 message="Current request would exceed the max queue length.",
+                 status_code=503):
         super().__init__(message, status_code)
 
 
@@ -576,8 +580,8 @@ class LLMEngine:
         if max_queue_len > -1 and curr_queue_len >= max_queue_len:
             raise QueueOverflowError(
                 f"Request {request_id} would exceed the indicated maximum "
-                f"queue length of {max_queue_len}", HTTPStatus.SERVICE_UNAVAILABLE
-            )
+                f"queue length of {max_queue_len}",
+                HTTPStatus.SERVICE_UNAVAILABLE)
 
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "

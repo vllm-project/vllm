@@ -9,6 +9,7 @@ from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 # initialize constants
 logger = init_logger(__name__)
 
+
 @pytest.fixture
 def test_prompts() -> List[Tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters."""
@@ -81,7 +82,8 @@ def test_max_queue_length(max_wait_q_len, expect_error, test_prompts):
     parser = EngineArgs.add_cli_args(parser)
     args_to_test = [
         '--max-num-seqs',
-        str(1), '--max-queue-length',
+        str(1),
+        '--max-queue-length',
         str(max_wait_q_len),
         "--max-num-batched-tokens",
         "2048",

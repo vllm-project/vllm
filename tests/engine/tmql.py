@@ -98,6 +98,3 @@ if __name__ == '__main__':
     ]
     args = parser.parse_args(args_to_test)
     main(args)
-
-
-
