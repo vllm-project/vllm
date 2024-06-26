@@ -38,11 +38,8 @@ main() {
 
     (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
     (which jq) || (apt-get update && apt-get -y install jq)
-    cd /
-    git clone https://github.com/KuntaiDu/vllm.git
-    cd vllm
-    git checkout kuntai-benchmark-dev
-    cd benchmarks
+
+    cd $VLLM_SOURCE_CODE_LOC/benchmarks
     wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
     
 

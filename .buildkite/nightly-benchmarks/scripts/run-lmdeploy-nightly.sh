@@ -199,7 +199,7 @@ main() {
 
   check_gpus
   # enter vllm directory
-  cd /vllm/benchmarks
+  cd $VLLM_SOURCE_CODE_LOC/benchmarks
 
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER

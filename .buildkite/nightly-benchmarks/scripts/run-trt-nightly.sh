@@ -178,7 +178,7 @@ run_serving_tests() {
 
 
     # prepare tokenizer
-    cd /vllm/benchmarks
+    cd $VLLM_SOURCE_CODE_LOC/benchmarks
     rm -rf /tokenizer_cache
     mkdir /tokenizer_cache
     python ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
@@ -202,7 +202,7 @@ run_serving_tests() {
     fi
 
     # go back to vllm benchmarking directory
-    cd /vllm/benchmarks
+    cd $VLLM_SOURCE_CODE_LOC/benchmarks
 
     # iterate over different QPS
     for qps in $qps_list; do
@@ -276,7 +276,7 @@ main() {
 
 
   # enter vllm directory
-  cd /vllm/benchmarks
+  cd $VLLM_SOURCE_CODE_LOC/benchmarks
 
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
