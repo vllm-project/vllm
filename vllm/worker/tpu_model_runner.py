@@ -145,7 +145,6 @@ class TPUModelRunner:
             )
         t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
         p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
-        n = torch.ones((batch_size, ), dtype=torch.int32, device=self.device)
 
         # Dummy run.
         num_samples = _MAX_NUM_SAMPLES if is_prompt else 1
@@ -383,16 +382,6 @@ class TPUModelRunner:
         num_paddings = padded_batch_size - len(t)
         t += [1.0] * num_paddings
         p += [1.0] * num_paddings
-        n += [1] * num_paddings
-
-        if any(top_p != 1 for top_p in p):
-            raise NotImplementedError(
-                "Top-p sampling is currently not supported by the TPU "
-                "backend due to performance issues.")
-        if any(num_samples != 1 for num_samples in n):
-            raise NotImplementedError(
-                "Parallel sampling (n > 1) is currently not supported by the "
-                "TPU backend due to performance issues.")
 
         t = torch.tensor(t, dtype=torch.float32, device=self.device)
         p = torch.tensor(p, dtype=torch.float32, device=self.device)
@@ -462,11 +451,14 @@ class TPUModelRunner:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             assert len(seq_group_metadata_list) > 0
-            metadata_dict = {"seq_group_metadata_list": seq_group_metadata_list}
+            metadata_dict = {
+                "seq_group_metadata_list": seq_group_metadata_list
+            }
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
-            seq_group_metadata_list = metadata_dict.pop("seq_group_metadata_list")
+            seq_group_metadata_list = metadata_dict.pop(
+                "seq_group_metadata_list")
 
         if seq_group_metadata_list[0].is_prompt:
             # NOTE(woosuk): To reduce the compilation time, we only compile the

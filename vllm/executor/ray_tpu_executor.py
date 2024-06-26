@@ -1,14 +1,14 @@
 import asyncio
 import os
-import pickle
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Tuple,
+                    Union)
 
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorAsyncBase
-from vllm.executor.tpu_executor import TPUExecutor
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
+from vllm.executor.tpu_executor import TPUExecutor
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
@@ -197,10 +197,9 @@ class RayTPUExecutor(TPUExecutor):
 
         # Start the ray workers first.
         ray_worker_outputs = [
-            worker.execute_method.remote(method, *worker_args,
-                                            **worker_kwargs)
+            worker.execute_method.remote(method, *worker_args, **worker_kwargs)
             for (worker, worker_args, worker_kwargs
-                    ) in zip(self.workers, all_worker_args, all_worker_kwargs)
+                 ) in zip(self.workers, all_worker_args, all_worker_kwargs)
         ]
 
         if async_run_remote_workers_only:

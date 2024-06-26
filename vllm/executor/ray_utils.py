@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import get_ip, is_hip, is_xpu, is_tpu
+from vllm.utils import get_ip, is_hip, is_tpu, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)

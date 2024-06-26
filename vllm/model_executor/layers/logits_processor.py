@@ -5,7 +5,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from vllm.distributed import (tensor_model_parallel_gather, tensor_model_parallel_all_gather)
+from vllm.distributed import (tensor_model_parallel_all_gather,
+                              tensor_model_parallel_gather)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.utils import is_tpu
 
