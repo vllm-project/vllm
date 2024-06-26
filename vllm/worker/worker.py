@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple, Type
 
 import torch
 import torch.distributed
@@ -9,21 +9,20 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
-from vllm.worker.model_runner import ModelRunner
-from vllm.worker.worker_base import WorkerBase
+from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
+from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 
-class Worker(WorkerBase):
+class Worker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
 
     Each worker is associated with a single GPU. The worker is responsible for
@@ -70,9 +69,18 @@ class Worker(WorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
-        ModelRunnerClass = (EmbeddingModelRunner if
-                            self.model_config.embedding_mode else ModelRunner)
-        self.model_runner = ModelRunnerClass(
+        # Return hidden states from target model if the draft model is an
+        # mlp_speculator
+        speculative_args = {} if speculative_config is None \
+            or (speculative_config.draft_model_config.model ==
+                model_config.model) \
+              or (speculative_config.draft_model_config.hf_config.model_type !=
+                  "mlp_speculator") else {"return_hidden_states": True}
+
+        ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
+        if self.model_config.embedding_mode:
+            ModelRunnerClass = EmbeddingModelRunner
+        self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             model_config,
             parallel_config,
             scheduler_config,
@@ -83,6 +91,7 @@ class Worker(WorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
+            **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
@@ -216,40 +225,18 @@ class Worker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    def cache_swap(
-        self,
-        blocks_to_swap_in: torch.Tensor,
-        blocks_to_swap_out: torch.Tensor,
-        blocks_to_copy: torch.Tensor,
-    ) -> None:
-        # Issue cache operations.
-        if blocks_to_swap_in.numel() > 0:
-            self.cache_engine.swap_in(blocks_to_swap_in)
-        if blocks_to_swap_out.numel() > 0:
-            self.cache_engine.swap_out(blocks_to_swap_out)
-        if blocks_to_copy.numel() > 0:
-            self.cache_engine.copy(blocks_to_copy)
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return self.parallel_config.tensor_parallel_size > 1
+
+    @property
+    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+        return self.gpu_cache
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[Union[SamplerOutput, PoolerOutput]]:
-        if not self.is_driver_worker:
-            self._execute_model_non_driver()
-            return []
-
-        if execute_model_req is None:
-            # This signals that there's no more requests to process for now.
-            # All workers are running infinite loop with broadcast_tensor_dict,
-            # and it stops the loop when the driver broadcasts an empty input.
-            # Send an empty input to notify all other workers to stop their
-            # execution loop.
-            broadcast_tensor_dict({}, src=0)
-            return []
-
-        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-        num_seq_groups = len(seq_group_metadata_list)
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        num_seq_groups = len(execute_model_req.seq_group_metadata_list)
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
         blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
@@ -264,65 +251,35 @@ class Worker(WorkerBase):
         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                       device=self.device,
                                       dtype=torch.int64).view(-1, 2)
-        data: Dict[str, Any] = {
-            "num_seq_groups": num_seq_groups,
-            "blocks_to_swap_in": blocks_to_swap_in,
-            "blocks_to_swap_out": blocks_to_swap_out,
-            "blocks_to_copy": blocks_to_copy,
-        }
-        broadcast_tensor_dict(data, src=0)
 
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
-
-        # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
-            return []
-
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
-
-        # Worker only supports single-step execution. Wrap the output in a list
-        # to conform to interface.
-        return [output]
+        return WorkerInput(
+            num_seq_groups=num_seq_groups,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+        )
 
     @torch.inference_mode()
-    def start_worker_execution_loop(self) -> None:
-        """Execute model loop in parallel worker.
-
-        You can stop the loop by executing a driver worker with an empty output.
-        See `stop_remote_worker_execution_loop` for more details.
-        """
-        while self._execute_model_non_driver():
-            pass
-
-    def _execute_model_non_driver(self) -> bool:
-        """Execute model in parallel worker.
-
-        Returns True iff there are remaining sequences to process.
-        """
-        assert not self.is_driver_worker
-        data = broadcast_tensor_dict(src=0)
-        if not data:
-            return False
-
-        num_seq_groups = data.get("num_seq_groups", 0)
-        blocks_to_swap_in = data.get("blocks_to_swap_in")
-        blocks_to_swap_out = data.get("blocks_to_swap_out")
-        blocks_to_copy = data.get("blocks_to_copy")
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
-
-        # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
-            return False
-
-        self.model_runner.execute_model(None, self.gpu_cache)
-        return True
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        # Issue cache operations.
+        if (worker_input.blocks_to_swap_in is not None
+                and worker_input.blocks_to_swap_in.numel() > 0):
+            self.cache_engine.swap_in(worker_input.blocks_to_swap_in)
+        if (worker_input.blocks_to_swap_out is not None
+                and worker_input.blocks_to_swap_out.numel() > 0):
+            self.cache_engine.swap_out(worker_input.blocks_to_swap_out)
+        if (worker_input.blocks_to_copy is not None
+                and worker_input.blocks_to_copy.numel() > 0):
+            self.cache_engine.copy(worker_input.blocks_to_copy)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_runner.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
