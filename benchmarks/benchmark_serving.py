@@ -690,20 +690,23 @@ if __name__ == "__main__":
         " format.",
     )
 
-    parser.add_argument("--random-input-len",
-                        type=int,
-                        default=1024,
-                        help="random sample input length")
+    parser.add_argument(
+        "--random-input-len",
+        type=int,
+        default=1024,
+        help="random sample input length")
 
-    parser.add_argument("--random-output-len",
-                        type=int,
-                        default=128,
-                        help="random sample output length")
+    parser.add_argument(
+        "--random-output-len",
+        type=int,
+        default=128,
+        help="random sample output length")
 
-    parser.add_argument("--random-range-ratio",
-                        type=float,
-                        default=1.0,
-                        help="random sample range ratio")
+    parser.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=1.0,
+        help="random sample range ratio")
 
     args = parser.parse_args()
     main(args)
