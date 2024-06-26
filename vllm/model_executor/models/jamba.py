@@ -222,40 +222,27 @@ class JambaMambaMixer(nn.Module):
         ssm_state: torch.Tensor,
     ):
         if attn_metadata.prefill_metadata is not None:
-            # Mamba doesn't support chunked prefill,
-            # We pad the hidden_states before the forward pass and
-            # unpad it again afterwards.
-            max_seq_len = max(attn_metadata.prefill_metadata.seq_lens)
-            batch_size = len(attn_metadata.prefill_metadata.seq_lens)
-            padded_hidden_states = torch.zeros(
-                (batch_size, max_seq_len, hidden_states.shape[-1]),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device)
             offset = 0
-            for i, seq_len in enumerate(
-                    attn_metadata.prefill_metadata.seq_lens):
-                padded_hidden_states[i, :seq_len].copy_(
-                    hidden_states[offset:offset + seq_len])
-                offset += seq_len
-            cache = MambaCacheParams(
-                True,
-                conv_state=conv_state,
-                ssm_state=ssm_state,
-            )
-            padded_hidden_states = self.mamba_forward(padded_hidden_states,
-                                                      cache_params=cache)
-            offset = 0
-            for i, seq_len in enumerate(
-                    attn_metadata.prefill_metadata.seq_lens):
-                hidden_states[offset:offset + seq_len].copy_(
-                    padded_hidden_states[i, :seq_len])
-                offset += seq_len
+            for i,prompt_len in enumerate(attn_metadata.prefill_metadata.seq_lens):
+                cache = MambaCacheParams(
+                    True,
+                    conv_state=conv_state[i].unsqueeze(0),
+                    ssm_state=ssm_state[i].unsqueeze(0)
+                )
+                hidden_states[offset:offset + prompt_len].copy_(
+                    self.mamba_forward(
+                        hidden_states[offset:offset + prompt_len].unsqueeze(0),
+                        cache_params=cache
+                    )[0]
+                )
+                offset += prompt_len
         else:
-            cache = MambaCacheParams(False,
-                                     conv_state=conv_state,
-                                     ssm_state=ssm_state)
-            hidden_states = self.mamba_forward(hidden_states.unsqueeze(1),
-                                               cache_params=cache)
+            cache = MambaCacheParams(
+                False,
+                conv_state=conv_state,
+                ssm_state=ssm_state
+            )
+            hidden_states = self.mamba_forward(hidden_states.unsqueeze(1), cache_params=cache)
             hidden_states = hidden_states.squeeze(1)
 
         return hidden_states
@@ -409,7 +396,7 @@ class JambaMambaDecoderLayer(nn.Module):
 
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
-        self.feed_forward = ffn_layer_class(config, quant_config)
+        self.feed_forward = ffn_layer_class(config, quant_config=quant_config)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -463,7 +450,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         self.head_dim = config.hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.head_dim ** -0.5
         self.sliding_window = config.sliding_window
 
         self.qkv_proj = QKVParallelLinear(
@@ -490,7 +477,7 @@ class JambaAttentionDecoderLayer(nn.Module):
 
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
-        self.feed_forward = ffn_layer_class(config, quant_config)
+        self.feed_forward = ffn_layer_class(config, quant_config=quant_config)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
