@@ -144,6 +144,7 @@ class GPUExecutor(ExecutorBase):
         # it's running.
         return
 
+
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
