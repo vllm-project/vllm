@@ -104,16 +104,9 @@ class PersimmonAttention(nn.Module):
         self.is_qk_layernorm = config.qk_layernorm
 
         if self.is_qk_layernorm:
-            self.q_layernorm = nn.LayerNorm(
-                config.hidden_size // self.num_heads,
-                eps=config.layer_norm_eps,
-                elementwise_affine=True,
-            )
-            self.k_layernorm = nn.LayerNorm(
-                config.hidden_size // self.num_heads,
-                eps=config.layer_norm_eps,
-                elementwise_affine=True,
-            )
+            self.q_layernorm = nn.LayerNorm(self.head_dim)
+            self.k_layernorm = nn.LayerNorm(self.head_dim)
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=int(self.partial_rotary_factor * self.head_dim),
@@ -161,6 +154,7 @@ class PersimmonAttention(nn.Module):
 
         q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        print("attn_output", attn_output.mean().item())
         output, _ = self.dense(attn_output)
         return output
 

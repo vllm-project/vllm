@@ -56,6 +56,10 @@ def _image_processor(
 ) -> Dict[str, torch.Tensor]:
     image = data.image
 
+    img_processor = MULTIMODAL_REGISTRY \
+                    ._get_plugin_for_data_type(ImagePixelData) \
+                    ._get_hf_image_processor(model_config, vlm_config)
+
     if isinstance(image, Image.Image):
         # Temporary patch before dynamic number of image tokens is supported
         # It's difficult to infer number of image tokens from image size for
@@ -68,23 +72,22 @@ def _image_processor(
                 "Resizing input image to (%d, %d).", w, h)
             data.image = image.resize((w, h))
 
-    img_processor = MULTIMODAL_REGISTRY \
+        # FuyuImageProcessor's preprocess returns unpatched image,
+        # we need to call patchify_image manually
+        outputs = MULTIMODAL_REGISTRY \
                     ._get_plugin_for_data_type(ImagePixelData) \
-                    ._get_hf_image_processor(model_config, vlm_config)
+                    ._default_input_processor(data, model_config, vlm_config)
 
-    # FuyuImageProcessor's preprocess returns unpatched image,
-    # we need to call patchify_image manually
-    processor_outputs = img_processor(data.image)
+        image = torch.stack(outputs["images"][0])
+        _, _, h, w = image.shape
+        image_unpadded_h = outputs["image_unpadded_heights"]
+        image_unpadded_w = outputs["image_unpadded_widths"]
+        new_h = min(h, math.ceil(image_unpadded_h[0][0] / 30) * 30)
+        new_w = min(w, math.ceil(image_unpadded_w[0][0] / 30) * 30)
+        image = image[:, :, :new_h, :new_w]
 
-    image = torch.stack(processor_outputs["images"][0])
-    _, _, h, w = image.shape
-    image_unpadded_h = processor_outputs["image_unpadded_heights"]
-    image_unpadded_w = processor_outputs["image_unpadded_widths"]
-    new_h = min(h, math.ceil(image_unpadded_h[0][0] / 30) * 30)
-    new_w = min(w, math.ceil(image_unpadded_w[0][0] / 30) * 30)
-    image = image[:, :, :new_h, :new_w]
-
-    return {"image_patches": img_processor.patchify_image(image)}
+    image_patches = img_processor.patchify_image(image)
+    return {"image_patches": image_patches}
 
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input(_image_processor)
