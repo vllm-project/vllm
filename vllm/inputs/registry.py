@@ -96,7 +96,8 @@ class InputRegistry:
         seq_len: int,
     ) -> Tuple["SequenceData", Optional["MultiModalData"]]:
         """
-        Create dummy data to be inputted into the model.
+        The default dummy data factory represents the longest possible text
+        that can be inputted to the model.
 
         Note:
             :data:`InputProcessor` is not applied to the dummy data.
@@ -145,7 +146,7 @@ class InputRegistry:
 
     def _default_input_processor(self, ctx: InputContext,
                                  inputs: LLMInputs) -> LLMInputs:
-        """Preprocess the inputs to the model."""
+        """The default input processor is a no-op."""
         return inputs
 
     def register_input_processor(self, processor: InputProcessor):
@@ -154,6 +155,8 @@ class InputRegistry:
 
         The provided function is invoked on each input to the model. This
         happens before :meth:`~vllm.multimodal.MultiModalRegistry.map_input`.
+
+        TODO: Add guide [ref: PR #5276]
         """
 
         def wrapper(model_cls: N) -> N:
@@ -177,6 +180,8 @@ class InputRegistry:
         The model is identified by ``model_config``. ``vlm_config`` is
         for compatibility purposes and may be merged into ``model_config``
         in the near future.
+
+        TODO: Add guide [ref: PR #5276]
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
