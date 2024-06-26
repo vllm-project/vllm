@@ -15,7 +15,7 @@ main() {
         echo "buildkite-agent binary not found. Skip uploading the results."
         return 0
     else
-        /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < /vllm/.buildkite/nightly-benchmarks/nightly-descriptions.md
+        /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/nightly-descriptions.md
     fi
     
 }

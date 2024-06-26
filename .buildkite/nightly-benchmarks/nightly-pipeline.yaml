@@ -16,8 +16,8 @@ steps:
             volumeMounts:
             - name: devshm
               mountPath: /dev/shm
-            # - name: nvme-raid
-            #   mountPath: /mnt/fast-disks/nvme-raid
+            - name: nvme-raid
+              mountPath: /mnt/fast-disks/nvme-raid
             env:
             - name: VLLM_USAGE_SOURCE
               value: ci-test
@@ -34,10 +34,10 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-          # - name: nvme-raid
-          #   hostpath:
-          #     path: /mnt/fast-disks/nvme-raid
-          #     type: directory
+          - name: nvme-raid
+            hostpath:
+              path: /mnt/fast-disks/nvme-raid
+              type: Directory
   - wait
   - label: "A100 trt benchmark"
     agents:
