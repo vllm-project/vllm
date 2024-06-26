@@ -678,8 +678,6 @@ class JambaForCausalLM(nn.Module):
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             requests_info = kwargs["requests_info"]
-            finished_seq_groups_req_ids = kwargs["finished_seq_groups_req_ids"]
-            self._release_seqlen_agnostic_cache(finished_seq_groups_req_ids)
             batch_size = input_ids.shape[0]
             if attn_metadata.prefill_metadata:
                  batch_size = len(requests_info)
@@ -690,6 +688,8 @@ class JambaForCausalLM(nn.Module):
                 requests_info,
                 batch_size
             )
+            finished_seq_groups_req_ids = kwargs["finished_seq_groups_req_ids"]
+            self._release_seqlen_agnostic_cache(finished_seq_groups_req_ids)
         else:
             ## CG capturing runs
             current_seqlen_agnostic_cache, indices = (
@@ -780,14 +780,15 @@ class JambaForCausalLM(nn.Module):
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         requests_info = kwargs["requests_info"]
-        finished_seq_groups_req_ids = kwargs["finished_seq_groups_req_ids"]
-        self._release_seqlen_agnostic_cache(finished_seq_groups_req_ids)
         batch_size = len(requests_info)
         (
             current_seqlen_agnostic_cache,
             indices,
         ) = self._prepare_current_run_seqlen_agnostic_cache(requests_info, batch_size)
         self.current_indices = indices
+
+        finished_seq_groups_req_ids = kwargs["finished_seq_groups_req_ids"]
+        self._release_seqlen_agnostic_cache(finished_seq_groups_req_ids)
 
         for i in [0,1]:
             input_buffers["seqlen_agnostic_capture_inputs"][i].copy_(

@@ -908,7 +908,7 @@ class ModelRunner:
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        finished_seq_groups_req_ids = []
+        finished_seq_groups_req_ids = [seq.request_id for seq in seqs]
         self.execute_model(seqs, kv_caches,finished_seq_groups_req_ids)
         torch.cuda.synchronize()
         return
