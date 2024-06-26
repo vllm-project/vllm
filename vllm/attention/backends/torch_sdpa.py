@@ -31,8 +31,8 @@ class TorchSDPABackend(AttentionBackend):
         return TorchSDPABackendImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "TorchSDPAMetadata":
-        return TorchSDPAMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return TorchSDPAMetadata
 
     @staticmethod
     def get_kv_cache_shape(

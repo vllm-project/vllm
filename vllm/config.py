@@ -7,13 +7,15 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
 import torch
 from transformers import PretrainedConfig, PreTrainedTokenizerBase
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_tpu, is_xpu)
+                        is_hip, is_neuron, is_tpu, is_xpu,
+                        update_environment_variables)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -634,6 +636,12 @@ class ParallelConfig:
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
+        # If CUDA_VISIBLE_DEVICES is set on ROCm prior to vLLM init,
+        # propagate changes to HIP_VISIBLE_DEVICES (conversion handled by
+        # the update_environment_variables function)
+        if is_hip() and envs.CUDA_VISIBLE_DEVICES:
+            update_environment_variables(
+                {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
 
         self._verify_args()
 
