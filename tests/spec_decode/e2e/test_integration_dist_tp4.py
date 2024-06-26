@@ -41,7 +41,9 @@ from .conftest import run_greedy_equality_correctness_test
 @pytest.mark.parametrize(
     "test_llm_kwargs",
     [
-        #TODO(wooyeon): add spec_draft_dp=2 case
+        {
+            "speculative_draft_tensor_parallel_size": 2,
+        },
         {
             "speculative_draft_tensor_parallel_size": 1,
         },
