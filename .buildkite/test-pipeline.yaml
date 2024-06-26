@@ -17,6 +17,10 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
+- label: Dummy Test
+  mirror_hardwares: [amd]
+  command: ls
+
 - label: Distributed Tests (A100)
   gpu: a100
   num_gpus: 4
