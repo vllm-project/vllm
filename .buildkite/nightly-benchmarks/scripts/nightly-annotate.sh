@@ -7,6 +7,11 @@ main() {
 
     (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
     (which jq) || (apt-get update && apt-get -y install jq)
+    cd /workspace
+    ls
+    cd ./vllm
+    ls
+    exit 0
     cd /
     git clone https://github.com/KuntaiDu/vllm.git
     cd vllm

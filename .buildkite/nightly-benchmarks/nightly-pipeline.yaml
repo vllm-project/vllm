@@ -30,129 +30,129 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  - wait
-  - label: "A100 trt benchmark"
-    agents:
-      queue: A100
-    plugins:
-    - kubernetes:
-        podSpec:
-          priorityClassName: perf-benchmark
-          containers:
-          - image: nvcr.io/nvidia/tritonserver:24.04-trtllm-python-py3
-            command:
-            - (apt update) && (apt install wget) && (wget https://github.com/KuntaiDu/vllm/raw/kuntai-benchmark-dev/.buildkite/nightly-benchmarks/run-nightly-suite.sh) && (bash run-nightly-suite.sh)
-            resources:
-              limits:
-                nvidia.com/gpu: 8
-            volumeMounts:
-            - name: devshm
-              mountPath: /dev/shm
-            env:
-            - name: VLLM_USAGE_SOURCE
-              value: ci-test
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: token
-          nodeSelector:
-            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-          volumes:
-          - name: devshm
-            emptyDir:
-              medium: Memory
-  - label: "A100 vllm benchmark"
-    agents:
-      queue: A100
-    plugins:
-    - kubernetes:
-        podSpec:
-          priorityClassName: perf-benchmark
-          containers:
-          - image: vllm/vllm-openai:latest
-            command:
-            - (apt update) && (apt install wget) && (wget https://github.com/KuntaiDu/vllm/raw/kuntai-benchmark-dev/.buildkite/nightly-benchmarks/run-nightly-suite.sh) && (bash run-nightly-suite.sh)
-            resources:
-              limits:
-                nvidia.com/gpu: 8
-            volumeMounts:
-            - name: devshm
-              mountPath: /dev/shm
-            env:
-            - name: VLLM_USAGE_SOURCE
-              value: ci-test
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: token
-          nodeSelector:
-            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-          volumes:
-          - name: devshm
-            emptyDir:
-              medium: Memory
-  - label: "A100 tgi benchmark"
-    agents:
-      queue: A100
-    plugins:
-    - kubernetes:
-        podSpec:
-          priorityClassName: perf-benchmark
-          containers:
-          - image: ghcr.io/huggingface/text-generation-inference:2.0
-            command:
-            - (apt update) && (apt install wget) && (wget https://github.com/KuntaiDu/vllm/raw/kuntai-benchmark-dev/.buildkite/nightly-benchmarks/run-nightly-suite.sh) && (bash run-nightly-suite.sh)
-            resources:
-              limits:
-                nvidia.com/gpu: 8
-            volumeMounts:
-            - name: devshm
-              mountPath: /dev/shm
-            env:
-            - name: VLLM_USAGE_SOURCE
-              value: ci-test
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: token
-          nodeSelector:
-            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-          volumes:
-          - name: devshm
-            emptyDir:
-              medium: Memory
-  - label: "A100 lmdeploy benchmark"
-    agents:
-      queue: A100
-    plugins:
-    - kubernetes:
-        podSpec:
-          priorityClassName: perf-benchmark
-          containers:
-          - image: openmmlab/lmdeploy:latest
-            command:
-            - (apt update) && (apt install wget) && (wget https://github.com/KuntaiDu/vllm/raw/kuntai-benchmark-dev/.buildkite/nightly-benchmarks/run-nightly-suite.sh) && (bash run-nightly-suite.sh)
-            resources:
-              limits:
-                nvidia.com/gpu: 8
-            volumeMounts:
-            - name: devshm
-              mountPath: /dev/shm
-            env:
-            - name: VLLM_USAGE_SOURCE
-              value: ci-test
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: token
-          nodeSelector:
-            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-          volumes:
-          - name: devshm
-            emptyDir:
-              medium: Memory
+  # - wait
+  # - label: "A100 trt benchmark"
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #   - kubernetes:
+  #       podSpec:
+  #         priorityClassName: perf-benchmark
+  #         containers:
+  #         - image: nvcr.io/nvidia/tritonserver:24.04-trtllm-python-py3
+  #           command:
+  #           - (apt update) && (apt install wget) && (wget https://github.com/KuntaiDu/vllm/raw/kuntai-benchmark-dev/.buildkite/nightly-benchmarks/run-nightly-suite.sh) && (bash run-nightly-suite.sh)
+  #           resources:
+  #             limits:
+  #               nvidia.com/gpu: 8
+  #           volumeMounts:
+  #           - name: devshm
+  #             mountPath: /dev/shm
+  #           env:
+  #           - name: VLLM_USAGE_SOURCE
+  #             value: ci-test
+  #           - name: HF_TOKEN
+  #             valueFrom:
+  #               secretKeyRef:
+  #                 name: hf-token-secret
+  #                 key: token
+  #         nodeSelector:
+  #           nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+  #         volumes:
+  #         - name: devshm
+  #           emptyDir:
+  #             medium: Memory
+  # - label: "A100 vllm benchmark"
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #   - kubernetes:
+  #       podSpec:
+  #         priorityClassName: perf-benchmark
+  #         containers:
+  #         - image: vllm/vllm-openai:latest
+  #           command:
+  #           - (apt update) && (apt install wget) && (wget https://github.com/KuntaiDu/vllm/raw/kuntai-benchmark-dev/.buildkite/nightly-benchmarks/run-nightly-suite.sh) && (bash run-nightly-suite.sh)
+  #           resources:
+  #             limits:
+  #               nvidia.com/gpu: 8
+  #           volumeMounts:
+  #           - name: devshm
+  #             mountPath: /dev/shm
+  #           env:
+  #           - name: VLLM_USAGE_SOURCE
+  #             value: ci-test
+  #           - name: HF_TOKEN
+  #             valueFrom:
+  #               secretKeyRef:
+  #                 name: hf-token-secret
+  #                 key: token
+  #         nodeSelector:
+  #           nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+  #         volumes:
+  #         - name: devshm
+  #           emptyDir:
+  #             medium: Memory
+  # - label: "A100 tgi benchmark"
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #   - kubernetes:
+  #       podSpec:
+  #         priorityClassName: perf-benchmark
+  #         containers:
+  #         - image: ghcr.io/huggingface/text-generation-inference:2.0
+  #           command:
+  #           - (apt update) && (apt install wget) && (wget https://github.com/KuntaiDu/vllm/raw/kuntai-benchmark-dev/.buildkite/nightly-benchmarks/run-nightly-suite.sh) && (bash run-nightly-suite.sh)
+  #           resources:
+  #             limits:
+  #               nvidia.com/gpu: 8
+  #           volumeMounts:
+  #           - name: devshm
+  #             mountPath: /dev/shm
+  #           env:
+  #           - name: VLLM_USAGE_SOURCE
+  #             value: ci-test
+  #           - name: HF_TOKEN
+  #             valueFrom:
+  #               secretKeyRef:
+  #                 name: hf-token-secret
+  #                 key: token
+  #         nodeSelector:
+  #           nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+  #         volumes:
+  #         - name: devshm
+  #           emptyDir:
+  #             medium: Memory
+  # - label: "A100 lmdeploy benchmark"
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #   - kubernetes:
+  #       podSpec:
+  #         priorityClassName: perf-benchmark
+  #         containers:
+  #         - image: openmmlab/lmdeploy:latest
+  #           command:
+  #           - (apt update) && (apt install wget) && (wget https://github.com/KuntaiDu/vllm/raw/kuntai-benchmark-dev/.buildkite/nightly-benchmarks/run-nightly-suite.sh) && (bash run-nightly-suite.sh)
+  #           resources:
+  #             limits:
+  #               nvidia.com/gpu: 8
+  #           volumeMounts:
+  #           - name: devshm
+  #             mountPath: /dev/shm
+  #           env:
+  #           - name: VLLM_USAGE_SOURCE
+  #             value: ci-test
+  #           - name: HF_TOKEN
+  #             valueFrom:
+  #               secretKeyRef:
+  #                 name: hf-token-secret
+  #                 key: token
+  #         nodeSelector:
+  #           nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+  #         volumes:
+  #         - name: devshm
+  #           emptyDir:
+  #             medium: Memory
   
