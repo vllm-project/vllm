@@ -8,9 +8,13 @@ Input Processing
 vLLM provides a mechanism for defining input processors for each model so that the inputs are processed
 in :class:`~vllm.LLMEngine` before they are passed to model executors.
 
-.. contents::
-   :local:
-   :backlinks: none
+Guides
+++++++
+
+.. toctree::
+   :maxdepth: 1
+
+   input_processing_pipeline
 
 Module Contents
 +++++++++++++++

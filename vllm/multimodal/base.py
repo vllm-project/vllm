@@ -82,6 +82,9 @@ class MultiModalPlugin(ABC, Generic[D]):
         this plugin (see :meth:`get_data_type`), the provided function is
         invoked to transform the data into a dictionary of model inputs.
         If `None` is provided, then the default input mapper is used instead.
+
+        See also:
+            :ref:`input_processing_pipeline`
         """
 
         def wrapper(model_cls: N) -> N:

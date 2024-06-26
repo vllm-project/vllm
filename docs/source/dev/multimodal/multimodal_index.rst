@@ -12,10 +12,6 @@ By default, vLLM models do not support multi-modal inputs. To enable multi-modal
 you must decorate the model class with :meth:`MULTIMODAL_REGISTRY.register_dummy_data <MultiModalRegistry.register_dummy_data>`,
 as well as :meth:`MULTIMODAL_REGISTRY.register_input <MultiModalRegistry.register_input>` for each modality type to support.
 
-.. contents::
-   :local:
-   :backlinks: none
-
 Module Contents
 +++++++++++++++
 
