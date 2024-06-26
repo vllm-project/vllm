@@ -99,7 +99,7 @@ class OpenAIServing:
         })
         return json_str
 
-    def _check_model(
+    async def _check_model(
         self, request: Union[ChatCompletionRequest, CompletionRequest,
                              DetokenizeRequest, EmbeddingRequest,
                              TokenizeRequest]

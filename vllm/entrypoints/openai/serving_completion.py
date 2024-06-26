@@ -84,7 +84,7 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
-        error_check_ret = self._check_model(request)
+        error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
@@ -447,8 +447,9 @@ class OpenAIServingCompletion(OpenAIServing):
             top_logprobs=out_top_logprobs,
         )
 
-    def create_tokenize(self, request: TokenizeRequest) -> TokenizeResponse:
-        error_check_ret = self._check_model(request)
+    async def create_tokenize(self,
+                              request: TokenizeRequest) -> TokenizeResponse:
+        error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
@@ -461,9 +462,9 @@ class OpenAIServingCompletion(OpenAIServing):
                                 count=len(input_ids),
                                 max_model_len=self.max_model_len)
 
-    def create_detokenize(self,
-                          request: DetokenizeRequest) -> DetokenizeResponse:
-        error_check_ret = self._check_model(request)
+    async def create_detokenize(
+            self, request: DetokenizeRequest) -> DetokenizeResponse:
+        error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 

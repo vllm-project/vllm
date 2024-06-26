@@ -68,7 +68,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
         """
-        error_check_ret = self._check_model(request)
+        error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
