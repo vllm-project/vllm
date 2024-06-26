@@ -183,7 +183,7 @@ class SequenceData:
 
     def hash_prefix_token_ids(self, num_tokens: int) -> bytes:
         """Get prefix tokens, and make the return value hashable"""
-        data = self.tokens[:self.num_prompt_tokens + self.num_output_tokens]
+        data = self.tokens[:num_tokens]
         # get a memory view of the underlying data
         buffer = memoryview(data)  # type: ignore
         # hash the memory view
