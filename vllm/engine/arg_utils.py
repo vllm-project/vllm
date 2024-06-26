@@ -379,10 +379,6 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_num_seqs,
                             help='Maximum number of sequences per iteration.')
-        parser.add_argument('--max-paddings',
-                            type=int,
-                            default=EngineArgs.max_paddings,
-                            help='maximum number of paddings in a batch')
         parser.add_argument('--max-queue-length',
                             type=int,
                             default=EngineArgs.max_queue_length,
