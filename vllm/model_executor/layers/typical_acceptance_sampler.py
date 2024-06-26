@@ -31,10 +31,9 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler):
             nontrivial latency.
             posterior_threshold : A threshold value that sets a lower bound 
             on the posterior probability of a token in target model for it
-            to be accepted. Default is 0.09
+            to be accepted.
             posterior_alpha : A scaling factor for the entropy-based
-            threshold in typical acceptance sampling. Typically defaults to
-            sqrt of posterior_threshold and is set to 0.3.
+            threshold in typical acceptance sampling.
         """
         self._posterior_threshold = posterior_threshold
         self._posterior_alpha = posterior_alpha
