@@ -25,8 +25,8 @@ class ROCmFlashAttentionBackend(AttentionBackend):
         return ROCmFlashAttentionImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "ROCmFlashAttentionMetadata":
-        return ROCmFlashAttentionMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return ROCmFlashAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(

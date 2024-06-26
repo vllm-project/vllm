@@ -887,7 +887,8 @@ class HiddenStates:
 
 @dataclass
 class ExecuteModelRequest:
-    """The model execution request."""
+    """The model execution request, containing CPU metadata only. The LLM
+    engine should create an instance of this class for each request batch."""
     # The sequence group metadata list.
     seq_group_metadata_list: List[SequenceGroupMetadata]
     # Blocks to swap in. List of CPU -> GPU block number.
