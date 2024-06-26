@@ -17,27 +17,15 @@
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-import sys
-
 from transformers import AutoConfig
 from transformers import PretrainedConfig
 from transformers import LlamaConfig
-
-if sys.version_info >= (3, 10):
-    print("Python version is above 3.10, patching the collections module.")
-    # Monkey patch collections
-    import collections
-    import collections.abc
-
-    for type_name in collections.abc.__all__:
-        setattr(collections, type_name, getattr(collections.abc, type_name))
-    from attrdict import AttrDict
 
 
 class VisionConfig(PretrainedConfig):
     model_type = "vision"
     cls: str = ""
-    params: AttrDict = {}
+    params: dict = {}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -46,13 +34,13 @@ class VisionConfig(PretrainedConfig):
         if not isinstance(self.cls, str):
             self.cls = self.cls.__name__
 
-        self.params = AttrDict(kwargs.get("params", {}))
+        self.params = kwargs.get("params", {})
 
 
 class AlignerConfig(PretrainedConfig):
     model_type = "aligner"
     cls: str = ""
-    params: AttrDict = {}
+    params: dict = {}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -61,7 +49,7 @@ class AlignerConfig(PretrainedConfig):
         if not isinstance(self.cls, str):
             self.cls = self.cls.__name__
 
-        self.params = AttrDict(kwargs.get("params", {}))
+        self.params = kwargs.get("params", {})
 
 
 class DeepSeekMultiModalityConfig(PretrainedConfig):

@@ -23,8 +23,6 @@ import copy
 
 from dataclasses import dataclass
 from functools import partial
-from dataclasses import dataclass
-from functools import partial
 from typing import (
     Callable,
     Dict,
@@ -46,19 +44,14 @@ import torch.nn.functional as F
 import numpy as np
 import torchvision
 import torchvision.transforms.functional
-import torch.nn.functional as F
-
-
-from einops import rearrange
 from transformers import PreTrainedModel
-from transformers.configuration_utils import PretrainedConfig
-from einops import rearrange
 from PIL import Image
 from transformers import AutoImageProcessor, PretrainedConfig
-from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
+from transformers.image_processing_utils import (
+    BaseImageProcessor,
+    BatchFeature,
+)
 from transformers.image_utils import to_numpy_array
-from einops import rearrange
-from transformers import PreTrainedModel
 from timm.layers import (
     AttentionPoolLatent,
     DropPath,
@@ -68,13 +61,13 @@ from timm.layers import (
     PatchEmbed,
     resample_abs_pos_embed,
 )
-from timm.models._manipulate import checkpoint_seq, named_apply
-
+from timm.models._manipulate import checkpoint_seq
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, )
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -86,12 +79,23 @@ from vllm.sequence import SamplerOutput
 from .vlm_base import VisionLanguageModelBase
 from vllm.transformers_utils.configs import DeepSeekMultiModalityConfig
 
-
 ImageType = Union[np.ndarray, torch.Tensor, Image.Image]
 IMAGENET_MEAN = (0.48145466, 0.4578275, 0.40821073)
 IMAGENET_STD = (0.26862954, 0.26130258, 0.27577711)
 IMAGENET_INCEPTION_MEAN = (0.5, 0.5, 0.5)
 IMAGENET_INCEPTION_STD = (0.5, 0.5, 0.5)
+
+
+class AttrDict:
+
+    def __init__(self, entries):
+        for key, value in entries.items():
+            if isinstance(value, dict):
+                entries[key] = AttrDict(value)
+        self.__dict__.update(entries)
+
+    def get(self, key, default_val=None):
+        return self.__dict__.get(key, default_val)
 
 
 def expand2square(pil_img, background_color):
@@ -205,7 +209,8 @@ class VLMImageProcessor(BaseImageProcessor):
         pil_img = torchvision.transforms.functional.resize(
             pil_img,
             size,
-            interpolation=torchvision.transforms.functional.InterpolationMode.BICUBIC,
+            interpolation=torchvision.transforms.functional.InterpolationMode.
+            BICUBIC,
             antialias=True,
         )
 
@@ -217,7 +222,10 @@ class VLMImageProcessor(BaseImageProcessor):
 
         return x
 
-    def preprocess(self, images, return_tensors: str = "pt", **kwargs) -> BatchFeature:
+    def preprocess(self,
+                   images,
+                   return_tensors: str = "pt",
+                   **kwargs) -> BatchFeature:
         # resize and pad to [self.image_size, self.image_size]
         # then convert from [H, W, 3] to [3, H, W]
         # print(images)
@@ -233,8 +241,7 @@ class VLMImageProcessor(BaseImageProcessor):
                 image=image,
                 scale=self.rescale_factor,
                 input_data_format="channels_first",
-            )
-            for image in images
+            ) for image in images
         ]
 
         # normalize
@@ -245,8 +252,7 @@ class VLMImageProcessor(BaseImageProcessor):
                     mean=self.image_mean,
                     std=self.image_std,
                     input_data_format="channels_first",
-                )
-                for image in images
+                ) for image in images
             ]
 
         data = {"pixel_values": images}
@@ -258,9 +264,10 @@ class VLMImageProcessor(BaseImageProcessor):
 
 
 class MlpProjector(nn.Module):
+
     def __init__(self, cfg):
         super().__init__()
-
+        cfg = AttrDict(cfg)
         self.cfg = cfg
 
         if cfg.projector_type == "identity":
@@ -294,14 +301,16 @@ class MlpProjector(nn.Module):
         self.layers = modules
 
     def forward(
-        self, x_or_tuple: Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]
+        self,
+        x_or_tuple: Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor],
     ):
         """
 
         Args:
-            x_or_tuple (Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:  if it is a tuple of torch.Tensor,
-                then it comes from the hybrid vision encoder, and x = high_res_x, low_res_x);
-                otherwise it is the feature from the single vision encoder.
+            x_or_tuple (Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:  
+            if it is a tuple of torch.Tensor,
+            then it comes from the hybrid vision encoder, and x = high_res_x, low_res_x);
+            otherwise it is the feature from the single vision encoder.
 
         Returns:
             x (torch.Tensor): [b, s, c]
@@ -360,7 +369,7 @@ def _no_grad_trunc_normal_(tensor, mean, std, a, b):
 def trunc_normal_(tensor, mean=0.0, std=1.0, a=-2.0, b=2.0):
     # type: (torch.Tensor, float, float, float, float) -> torch.Tensor
     r"""The original timm.models.layers.weight_init.trunc_normal_ can not handle bfloat16 yet, here we first
-    convert the tensor to float32, apply the trunc_normal_() in float32, and then convert it back to its orignal dtype.
+    convert the tensor to float32, apply the trunc_normal_() in float32, and then convert it back to its original dtype.
     Fills the input Tensor with values drawn from a truncated normal distribution. The values are effectively drawn
     from the normal distribution :math:`\mathcal{N}(\text{mean}, \text{std}^2)`
     with values outside :math:`[a, b]` redrawn until they are within
@@ -387,18 +396,8 @@ def trunc_normal_(tensor, mean=0.0, std=1.0, a=-2.0, b=2.0):
 
 def init_weights(self):
     if self.pos_embed is not None:
-        trunc_normal_(self.pos_embed, std=self.pos_embed.shape[1] ** -0.5)
+        trunc_normal_(self.pos_embed, std=self.pos_embed.shape[1]**-0.5)
     trunc_normal_(self.latent, std=self.latent_dim**-0.5)
-
-
-def init_weights_vit_timm(module: nn.Module, name: str = "") -> None:
-    """ViT weight initialization, original timm impl (for reproducibility)"""
-    if isinstance(module, nn.Linear):
-        trunc_normal_(module.weight, std=0.02)
-        if module.bias is not None:
-            nn.init.zeros_(module.bias)
-    elif hasattr(module, "init_weights"):
-        module.init_weights()
 
 
 class SigLipAttention(nn.Module):
@@ -427,15 +426,13 @@ class SigLipAttention(nn.Module):
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop) if proj_drop > 0.0 else nn.Identity()
+        self.proj_drop = (nn.Dropout(proj_drop)
+                          if proj_drop > 0.0 else nn.Identity())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, self.head_dim)
-            .permute(2, 0, 3, 1, 4)
-        )
+        qkv = (self.qkv(x).reshape(B, N, 3, self.num_heads,
+                                   self.head_dim).permute(2, 0, 3, 1, 4))
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
 
@@ -460,6 +457,7 @@ class SigLipAttention(nn.Module):
 
 
 class LayerScale(nn.Module):
+
     def __init__(
         self,
         dim: int,
@@ -475,6 +473,7 @@ class LayerScale(nn.Module):
 
 
 class SigLipBlock(nn.Module):
+
     def __init__(
         self,
         dim: int,
@@ -501,10 +500,10 @@ class SigLipBlock(nn.Module):
             proj_drop=proj_drop,
             norm_layer=norm_layer,
         )
-        self.ls1 = (
-            LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
-        )
-        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.ls1 = (LayerScale(dim, init_values=init_values)
+                    if init_values else nn.Identity())
+        self.drop_path1 = (DropPath(drop_path)
+                           if drop_path > 0.0 else nn.Identity())
 
         self.norm2 = norm_layer(dim)
         self.mlp = mlp_layer(
@@ -513,10 +512,10 @@ class SigLipBlock(nn.Module):
             act_layer=act_layer,
             drop=proj_drop,
         )
-        self.ls2 = (
-            LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
-        )
-        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.ls2 = (LayerScale(dim, init_values=init_values)
+                    if init_values else nn.Identity())
+        self.drop_path2 = (DropPath(drop_path)
+                           if drop_path > 0.0 else nn.Identity())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
@@ -560,7 +559,6 @@ class VisionTransformer(nn.Module):
         proj_drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
         drop_path_rate: float = 0.0,
-        weight_init: Literal["skip", "jax", "jax_nlhb", "moco", ""] = "",
         embed_layer: Callable = PatchEmbed,
         norm_layer: Optional[LayerType] = None,
         act_layer: Optional[LayerType] = None,
@@ -573,7 +571,7 @@ class VisionTransformer(nn.Module):
             img_size: Input image size.
             patch_size: Patch size.
             in_chans: Number of image input channels.
-            num_classes: Mumber of classes for classification head.
+            num_classes: Number of classes for classification head.
             global_pool: Type of global pooling for final sequence (default: 'token').
             embed_dim: Transformer embedding dimension.
             depth: Depth of transformer.
@@ -635,16 +633,14 @@ class VisionTransformer(nn.Module):
         )
         num_patches = self.patch_embed.num_patches
 
-        self.cls_token = (
-            nn.Parameter(torch.zeros(1, 1, embed_dim)) if class_token else None
-        )
-        self.reg_token = (
-            nn.Parameter(torch.zeros(1, reg_tokens, embed_dim)) if reg_tokens else None
-        )
-        embed_len = (
-            num_patches if no_embed_class else num_patches + self.num_prefix_tokens
-        )
-        self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim) * 0.02)
+        self.cls_token = (nn.Parameter(torch.zeros(1, 1, embed_dim))
+                          if class_token else None)
+        self.reg_token = (nn.Parameter(torch.zeros(1, reg_tokens, embed_dim))
+                          if reg_tokens else None)
+        embed_len = (num_patches if no_embed_class else num_patches +
+                     self.num_prefix_tokens)
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, embed_len, embed_dim) * 0.02)
         self.pos_drop = nn.Dropout(p=pos_drop_rate)
         if patch_drop_rate > 0:
             self.patch_drop = PatchDropout(
@@ -655,28 +651,24 @@ class VisionTransformer(nn.Module):
             self.patch_drop = nn.Identity()
         self.norm_pre = norm_layer(embed_dim) if pre_norm else nn.Identity()
 
-        dpr = [
-            x.item() for x in torch.linspace(0, drop_path_rate, depth)
-        ]  # stochastic depth decay rule
-        self.blocks = nn.Sequential(
-            *[
-                block_fn(
-                    dim=embed_dim,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    qk_norm=qk_norm,
-                    init_values=init_values,
-                    proj_drop=proj_drop_rate,
-                    attn_drop=attn_drop_rate,
-                    drop_path=dpr[i],
-                    norm_layer=norm_layer,
-                    act_layer=act_layer,
-                    mlp_layer=mlp_layer,
-                )
-                for i in range(depth)
-            ]
-        )
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)
+               ]  # stochastic depth decay rule
+        self.blocks = nn.Sequential(*[
+            block_fn(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+                init_values=init_values,
+                proj_drop=proj_drop_rate,
+                attn_drop=attn_drop_rate,
+                drop_path=dpr[i],
+                norm_layer=norm_layer,
+                act_layer=act_layer,
+                mlp_layer=mlp_layer,
+            ) for i in range(depth)
+        ])
         self.norm = norm_layer(embed_dim) if not use_fc_norm else nn.Identity()
 
         # Classifier Head
@@ -692,20 +684,8 @@ class VisionTransformer(nn.Module):
             self.attn_pool = None
         self.fc_norm = norm_layer(embed_dim) if use_fc_norm else nn.Identity()
         self.head_drop = nn.Dropout(drop_rate)
-        self.head = (
-            nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-        )
-
-        if weight_init != "skip":
-            self.init_weights(weight_init)
-
-    def init_weights(self, mode: Literal["jax", "jax_nlhb", "moco", ""] = "") -> None:
-        assert mode in ("jax", "jax_nlhb", "moco", "")
-        # head_bias = -math.log(self.num_classes) if "nlhb" in mode else 0.0
-        trunc_normal_(self.pos_embed, std=0.02)
-        if self.cls_token is not None:
-            nn.init.normal_(self.cls_token, std=1e-6)
-        named_apply(init_weights_vit_timm, self)
+        self.head = (nn.Linear(self.embed_dim, num_classes)
+                     if num_classes > 0 else nn.Identity())
 
     @torch.jit.ignore
     def no_weight_decay(self) -> Set:
@@ -715,7 +695,7 @@ class VisionTransformer(nn.Module):
     def group_matcher(self, coarse: bool = False) -> Dict:
         return dict(
             stem=r"^cls_token|pos_embed|patch_embed",  # stem and embed
-            blocks=[(r"^blocks\.(\d+)", None), (r"^norm", (99999,))],
+            blocks=[(r"^blocks\.(\d+)", None), (r"^norm", (99999, ))],
         )
 
     @torch.jit.ignore
@@ -731,15 +711,14 @@ class VisionTransformer(nn.Module):
         if global_pool is not None:
             assert global_pool in ("", "avg", "token", "map")
             if global_pool == "map" and self.attn_pool is None:
-                assert (
-                    False
-                ), "Cannot currently add attention pooling in reset_classifier()."
+                raise AssertionError(
+                    "Cannot currently add attention pooling in reset_classifier()."
+                )
             elif global_pool != "map " and self.attn_pool is not None:
                 self.attn_pool = None  # remove attention pooling
             self.global_pool = global_pool
-        self.head = (
-            nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-        )
+        self.head = (nn.Linear(self.embed_dim, num_classes)
+                     if num_classes > 0 else nn.Identity())
 
     def _pos_embed(self, x: torch.Tensor) -> torch.Tensor:
         if self.dynamic_img_size:
@@ -747,7 +726,8 @@ class VisionTransformer(nn.Module):
             pos_embed = resample_abs_pos_embed(
                 self.pos_embed,
                 (H, W),
-                num_prefix_tokens=0 if self.no_embed_class else self.num_prefix_tokens,
+                num_prefix_tokens=(0 if self.no_embed_class else
+                                   self.num_prefix_tokens),
             )
             x = x.view(B, -1, C)
         else:
@@ -781,8 +761,7 @@ class VisionTransformer(nn.Module):
     ) -> List[torch.Tensor]:
         outputs, num_blocks = [], len(self.blocks)
         take_indices = set(
-            range(num_blocks - n, num_blocks) if isinstance(n, int) else n
-        )
+            range(num_blocks - n, num_blocks) if isinstance(n, int) else n)
 
         # forward pass
         x = self.patch_embed(x)
@@ -811,15 +790,14 @@ class VisionTransformer(nn.Module):
         outputs = self._intermediate_layers(x, n)
         if norm:
             outputs = [self.norm(out) for out in outputs]
-        prefix_tokens = [out[:, 0 : self.num_prefix_tokens] for out in outputs]
-        outputs = [out[:, self.num_prefix_tokens :] for out in outputs]
+        prefix_tokens = [out[:, 0:self.num_prefix_tokens] for out in outputs]
+        outputs = [out[:, self.num_prefix_tokens:] for out in outputs]
 
         if reshape:
             grid_size = self.patch_embed.grid_size
             outputs = [
-                out.reshape(x.shape[0], grid_size[0], grid_size[1], -1)
-                .permute(0, 3, 1, 2)
-                .contiguous()
+                out.reshape(x.shape[0], grid_size[0], grid_size[1],
+                            -1).permute(0, 3, 1, 2).contiguous()
                 for out in outputs
             ]
 
@@ -839,11 +817,13 @@ class VisionTransformer(nn.Module):
         x = self.norm(x)
         return x
 
-    def forward_head(self, x: torch.Tensor, pre_logits: bool = False) -> torch.Tensor:
+    def forward_head(self,
+                     x: torch.Tensor,
+                     pre_logits: bool = False) -> torch.Tensor:
         if self.attn_pool is not None:
             x = self.attn_pool(x)
         elif self.global_pool == "avg":
-            x = x[:, self.num_prefix_tokens :].mean(dim=1)
+            x = x[:, self.num_prefix_tokens:].mean(dim=1)
         elif self.global_pool:
             x = x[:, 0]  # class token
         x = self.fc_norm(x)
@@ -912,9 +892,8 @@ def create_siglip_vit(
     ckpt_path: str = "",
     **kwargs,
 ):
-    assert (
-        model_name in SigLIP_MODEL_CONFIG.keys()
-    ), f"model name should be in {SigLIP_MODEL_CONFIG.keys()}"
+    assert (model_name in SigLIP_MODEL_CONFIG
+            ), f"model name should be in {SigLIP_MODEL_CONFIG.keys()}"
 
     vision_cfg = SigLIPVisionCfg(**SigLIP_MODEL_CONFIG[model_name])
 
@@ -933,7 +912,6 @@ def create_siglip_vit(
         class_token=vision_cfg.class_token,
         global_pool=vision_cfg.global_pool,
         ignore_head=kwargs.get("ignore_head", True),
-        weight_init=kwargs.get("weight_init", "skip"),
         num_classes=0,
     )
 
@@ -941,15 +919,14 @@ def create_siglip_vit(
         state_dict = torch.load(ckpt_path, map_location="cpu")
 
         incompatible_keys = model.load_state_dict(state_dict, strict=False)
-        print(
-            f"SigLIP-ViT restores from {ckpt_path},\n"
-            f"\tincompatible_keys:', {incompatible_keys}."
-        )
+        print(f"SigLIP-ViT restores from {ckpt_path},\n"
+              f"\tincompatible_keys:', {incompatible_keys}.")
 
     return model
 
 
 class MLPBlock(nn.Module):
+
     def __init__(
         self,
         embedding_dim: int,
@@ -968,6 +945,7 @@ class MLPBlock(nn.Module):
 # From https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/batch_norm.py # noqa
 # Itself from https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119  # noqa
 class LayerNorm2d(nn.Module):
+
     def __init__(self, num_channels: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(num_channels))
@@ -984,25 +962,26 @@ class LayerNorm2d(nn.Module):
 
 # This class and its supporting functions below lightly adapted from the ViTDet backbone available at: https://github.com/facebookresearch/detectron2/blob/main/detectron2/modeling/backbone/vit.py # noqa
 class ImageEncoderViT(nn.Module):
+
     def __init__(
-        self,
-        img_size: int = 1024,
-        patch_size: int = 16,
-        in_chans: int = 3,
-        embed_dim: int = 768,
-        depth: int = 12,
-        num_heads: int = 12,
-        mlp_ratio: float = 4.0,
-        out_chans: int = 256,
-        qkv_bias: bool = True,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
-        act_layer: Type[nn.Module] = nn.GELU,
-        use_abs_pos: bool = True,
-        use_rel_pos: bool = False,
-        rel_pos_zero_init: bool = True,
-        window_size: int = 0,
-        global_attn_indexes: Tuple[int, ...] = (),
-        downsample_channels: Tuple[int, ...] = (512, 1024),
+            self,
+            img_size: int = 1024,
+            patch_size: int = 16,
+            in_chans: int = 3,
+            embed_dim: int = 768,
+            depth: int = 12,
+            num_heads: int = 12,
+            mlp_ratio: float = 4.0,
+            out_chans: int = 256,
+            qkv_bias: bool = True,
+            norm_layer: Type[nn.Module] = nn.LayerNorm,
+            act_layer: Type[nn.Module] = nn.GELU,
+            use_abs_pos: bool = True,
+            use_rel_pos: bool = False,
+            rel_pos_zero_init: bool = True,
+            window_size: int = 0,
+            global_attn_indexes: Tuple[int, ...] = (),
+            downsample_channels: Tuple[int, ...] = (512, 1024),
     ) -> None:
         """
         Args:
@@ -1038,9 +1017,11 @@ class ImageEncoderViT(nn.Module):
             # Initialize absolute positional embedding with pretrain image size.
             self.pos_embed = nn.Parameter(
                 torch.zeros(
-                    1, img_size // patch_size, img_size // patch_size, embed_dim
-                )
-            )
+                    1,
+                    img_size // patch_size,
+                    img_size // patch_size,
+                    embed_dim,
+                ))
 
         self.blocks = nn.ModuleList()
         for i in range(depth):
@@ -1088,8 +1069,7 @@ class ImageEncoderViT(nn.Module):
                     stride=2,
                     padding=1,
                     bias=False,
-                )
-            )
+                ))
             in_channels = out_channels
         self.downsamples = nn.Sequential(*downsamples)
 
@@ -1113,13 +1093,15 @@ class ImageEncoderViT(nn.Module):
 
         x = self.neck(x.permute(0, 3, 1, 2))
         x_dtype = x.dtype
-        x = F.interpolate(
-            x.float(), size=(96, 96), mode="bilinear", align_corners=False
-        ).to(x_dtype)
+        x = F.interpolate(x.float(),
+                          size=(96, 96),
+                          mode="bilinear",
+                          align_corners=False).to(x_dtype)
         x = self.downsamples(x)
 
         if self.sam_hd:
-            first_global_feature = self.neck_hd(global_features[0].permute(0, 3, 1, 2))
+            first_global_feature = self.neck_hd(global_features[0].permute(
+                0, 3, 1, 2))
             x_dtype = first_global_feature.dtype
             first_global_feature = F.interpolate(
                 first_global_feature.float(),
@@ -1127,7 +1109,8 @@ class ImageEncoderViT(nn.Module):
                 mode="bilinear",
                 align_corners=False,
             )
-            first_global_feature = self.downsamples(first_global_feature.to(x_dtype))
+            first_global_feature = self.downsamples(
+                first_global_feature.to(x_dtype))
             x = x + first_global_feature * self.hd_alpha_downsamples
 
         return x
@@ -1172,13 +1155,14 @@ class Block(nn.Module):
             qkv_bias=qkv_bias,
             use_rel_pos=use_rel_pos,
             rel_pos_zero_init=rel_pos_zero_init,
-            input_size=input_size if window_size == 0 else (window_size, window_size),
+            input_size=(input_size if window_size == 0 else
+                        (window_size, window_size)),
         )
 
         self.norm2 = norm_layer(dim)
-        self.mlp = MLPBlock(
-            embedding_dim=dim, mlp_dim=int(dim * mlp_ratio), act=act_layer
-        )
+        self.mlp = MLPBlock(embedding_dim=dim,
+                            mlp_dim=int(dim * mlp_ratio),
+                            act=act_layer)
 
         self.window_size = window_size
 
@@ -1237,32 +1221,29 @@ class Attention(nn.Module):
                 input_size is not None
             ), "Input size must be provided if using relative positional encoding."
             # initialize relative positional embeddings
-            self.rel_pos_h = nn.Parameter(torch.zeros(2 * input_size[0] - 1, head_dim))
-            self.rel_pos_w = nn.Parameter(torch.zeros(2 * input_size[1] - 1, head_dim))
+            self.rel_pos_h = nn.Parameter(
+                torch.zeros(2 * input_size[0] - 1, head_dim))
+            self.rel_pos_w = nn.Parameter(
+                torch.zeros(2 * input_size[1] - 1, head_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, H, W, _ = x.shape
         # qkv with shape (3, B, nHead, H * W, C)
-        qkv = (
-            self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        )
+        qkv = (self.qkv(x).reshape(B, H * W, 3, self.num_heads,
+                                   -1).permute(2, 0, 3, 1, 4))
         # q, k, v with shape (B * nHead, H * W, C)
         q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
 
         def do_attention(q, k, v):
             attn = (q * self.scale) @ k.transpose(-2, -1)
             if self.use_rel_pos:
-                attn = add_decomposed_rel_pos(
-                    attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W)
-                )
+                attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h,
+                                              self.rel_pos_w, (H, W), (H, W))
 
             attn = attn.softmax(dim=-1)
-            x = (
-                (attn @ v)
-                .view(B, self.num_heads, H, W, -1)
-                .permute(0, 2, 3, 1, 4)
-                .reshape(B, H, W, -1)
-            )
+            x = ((attn @ v).view(B, self.num_heads, H, W,
+                                 -1).permute(0, 2, 3, 1,
+                                             4).reshape(B, H, W, -1))
 
             return x
 
@@ -1274,9 +1255,8 @@ class Attention(nn.Module):
         return x
 
 
-def window_partition(
-    x: torch.Tensor, window_size: int
-) -> Tuple[torch.Tensor, Tuple[int, int]]:
+def window_partition(x: torch.Tensor,
+                     window_size: int) -> Tuple[torch.Tensor, Tuple[int, int]]:
     """
     Partition into non-overlapping windows with padding if needed.
     Args:
@@ -1295,10 +1275,10 @@ def window_partition(
         x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
     Hp, Wp = H + pad_h, W + pad_w
 
-    x = x.view(B, Hp // window_size, window_size, Wp // window_size, window_size, C)
-    windows = (
-        x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
-    )
+    x = x.view(B, Hp // window_size, window_size, Wp // window_size,
+               window_size, C)
+    windows = (x.permute(0, 1, 3, 2, 4,
+                         5).contiguous().view(-1, window_size, window_size, C))
     return windows, (Hp, Wp)
 
 
@@ -1322,9 +1302,8 @@ def window_unpartition(
     Hp, Wp = pad_hw
     H, W = hw
     B = windows.shape[0] // (Hp * Wp // window_size // window_size)
-    x = windows.view(
-        B, Hp // window_size, Wp // window_size, window_size, window_size, -1
-    )
+    x = windows.view(B, Hp // window_size, Wp // window_size, window_size,
+                     window_size, -1)
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, Hp, Wp, -1)
 
     if Hp > H or Wp > W:
@@ -1332,7 +1311,8 @@ def window_unpartition(
     return x
 
 
-def get_rel_pos(q_size: int, k_size: int, rel_pos: torch.Tensor) -> torch.Tensor:
+def get_rel_pos(q_size: int, k_size: int,
+                rel_pos: torch.Tensor) -> torch.Tensor:
     """
     Get relative positional embeddings according to the relative positions of
         query and key sizes.
@@ -1353,14 +1333,16 @@ def get_rel_pos(q_size: int, k_size: int, rel_pos: torch.Tensor) -> torch.Tensor
             size=max_rel_dist,
             mode="linear",
         )
-        rel_pos_resized = rel_pos_resized.reshape(-1, max_rel_dist).permute(1, 0)
+        rel_pos_resized = rel_pos_resized.reshape(-1,
+                                                  max_rel_dist).permute(1, 0)
     else:
         rel_pos_resized = rel_pos
 
     # Scale the coords with short length if shapes for q and k are different.
     q_coords = torch.arange(q_size)[:, None] * max(k_size / q_size, 1.0)
     k_coords = torch.arange(k_size)[None, :] * max(q_size / k_size, 1.0)
-    relative_coords = (q_coords - k_coords) + (k_size - 1) * max(q_size / k_size, 1.0)
+    relative_coords = (q_coords -
+                       k_coords) + (k_size - 1) * max(q_size / k_size, 1.0)
 
     return rel_pos_resized[relative_coords.long()]
 
@@ -1397,11 +1379,8 @@ def add_decomposed_rel_pos(
     rel_h = torch.einsum("bhwc,hkc->bhwk", r_q, Rh)
     rel_w = torch.einsum("bhwc,wkc->bhwk", r_q, Rw)
 
-    attn = (
-        attn.view(B, q_h, q_w, k_h, k_w)
-        + rel_h[:, :, :, :, None]
-        + rel_w[:, :, :, None, :]
-    ).view(B, q_h * q_w, k_h * k_w)
+    attn = (attn.view(B, q_h, q_w, k_h, k_w) + rel_h[:, :, :, :, None] +
+            rel_w[:, :, :, None, :]).view(B, q_h * q_w, k_h * k_w)
 
     return attn
 
@@ -1430,7 +1409,11 @@ class PatchEmbed(nn.Module):
         super().__init__()
 
         self.proj = nn.Conv2d(
-            in_chans, embed_dim, kernel_size=kernel_size, stride=stride, padding=padding
+            in_chans,
+            embed_dim,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1492,7 +1475,7 @@ def create_sam_vit(
     **kwargs,
 ):
     assert (
-        model_name in SAM_MODEL_CONFIG.keys()
+        model_name in SAM_MODEL_CONFIG
     ), f"model name: {model_name} should be in {SAM_MODEL_CONFIG.keys()}"
 
     sam_cfg = SAMViTCfg(**SAM_MODEL_CONFIG[model_name])
@@ -1521,6 +1504,7 @@ def create_sam_vit(
 
 
 class CLIPVisionTower(nn.Module):
+
     def __init__(
         self,
         model_name: str = "siglip_large_patch16_384",
@@ -1548,13 +1532,11 @@ class CLIPVisionTower(nn.Module):
         }
         vision_tower_params.update(kwargs)
         self.vision_tower, self.forward_kwargs = self.build_vision_tower(
-            vision_tower_params
-        )
+            vision_tower_params)
 
         if pixel_mean is not None and pixel_std is not None:
-            image_norm = torchvision.transforms.Normalize(
-                mean=pixel_mean, std=pixel_std
-            )
+            image_norm = torchvision.transforms.Normalize(mean=pixel_mean,
+                                                          std=pixel_std)
         else:
             image_norm = None
 
@@ -1573,7 +1555,8 @@ class CLIPVisionTower(nn.Module):
         else:  # huggingface
             from transformers import CLIPVisionModel
 
-            vision_tower = CLIPVisionModel.from_pretrained(**vision_tower_params)
+            vision_tower = CLIPVisionModel.from_pretrained(
+                **vision_tower_params)
             forward_kwargs = dict(output_hidden_states=True)
 
         return vision_tower, forward_kwargs
@@ -1583,18 +1566,18 @@ class CLIPVisionTower(nn.Module):
             # the output has been the self.select_layer"s features
             image_features = image_forward_outs
         else:
-            image_features = image_forward_outs.hidden_states[self.select_layer]
+            image_features = image_forward_outs.hidden_states[
+                self.select_layer]
 
         if self.select_feature == "patch":
             # if the output has cls_token
             image_features = image_features[:, 1:]
-        elif self.select_feature == "cls_patch":
+        elif (self.select_feature == "cls_patch"
+              or self.select_feature == "same"):
             image_features = image_features
-        elif self.select_feature == "same":
-            image_features = image_features
-
         else:
-            raise ValueError(f"Unexpected select feature: {self.select_feature}")
+            raise ValueError(
+                f"Unexpected select feature: {self.select_feature}")
         return image_features
 
     def forward(self, images):
@@ -1616,6 +1599,7 @@ class CLIPVisionTower(nn.Module):
 
 
 class HybridVisionTower(nn.Module):
+
     def __init__(
         self,
         high_res_cfg: Dict,
@@ -1632,7 +1616,8 @@ class HybridVisionTower(nn.Module):
         self.low_res_size = low_res_cfg["image_size"]
         self.concat_type = concat_type
 
-        self.high_layer_norm = nn.LayerNorm(high_res_cfg.get("output_dim", 1024))
+        self.high_layer_norm = nn.LayerNorm(
+            high_res_cfg.get("output_dim", 1024))
         self.low_layer_norm = nn.LayerNorm(low_res_cfg.get("output_dim", 1024))
 
         if freeze_high:
@@ -1652,7 +1637,8 @@ class HybridVisionTower(nn.Module):
                 p.requires_grad = False
             self.vision_tower_low = self.vision_tower_low.eval()
 
-        self.resize = torchvision.transforms.Resize(self.low_res_size, antialias=True)
+        self.resize = torchvision.transforms.Resize(self.low_res_size,
+                                                    antialias=True)
 
     def forward(self, images: torch.Tensor):
         """
@@ -1674,7 +1660,9 @@ class HybridVisionTower(nn.Module):
         # run high_res vision tower
         high_res = self.vision_tower_high(high_images)
         # [bs, c, h, w] -> [bs, h*w, c]
-        high_res = rearrange(high_res, "b c h w -> b (h w) c")
+        b, c, h, w = high_res.shape
+        high_res = torch.einsum("bchw->bhwc", high_res)
+        high_res = high_res.reshape(b, h * w, c)
         # run low_res vision tower
         low_res = self.vision_tower_low(low_images)
 
@@ -1730,16 +1718,19 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
-        super().__init__(
-            config,
-        )
+        super().__init__(config, )
         self.config = config
         vision_config = config.vision_config
-        self.image_size = vision_config.params.high_res_cfg.image_size
+        aligner_config = config.aligner_config
+        self.image_size = aligner_config.params["input_dim"]
+        self.image_size = vision_config.params.get("image_size")
+        if not self.image_size:
+            # Get image size for 7b model
+            self.image_size = vision_config.params["high_res_cfg"][
+                "image_size"]
         vision_cls = model_name_to_cls(vision_config.cls)
         self.vision_model = vision_cls(**vision_config.params)
         self.vision_tower = self.vision_model
-        aligner_config = config.aligner_config
         aligner_cls = model_name_to_cls(aligner_config.cls)
         self.aligner = aligner_cls(aligner_config.params)
 
@@ -1748,9 +1739,8 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
         self.image_processor = VLMImageProcessor(self.image_size)
         self.logits_processor = LogitsProcessor(language_config.vocab_size)
         self.sampler = Sampler()
-        self.lm_head = ParallelLMHead(
-            language_config.vocab_size, language_config.hidden_size
-        )
+        self.lm_head = ParallelLMHead(language_config.vocab_size,
+                                      language_config.hidden_size)
 
     def sample(
         self,
@@ -1781,24 +1771,26 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
         """
 
         bs, n = pixel_values.shape[0:2]
-        images = rearrange(pixel_values, "b n c h w -> (b n) c h w")
+        p_b, p_n, p_c, p_h, p_w = pixel_values.shape
+        images = pixel_values.reshape(p_b * p_n, p_c, p_h, p_w)
         # [b x n, T2, D]
-        images = images.to(self.vision_model.high_layer_norm.weight.dtype).to(
-            self.vision_model.high_layer_norm.weight.device
-        )
+        # images = images.to(self.vision_model.high_layer_norm.weight.dtype).to(
+        #     self.vision_model.high_layer_norm.weight.device
+        # )
         images_embeds = self.aligner(self.vision_model(images))
 
         # [b x n, T2, D] -> [b, n x T2, D]
-        images_embeds = rearrange(images_embeds, "(b n) t d -> b (n t) d", b=bs, n=n)
+        _, t, d = images_embeds.shape
+        images_embeds = images_embeds.reshape(bs, n * t, d)
 
         # [b, T, D]
         input_ids[input_ids < 0] = 0  # ignore the image embeddings
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids=input_ids)
+        inputs_embeds = self.language_model.get_input_embeddings(
+            input_ids=input_ids)
 
         # replace with the image embeddings
         images_embeds = images_embeds.reshape(
-            -1, self.config.aligner_config.params.n_embed
-        )
+            -1, self.config.aligner_config.params["n_embed"])
         inputs_embeds[images_seq_mask] = images_embeds
 
         return inputs_embeds
@@ -1820,7 +1812,8 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
             image_token_mask = input_ids == image_token_id
             inputs_embeds = self.prepare_inputs_embeds(
                 input_ids,
-                pixel_values.reshape(1, -1, 3, self.image_size, self.image_size),
+                pixel_values.reshape(1, -1, 3, self.image_size,
+                                     self.image_size),
                 image_token_mask,
             )
 
@@ -1829,17 +1822,19 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
             inputs_embeds = None
 
         hidden_states = self.language_model(
-            input_ids, positions, kv_caches, attn_metadata, inputs_embeds=inputs_embeds
+            input_ids,
+            positions,
+            kv_caches,
+            attn_metadata,
+            inputs_embeds=inputs_embeds,
         )
 
         return hidden_states
 
-    def compute_logits(
-        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata
-    ) -> torch.Tensor:
-        logits = self.logits_processor(
-            self.lm_head.weight, hidden_states, sampling_metadata
-        )
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def load_weights(self, weights):
@@ -1857,12 +1852,14 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
                 self.lm_head.weight_loader(self.lm_head.weight, loaded_weight)
                 continue
             if name.startswith("language_model"):
-                name = name.replace("language_model.model.", "language_model.", 1)
+                name = name.replace("language_model.model.", "language_model.",
+                                    1)
             if "rotary_emb.inv_freq" in name:
                 continue
             if "language_model" not in name:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -1874,9 +1871,8 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Skip experts that are not assigned to this worker.
-                if (
-                    "mlp.experts." in name or "mlp.shared_experts." in name
-                ) and name not in params_dict:
+                if ("mlp.experts." in name or "mlp.shared_experts."
+                        in name) and name not in params_dict:
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -1887,14 +1883,14 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
                 # if name.endswith(".bias") and name not in params_dict:
                 #     continue
                 # Skip experts that are not assigned to this worker.
-                if (
-                    "mlp.experts." in name or "mlp.shared_experts." in name
-                ) and name not in params_dict:
+                if ("mlp.experts." in name or "mlp.shared_experts."
+                        in name) and name not in params_dict:
                     continue
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
 
 
