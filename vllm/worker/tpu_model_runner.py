@@ -23,6 +23,7 @@ _PAD_SLOT_ID = 0  # FIXME(woosuk)
 # FIXME(woosuk): Temporarily disabled top-p sampling since it's too slow.
 _ENABLE_TOP_P = False
 # FIXME(woosuk): A temporary hack to support `n > 1`.
+# This can significantly affect the performance if too large.
 _MAX_NUM_SAMPLES = 128
 
 
@@ -416,7 +417,6 @@ class TPUModelRunner:
             for seq_group_metadata in seq_group_metadata_list:
                 seq_outputs = []
                 seq_ids = list(seq_group_metadata.seq_data.keys())
-                print(seq_ids)
                 for i, seq_id in enumerate(seq_ids):
                     next_token_id = next_token_ids[batch_idx][i]
                     seq_outputs.append(
