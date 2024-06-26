@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from sparseml.transformers import SparseAutoModelForCausalLM
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
                           AutoProcessor, AutoTokenizer, BatchEncoding)
 
@@ -167,6 +166,7 @@ class HfRunner:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
             if is_sparseml_model:
+                from sparseml.transformers import SparseAutoModelForCausalLM
                 auto_cls = SparseAutoModelForCausalLM
             else:
                 auto_cls = AutoModelForCausalLM
