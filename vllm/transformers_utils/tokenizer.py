@@ -122,6 +122,17 @@ def get_tokenizer(
         else:
             raise e
 
+    # BLIP-2 tokenizer does not support image token, so we manually add it in
+    # TODO: Remove the need for this dirty hack
+    if "/blip2" in tokenizer.name_or_path:
+        from vllm.model_executor.models.blip2 import (BLIP2_IMAGE_TOKEN,
+                                                      BLIP2_IMAGE_TOKEN_ID)
+        tokenizer.add_tokens(BLIP2_IMAGE_TOKEN)
+        encoded_image_token, = tokenizer.encode(BLIP2_IMAGE_TOKEN,
+                                                add_special_tokens=False)
+
+        assert encoded_image_token == BLIP2_IMAGE_TOKEN_ID
+
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "

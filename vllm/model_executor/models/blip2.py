@@ -394,6 +394,7 @@ class Blip2ImageFeatureInputs(TypedDict):
 Blip2ImageInputs = Union[Blip2ImagePixelInputs, Blip2ImageFeatureInputs]
 
 # Used internally as placeholders
+BLIP2_IMAGE_TOKEN = "<image>"
 BLIP2_IMAGE_TOKEN_ID = 50265
 
 

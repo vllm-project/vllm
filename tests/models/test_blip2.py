@@ -3,7 +3,8 @@ from typing import List, Tuple
 import pytest
 
 from vllm.config import VisionLanguageConfig
-from vllm.model_executor.models.blip2 import BLIP2_IMAGE_TOKEN_ID
+from vllm.model_executor.models.blip2 import (BLIP2_IMAGE_TOKEN,
+                                              BLIP2_IMAGE_TOKEN_ID)
 from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import rescale_image_size
 
@@ -56,7 +57,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     hf_output_ids = [
         input_id for input_id in output_ids if input_id != image_token_id
     ]
-    hf_output_str = output_str
+    hf_output_str = output_str.replace(BLIP2_IMAGE_TOKEN, "")
 
     return hf_output_ids, hf_output_str
 
