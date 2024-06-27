@@ -205,3 +205,7 @@ steps:
   - pytest -v -s distributed/test_custom_all_reduce.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
+
+- label: Multi-node Tests
+  num_gpus: 4
+  multi_node: True

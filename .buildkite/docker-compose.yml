@@ -1,0 +1,20 @@
+version: '3'
+services:
+  container1:
+    image: 'public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:2061f0b8a7f1a01683c4045096a092eedf6387a4'
+    networks:
+      custom_network:
+        ipv4_address: 192.168.10.10
+
+  container2:
+    image: 'public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:2061f0b8a7f1a01683c4045096a092eedf6387a4'
+    networks:
+      custom_network:
+        ipv4_address: 192.168.10.11
+
+networks:
+  custom_network:
+    ipam:
+      driver: default
+      config:
+        - subnet: 192.168.10.0/24
