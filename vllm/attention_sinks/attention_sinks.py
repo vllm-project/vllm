@@ -60,7 +60,8 @@ class StreamingAttentionSink(nn.Module):
     ) -> torch.Tensor:
         if kv_cache is None:
             # ModelRunner.profile_run
-            q, k = self.rotary_emb(self.positions, q, k)
+            if not self.use_alibi:
+                q, k = self.rotary_emb(self.positions, q, k)
             return self.attn(q, k, v, None, attn_metadata)
 
         if self.use_alibi:
@@ -134,8 +135,7 @@ class StreamingAttentionSink(nn.Module):
         context_lens_tensor = attn_metadata.context_lens_tensor
 
         # batch size = num sequences
-        batch_size = block_tables_tensor.shape[0]
-        assert context_lens_tensor.shape[0] == batch_size
+        batch_size = context_lens_tensor.shape[0]
 
         # cache phys_bnums
         if hasattr(attn_metadata, 'phys_bnums_list'):
@@ -156,7 +156,6 @@ class StreamingAttentionSink(nn.Module):
             if hasattr(attn_metadata, 'phys_bnums_list'):
                 phys_bnums = phys_bnums_list[i]
             else:
-                # print(f"seq {i}: len block table:", block_table.shape, "num_blocks:", num_blocks)
                 phys_bnums = block_table[:num_blocks - 1]
                 phys_bnums_list[i] = phys_bnums
             
@@ -178,7 +177,7 @@ class StreamingAttentionSink(nn.Module):
             pos_end = min(num_past_tokens, model_context_len - 1)
             pos = torch.arange(pos_start, pos_end, device=device)
             if not within_context_len:
-                # pos: [0, 16] + [31 - rem, 4095)
+                # pos: [0, 16) + [31 - rem, 4095)
                 pos_sink = torch.arange(0, block_size, device=device)
                 pos = torch.cat((pos_sink, pos))
             
@@ -220,6 +219,7 @@ class StreamingAttentionSink(nn.Module):
             
             if not within_context_len:
                 # must be decode
+                assert i >= attn_metadata.num_prefills
                 # => cap number of tokens to consider with model context len
                 attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
                 self.positions[i] = model_context_len - 1
@@ -485,37 +485,31 @@ class StreamingAttentionSink(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        if attn_metadata.prefill_metadata is not None:
+        if (attn_metadata.prefill_metadata is not None
+            and not self.chunked_prefill_enabled):
+            # non-chunked prefill (entire prompt)
+            assert attn_metadata.decode_metadata is None
             return self.attn(q, k, v, kv_cache, attn_metadata)
-        elif attn_metadata.decode_metadata is not None:
-            device = q.device
-            block_size = self.block_size
-            model_context_len = self.model_context_len
+        
+        # else, decode only or decode + chunked prefill
+        if not self.chunked_prefill_enabled:
+            assert attn_metadata.num_prefills == 0
 
-            # cache seq_lens
-            if hasattr(attn_metadata, 'seq_lens_clone'):
-                seq_lens = attn_metadata.seq_lens_clone
-            else:
-                seq_lens = attn_metadata.seq_lens_tensor.tolist()
-                attn_metadata.seq_lens_clone = seq_lens
+        block_size = self.block_size
+        model_context_len = self.model_context_len
+        context_lens_tensor = attn_metadata.context_lens_tensor
 
-            block_tables_tensor = attn_metadata.decode_metadata.block_tables
+        # batch size = num sequences
+        batch_size = context_lens_tensor.shape[0]
 
-            # batch size = num sequences
-            batch_size = block_tables_tensor.shape[0]
-            for i in range(batch_size):
-                num_past_tokens = seq_lens[i] - 1  # assumes decode only yields 1 token
-                if num_past_tokens < model_context_len: continue
+        for i in range(batch_size):
+            num_past_tokens = context_lens_tensor[i].item()
+            if num_past_tokens < model_context_len: continue
 
-                # cap number of tokens to consider with model context len
-                rem = num_past_tokens % block_size
-                attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
+            # cap number of tokens to consider with model context len
+            rem = num_past_tokens % block_size
+            attn_metadata.seq_lens_tensor[i] = model_context_len - block_size + rem + 1
 
-            # compute attention in kernel
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-            
-            # revert seq_lens inside metadata
-            # so that next attn layer starts with same seq lens
-            attn_metadata.seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
-            
-            return attn_output
+        # compute attention in kernel
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        return attn_output
