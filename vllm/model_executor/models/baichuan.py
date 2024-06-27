@@ -295,8 +295,6 @@ class BaiChuanModel(nn.Module):
 
 
 class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA):
-    supports_lora = True
-
     packed_modules_mapping = {
         "W_pack": ["W_pack"],
         "gate_up_proj": [

@@ -232,8 +232,6 @@ class PhiModel(nn.Module):
 
 
 class PhiForCausalLM(nn.Module, SupportsLoRA):
-    supports_lora = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

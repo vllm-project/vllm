@@ -13,7 +13,14 @@ logger = init_logger(__name__)
 class SupportsVision(Protocol):
     """The interface required for all vision language models (VLMs)."""
 
-    supports_vision: ClassVar[Literal[True]]
+    supports_vision: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports vision inputs.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
 
     def __init__(self, *, vlm_config: VisionLanguageConfig) -> None:
         ...
@@ -52,7 +59,14 @@ def supports_vision(
 class SupportsLoRA(Protocol):
     """The interface required for all models that support LoRA."""
 
-    supports_lora: ClassVar[Literal[True]]
+    supports_lora: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports LoRA.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
 
     packed_modules_mapping: ClassVar[Dict[str, List[str]]]
     supported_lora_modules: ClassVar[List[str]]
