@@ -419,21 +419,23 @@ class Scheduler:
         # groups to preempt.
         now = time.time()
         running_queue = policy.sort_by_priority(now, running_queue)
+        running: Deque[SequenceGroup] = deque()
         while running_queue:
             seq_group = running_queue[0]
+
+            if(seq_group.is_paused()):
+                running.append(running_queue.popleft())
+                continue    
+
+
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
 
             if num_running_tokens == 0:
                 break
             
-            seq_group = seq_group.get_seqs(SequenceStatus.RUNNING)
-            if not seq_group:
-                running_queue.append(running_queue.popleft())
-                continue
-    
-
             running_queue.popleft()
+
             while not self._can_append_slots(seq_group):
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
@@ -486,7 +488,7 @@ class Scheduler:
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
 
-        return running_queue, SchedulerRunningOutputs(
+        return running, SchedulerRunningOutputs(
             decode_seq_groups=decode_seq_groups,
             prefill_seq_groups=prefill_seq_groups,
             preempted=preempted,
