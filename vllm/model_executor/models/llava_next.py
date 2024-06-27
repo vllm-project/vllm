@@ -125,8 +125,8 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(LlavaNextConfig)
     vision_config = hf_config.vision_config
 
-    # Result in the max possible feature size
-    dummy_height = dummy_width = 448
+    #TODO: change the logic for dummy data to support dynamic shape
+    _, _, dummy_height, dummy_width = multimodal_config.image_input_shape
     image_feature_size = _get_llava_next_image_feature_size(
         hf_config, input_height=dummy_height, input_width=dummy_width)
 
