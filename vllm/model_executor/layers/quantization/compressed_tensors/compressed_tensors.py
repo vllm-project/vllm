@@ -19,6 +19,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
 
+__all__ = ["CompressedTensorsLinearMethod"]
+
 
 class CompressedTensorsConfig(QuantizationConfig):
 

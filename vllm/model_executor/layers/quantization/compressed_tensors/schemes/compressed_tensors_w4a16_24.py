@@ -2,12 +2,13 @@ from typing import Callable, List, Optional
 
 import torch
 from torch.nn import Parameter
+
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N)
-from vllm.model_executor.parameter import vLLMParameter, PackedvLLMParameter
+from vllm.model_executor.parameter import PackedvLLMParameter, vLLMParameter
 
 __all__ = ["CompressedTensorsW4A16Sparse24"]
 W4A16SPARSE24_SUPPORTED_BITS = [4]
@@ -73,7 +74,8 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
             output_dim=1,
             input_dim=input_dim,
             use_col_loading=True,
-            use_row_loading=True if input_dim is not None else False,
+            use_row_loading=True  #noqa: SIM210
+            if input_dim is not None else False,
             weight_loader=weight_loader)
 
         weight_shape = vLLMParameter(data=torch.empty(2, dtype=torch.int64),

@@ -2,6 +2,7 @@ from typing import Callable, List, Optional
 
 import torch
 from torch.nn import Parameter
+
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
@@ -93,7 +94,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             input_dim=weight_scale_dim,
             output_dim=0,
             use_col_loading=True,
-            use_row_loading=True if weight_scale_dim is not None else False,
+            use_row_loading=True  # noqa: SIM210
+            if weight_scale_dim is not None else False,
             weight_loader=weight_loader,
             data=torch.empty(
                 output_size_per_partition,
