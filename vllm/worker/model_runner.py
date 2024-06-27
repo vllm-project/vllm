@@ -312,10 +312,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
 
     def _prepare_model_input_tensors(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_request_ids: Optional[List[str]]
-    ) -> TModelInputForGPU:
+            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            finished_request_ids: Optional[List[str]]) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
         metadata for possible additional steps, e.g., sampling.
@@ -809,7 +807,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
         finished_request_ids = [seq.request_id for seq in seqs]
-        model_input = self.prepare_model_input(seqs,finished_request_ids)
+        model_input = self.prepare_model_input(seqs, finished_request_ids)
         self.execute_model(model_input, kv_caches)
         torch.cuda.synchronize()
         return
@@ -975,8 +973,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             ))
 
     def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        self, seq_group_metadata_list: List[SequenceGroupMetadata],
         finished_request_ids: Optional[List[str]]
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
@@ -993,8 +990,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         If cuda graph is required, this API automatically pads inputs.
         """
         model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list,
-            finished_request_ids)
+            seq_group_metadata_list, finished_request_ids)
         sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
                                                      model_input.seq_lens,
                                                      model_input.query_lens,
@@ -1007,9 +1003,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                    is_prompt=is_prompt)
 
     @torch.inference_mode()
-    def execute_model(
-            self, model_input: ModelInputForGPUWithSamplingMetadata,
-            kv_caches: List[torch.Tensor]) -> SamplerOutput:
+    def execute_model(self, model_input: ModelInputForGPUWithSamplingMetadata,
+                      kv_caches: List[torch.Tensor]) -> SamplerOutput:
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None

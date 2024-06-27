@@ -175,7 +175,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        model_input = self.prepare_model_input(seqs)
+        model_input = self.prepare_model_input(seqs, None)
         self.execute_model(model_input, kv_caches)
         torch.xpu.synchronize()
         return
@@ -188,9 +188,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         ))
 
     def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> ModelInputForXPU:
+            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            finished_request_ids: Optional[List[str]]) -> ModelInputForXPU:
         multi_modal_input = None
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or

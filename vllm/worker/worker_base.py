@@ -228,8 +228,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             model_input: ModelRunnerInputBase = (
                 self.model_runner.prepare_model_input(
                     execute_model_req.seq_group_metadata_list,
-                    execute_model_req.finished_request_ids
-                ))
+                    execute_model_req.finished_request_ids))
 
             if self.do_metadata_broadcast:
                 broadcast_data = worker_input.as_broadcastable_tensor_dict()
@@ -254,8 +253,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(
-            model_input, self.kv_cache)
+        output = self.model_runner.execute_model(model_input, self.kv_cache)
         # Worker only supports single-step execution. Wrap the output in a
         # list to conform to interface.
         return [output]
