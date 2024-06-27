@@ -135,7 +135,19 @@ void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
   inputs.scaleA = d_scale_a;
   inputs.scaleB = d_scale_b;
   inputs.scaleD = d_scale_d;
-  gemm.setProblem(m, n, k, 1, epilogue, inputs);
+
+  auto&& problem = gemm.getProblemTypes();
+  auto lda = problem.op_a == HIPBLAS_OP_N ? m : k;
+  auto ldb = problem.op_b == HIPBLAS_OP_N ? k : n;
+  auto ldc = m;
+  auto strideA = m * k;
+  auto strideB = n * k;
+  auto strideC = m * n;
+
+  CHECK_HIPBLASLT_ERROR(gemm.setProblem(m, n, k, 1, lda, ldb, ldc, ldc, strideA,
+                                        strideB, strideC, strideC, epilogue,
+                                        inputs, problem));
+
   std::vector<int> algoIndex(1);
   algoIndex[0] = solidx;
   std::vector<hipblasLtMatmulHeuristicResult_t> tmpAlgo;
