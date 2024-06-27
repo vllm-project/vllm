@@ -17,7 +17,7 @@ LORA_NAME = "typeof/zephyr-7b-beta-lora"
 pytestmark = pytest.mark.openai
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def zephyr_lora_files():
     return snapshot_download(repo_id=LORA_NAME)
 
