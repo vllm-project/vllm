@@ -1,3 +1,12 @@
+"""
+LM eval harness on model to compare vs HF baseline computed offline.
+Configs are found in configs/$MODEL.yaml
+
+* export LM_EVAL_TEST_DATA_FILE=configs/Meta-Llama-3-70B-Instruct.yaml
+* export LM_EVAL_TP_SIZE=4 
+* pytest -s test_lm_eval_correctness.py
+"""
+
 import os
 from pathlib import Path
 
@@ -29,20 +38,19 @@ def launch_lm_eval(eval_config):
 
 
 def test_lm_eval_correctness():
-    eval_configs = yaml.safe_load(
+    eval_config = yaml.safe_load(
         Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
 
-    for eval_config in eval_configs:
-        # Launch eval requests.
-        results = launch_lm_eval(eval_config)
+    # Launch eval requests.
+    results = launch_lm_eval(eval_config)
 
-        # Confirm scores match ground truth.
-        for task in eval_config["tasks"]:
-            for metric in task["metrics"]:
-                ground_truth = metric["value"]
-                measured_value = results["results"][task["name"]][
-                    metric["name"]]
-                print(
-                    f'{task["name"]} | {metric["name"]}: '
-                    f'ground_truth={ground_truth} | measured={measured_value}')
-                assert numpy.isclose(ground_truth, measured_value, rtol=RTOL)
+    # Confirm scores match ground truth.
+    for task in eval_config["tasks"]:
+        for metric in task["metrics"]:
+            ground_truth = metric["value"]
+            measured_value = results["results"][task["name"]][
+                metric["name"]]
+            print(
+                f'{task["name"]} | {metric["name"]}: '
+                f'ground_truth={ground_truth} | measured={measured_value}')
+            assert numpy.isclose(ground_truth, measured_value, rtol=RTOL)
