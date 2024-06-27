@@ -119,6 +119,18 @@ def test_llama_tensor_parallel_equality(sql_lora_files, num_gpus_available):
 
     assert output_tp1 == output_tp4
 
+    llm_tp8 = vllm.LLM(MODEL_PATH,
+                       enable_lora=True,
+                       max_num_seqs=16,
+                       max_loras=4,
+                       tensor_parallel_size=8)
+    output_tp8 = do_sample(llm_tp8, sql_lora_files, lora_id=1)
+
+    del llm_tp8
+    cleanup()
+
+    assert output_tp1 == output_tp8
+
 
 def test_llama_lora_warmup(sql_lora_files):
     """Test that the LLM initialization works with a warmup LORA path and

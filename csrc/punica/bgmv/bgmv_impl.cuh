@@ -63,17 +63,19 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   size_t X_shared_offset[num_pipeline_stages] = {0U, 1U * tile_size};
   auto pipe = cuda::make_pipeline();
 
-  // pipeline load W/X and compute WX;
-  pipe.producer_acquire();
-  cuda::memcpy_async(W_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
-                     W + (idx * feat_out + j) * feat_in +
-                         (threadIdx.y * tx + threadIdx.x) * vec_size,
-                     cuda::aligned_size_t<W_copy_size>(W_copy_size), pipe);
-  cuda::memcpy_async(X_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
-                     X + (batch_idx * feat_in) +
-                         (threadIdx.y * tx + threadIdx.x) * vec_size,
-                     cuda::aligned_size_t<X_copy_size>(X_copy_size), pipe);
-  pipe.producer_commit();
+  if (threadIdx.y * tx * vec_size < feat_in) {
+    // pipeline load W/X and compute WX;
+    pipe.producer_acquire();
+    cuda::memcpy_async(W_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
+                      W + (idx * feat_out + j) * feat_in +
+                          (threadIdx.y * tx + threadIdx.x) * vec_size,
+                      cuda::aligned_size_t<W_copy_size>(W_copy_size), pipe);
+    cuda::memcpy_async(X_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
+                      X + (batch_idx * feat_in) +
+                          (threadIdx.y * tx + threadIdx.x) * vec_size,
+                      cuda::aligned_size_t<X_copy_size>(X_copy_size), pipe);
+    pipe.producer_commit();
+  }
   size_t copy_idx, compute_idx;
   float y = 0.f;
   vec_t<in_T, vec_size> x_vec;
