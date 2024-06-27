@@ -35,6 +35,7 @@ class MLPSpeculatorConfig(PretrainedConfig):
                 candidate tree.
                 For each candidate branch in the tree, head n produces topk[n]
                 additional sub-branches.
+                NOTE: This parameter is currently unused.
             n_candidates: int
                 number of child candidates to create per sequence
         """
@@ -47,4 +48,6 @@ class MLPSpeculatorConfig(PretrainedConfig):
         self.n_predict = n_predict
         self.top_k_tokens_per_head = top_k_tokens_per_head
         self.n_candidates = n_candidates
+        self.num_lookahead_tokens = n_predict
+
         super().__init__(**kwargs)
