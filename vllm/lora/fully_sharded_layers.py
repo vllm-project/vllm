@@ -71,8 +71,8 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         # now have column partitioned output
 
         if self.bias_stacked is not None:
-            self.bias_stacked = self.bias_stacked.view(-1,
-                                                       self.bias_stacked.shape[-1])
+            self.bias_stacked = self.bias_stacked.view(
+                -1, self.bias_stacked.shape[-1])
             self.bias_stacked = self.bias_stacked[self.indices]
             output += self.bias_stacked
 
@@ -130,7 +130,7 @@ def _mcp_apply(x, bias, layer):
             if bias is not None:
                 bias = bias.view(-1, bias.shape[-1])
                 bias = bias[layer.indices[:layer.indices_len[0]]]
-                output[:, left_offset: left_offset + shard_size] += bias
+                output[:, left_offset:left_offset + shard_size] += bias
 
         left_offset += shard_size
 
