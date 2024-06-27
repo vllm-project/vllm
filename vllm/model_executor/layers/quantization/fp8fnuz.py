@@ -44,7 +44,7 @@ class Fp8FnuzConfig(QuantizationConfig):
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
-        return ["serenity_config.json"]
+        return ["fp8fnuz_config.json"]
 
     @classmethod
     def from_config(cls, config) -> "Fp8FnuzConfig":
