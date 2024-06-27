@@ -17,6 +17,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
+
 def adjust_marlin_shard(param, shard_size, shard_offset):
     marlin_tile_size = getattr(param, "marlin_tile_size", None)
     if marlin_tile_size is None:
@@ -373,30 +374,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         output_dim = getattr(param, "output_dim", None)
         # Special case for AQLM codebooks.
         is_metadata = getattr(param, "is_metadata", False)
-
-        # Special case for per-tensor scales in fused case.
+        # Special case for per-tensor scale in fused case.
         is_per_tensor_scale = getattr(param, "is_per_tensor_scale", False)
-
-        # if output_dim is not None and param_shard_splitter is not None:
-        #     raise NotImplementedError(
-        #         "We do not currently support output_dim != None and "
-        #         "shard_splitter != None for a parameter. Please open an issue."
-        #     )
-        # # If a parameter has defined a shard_splitter to be used for
-        # # the weight, it should be applied before the weight is
-        # # loaded/copied to the parameter. The shard_splitter applies
-        # # logic by using the loaded_shard_id to ensure that the loaded
-        # # param is loaded to the correct location
-        # # within the parameter defined by the linear method.
-        # if loaded_shard_id is None and param_shard_splitter is not None:
-        #     raise NotImplementedError(
-        #         "We do not currently support loaded_shard_id == None and "
-        #         "shard_splitter != None for a parameter. Please open an issue."
-        #     )
-
-        # # Special case for Fp8 scales.
-        # fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
-        #                                    None)
 
         if loaded_shard_id is None:
             # Loaded weight is already packed.
@@ -465,17 +444,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         elif is_per_tensor_scale:
             param_data, loaded_weight = load_weight_into_param_array(
                 param_data, loaded_weight, loaded_shard_id)
-            
-        # # If a param_shard_splitter is defined by the LinearMethod, use it.
-        # elif param_shard_splitter is not None:
-        #     logical_widths = getattr(param, "logical_widths", None)
-        #     param_data, loaded_weight = param_shard_splitter(
-        #         param_data, loaded_weight, loaded_shard_id, logical_widths)
-
-        # # Special case for Fp8 scales.
-        # elif fp8_scales_shard_indexer is not None:
-        #     param_data, loaded_weight = fp8_scales_shard_indexer(
-        #         param_data, loaded_weight, loaded_shard_id)
 
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
