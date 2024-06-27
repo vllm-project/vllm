@@ -349,7 +349,8 @@ class ModelConfig:
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
-        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
+        total_num_hidden_layers = getattr(self.hf_text_config,
+                                          "num_hidden_layers", 0)
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
 
     def contains_seqlen_agnostic_layers(
