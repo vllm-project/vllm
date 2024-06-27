@@ -41,7 +41,7 @@ def adjust_bitsandbytes_shard(param: Parameter,
     return quantized_size, quantized_offset
 
 
-def load_weight_into_param_array(param, loaded_weight, shard_id):
+def load_scale_into_param_array(param, loaded_weight, shard_id):
     qkv_idxs = {"q": 0, "k": 1, "v": 2}
 
     if isinstance(shard_id, str):
@@ -442,7 +442,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         
         # Special case for per-tensor scales in fused case.
         elif is_per_tensor_scale:
-            param_data, loaded_weight = load_weight_into_param_array(
+            param_data, loaded_weight = load_scale_into_param_array(
                 param_data, loaded_weight, loaded_shard_id)
 
         else:
@@ -628,7 +628,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                                            shard_size)
         # Special case for per-tensor scales in fused case.
         elif is_per_tensor_scale:
-            param_data, loaded_weight = load_weight_into_param_array(
+            param_data, loaded_weight = load_scale_into_param_array(
                 param_data, loaded_weight, loaded_shard_id)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
