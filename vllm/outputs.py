@@ -142,7 +142,7 @@ class RequestOutput:
         seq_group.set_finished_time(finished_time)
         return cls(seq_group.request_id,
                    prompt,
-                   prompt_token_ids.tolist(),
+                   prompt_token_ids,
                    prompt_logprobs,
                    outputs,
                    finished,
@@ -185,7 +185,7 @@ class EmbeddingRequestOutput:
             raise ValueError(
                 "Embeddings are missing in seq_group for EmbeddingRequest.")
         output = EmbeddingOutput(seq_group.embeddings)
-        prompt_token_ids = seq_group.prompt_token_ids.tolist()
+        prompt_token_ids = seq_group.prompt_token_ids
         finished = seq_group.is_finished()
 
         return cls(seq_group.request_id, output, prompt_token_ids, finished)

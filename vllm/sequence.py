@@ -266,7 +266,7 @@ class Sequence:
         self.lora_request = lora_request
 
         self.data = SequenceData(self.inputs["prompt_token_ids"])
-        self.prompt_token_ids: np.ndarray = self.data.get_prompt_token_ids()
+        self.prompt_token_ids: List[int] = self.inputs["prompt_token_ids"]
         self.prompt: Optional[str] = self.inputs.get("prompt")
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
@@ -457,7 +457,7 @@ class SequenceGroup:
         return next(iter(self.seqs_dict.values())).prompt
 
     @property
-    def prompt_token_ids(self) -> np.ndarray:
+    def prompt_token_ids(self) -> List[int]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).prompt_token_ids
