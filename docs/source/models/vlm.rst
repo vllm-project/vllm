@@ -5,6 +5,9 @@ Using VLMs
 
 vLLM provides experimental support for Vision Language Models (VLMs). This document shows you how to run and serve these models using vLLM.
 
+.. important::
+    We are actively iterating on VLM support. Expect breaking changes to VLM usage and development in upcoming releases without prior deprecation.
+
 Engine Arguments
 ----------------
 
@@ -20,9 +23,9 @@ The following :ref:`engine arguments <engine_args>` are specific to VLMs:
     Currently, the support for vision language models on vLLM has the following limitations:
 
     * Only single image input is supported per text prompt.
-    * Dynamic ``image_input_shape`` is not supported: the input image will be resized to the static ``image_input_shape``. This means model output might not exactly match the HuggingFace implementation.
+    * Dynamic ``image_input_shape`` is not supported: the input image will be resized to the static ``image_input_shape``. This means our LLaVA-NeXT output may not exactly match the huggingface implementation.
 
-    We are continuously improving user & developer experience for VLMs. Please raise an issue on GitHub if you have any feedback or feature requests.
+    We are continuously improving user & developer experience for VLMs. Please `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ if you have any feedback or feature requests.
 
 Offline Batched Inference
 -------------------------
@@ -38,6 +41,10 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
         image_input_shape="1,3,336,336",
         image_feature_size=576,
     )
+
+.. important::
+    We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
+
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
 
@@ -62,6 +69,9 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
         print(generated_text)
 
 A code example can be found in `examples/llava_example.py <https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py>`_.
+
+.. important::
+    We will remove the need to format image tokens in a future release. Afterwards, the input text will follow the same format as that for the original HuggingFace model.
 
 Online OpenAI Vision API Compatible Inference
 ----------------------------------------------
@@ -88,6 +98,9 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
         --image-input-shape 1,3,336,336 \
         --image-feature-size 576 \
         --chat-template template_llava.jinja
+
+.. important::
+    We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
 
 To consume the server, you can use the OpenAI client like in the example below:
 
@@ -116,6 +129,8 @@ To consume the server, you can use the OpenAI client like in the example below:
         }],
     )
     print("Chat response:", chat_response)
+
+A full code example can be found in `examples/openai_vision_api_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_vision_api_client.py>`_.
 
 .. note::
 

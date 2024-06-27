@@ -16,7 +16,11 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              UsageInfo)
+                                              DetokenizeRequest,
+                                              DetokenizeResponse,
+                                              TokenizeRequest,
+                                              TokenizeResponse, UsageInfo)
+# yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
@@ -24,6 +28,8 @@ from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
+from vllm.tracing import (contains_trace_headers, extract_trace_headers,
+                          log_tracing_disabled_warning)
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -125,6 +131,14 @@ class OpenAIServingCompletion(OpenAIServing):
                         truncate_prompt_tokens)
                 prompt_ids, prompt_text = prompt_formats
 
+                is_tracing_enabled = await self.engine.is_tracing_enabled()
+                trace_headers = None
+                if is_tracing_enabled:
+                    trace_headers = extract_trace_headers(raw_request.headers)
+                if not is_tracing_enabled and contains_trace_headers(
+                        raw_request.headers):
+                    log_tracing_disabled_warning()
+
                 generator = self.engine.generate(
                     {
                         "prompt": prompt_text,
@@ -133,6 +147,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params,
                     f"{request_id}-{i}",
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
                 )
 
                 generators.append(generator)
@@ -431,3 +446,29 @@ class OpenAIServingCompletion(OpenAIServing):
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
         )
+
+    async def create_tokenize(self,
+                              request: TokenizeRequest) -> TokenizeResponse:
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        (input_ids, input_text) = self._validate_prompt_and_tokenize(
+            request,
+            prompt=request.prompt,
+            add_special_tokens=request.add_special_tokens)
+
+        return TokenizeResponse(tokens=input_ids,
+                                count=len(input_ids),
+                                max_model_len=self.max_model_len)
+
+    async def create_detokenize(
+            self, request: DetokenizeRequest) -> DetokenizeResponse:
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        (input_ids, input_text) = self._validate_prompt_and_tokenize(
+            request, prompt_ids=request.tokens)
+
+        return DetokenizeResponse(prompt=input_text)

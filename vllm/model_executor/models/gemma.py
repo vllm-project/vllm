@@ -15,7 +15,7 @@
 # limitations under the License.
 """Inference-only Gemma model compatible with HuggingFace weights."""
 from functools import lru_cache
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -40,6 +40,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+
+from .interfaces import SupportsLoRA
 
 logger = init_logger(__name__)
 
@@ -288,7 +290,9 @@ class GemmaModel(nn.Module):
         return hidden_states
 
 
-class GemmaForCausalLM(nn.Module):
+class GemmaForCausalLM(nn.Module, SupportsLoRA):
+    supports_lora = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -319,9 +323,11 @@ class GemmaForCausalLM(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        del lora_config  # Unused.
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.quant_config = quant_config
         self.model = GemmaModel(config, cache_config, quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -363,7 +369,7 @@ class GemmaForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params = set()
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, shard_name, shard_id) in stacked_params_mapping:
                 if shard_name not in name:

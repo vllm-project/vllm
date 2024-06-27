@@ -18,6 +18,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
+from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.utils import LRUCache, is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -363,7 +364,7 @@ class LoRAModelManager:
 
     def __init__(
         self,
-        model: nn.Module,
+        model: SupportsLoRA,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
@@ -411,7 +412,7 @@ class LoRAModelManager:
         # embeddings_indices
         self.indices_len: List[Optional[int]] = [None] * 4
 
-        self.model: nn.Module = model
+        self.model = model
         if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
                 self.model.supported_lora_modules)
@@ -428,7 +429,6 @@ class LoRAModelManager:
         self._active_loras: Dict[int, None] = {}
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
-        self.model.lora_manager = self
 
     @property
     def capacity(self) -> int:
@@ -524,6 +524,12 @@ class LoRAModelManager:
         if self.long_lora_context:
             self.long_lora_context.offsets_by_lora_id.pop(lora_id, None)
         return bool(self._registered_loras.pop(lora_id, None))
+
+    def pin_lora(self, lora_id: int) -> bool:
+        """Pin a LoRAModel in the manager cache."""
+        raise NotImplementedError(
+            "Pinning is not supported in LoRAModelManager."
+            "Use LRUCacheLoRAModelManager for pinning")  # type: ignore
 
     # TODO see if this can be vectorized
     def _set_lora_mapping(self, mapping: LoRAMapping) -> None:
@@ -776,6 +782,26 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             self._registered_loras.remove_oldest()
             return True
         return False
+
+    def pin_lora(self, lora_id: int) -> bool:
+        """Pin a LoRAModel in the manager cache."""
+        self._pin_lora_in_cpu_cache(lora_id)
+        self._pin_lora_in_gpu_cache(lora_id)
+        return True
+
+    def _pin_lora_in_cpu_cache(self, lora_id: int):
+        try:
+            self._registered_loras.pin(lora_id)
+        except ValueError as err:
+            raise ValueError("Pinning failed. "
+                             f"LoRA {lora_id} is not registered.") from err
+
+    def _pin_lora_in_gpu_cache(self, lora_id: int):
+        if lora_id not in self._active_loras:
+            # move lora to gpu if not already active
+            self.activate_lora(lora_id)
+
+        self._active_loras.pin(lora_id)
 
 
 def create_lora_manager(
