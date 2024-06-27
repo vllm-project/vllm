@@ -1,2 +1,0 @@
-Meta-Llama-3-8B-Instruct.yaml
-Meta-Llama-3-8B-Instruct-FP8.yaml

@@ -1,2 +1,0 @@
-Meta-Llama-3-70B-Instruct.yaml
-Mixtral-8x7B-Instruct-v0.1.yaml
