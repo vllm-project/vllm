@@ -31,7 +31,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
-from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensors
 from vllm.multimodal.image import (ImageFeatureData, ImagePixelData,
@@ -40,6 +39,7 @@ from vllm.sequence import SamplerOutput
 
 from .clip import (dummy_pixel_data_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
+from .interfaces import SupportsVision
 
 _KEYS_TO_MODIFY_MAPPING = {
     "model.vision_embed_tokens": "vision_embed_tokens",
@@ -139,11 +139,14 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
     def forward(self, input_ids: torch.LongTensor,
                 pixel_values: torch.FloatTensor,
-                image_sizes: Optional[torch.Tensor]) -> torch.FloatTensor:
+                image_sizes: torch.Tensor) -> torch.FloatTensor:
         """process and merge text embeddings with image embeddings."""
 
+        # (batch_size, max_num_crops, 3, height, width)
         img_embeds = pixel_values
-        img_sizes = [] if image_sizes is None else image_sizes
+
+        # (batch_size, 2)
+        img_sizes = image_sizes
 
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
@@ -394,8 +397,9 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
-class Phi3VForCausalLM(VisionLanguageModelBase):
+class Phi3VForCausalLM(nn.Module, SupportsVision):
+
+    supports_vision = True
 
     def __init__(self,
                  config: PretrainedConfig,

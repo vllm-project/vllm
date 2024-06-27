@@ -28,8 +28,9 @@ from vllm.sequence import SamplerOutput
 from .clip import (dummy_feature_data_for_clip, dummy_pixel_data_for_clip,
                    dummy_seq_data_for_clip, get_clip_patch_grid_length,
                    input_processor_for_clip)
+from .interfaces import SupportsVision
 from .llava import LlavaMultiModalProjector
-from .vlm_base import VisionLanguageModelBase
+from .utils import merge_vision_embeddings
 
 logger = init_logger(__name__)
 
@@ -202,18 +203,21 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
 @MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava_next)
-class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
+class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
+
+    supports_vision = True
 
     def __init__(self,
                  config: LlavaNextConfig,
-                 vision_language_config: VisionLanguageConfig,
+                 vlm_config: VisionLanguageConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
-        super().__init__(vision_language_config)
+        super().__init__()
 
         self.config = config
+        self.vlm_config = vlm_config
 
-        if self.vision_language_config.image_input_type == (
+        if self.vlm_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
             self.vision_tower = CLIPVisionModel(config=config.vision_config)
         else:
@@ -253,7 +257,7 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
 
-        expected_input_type = self.vision_language_config.image_input_type
+        expected_input_type = self.vlm_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
         if expected_input_type == ImageInputType.PIXEL_VALUES:
@@ -465,9 +469,9 @@ class LlavaNextForConditionalGeneration(VisionLanguageModelBase):
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = self.merge_vision_embeddings(
+            inputs_embeds = merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
-                self.vision_language_config.image_token_id)
+                self.vlm_config.image_token_id)
 
             input_ids = None
         else:
