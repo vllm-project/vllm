@@ -3,7 +3,7 @@
 Installation with OpenVINO
 ========================
 
-vLLM powered by OpenVINO supports all LLM models from [vLLM supported models list](../dev/models/supported_models.rst) and can perform optimal model serving on all x86-64 CPUs with, at least, AVX2 support. OpenVINO vLLM backend supports the following advanced vLLM features:
+vLLM powered by OpenVINO supports all LLM models from :ref:`vLLM supported models list <_supported_models>` and can perform optimal model serving on all x86-64 CPUs with, at least, AVX2 support. OpenVINO vLLM backend supports the following advanced vLLM features:
 
 - Prefix caching (``--enable-prefix-caching``)
 - Chunked prefill (``--enable-chunked-prefill``)

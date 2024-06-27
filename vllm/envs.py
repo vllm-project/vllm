@@ -219,10 +219,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # OpenVINO KV cache precision
     # default is bf16 if natively supported by platform, otherwise f16
+    # To enable KV cache compression, please, explicitly specify u8
     "VLLM_OPENVINO_CPU_KV_CACHE_PRECISION":
     lambda: os.getenv("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION", None),
 
-    # OpenVINO key-value cache space
+    # Enables weights compression during model export via HF Optimum
     # default is False
     "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
     lambda: bool(os.getenv("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", False)),
