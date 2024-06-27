@@ -189,7 +189,7 @@ FROM vllm-openai as vllm-grpc-adapter
 USER root
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install vllm-tgis-adapter==0.1.2
+    pip install git+https://github.com/opendatahub-io/vllm-tgis-adapter@ibm-release-prep
 
 ENV GRPC_PORT=8033
 USER 2000
