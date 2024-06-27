@@ -108,8 +108,6 @@ def _image_pixel_processor(
 @MULTIMODAL_REGISTRY.register_dummy_data(_get_dummy_image_data)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
-    supports_vision = True
-
     def __init__(self,
                  config: LlavaNextConfig,
                  vlm_config: VisionLanguageConfig,

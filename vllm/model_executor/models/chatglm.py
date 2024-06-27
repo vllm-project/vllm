@@ -325,8 +325,6 @@ class ChatGLMModel(nn.Module):
 
 
 class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
-    supports_lora = True
-
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"]
