@@ -2,6 +2,7 @@
 import copy
 import enum
 import hashlib
+import math
 import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -10,7 +11,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from vllm.block import LogicalTokenBlock
 from vllm.inputs import LLMInputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -271,9 +271,7 @@ class Sequence:
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
-        self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
-        self._append_tokens_to_blocks(self.prompt_token_ids)
         self.status = SequenceStatus.WAITING
         self.stop_reason: Union[int, str, None] = None
 
@@ -282,6 +280,10 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+
+    @property
+    def n_blocks(self) -> int:
+        return math.ceil(self.data.get_len() / self.block_size)
 
     @property
     def multi_modal_data(self) -> Optional["MultiModalData"]:
@@ -314,47 +316,12 @@ class Sequence:
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
 
-    def _append_logical_block(self) -> None:
-        block = LogicalTokenBlock(
-            block_number=len(self.logical_token_blocks),
-            block_size=self.block_size,
-        )
-        self.logical_token_blocks.append(block)
-
-    def _append_tokens_to_blocks(self, token_ids: np.ndarray) -> None:
-        cursor = 0
-        while cursor < len(token_ids):
-            if not self.logical_token_blocks:
-                self._append_logical_block()
-
-            last_block = self.logical_token_blocks[-1]
-            if last_block.is_full():
-                self._append_logical_block()
-                last_block = self.logical_token_blocks[-1]
-
-            num_empty_slots = last_block.get_num_empty_slots()
-            last_block.append_tokens(token_ids[cursor:cursor +
-                                               num_empty_slots])
-            cursor += num_empty_slots
-
-    def _append_token_to_blocks(self, token_id: int) -> None:
-        if not self.logical_token_blocks:
-            self._append_logical_block()
-
-        last_block = self.logical_token_blocks[-1]
-        if last_block.is_full():
-            self._append_logical_block()
-            last_block = self.logical_token_blocks[-1]
-
-        last_block.append_token(token_id)
-
     def append_token_id(
         self,
         token_id: int,
         logprobs: Dict[int, Logprob],
     ) -> None:
         assert token_id in logprobs
-        self._append_token_to_blocks(token_id)
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
@@ -426,7 +393,7 @@ class Sequence:
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
                 f"status={self.status.name}, "
-                f"num_blocks={len(self.logical_token_blocks)})")
+                f"num_blocks={self.n_blocks}, ")
 
 
 @dataclass
