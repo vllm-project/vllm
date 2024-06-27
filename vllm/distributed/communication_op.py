@@ -12,6 +12,9 @@ if is_hpu():
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
     if is_hpu():
+        # FIXME(kzawora): this is a workaround for a bug in Habana PT bridge
+        # occuring when PT_HPU_ENABLE_LAZY_COLLECTIVES=true env var is used
+        # (which is required for tensor parallel HPUGraph inference)
         htorch.core.mark_step()
     return get_tp_group().all_reduce(input_)
 
