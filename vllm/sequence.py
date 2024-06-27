@@ -156,6 +156,7 @@ class SequenceData:
         if output_token_ids is None:
             output_token_ids = []
         self.num_output_tokens = len(output_token_ids)
+        self.output_token_ids_list = output_token_ids
         self.tokens[self.num_prompt_tokens:self.num_prompt_tokens +
                     self.num_output_tokens] = output_token_ids
         self.cumulative_logprob = 0.0
@@ -167,6 +168,7 @@ class SequenceData:
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.tokens[self.num_prompt_tokens + self.num_output_tokens] = token_id
+        self.output_token_ids_list.append(token_id)
         self.num_output_tokens += 1
         self.cumulative_logprob += logprob
 
@@ -226,9 +228,8 @@ class SequenceData:
     def get_prompt_token_ids(self) -> List[int]:
         return self.prompt_token_ids_list
 
-    def get_output_token_ids(self) -> np.ndarray:
-        return self.tokens[self.num_prompt_tokens:self.num_prompt_tokens +
-                           self.num_output_tokens]
+    def get_output_token_ids(self) -> List[int]:
+        return self.output_token_ids_list
 
     @property
     def stage(self) -> SequenceStage:
@@ -237,7 +238,7 @@ class SequenceData:
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.get_prompt_token_ids()}, "
-                f"output_token_ids={self.get_output_token_ids().tolist()}, "
+                f"output_token_ids={self.get_output_token_ids()}, "
                 f"cumulative_logprob={self.cumulative_logprob})")
 
 
@@ -344,7 +345,7 @@ class Sequence:
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
 
-    def get_output_token_ids(self) -> np.ndarray:
+    def get_output_token_ids(self) -> List[int]:
         return self.data.get_output_token_ids()
 
     def get_cumulative_logprob(self) -> float:
