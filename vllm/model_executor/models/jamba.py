@@ -701,12 +701,14 @@ class JambaForCausalLM(nn.Module):
 
         return hidden_states
 
-    def _copy_mamba_cache_by_indices(self, indices,
-                                     current_seqlen_agnostic_cache):
+    def _copy_mamba_cache_by_indices(
+            self, indices: List[int],
+            current_seqlen_agnostic_cache: Tuple[torch.Tensor]):
         for i, offset in enumerate(indices):
             self._copy_mamba_cache(offset, i, current_seqlen_agnostic_cache)
 
-    def _copy_mamba_cache(self, index_to, index_from, from_buffer):
+    def _copy_mamba_cache(self, index_to: int, index_from: int,
+                          from_buffer: Tuple[torch.Tensor]):
         assert self.mamba_cache is not None
         for i in [0, 1]:
             self.mamba_cache[i][:, index_to].copy_(from_buffer[i][:,
@@ -782,7 +784,7 @@ class JambaForCausalLM(nn.Module):
             self.current_indices,
             input_buffers["seqlen_agnostic_capture_inputs"])
 
-    def get_seqlen_agnostic_capture_inputs(self, batch_size):
+    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return (
             self.mamba_gc_cache_buffer[0][:, :batch_size],
             self.mamba_gc_cache_buffer[1][:, :batch_size],
@@ -808,7 +810,8 @@ class JambaForCausalLM(nn.Module):
         return 0
 
     def _get_mamba_cache_shape(
-        self, ) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
+            self
+    ) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = self.config.hidden_size
         conv_state_shape = (
