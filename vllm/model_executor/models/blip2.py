@@ -8,6 +8,7 @@ from transformers import (Blip2Config, Blip2QFormerConfig, Blip2VisionModel,
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -16,11 +17,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.opt import OPTModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import get_dummy_image_data
-from vllm.sequence import SamplerOutput
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
+from vllm.multimodal.image import ImageFeatureData, ImagePixelData
+from vllm.sequence import SamplerOutput, SequenceData
 
+from .clip import dummy_feature_data_for_clip, dummy_pixel_data_for_clip
 from .interfaces import SupportsVision
+from .utils import merge_vision_embeddings
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -376,39 +379,6 @@ class Blip2QFormerModel(nn.Module):
         return sequence_output
 
 
-def merge_vision_embeddings(input_ids: torch.Tensor,
-                            inputs_embeds: torch.Tensor,
-                            vision_embeddings: torch.Tensor,
-                            image_token_id: int) -> torch.Tensor:
-    """In place merges in vision_embeddings with inputs_embeds."""
-    mask = (input_ids == image_token_id)
-
-    batch_size, image_feature_size, *_, embed_dim = vision_embeddings.shape
-    mask_size = batch_size * image_feature_size
-    if mask.sum() != mask_size:
-        raise ValueError(f"Expected {batch_size} x {image_feature_size} = "
-                         f"{mask_size} image tokens, but found: {mask.sum()}")
-
-    inputs_embeds[mask] = vision_embeddings.view(mask_size, embed_dim)
-
-    # Since the text should start with BOS token, we have to place input images
-    # at the end. However, the original model places image tokens at the front
-    # so we have to swap their order (within each batch).
-    # https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/blip_2/modeling_blip_2.py#L1514
-    if not mask[0].item():
-        # https://stackoverflow.com/questions/7352684/how-to-find-the-groups-of-consecutive-elements-in-a-numpy-array
-        split_idxs = (torch.where(mask[1:] ^ mask[:-1])[0] + 1)
-        split_sizes = torch.tensor([0, *split_idxs, mask.numel()]).diff()
-        text_img_text_img = torch.split(inputs_embeds, split_sizes.tolist())
-        img_text_img_text = [
-            section for i in range(0, len(text_img_text_img), 2)
-            for section in (text_img_text_img[i + 1], text_img_text_img[i])
-        ]
-        inputs_embeds = torch.cat(img_text_img_text)
-
-    return inputs_embeds
-
-
 class Blip2ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
@@ -423,10 +393,56 @@ class Blip2ImageFeatureInputs(TypedDict):
 
 Blip2ImageInputs = Union[Blip2ImagePixelInputs, Blip2ImageFeatureInputs]
 
+# Used internally as placeholders
+BLIP2_IMAGE_TOKEN_ID = 50265
 
-@MULTIMODAL_REGISTRY.register_image_feature_input()
-@MULTIMODAL_REGISTRY.register_image_pixel_input()
-@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
+
+def get_blip2_image_feature_size(hf_config: Blip2Config) -> int:
+    return hf_config.num_query_tokens
+
+
+def dummy_data_for_blip2(ctx: InputContext, seq_len: int):
+    multimodal_config = ctx.get_multimodal_config()
+    hf_config = ctx.get_hf_config(Blip2Config)
+    vision_config = hf_config.vision_config
+
+    image_feature_size = get_blip2_image_feature_size(hf_config)
+    token_ids = [BLIP2_IMAGE_TOKEN_ID] * image_feature_size
+    token_ids += [0] * (seq_len - image_feature_size)
+    seq_data = SequenceData(token_ids)
+
+    image_input_type = multimodal_config.image_input_type
+    ImageInputType = VisionLanguageConfig.ImageInputType
+    mm_data: MultiModalData
+    if image_input_type == ImageInputType.PIXEL_VALUES:
+        mm_data = dummy_pixel_data_for_clip(vision_config)
+    elif image_input_type == ImageInputType.IMAGE_FEATURES:
+        mm_data = dummy_feature_data_for_clip(vision_config)
+
+    return seq_data, mm_data
+
+
+def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or not isinstance(
+            multi_modal_data, (ImagePixelData, ImageFeatureData)):
+        return llm_inputs
+
+    hf_config = ctx.get_hf_config(Blip2Config)
+    image_feature_size = get_blip2_image_feature_size(hf_config)
+
+    new_token_ids = list(llm_inputs["prompt_token_ids"])
+    new_token_ids = [BLIP2_IMAGE_TOKEN_ID] * image_feature_size
+
+    return LLMInputs(prompt_token_ids=new_token_ids,
+                     prompt=llm_inputs.get("prompt"),
+                     multi_modal_data=multi_modal_data)
+
+
+@MULTIMODAL_REGISTRY.register_image_feature_input_mapper()
+@MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_blip2)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_blip2)
 class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
     def __init__(self,
@@ -475,8 +491,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
         self.sampler = Sampler()
 
     def _validate_image_data(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[1:]) != list(
-                self.vlm_config.image_input_shape[1:]):
+        if list(data.shape[1:]) != list(self.vlm_config.image_input_shape[1:]):
             raise ValueError(
                 f"The expected image tensor shape is batch dimension plus "
                 f"{self.vlm_config.image_input_shape[1:]}. "
