@@ -98,7 +98,7 @@ class Fp8LinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: Fp8Config):
-        self.qkv_mlp_fused_on_disk = False
+        self.fused_module_in_checkpoint = False
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
@@ -178,7 +178,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if shard_id is None:
             shard_id = 0
-            self.qkv_mlp_fused_on_disk = True
+            self.fused_module_in_checkpoint = True
         elif isinstance(shard_id, int):
             pass
         elif isinstance(shard_id, str):
@@ -212,7 +212,7 @@ class Fp8LinearMethod(LinearMethodBase):
             #   Loop over logical weights, requantizing with single scale.
             max_w_scale = layer.weight_scale.max()
 
-            if not self.qkv_mlp_fused_on_disk:
+            if not self.fused_module_in_checkpoint:
                 start = 0
                 for idx, logical_width in enumerate(layer.logical_widths):
                     end = start + logical_width
