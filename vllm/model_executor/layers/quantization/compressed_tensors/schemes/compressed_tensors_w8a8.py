@@ -43,18 +43,6 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
                        **kwargs):
         self.logical_widths = output_partition_sizes
 
-        # WEIGHT
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=torch.int8),
-                           requires_grad=False)
-        layer.register_parameter("weight", weight)
-        set_weight_attrs(weight, {
-            "input_dim": 1,
-            "output_dim": 0,
-            "weight_loader": weight_loader,
-        })
-
         # WEIGHT SCALE
         shape: Union[Tuple[int], Tuple[int, int]]
         if self.strategy == QuantizationStrategy.CHANNEL:
@@ -77,3 +65,16 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
                     "is_per_tensor_scale": True,
                     "ignore_warning": True,
                 })
+
+
+        # WEIGHT
+        weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                       input_size_per_partition,
+                                       dtype=torch.int8),
+                           requires_grad=False)
+        layer.register_parameter("weight", weight)
+        set_weight_attrs(weight, {
+            "input_dim": 1,
+            "output_dim": 0,
+            "weight_loader": weight_loader,
+        })
