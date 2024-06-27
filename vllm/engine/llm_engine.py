@@ -861,7 +861,7 @@ class LLMEngine:
             model_output: Optional[List[SamplerOutput]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
-            for _, logger in self.stat_loggers.items():
+            for logger in self.stat_loggers.values():
                 logger.log(self._get_stats(scheduler_outputs, model_output))
 
     def _get_stats(
