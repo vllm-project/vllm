@@ -31,3 +31,6 @@ class CompressedTensorsScheme(ABC):
 
         """
         raise NotImplementedError
+
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        pass

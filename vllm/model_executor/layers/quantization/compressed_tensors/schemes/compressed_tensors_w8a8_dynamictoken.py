@@ -8,9 +8,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 
 __all__ = ["CompressedTensorsW8A8DynamicToken"]
 
-
 class CompressedTensorsW8A8DynamicToken(CompressedTensorsW8A8):
-
+            
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: List[int],
                        input_size_per_partition: int,
@@ -23,6 +22,7 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsW8A8):
             input_size_per_partition=input_size_per_partition,
             params_dtype=params_dtype,
             weight_loader=weight_loader)
+
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         weight = layer.weight
