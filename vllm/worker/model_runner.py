@@ -1020,10 +1020,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
+            assert model_input.sampling_metadata is not None
+            indices = model_input.sampling_metadata.selected_token_indices
             if model_input.is_prompt:
-                assert model_input.sampling_metadata is not None
-                hidden_states = hidden_states.index_select(
-                    0, model_input.sampling_metadata.selected_token_indices)
+                hidden_states = hidden_states.index_select(0, indices)
+            elif decode_meta.use_cuda_graph:
+                hidden_states = hidden_states[:len(indices)]
+
             output.hidden_states = hidden_states
 
         return output
