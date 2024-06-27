@@ -42,6 +42,7 @@ class SequenceStatus(enum.Enum):
     WAITING = enum.auto()
     RUNNING = enum.auto()
     SWAPPED = enum.auto()
+    PAUSED = enum.auto()
     FINISHED_STOPPED = enum.auto()
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
@@ -72,6 +73,10 @@ class SequenceStatus(enum.Enum):
         else:
             finish_reason = None
         return finish_reason
+    
+    @staticmethod
+    def is_paused(status: "SequenceStatus") -> bool:
+        return status == SequenceStatus.PAUSED
 
 
 class SequenceStage(enum.Enum):
@@ -354,6 +359,9 @@ class Sequence:
     def is_finished(self) -> bool:
         return SequenceStatus.is_finished(self.status)
 
+    def is_paused(self) -> bool:
+        return SequenceStatus.is_paused(self.status)
+
     def fork(self, new_seq_id: int) -> "Sequence":
         new_seq = copy.deepcopy(self)
         new_seq.seq_id = new_seq_id
@@ -580,6 +588,10 @@ class SequenceGroup:
     def is_prefill(self) -> bool:
         # Every sequence should be in the same stage.
         return self.get_seqs()[0].is_prefill()
+    
+    def is_paused(self) -> bool:
+        # Every sequence should be in the same stage.
+        return self.get_seqs()[0].is_paused()
 
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "

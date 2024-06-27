@@ -426,6 +426,12 @@ class Scheduler:
 
             if num_running_tokens == 0:
                 break
+            
+            seq_group = seq_group.get_seqs(SequenceStatus.RUNNING)
+            if not seq_group:
+                running_queue.append(running_queue.popleft())
+                continue
+    
 
             running_queue.popleft()
             while not self._can_append_slots(seq_group):
