@@ -55,6 +55,10 @@ Alongside each architecture, we include some popular models that use it.
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
     - ✅︎
+  * - :code:`Gemma2ForCausalLM`
+    - Gemma2
+    - :code:`google/gemma-2-9b`, :code:`google/gemma-2-27b`, etc.
+    - ✅︎
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
