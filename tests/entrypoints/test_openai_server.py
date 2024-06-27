@@ -76,13 +76,14 @@ TEST_CHOICE = [
     "Swift", "Kotlin"
 ]
 
-MAX_QUEUE_LEN = "3"
+# MAX_QUEUE_LEN = "1"
 
 pytestmark = pytest.mark.openai
 
-# @pytest.fixture(scope="session")
-# def zephyr_lora_files():
-#     return snapshot_download(repo_id=LORA_NAME)
+
+@pytest.fixture(scope="session")
+def zephyr_lora_files():
+    return snapshot_download(repo_id=LORA_NAME)
 
 
 @pytest.fixture(scope="module")
@@ -93,8 +94,7 @@ def ray_ctx():
 
 
 @pytest.fixture(scope="module")
-# def server(zephyr_lora_files, ray_ctx):
-def server(ray_ctx):
+def server(zephyr_lora_files, ray_ctx):
     return RemoteOpenAIServer([
         "--model",
         MODEL_NAME,
@@ -105,20 +105,20 @@ def server(ray_ctx):
         "8192",
         "--enforce-eager",
         # lora config below
-        # "--enable-lora",
-        # "--lora-modules",
-        # f"zephyr-lora={zephyr_lora_files}",
-        # f"zephyr-lora2={zephyr_lora_files}",
-        # "--max-lora-rank",
-        # "64",
-        # "--max-cpu-loras",
-        # "2",
-        # "--max-num-seqs",
-        # "128",
-        "--max-queue-length",
-        "1",
+        "--enable-lora",
+        "--lora-modules",
+        f"zephyr-lora={zephyr_lora_files}",
+        f"zephyr-lora2={zephyr_lora_files}",
+        "--max-lora-rank",
+        "64",
+        "--max-cpu-loras",
+        "2",
         "--max-num-seqs",
-        "1",
+        "128",
+        # "--max-queue-length",
+        # MAX_QUEUE_LEN,
+        # "--max-num-seqs",
+        # "1",
     ])
 
 
@@ -131,11 +131,11 @@ async def test_check_models(client: openai.AsyncOpenAI):
     models = await client.models.list()
     models = models.data
     served_model = models[0]
-    # lora_models = models[1:]
+    lora_models = models[1:]
     assert served_model.id == MODEL_NAME
     assert all(model.root == MODEL_NAME for model in models)
-    # assert lora_models[0].id == "zephyr-lora"
-    # assert lora_models[1].id == "zephyr-lora2"
+    assert lora_models[0].id == "zephyr-lora"
+    assert lora_models[1].id == "zephyr-lora2"
 
 
 @pytest.mark.asyncio
@@ -791,7 +791,9 @@ async def test_max_queue_length(server, client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_max_queue_length(client: openai.AsyncOpenAI, model_name: str, capsys):
+async def test_max_queue_length(client: openai.AsyncOpenAI, model_name: str,
+                                capsys):
+
     sample_prompts = [
         "Who won the world series in 2020?",
         "Where was the 2020 world series played?",
@@ -812,22 +814,17 @@ async def test_max_queue_length(client: openai.AsyncOpenAI, model_name: str, cap
     ]
     responses = await asyncio.gather(*coroutines, return_exceptions=True)
 
-    # cli_output = capsys.readouterr()
-
-    # for i in range(int(MAX_QUEUE_LEN), len(sample_prompts)+1):
-    #     # krishna
-    #     print("detecting cli output:")
-    #     print(f"pending {i}")
-    #     print(f"Pending: {i}" not in cli_output)
-    #     assert f"Pending: {i}" not in cli_output
-
+    err_cnt = 0
     for response in responses:
-        # krishna
-        print("async responses: ", response.__dict__)
         if "code" in response.__dict__:
-            # krishna
-            print("code pls: ", response.__dict__["code"])
             assert response.__dict__["code"] == 503
+            err_cnt += 1
+
+    # Ensure that # of err requests == (# of requests - max_queue_len - run_queue_len)
+    correctness_check = err_cnt == (len(sample_prompts) - int(MAX_QUEUE_LEN) -
+                                    1)
+    print("Correct number of errors? ", correctness_check)
+    assert correctness_check
 
 
 @pytest.mark.asyncio
