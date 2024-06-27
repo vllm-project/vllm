@@ -312,8 +312,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
 
     def _prepare_model_input_tensors(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            finished_request_ids: Optional[List[str]]) -> TModelInputForGPU:
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            finished_request_ids: Optional[List[str]] = None
+    ) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
         metadata for possible additional steps, e.g., sampling.
@@ -973,8 +975,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             ))
 
     def prepare_model_input(
-        self, seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_request_ids: Optional[List[str]]
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        finished_request_ids: Optional[List[str]] = None
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.

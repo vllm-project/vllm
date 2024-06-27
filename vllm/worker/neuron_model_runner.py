@@ -173,8 +173,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         return ModelInputForNeuron.from_broadcasted_tensor_dict(tensor_dict)
 
     def prepare_model_input(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            finished_request_ids: Optional[List[str]]) -> ModelInputForNeuron:
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        finished_request_ids: Optional[List[str]] = None
+    ) -> ModelInputForNeuron:
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
