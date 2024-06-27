@@ -111,7 +111,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             self.block_size,
         )
 
-        # Create processor for multi-modal data
+        # Multi-modal data support
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
             .create_input_mapper(self.model_config)
 

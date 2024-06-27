@@ -191,7 +191,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.block_size,
         ) if num_attn_heads else None
 
-        # Create processor for multi-modal data
+        # Multi-modal data support
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
             .create_input_mapper(self.model_config)
 
