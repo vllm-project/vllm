@@ -262,8 +262,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self.cross_block_tables: Dict[str, BlockTable] = {}
 
     def _get_seq_num_required_blocks(self, seq: Sequence) -> int:
-        return 0 if seq is None \
-            else len(seq.logical_token_blocks)
+        return 0 if seq is None else seq.n_blocks
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -298,7 +297,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                            ref_count: int, \
                            is_encoder_decoder: bool = True) -> BlockTable:
         # Allocate new physical token blocks that will store the prompt tokens.
-        num_prompt_blocks = len(seq.logical_token_blocks)
+        num_prompt_blocks = seq.n_blocks
 
         block_table: BlockTable = []
         for logical_idx in range(num_prompt_blocks):
@@ -367,7 +366,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         # Compute a new hash for the block so that it can be shared by other
         # Sequences
-        new_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
+        new_hash = seq.hash_of_block(seq.n_blocks - 1)
 
         # if new_hash is already in the cached table, then free last_block
         # and return the cached version
@@ -407,10 +406,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if not self.enable_caching:
             return self.gpu_allocator.allocate()
         block_hash: Optional[int] = None
+        n_blocks = seq.n_blocks
         if (self._is_last_block_full(seq)):
-            block_hash = seq.hash_of_block(len(seq.logical_token_blocks) - 1)
-        num_hashed_tokens = seq.num_hashed_tokens_of_block(
-            len(seq.logical_token_blocks) - 1)
+            block_hash = seq.hash_of_block(n_blocks - 1)
+        num_hashed_tokens = seq.num_hashed_tokens_of_block(n_blocks - 1)
 
         # num_hashed_tokens is used to compute future hashes
         # (e.g. in the hashing function, it is used to ask the sequence for
@@ -429,12 +428,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         num_lookahead_slots: int = 0,
     ) -> List[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
-        logical_blocks = seq.logical_token_blocks
+        n_blocks = seq.n_blocks
         block_table = self.block_tables[seq.seq_id]
         # If we need to allocate a new physical block
-        if len(block_table) < len(logical_blocks):
+        if len(block_table) < n_blocks:
             # Currently this code only supports adding one physical block
-            assert len(block_table) == len(logical_blocks) - 1
+            assert len(block_table) == n_blocks - 1
 
             if (self.block_sliding_window
                     and len(block_table) >= self.block_sliding_window):
