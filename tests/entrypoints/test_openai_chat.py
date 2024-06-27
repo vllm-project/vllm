@@ -402,6 +402,49 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
             stream_options={"include_usage": True})
 
 
+# NOTE: Not sure why, but when I place this after `test_guided_regex_chat`
+# (i.e. using the same ordering as in the Completions API tests), the test
+# will fail on the second `guided_decoding_backend` even when I swap their order
+# (ref: https://github.com/vllm-project/vllm/pull/5526#issuecomment-2173772256)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_choice_chat(client: openai.AsyncOpenAI,
+                                  guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        "The best language for type-safe systems programming is "
+    }]
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=10,
+        extra_body=dict(guided_choice=TEST_CHOICE,
+                        guided_decoding_backend=guided_decoding_backend))
+    choice1 = chat_completion.choices[0].message.content
+    assert choice1 in TEST_CHOICE
+
+    messages.append({"role": "assistant", "content": choice1})
+    messages.append({
+        "role": "user",
+        "content": "I disagree, pick another one"
+    })
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=10,
+        extra_body=dict(guided_choice=TEST_CHOICE,
+                        guided_decoding_backend=guided_decoding_backend))
+    choice2 = chat_completion.choices[0].message.content
+    assert choice2 in TEST_CHOICE
+    assert choice1 != choice2
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
@@ -485,45 +528,6 @@ async def test_guided_regex_chat(client: openai.AsyncOpenAI,
     assert ip2 is not None
     assert re.fullmatch(TEST_REGEX, ip2) is not None
     assert ip1 != ip2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
-async def test_guided_choice_chat(client: openai.AsyncOpenAI,
-                                  guided_decoding_backend: str):
-    messages = [{
-        "role": "system",
-        "content": "you are a helpful assistant"
-    }, {
-        "role":
-        "user",
-        "content":
-        "The best language for type-safe systems programming is "
-    }]
-    chat_completion = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_tokens=10,
-        extra_body=dict(guided_choice=TEST_CHOICE,
-                        guided_decoding_backend=guided_decoding_backend))
-    choice1 = chat_completion.choices[0].message.content
-    assert choice1 in TEST_CHOICE
-
-    messages.append({"role": "assistant", "content": choice1})
-    messages.append({
-        "role": "user",
-        "content": "I disagree, pick another one"
-    })
-    chat_completion = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_tokens=10,
-        extra_body=dict(guided_choice=TEST_CHOICE,
-                        guided_decoding_backend=guided_decoding_backend))
-    choice2 = chat_completion.choices[0].message.content
-    assert choice2 in TEST_CHOICE
-    assert choice1 != choice2
 
 
 @pytest.mark.asyncio
