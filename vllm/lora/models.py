@@ -240,7 +240,7 @@ class LoRAModel:
                                                       lora_embeddings_tensor)
             if is_bias:
                 loras[module_name].bias = tensor.to(device=device,
-                                                      dtype=dtype).t()
+                                                    dtype=dtype).t()
                 if pin_memory:
                     bias = loras[module_name].bias
                     if bias is not None:
@@ -475,7 +475,8 @@ class LoRAModelManager:
                 if not self.lora_config.bias_enabled:
                     module_lora.bias = None
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
-                                module_lora.embeddings_tensor, module_lora.bias)
+                                module_lora.embeddings_tensor,
+                                module_lora.bias)
             else:
                 module.reset_lora(index)
         return True

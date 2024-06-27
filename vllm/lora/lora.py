@@ -81,9 +81,9 @@ class LoRALayerWeights:
                              pin_memory=pin_memory)
         if bias_enabled:
             bias = torch.zeros([output_dim],
-                                 dtype=dtype,
-                                 device=device,
-                                 pin_memory=pin_memory)
+                               dtype=dtype,
+                               device=device,
+                               pin_memory=pin_memory)
         else:
             bias = None
 
@@ -124,7 +124,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             lora_a=lora_a,
             lora_b=lora_b,
             bias=bias,
-            scaling=scaling, # type: ignore
+            scaling=scaling,  # type: ignore
             embeddings_tensor=None,
         )
         self.lora_alphas = lora_alphas
@@ -156,8 +156,10 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             [lora.lora_a if lora is not None else None for lora in loras],
             [lora.lora_b if lora is not None else None for lora in loras],
             [lora.bias if lora is not None else None for lora in loras],
-            scaling=[1 if lora is not None else None # type: ignore
-                     for lora in loras])
+            scaling=[
+                1 if lora is not None else None  # type: ignore
+                for lora in loras
+            ])
         return obj
 
     def optimize(self) -> "PackedLoRALayerWeights":
