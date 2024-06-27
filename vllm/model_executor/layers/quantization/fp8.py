@@ -98,6 +98,7 @@ class Fp8LinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: Fp8Config):
+        self.qkv_mlp_fused_on_disk = False
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
@@ -111,6 +112,7 @@ class Fp8LinearMethod(LinearMethodBase):
         scale = Parameter(torch.empty(len(output_partition_sizes),
                                       dtype=torch.float32),
                           requires_grad=False)
+        scale[:] = torch.finfo(torch.float8_e4m3fn).min
         layer.register_parameter(scale_name, scale)
         set_weight_attrs(
             scale, {
@@ -170,10 +172,13 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def scales_shard_indexer(
             self, param: torch.Tensor, loaded_weight: torch.Tensor,
-            shard_id: Union[str, int]) -> Tuple[torch.Tensor, torch.Tensor]:
+            shard_id: Optional[Union[str, int]]) -> Tuple[torch.Tensor, torch.Tensor]:
         qkv_idxs = {"q": 0, "k": 1, "v": 2}
 
-        if isinstance(shard_id, int):
+        if shard_id is None:
+            shard_id = 0
+            self.qkv_mlp_fused_on_disk = True
+        elif isinstance(shard_id, int):
             pass
         elif isinstance(shard_id, str):
             if shard_id not in qkv_idxs:
@@ -205,15 +210,17 @@ class Fp8LinearMethod(LinearMethodBase):
             # WEIGHT_SCALE / WEIGHT
             #   Loop over logical weights, requantizing with single scale.
             max_w_scale = layer.weight_scale.max()
-            start = 0
-            for idx, logical_width in enumerate(layer.logical_widths):
-                end = start + logical_width
-                weight_dq = per_tensor_dequantize(layer.weight[start:end, :],
-                                                  layer.weight_scale[idx])
 
-                layer.weight[start:end, :] = per_tensor_quantize(
-                    weight_dq, layer.weight_scale.max())
-                start = end
+            if not self.qkv_mlp_fused_on_disk:
+                start = 0
+                for idx, logical_width in enumerate(layer.logical_widths):
+                    end = start + logical_width
+                    weight_dq = per_tensor_dequantize(layer.weight[start:end, :],
+                                                    layer.weight_scale[idx])
+
+                    layer.weight[start:end, :] = per_tensor_quantize(
+                        weight_dq, layer.weight_scale.max())
+                    start = end
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
 
             # WEIGHT
@@ -227,10 +234,6 @@ class Fp8LinearMethod(LinearMethodBase):
             if self.quant_config.activation_scheme == "dynamic":
                 layer.input_scale = None
             elif self.quant_config.activation_scheme == "static":
-                if not all_close_1d(layer.input_scale):
-                    raise ValueError(
-                        "All the input_scales for the logical weights of a "
-                        f"layer must be equal. But got {layer.input_scale}")
                 layer.input_scale = Parameter(layer.input_scale.max(),
                                               requires_grad=False)
             else:
@@ -315,11 +318,6 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
                     "cause accuracy issues. Please make sure kv-cache scaling "
                     "factor is available in the fp8 checkpoint.")
         del layer.kv_scale
-
-
-def all_close_1d(x: torch.Tensor) -> bool:
-    assert len(x.shape) == 1
-    return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
 
 
 def per_tensor_quantize(tensor: torch.Tensor,
