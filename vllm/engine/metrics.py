@@ -15,6 +15,8 @@ from vllm.logger import init_logger
 
 if ray is not None:
     from ray.util import metrics as ray_metrics
+else:
+    ray_metrics = None
 
 if TYPE_CHECKING:
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
