@@ -14,7 +14,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_tpu, is_xpu,
+                        is_hip, is_neuron, is_tpu, is_xpu, print_warning_once,
                         update_environment_variables)
 
 if TYPE_CHECKING:
@@ -257,8 +257,17 @@ class ModelConfig:
                 "BitAndBytes quantization with TP or PP is not supported yet.")
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
-        """Get the sliding window size, or None if disabled.
-        """
+        """Get the sliding window size, or None if disabled."""
+
+        if (self.hf_text_config.model_type == "gemma2"
+                and self.hf_text_config.sliding_window is not None):
+            print_warning_once(
+                "While Gemma 2 uses sliding window attention for every odd "
+                "layer, vLLM currently ignores it and uses global attention "
+                "for all layers. This might affect the model's behavior when "
+                "the context length is larger than the sliding window size "
+                f"({self.hf_text_config.sliding_window}).")
+            return None
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
         # addition to sliding window size. We check if that field is present
@@ -1252,10 +1261,16 @@ def _get_and_verify_dtype(
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
-                # Following the common practice, we use float16 for float32
-                # models.
-                logger.info("Casting torch.float32 to torch.float16.")
-                torch_dtype = torch.float16
+                if config.model_type == "gemma2":
+                    logger.info(
+                        "For Gemma 2, we downcast float32 to bfloat16 instead "
+                        "of float16 by default. Please specify `dtype` if you "
+                        "want to use float16.")
+                    torch_dtype = torch.bfloat16
+                else:
+                    # Following the common practice, we use float16 for float32
+                    # models.
+                    torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
         else:
