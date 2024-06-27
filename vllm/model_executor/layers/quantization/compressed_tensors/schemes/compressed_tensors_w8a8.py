@@ -59,12 +59,10 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
                 "output_dim": 0,
             })
         else:
-            set_weight_attrs(
-                weight_scale, {
-                    "weight_loader": weight_loader,
-                    "is_per_tensor_scale": True,
-                })
-
+            set_weight_attrs(weight_scale, {
+                "weight_loader": weight_loader,
+                "is_per_tensor_scale": True,
+            })
 
         # WEIGHT
         weight = Parameter(torch.empty(sum(output_partition_sizes),
