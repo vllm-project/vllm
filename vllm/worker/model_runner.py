@@ -1029,7 +1029,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         seqlen_agnostic_kwargs = {
             "finished_request_ids": model_input.finished_request_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
-        }
+        } if self.has_seqlen_agnostic else {}
         hidden_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
