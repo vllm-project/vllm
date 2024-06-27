@@ -1,0 +1,23 @@
+# # bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m neuralmagic/Meta-Llama-3-8B-Instruct-FP8 -b 32 -l 250 -f 5 -t 1
+# model_name: "neuralmagic/Meta-Llama-3-8B-Instruct-FP8"
+# tasks:
+# - name: "gsm8k"
+#   metrics:
+#   - name: "exact_match,strict-match"
+#     value: 0.744
+#   - name: "exact_match,flexible-extract"
+#     value: 0.740
+# limit: 250
+# num_fewshot: 5
+
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m meta-llama/Meta-Llama-3-8B-Instruct -b 32 -l 250 -f 5 -t 1
+model_name: "meta-llama/Meta-Llama-3-8B-Instruct"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.74
+  - name: "exact_match,flexible-extract"
+    value: 0.74
+limit: 250
+num_fewshot: 5
