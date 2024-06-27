@@ -34,6 +34,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return [torch.float16, torch.bfloat16]
 
     def get_min_capability(self) -> int:
+        # maybe add a check when it actually runs?
         return 75 # 75 for int8, 80 for gpt/gptq_marlin kernels
 
     def get_name(self) -> str:
