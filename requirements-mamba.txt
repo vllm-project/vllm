@@ -1,6 +1,3 @@
-# Common dependencies
--r requirements-common.txt
--r requirements-cuda.txt
-
+# Mamba dependencies
 mamba-ssm>=1.2.2
 causal-conv1d>=1.2.0
