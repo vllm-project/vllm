@@ -358,14 +358,17 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 vision_language_config: VisionLanguageConfig,
+                 vlm_config: VisionLanguageConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
-        super().__init__(vision_language_config)
+        super().__init__()
+
         self.config = config
+        self.vlm_config = vlm_config
+
         self.model = LlamaModel(config, cache_config, quant_config)
         self.vision_embed_tokens = Phi3HDImageEmbedding(
-            vision_language_config, config, self.model.embed_tokens)
+            vlm_config, config, self.model.embed_tokens)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -375,7 +378,7 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
 
-        expected_input_type = self.vision_language_config.image_input_type
+        expected_input_type = self.vlm_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
         if expected_input_type != ImageInputType.PIXEL_VALUES:
