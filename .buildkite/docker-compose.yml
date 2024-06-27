@@ -2,12 +2,28 @@ version: '3'
 services:
   container1:
     image: 'public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:2061f0b8a7f1a01683c4045096a092eedf6387a4'
+    command: VLLM_TEST_SAME_HOST=0 torchrun --nproc-per-node=2 --nnodes 2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 tests/distributed/test_same_node.py
+    deploy:
+        resources:
+            reservations:
+                devices:
+                    - driver: nvidia
+                      device_ids: ['0', '1']
+                      capabilities: [gpu]
     networks:
       custom_network:
         ipv4_address: 192.168.10.10
 
   container2:
     image: 'public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:2061f0b8a7f1a01683c4045096a092eedf6387a4'
+    command: VLLM_TEST_SAME_HOST=0 torchrun --nproc-per-node=2 --nnodes 2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 tests/distributed/test_same_node.py
+    deploy:
+        resources:
+            reservations:
+                devices:
+                    - driver: nvidia
+                      device_ids: ['2', '3']
+                      capabilities: [gpu]
     networks:
       custom_network:
         ipv4_address: 192.168.10.11
