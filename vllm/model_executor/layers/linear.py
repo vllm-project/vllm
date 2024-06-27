@@ -41,7 +41,13 @@ def adjust_bitsandbytes_shard(param: Parameter,
     return quantized_size, quantized_offset
 
 
-def load_scale_into_param_array(param, loaded_weight, shard_id):
+def adjust_per_tensor_scale_shard(param, loaded_weight, shard_id):
+    """For fused modules (QKV and MLP) we have an array of length
+    N that holds 1 scale for each "logical" matrix. So the param
+    is an array of length N. The loaded_weight corresponds to 
+    one of the shards on disk. Here, we slice the param based on 
+    the shard_id for loading.
+    """
     qkv_idxs = {"q": 0, "k": 1, "v": 2}
 
     if isinstance(shard_id, str):
@@ -56,6 +62,7 @@ def load_scale_into_param_array(param, loaded_weight, shard_id):
         loaded_weight = loaded_weight[0]
 
     return param[shard_id], loaded_weight
+
 
 class LinearMethodBase(QuantizeMethodBase):
     """Base class for different (maybe quantized) linear methods."""
@@ -442,7 +449,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         
         # Special case for per-tensor scales in fused case.
         elif is_per_tensor_scale:
-            param_data, loaded_weight = load_scale_into_param_array(
+            param_data, loaded_weight = adjust_per_tensor_scale_shard(
                 param_data, loaded_weight, loaded_shard_id)
 
         else:
@@ -628,7 +635,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                                            shard_size)
         # Special case for per-tensor scales in fused case.
         elif is_per_tensor_scale:
-            param_data, loaded_weight = load_scale_into_param_array(
+            param_data, loaded_weight = adjust_per_tensor_scale_shard(
                 param_data, loaded_weight, loaded_shard_id)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
