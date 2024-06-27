@@ -6,8 +6,6 @@ from typing import Counter as CollectionsCounter
 from typing import Dict, List, Optional, Protocol, Union
 
 import numpy as np
-#from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
-#                              disable_created_metrics)
 import prometheus_client
 
 from vllm.executor.ray_utils import ray
@@ -39,7 +37,7 @@ class Metrics:
         self._unregister_vllm_metrics()
 
         # Config Information
-        self.info_cache_config = self._base_library.Info(
+        self.info_cache_config = prometheus_client.Info(
             name='vllm:cache_config',
             documentation='information of cache_config')
 
@@ -160,6 +158,11 @@ class RayMetrics(Metrics):
     Provides the same metrics as Metrics but uses Ray's util.metrics library.
     """
     _base_library = ray_metrics
+
+    def __init__(self, labelnames: List[str], max_model_len: int):
+        super().__init__(labelnames, max_model_len)
+        if ray_metrics is None:
+            raise ImportError("RayMetrics requires Ray to be installed.")
 
     def _unregister_vllm_metrics(self) -> None:
         pass
@@ -327,14 +330,15 @@ class LoggingStatLogger(StatLoggerBase):
 
 class PrometheusStatLogger(StatLoggerBase):
     """PrometheusStatLogger is used LLMEngine to log to Promethus."""
+    _metrics_cls = Metrics
 
     def __init__(self, local_interval: float, labels: Dict[str, str],
                  max_model_len: int) -> None:
         super().__init__(local_interval)
         # Prometheus metrics
         self.labels = labels
-        self.metrics = Metrics(labelnames=list(labels.keys()),
-                               max_model_len=max_model_len)
+        self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
+                                         max_model_len=max_model_len)
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         if type == "cache_config":
@@ -452,11 +456,4 @@ class PrometheusStatLogger(StatLoggerBase):
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead."""
-
-    def __init__(self, local_interval: float, labels: Dict[str, str],
-                 max_model_len: int) -> None:
-        super().__init__(local_interval, labels, max_model_len)
-
-        # replace the base library with ray's metrics
-        self.metrics = RayMetrics(labelnames=list(labels.keys()),
-                                  max_model_len=max_model_len)
+    _metrics_cls = RayMetrics
