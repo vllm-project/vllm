@@ -194,7 +194,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
                 img_sizes.squeeze_(0)
 
             for _bs in range(bs):
-                h, w = img_sizes
+                h, w = img_sizes[_bs]
                 h = h // 336
                 w = w // 336
                 B_ = h * w
