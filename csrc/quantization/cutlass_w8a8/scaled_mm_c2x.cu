@@ -203,6 +203,56 @@ struct ScaledEpilogueBias
   }
 };
 
+/*
+ * This epilogue directly supports per-token azp by materializing the correction
+ * term using an outer product. If the term was precomputed, it would require
+ * O(m*n) space, and this way it only requires O(m+n) space.
+ *
+ * This epilogue also supports bias, which remain per-tensor.
+ */
+template <typename ElementD, typename OutputTileThreadMap>
+struct ScaledEpilogueBiasAzp
+    : private ScaledEpilogueBias<ElementD, OutputTileThreadMap> {
+ private:
+  using SUPER = ScaledEpilogueBias<ElementD, OutputTileThreadMap>;
+  using EVTComputePreAzp = typename SUPER::EVTCompute;
+
+  // Per-token azp term, float, already multiplied with scale_a, shape (m,1)
+  using Azp = cutlass::epilogue::threadblock::VisitorColBroadcast<
+      OutputTileThreadMap, float, Stride<Int<1>, Int<0>, Int<0>>>;
+
+  // This is the AZP adjustment term, scale_b * J * B, shape (1,n)
+  using AzpAdj = cutlass::epilogue::threadblock::VisitorRowBroadcast<
+      OutputTileThreadMap, float, Stride<Int<0>, Int<1>, Int<0>>>;
+
+  // Compute the outer product of Azp and AzpAdj, and add to the scaled & biased
+  // output.
+  using ComputeAzp = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::multiply_add, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::threadblock::Sm80EVT<ComputeAzp, Azp, AzpAdj,
+                                              EVTComputePreAzp>;
+
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales,
+                                   torch::Tensor const& bias,
+                                   torch::Tensor const& azp,
+                                   torch::Tensor const& azp_adj) {
+    auto base_args = SUPER::prepare_args(a_scales, b_scales, bias);
+
+    typename Azp::Arguments azp_args{azp.data_ptr<float>()};
+    typename AzpAdj::Arguments azp_adj_args{azp_adj.data_ptr<float>()};
+
+    ArgumentType evt_compute_args{azp_args, azp_adj_args, base_args};
+    return evt_compute_args;
+  }
+};
+
 template <typename Arch, template <typename> typename ArchGuard,
           typename ElementAB_, typename ElementD_,
           template <typename, typename> typename Epilogue_, typename TileShape,
@@ -551,6 +601,24 @@ void cutlass_scaled_mm_sm80(torch::Tensor& out, torch::Tensor const& a,
     return cutlass_scaled_mm_sm80_epilogue<ScaledEpilogue>(out, a, b, a_scales,
                                                            b_scales);
   }
+}
+
+void cutlass_scaled_mm_azp_sm80(torch::Tensor& out, torch::Tensor const& a,
+                                torch::Tensor const& b,
+                                torch::Tensor const& a_scales,
+                                torch::Tensor const& b_scales,
+                                torch::Tensor const& bias,
+                                torch::Tensor const& azp,
+                                torch::Tensor const& azp_adj) {
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(bias.dtype() == out.dtype(),
+              "currently bias dtype must match output dtype ", out.dtype());
+  TORCH_CHECK(azp.dtype() == torch::kFloat32);
+  TORCH_CHECK(azp_adj.dtype() == torch::kFloat32);
+
+  return cutlass_scaled_mm_sm80_epilogue<ScaledEpilogueBiasAzp>(
+      out, a, b, a_scales, b_scales, bias, azp, azp_adj);
 }
 
 template <template <typename, typename> typename Epilogue,
