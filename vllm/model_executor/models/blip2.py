@@ -432,11 +432,17 @@ def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
     hf_config = ctx.get_hf_config(Blip2Config)
     image_feature_size = get_blip2_image_feature_size(hf_config)
 
-    new_token_ids = list(llm_inputs["prompt_token_ids"])
+    # The original model places image tokens at the front
+    # https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/blip_2/modeling_blip_2.py#L1514
     new_token_ids = [BLIP2_IMAGE_TOKEN_ID] * image_feature_size
+    new_token_ids += llm_inputs["prompt_token_ids"]
+
+    new_prompt = llm_inputs.get("prompt")
+    if new_prompt is not None:
+        new_prompt = BLIP2_IMAGE_TOKEN * image_feature_size + new_prompt
 
     return LLMInputs(prompt_token_ids=new_token_ids,
-                     prompt=llm_inputs.get("prompt"),
+                     prompt=new_prompt,
                      multi_modal_data=multi_modal_data)
 
 
