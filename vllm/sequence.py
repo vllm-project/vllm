@@ -142,6 +142,16 @@ class SequenceData:
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
+        tokens: array of all the tokens (prompt + output)
+    
+    NOTE: special care must be taken regarding data copy and returning `list`
+        or `np.ndarray` from this class. `get_prompt_token_ids` and 
+        `get_output_token_ids` return `list`. They are used to construct
+        request output that will be returned to the user. They need to be
+        Python lists. And they are actually quite cheap, because the function
+        returns a reference to the list that is already stored in the object.
+        `get_token_ids` returns a view of `np.ndarray`. It avoids data copy,
+        and also allows array operations to be performed on the data.
     """
 
     def __init__(
