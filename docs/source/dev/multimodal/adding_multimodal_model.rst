@@ -51,7 +51,7 @@ As usual, follow :ref:`these steps <adding_a_new_model>` to implement the model 
 2. Register input mappers
 -------------------------
 
-For each modality type to support, decorate the model class with :meth:`vllm.multimodal.MULTIMODAL_REGISTRY.register_input_mapper <vllm.multimodal.MultiModalRegistry.register_input_mapper>`.
+For each modality type to support, decorate the model class with :meth:`MULTIMODAL_REGISTRY.register_input_mapper <vllm.multimodal.MultiModalRegistry.register_input_mapper>`.
 This decorator accepts a function that maps multi-modal inputs to the keyword arguments you have previously defined in :meth:`~torch.nn.Module.forward`.
 
 .. code-block:: diff
@@ -73,7 +73,7 @@ A default mapper is available for each modality in the core vLLM library. This i
 ---------------------------------
 
 During startup, dummy data is passed to the vLLM model to allocate memory. This only consists of text input by default, which may not be applicable to multi-modal models.
-In such cases, you can define your own dummy data by registering a factory method via :meth:`vllm.inputs.INPUT_REGISTRY.register_dummy_data <vllm.inputs.registry.InputRegistry.register_dummy_data>`.
+In such cases, you can define your own dummy data by registering a factory method via :meth:`INPUT_REGISTRY.register_dummy_data <vllm.inputs.registry.InputRegistry.register_dummy_data>`.
 
 .. code-block:: diff
 
