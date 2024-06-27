@@ -126,7 +126,7 @@ class RequestOutput:
         outputs = [
             CompletionOutput(seqs.index(seq),
                              seq.get_output_text_to_return(text_buffer_length),
-                             seq.get_output_token_ids(),
+                             seq.get_output_token_ids().tolist(),
                              seq.get_cumulative_logprob(),
                              seq.output_logprobs if include_logprobs else None,
                              SequenceStatus.get_finished_reason(seq.status),
