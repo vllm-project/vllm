@@ -1,4 +1,4 @@
-from typing import Callable, List
+from typing import Callable, List, Tuple, Union
 
 import torch
 from torch.nn import Parameter
@@ -19,15 +19,15 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
     # So if we have a fused module (QKV, MLP) with per tensor scales (thus N
     # scales being passed to the kernel), we convert to the per-channel case.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if (self.strategy == QuantizationStrategy.TENSOR and 
-            len(self.logical_widths) > 1):
+        if (self.strategy == QuantizationStrategy.TENSOR
+                and len(self.logical_widths) > 1):
 
             # Load the N per-tensor scales into the channelwise buffer.
             weight_scale_channel = torch.empty(
-                (sum(self.logical_widths), 1), 
+                (sum(self.logical_widths), 1),
                 dtype=torch.float32,
                 device=layer.weight_scale.device)
-            start = 0 
+            start = 0
             for idx, logical_width in enumerate(self.logical_widths):
                 end = start + logical_width
                 weight_scale_channel[start:end, :] = layer.weight_scale[idx]
@@ -47,22 +47,22 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
                                        dtype=torch.int8),
-                    requires_grad=False)
+                           requires_grad=False)
         layer.register_parameter("weight", weight)
-        set_weight_attrs(
-            weight, {
-                "input_dim": 1,
-                "output_dim": 0,
-                "weight_loader": weight_loader,
-            })
-        
+        set_weight_attrs(weight, {
+            "input_dim": 1,
+            "output_dim": 0,
+            "weight_loader": weight_loader,
+        })
+
         # WEIGHT SCALE
+        shape: Union[Tuple[int], Tuple[int, int]]
         if self.strategy == QuantizationStrategy.CHANNEL:
             shape = (sum(self.logical_widths), 1)
         else:
             shape = (len(self.logical_widths), )
 
-        weight_scale = Parameter(torch.empty(*shape,dtype=torch.float32),
+        weight_scale = Parameter(torch.empty(*shape, dtype=torch.float32),
                                  requires_grad=False)
         layer.register_parameter("weight_scale", weight_scale)
         if self.strategy == QuantizationStrategy.CHANNEL:
@@ -71,8 +71,9 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
                 "output_dim": 0,
             })
         else:
-            set_weight_attrs(weight_scale, {
-                "weight_loader": weight_loader,
-                "is_per_tensor_scale": True,
-                "ignore_warning": True,
-            })
+            set_weight_attrs(
+                weight_scale, {
+                    "weight_loader": weight_loader,
+                    "is_per_tensor_scale": True,
+                    "ignore_warning": True,
+                })

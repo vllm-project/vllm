@@ -54,7 +54,7 @@ def adjust_per_tensor_scale_shard(param, loaded_weight, shard_id):
         shard_id = qkv_idxs[shard_id]
     elif not isinstance(shard_id, int):
         raise ValueError(f"Unknown Shard Id {shard_id}")
-    
+
     # AutoFP8 scales do not have a shape
     # compressed-tensors scales do have a shape
     if len(loaded_weight.shape) != 0:
@@ -446,7 +446,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             shard_size = loaded_weight.shape[0]
             shard_offset = loaded_shard_id * shard_size
             param_data = param_data.narrow(0, shard_offset, shard_size)
-        
+
         # Special case for per-tensor scales in fused case.
         elif is_per_tensor_scale:
             param_data, loaded_weight = adjust_per_tensor_scale_shard(

@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -112,11 +112,10 @@ class Fp8LinearMethod(LinearMethodBase):
                                       dtype=torch.float32),
                           requires_grad=False)
         layer.register_parameter(scale_name, scale)
-        set_weight_attrs(
-            scale, {
-                **extra_weight_attrs,
-                "is_per_tensor_scale": True,
-            })
+        set_weight_attrs(scale, {
+            **extra_weight_attrs,
+            "is_per_tensor_scale": True,
+        })
 
     def create_weights(
         self,
