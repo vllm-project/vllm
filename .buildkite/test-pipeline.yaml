@@ -27,7 +27,9 @@ steps:
 
 - label: Core Test
   mirror_hardwares: [amd]
-  command: pytest -v -s core
+  commands: 
+  - pytest -v -s core
+  - pytest -v -s distributed/test_parallel_state.py
 
 - label: Distributed Comm Ops Test
   #mirror_hardwares: [amd]
