@@ -623,7 +623,7 @@ class GroupCoordinator:
                                      device=value.device)
                 if tensor.numel() == 0:
                     # Skip broadcasting empty tensors.
-                    tensor_dict[key] = tensor
+                    _update_nested_dict(tensor_dict, key, tensor)
                     continue
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
@@ -633,9 +633,9 @@ class GroupCoordinator:
                 else:
                     # use group for GPU tensors
                     torch.distributed.recv(tensor, src=src, group=group)
-                tensor_dict[key] = tensor
+                _update_nested_dict(tensor_dict, key, tensor)
             else:
-                tensor_dict[key] = value
+                _update_nested_dict(tensor_dict, key, value)
         return tensor_dict
 
     def barrier(self):
