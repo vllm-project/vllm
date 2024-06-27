@@ -57,6 +57,8 @@ from vllm.utils import print_warning_once, is_hpu
 if is_hpu():
     from vllm.hpu.ops import static_fused_moe
 
+from .interfaces import SupportsLoRA
+
 
 class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
@@ -487,7 +489,9 @@ class MixtralModel(nn.Module):
         return hidden_states
 
 
-class MixtralForCausalLM(nn.Module):
+class MixtralForCausalLM(nn.Module, SupportsLoRA):
+    supports_lora = True
+
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -519,7 +523,10 @@ class MixtralForCausalLM(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
