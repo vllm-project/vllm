@@ -9,14 +9,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import habana_frameworks.torch as htorch
-import habana_frameworks.torch.utils.experimental as htexp
 from typing import List, Optional, Tuple
 
 import vllm.hpu.utils as hpu_utils
 
-# FIXME: For some reason splitting value causes DFAs on G3. This needs to be debugged
-PA_SPLIT_VALUE_DEFAULT = '0' if (htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi3) else '1'
-PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', PA_SPLIT_VALUE_DEFAULT) == '1')
+PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', '1') == '1')
 
 
 def silu_and_mul(output, input):
