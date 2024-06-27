@@ -36,6 +36,8 @@ def get_dtype(dtype_str):
         dtype = torch.bfloat16
     elif dtype_str == 'f16':
         dtype = torch.float16
+    elif dtype_str == 'fp8':
+        dtype = torch.float8_e4m3fnuz
     else:
         print('>>> Warning! Invalid dtype', dtype_str,
               'using default dtype f16')
@@ -70,10 +72,15 @@ if __name__ == '__main__':
                         type=int,
                         default=os.getenv('GTUNE_TP', 1),
                         help="Tensor parallelism to be used.")
-    parser.add_argument("--dtype",
+    parser.add_argument("--indtype",
                         type=str,
                         default='f16',
-                        help="dtype f32 f16 bf16")
+                        choices=["f32", "f16", "bf16", "fp8"],
+                        help="dtype f32 f16 bf16 fp8")
+    parser.add_argument("--outdtype",
+                        type=str,
+                        choices=["f32", "f16", "bf16", "fp8"],
+                        help="dtype f32 f16 bf16 fp8")
     parser.add_argument("--rocblas-decode",
                         action="store_true",
                         default=False,
@@ -88,9 +95,12 @@ if __name__ == '__main__':
                         help="N sizes to tune for: 1,128,2048")
     args = parser.parse_args()
 
-    dtype = get_dtype(args.dtype)
+    if args.outdtype is None:
+        args.outdtype = args.indtype
+    indtype = get_dtype(args.indtype)
+    outdtype = get_dtype(args.outdtype)
 
-    gtuner = GemmTuner(dtype, args.tuned_file, args.rocblas_decode)
+    gtuner = GemmTuner(indtype, outdtype, args.tuned_file, args.rocblas_decode)
     nsets = [i * args.batch_size for i in args.nsets]
     if args.input_file:
         print(f">>> Loading {args.input_file}")

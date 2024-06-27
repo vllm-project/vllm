@@ -2,7 +2,7 @@ cmake >= 3.21
 ninja  # For faster builds.
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
-numpy
+numpy < 2.0.0
 requests
 py-cpuinfo
 transformers >= 4.40.0  # Required for StarCoder2 & Llava, Llama 3.

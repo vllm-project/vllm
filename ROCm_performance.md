@@ -48,7 +48,7 @@ To obtain all the shapes of gemms during the execution of the model, set the env
 Next, run gradlib to obtain the best solutions of these shapes:
 
 ```
-python3 gradlib/gradlib/fp8_gemm_tuner.py --input_file /tmp/fp8_shapes.csv --tuned_file /tmp/tuned_fp8_16.csv
+python3 gradlib/gradlib/gemm_tuner.py --input_file /tmp/fp8_shapes.csv --tuned_file /tmp/tuned_fp8_16.csv --indtype fp8 --outdtype f16
 ```
 where `/tmp/tuned_fp8_16` will be used by our fp8 gemm linear layer.
 

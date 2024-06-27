@@ -208,12 +208,18 @@ hipblasStatus_t hipblasLtMatmul_sol_wrapper(
       matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &op_A, sizeof(int32_t)));
   CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
       matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &op_B, sizeof(int32_t)));
-  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
-      matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, &scaleA, sizeof(scaleA)));
-  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
-      matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, &scaleB, sizeof(scaleB)));
-  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
-      matmul, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &scaleC, sizeof(scaleC)));
+  if (scaleA != nullptr) {
+    CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
+        matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, &scaleA, sizeof(scaleA)));
+  }
+  if (scaleB != nullptr) {
+    CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
+        matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, &scaleB, sizeof(scaleB)));
+  }
+  if (scaleC != nullptr) {
+    CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
+        matmul, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &scaleC, sizeof(scaleC)));
+  }
   // nvtxRangePop();
   //  if heuristic does not exist in the map, do search and push into the map
   // auto gemm_key { MatMulConfig { op_A, op_B, m, n, k, dtype } };
