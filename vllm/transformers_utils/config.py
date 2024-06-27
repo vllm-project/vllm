@@ -36,13 +36,17 @@ def get_config(model: str,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None,
                rope_scaling: Optional[dict] = None,
-               rope_theta: Optional[float] = None) -> PretrainedConfig:
+               rope_theta: Optional[float] = None,
+               hf_kwargs: Optional[dict] = None) -> PretrainedConfig:
     try:
+        if hf_kwargs is None:
+            hf_kwargs = {}
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
             revision=revision,
-            code_revision=code_revision)
+            code_revision=code_revision,
+            **hf_kwargs)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
