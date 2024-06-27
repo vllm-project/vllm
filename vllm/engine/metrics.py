@@ -325,7 +325,6 @@ class LoggingStatLogger(StatLoggerBase):
 
 class PrometheusStatLogger(StatLoggerBase):
     """PrometheusStatLogger is used LLMEngine to log to Promethus."""
-    _base_library = prometheus_client
 
     def __init__(self, local_interval: float, labels: Dict[str, str],
                  max_model_len: int) -> None:
@@ -450,7 +449,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
-    _base_library = ray_metrics
+    """RayPrometheusStatLogger uses Ray metrics instead."""
 
     def __init__(self, local_interval: float, labels: Dict[str, str],
                  max_model_len: int) -> None:
