@@ -285,7 +285,14 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # So this function is useless for block_v2.
         pass
 
-    def get_and_update_computed_block_ids(self, seqs):
+    def _get_and_update_computed_block_ids(self, seqs):
+        """Handles caching of per-sequence computed block ids. 
+        When a sequence appears for the first time, it traverses all of the 
+        blocks and detects the prefix of blocks that is computed. On the
+        subsequent times, it only traverses the new blocks that were added 
+        and updates the already recorded prefix of blocks with the newly 
+        computed blocks.
+        """
         ret = []
         for seq in seqs:
             seq_id = seq.seq_id
@@ -334,7 +341,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         sequences in the sequence group.
         """
 
-        computed_seq_block_ids = self.get_and_update_computed_block_ids(seqs)
+        computed_seq_block_ids = self._get_and_update_computed_block_ids(seqs)
 
         # NOTE(sang): This assumes seq_block_ids doesn't contain any None.
         return self.block_allocator.get_common_computed_block_ids(
