@@ -1,6 +1,7 @@
 import contextlib
 import gc
 import os
+import sys
 from collections import UserList
 from dataclasses import dataclass
 from functools import cached_property
@@ -79,7 +80,17 @@ class _ImageAssetPrompts(TypedDict):
     cherry_blossom: str
 
 
-class _ImageAssets(UserList[ImageAsset]):
+if sys.version_info < (3, 9):
+    # UserList cannot be subscripted
+    class _ImageAssetsBase(UserList):
+        pass
+else:
+
+    class _ImageAssetsBase(UserList[ImageAsset]):
+        pass
+
+
+class _ImageAssets(_ImageAssetsBase):
 
     def __init__(self) -> None:
         super().__init__(

@@ -13,17 +13,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Dict, Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
-from vllm.logger import init_logger
+from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -32,13 +31,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
-from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
+from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensors
+from vllm.multimodal.image import (ImageFeatureData, ImagePixelData,
+                                   cached_get_tokenizer)
 from vllm.sequence import SamplerOutput
 
-logger = init_logger(__name__)
+from .clip import (dummy_pixel_data_for_clip, dummy_seq_data_for_clip,
+                   input_processor_for_clip)
+from .interfaces import SupportsVision
 
 _KEYS_TO_MODIFY_MAPPING = {
     "model.vision_embed_tokens": "vision_embed_tokens",
@@ -106,7 +107,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.num_img_tokens = config.img_processor['num_img_tokens']
 
         self.image_dim_out = image_dim_out
-        self.img_sizes = None
 
         # global_gn and sub_gn for hd transform, serves as line separator
         self.use_hd_transform = config.embd_layer.get('use_hd_transform',
@@ -133,7 +133,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.img_projection = nn.Sequential(*layers)
 
         self.vocab_size = config.vocab_size
-        self.img_features = None
 
         self.layer_idx = config.img_processor.get('layer_idx', -2)
         self.type_feature = config.img_processor.get('type_feature', 'patch')
@@ -252,16 +251,57 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
 class Phi3VImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, 1 + num_patches, num_channels, height, width)"""
+    data: BatchedTensors
+    """
+    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
+
+    Note that `num_patches` may be different for each batch.
+    """
 
     image_sizes: torch.Tensor
-    """Shape: (batch_size, 2)"""
+    """
+    Shape: `(batch_size, 2)`
+
+    This should be in `(height, width)` format.
+    """
 
 
-# FIXME(Isotr0py): Remove these after dynamic num_img_tokens is supported
-# copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
-def calc_padded_size(width, height, padding_unit=336):
+def _get_phi3v_image_feature_size(
+    *,
+    input_height: int,
+    input_width: int,
+) -> int:
+    h, w = input_height, input_width
+
+    # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L178
+    return (h // 336 * w // 336 + 1) * 144 + 1 + (h // 336 + 1) * 12
+
+
+def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
+    # TODO: How to get the max possible feature size?
+    dummy_height, dummy_width = 1344, 1008
+    image_feature_size = _get_phi3v_image_feature_size(
+        input_height=dummy_height,
+        input_width=dummy_width,
+    )
+
+    seq_data = dummy_seq_data_for_clip(
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        seq_len,
+        image_token_id=32044,
+        image_feature_size_override=image_feature_size,
+    )
+    mm_data = dummy_pixel_data_for_clip(
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        image_width_override=dummy_width,
+        image_height_override=dummy_height,
+    )
+
+    return seq_data, mm_data
+
+
+# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
+def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
     target_height = int(np.ceil(height / padding_unit) * padding_unit)
     top_padding = int((target_height - height) / 2)
     bottom_padding = target_height - height - top_padding
@@ -270,8 +310,8 @@ def calc_padded_size(width, height, padding_unit=336):
     return padded_width, padded_height
 
 
-# copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
-def calc_hd_transform_size(width, height, hd_num=16):
+# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
+def _calc_hd_transform_size(*, width: int, height: int, hd_num: int = 16):
     transposed = False
     if width < height:
         width, height = height, width
@@ -286,7 +326,8 @@ def calc_hd_transform_size(width, height, hd_num=16):
     new_width = int(scale * 336)
     new_height = int(new_width / ratio)
 
-    padded_width, padded_height = calc_padded_size(new_width, new_height)
+    padded_width, padded_height = _calc_padded_size(width=new_width,
+                                                    height=new_height)
 
     if transposed:
         padded_width, padded_height = padded_height, padded_width
@@ -294,41 +335,91 @@ def calc_hd_transform_size(width, height, hd_num=16):
     return padded_width, padded_height
 
 
-def _image_processor(
-    data: ImagePixelData,
-    model_config: ModelConfig,
-    vlm_config: VisionLanguageConfig,
-) -> Dict[str, torch.Tensor]:
-    image = data.image
+def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or not isinstance(
+            multi_modal_data, (ImagePixelData, ImageFeatureData)):
+        return llm_inputs
 
-    if isinstance(image, Image.Image):
-        # Temporary patch before dynamic number of image tokens is supported
-        _, _, h, w = vlm_config.image_input_shape
-        if (w, h) != calc_hd_transform_size(image.width, image.height):
-            logger.warning(
-                "Dynamic image shape is currently not supported. "
-                "Resizing input image to (%d, %d).", w, h)
+    model_config = ctx.model_config
+    multimodal_config = ctx.get_multimodal_config()
 
-            data.image = image.resize((w, h))
+    if isinstance(multi_modal_data, ImagePixelData):
+        image = multi_modal_data.image
+        if isinstance(image, torch.Tensor):
+            _, _, _, h, w = image.shape
+        else:
+            w, h = image.size
 
-    return MULTIMODAL_REGISTRY._get_plugin_for_data_type(ImagePixelData) \
-            ._default_input_processor(data, model_config, vlm_config)
+        w, h = _calc_hd_transform_size(width=w, height=h)
+
+        image_feature_size = _get_phi3v_image_feature_size(input_width=w,
+                                                           input_height=h)
+    else:
+        image_features = multi_modal_data.image_features
+        image_feature_size = image_features.shape[-2]
+
+    prompt_token_ids = llm_inputs["prompt_token_ids"]
+    tokenizer = cached_get_tokenizer(model_config.tokenizer)
+
+    # We need to get the token for "<", not "▁<"
+    # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/raw/main/tokenizer.json
+    a_token_id, = tokenizer.encode("a", add_special_tokens=False)
+    a_token_id_, *image_1_token_ids = tokenizer.encode(
+        "a<|image_1|>", add_special_tokens=False)
+    assert a_token_id == a_token_id_
+
+    new_token_ids: List[int] = []
+    for i in range(len(prompt_token_ids) - len(image_1_token_ids) + 1):
+        if prompt_token_ids[i:i + len(image_1_token_ids)] == image_1_token_ids:
+            new_token_ids.append(multimodal_config.image_token_id)
+
+            # No need to further scan the list since we only replace once
+            new_token_ids.extend(prompt_token_ids[i + len(image_1_token_ids):])
+            break
+        else:
+            new_token_ids.append(prompt_token_ids[i])
+
+    # NOTE: Create a defensive copy of the original inputs
+    llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
+                           prompt=llm_inputs.get("prompt"),
+                           multi_modal_data=multi_modal_data)
+
+    return input_processor_for_clip(
+        model_config,
+        multimodal_config,
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        llm_inputs,
+        image_token_id=multimodal_config.image_token_id,
+        image_feature_size_override=image_feature_size,
+    )
 
 
-@MULTIMODAL_REGISTRY.register_image_pixel_input(_image_processor)
-@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
-class Phi3VForCausalLM(VisionLanguageModelBase):
+@MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
+class Phi3VForCausalLM(nn.Module, SupportsVision):
+
+    supports_vision = True
 
     def __init__(self,
                  config: PretrainedConfig,
-                 vision_language_config: VisionLanguageConfig,
+                 vlm_config: VisionLanguageConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
-        super().__init__(vision_language_config)
+        super().__init__()
+
         self.config = config
+        self.vlm_config = vlm_config
+
         self.model = LlamaModel(config, cache_config, quant_config)
-        self.vision_embed_tokens = Phi3HDImageEmbedding(
-            vision_language_config, config, self.model.embed_tokens)
+
+        if self.vlm_config.image_input_type == (
+                VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
+            self.vision_embed_tokens = Phi3HDImageEmbedding(
+                vlm_config, config, self.model.embed_tokens)
+        else:
+            raise TypeError("Image features are not supported by LLaVA-NeXT")
+
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -338,18 +429,27 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
 
-        expected_input_type = self.vision_language_config.image_input_type
+        expected_input_type = self.vlm_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
-        if expected_input_type != ImageInputType.PIXEL_VALUES:
-            raise ValueError(
-                f"Unexpected image input type: {expected_input_type}."
-                "Phi3v only support pixel_values input currently.")
+        if expected_input_type == ImageInputType.PIXEL_VALUES:
+            if pixel_values is None:
+                return None
 
-        if pixel_values is not None and image_sizes is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+
+            if not isinstance(image_sizes, torch.Tensor):
+                raise ValueError("Incorrect type of image sizes. "
+                                 f"Got type: {type(image_sizes)}")
+
             return Phi3VImagePixelInputs(type="pixel_values",
                                          data=pixel_values,
                                          image_sizes=image_sizes)
+
+        assert expected_input_type != ImageInputType.IMAGE_FEATURES, (
+            "Failed to validate this at initialization time")
 
         return None
 

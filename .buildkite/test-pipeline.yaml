@@ -120,7 +120,7 @@ steps:
   mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models -m vlm
+    - pytest -v -s -rx models -m vlm
 
 - label: Prefix Caching Test
   mirror_hardwares: [amd]

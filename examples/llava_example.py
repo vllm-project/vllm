@@ -22,8 +22,7 @@ def run_llava_pixel_values(*, disable_image_processor: bool = False):
         disable_image_processor=disable_image_processor,
     )
 
-    prompt = "<image>" * 576 + (
-        "\nUSER: What is the content of this image?\nASSISTANT:")
+    prompt = "<image>\nUSER: What is the content of this image?\nASSISTANT:"
 
     if disable_image_processor:
         image = torch.load("images/stop_sign_pixel_values.pt")
@@ -49,8 +48,7 @@ def run_llava_image_features():
         image_feature_size=576,
     )
 
-    prompt = "<image>" * 576 + (
-        "\nUSER: What is the content of this image?\nASSISTANT:")
+    prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     image: torch.Tensor = torch.load("images/stop_sign_image_features.pt")
 

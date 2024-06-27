@@ -1,70 +1,99 @@
-from typing import Dict, Tuple, Type, Union
+from functools import lru_cache
+from typing import List, Optional, Tuple, Type, TypeVar, Union
 
 import torch
 from PIL import Image
+from transformers import PreTrainedTokenizerBase
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
+from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.sequence import SequenceData
-from vllm.transformers_utils.image_processor import cached_get_image_processor
+from vllm.transformers_utils.image_processor import get_image_processor
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from .base import MultiModalData, MultiModalPlugin
+from .base import MultiModalData, MultiModalInputs, MultiModalPlugin
 
 logger = init_logger(__name__)
 
+cached_get_image_processor = lru_cache(get_image_processor)
+cached_get_tokenizer = lru_cache(get_tokenizer)
 
-def _get_dummy_seq_data(seq_len: int,
-                        vlm_config: VisionLanguageConfig) -> SequenceData:
-    # NOTE: We assume that <image> token is repeated `image_feature_size` times
-    # and then concatenated with the text prompt
-    # TODO: Enable other ways of inserting the image into the prompt
-
-    token_ids = [vlm_config.image_token_id] * vlm_config.image_feature_size
-    token_ids += [0] * (seq_len - vlm_config.image_feature_size)
-
-    return SequenceData(token_ids)
+# Utilities for image input processors
+_T = TypeVar("_T", str, int)
 
 
-def _get_dummy_values(vlm_config: VisionLanguageConfig) -> torch.Tensor:
-    if vlm_config.image_processor is None:
-        values_dtype = torch.float16
+def repeat_and_pad_token(
+    token: _T,
+    *,
+    repeat_count: int = 1,
+    pad_token_left: Optional[_T] = None,
+    pad_token_right: Optional[_T] = None,
+) -> List[_T]:
+    replacement = [token] * repeat_count
+    if pad_token_left is not None:
+        replacement = [pad_token_left] + replacement
+    if pad_token_right is not None:
+        replacement = replacement + [pad_token_right]
+
+    return replacement
+
+
+def repeat_and_pad_image_tokens(
+    tokenizer: PreTrainedTokenizerBase,
+    prompt: Optional[str],
+    prompt_token_ids: List[int],
+    *,
+    image_token_id: int,
+    repeat_count: int = 1,
+    pad_token_left: Optional[int] = None,
+    pad_token_right: Optional[int] = None,
+) -> Tuple[Optional[str], List[int]]:
+    if prompt is None:
+        new_prompt = None
     else:
-        values_dtype = torch.uint8
+        image_token_str = tokenizer.decode(image_token_id)
+        pad_token_str_left = (None if pad_token_left is None else
+                              tokenizer.decode(pad_token_left))
+        pad_token_str_right = (None if pad_token_right is None else
+                               tokenizer.decode(pad_token_right))
+        replacement_str = "".join(
+            repeat_and_pad_token(
+                image_token_str,
+                repeat_count=repeat_count,
+                pad_token_left=pad_token_str_left,
+                pad_token_right=pad_token_str_right,
+            ))
 
-    return torch.zeros(vlm_config.image_input_shape, dtype=values_dtype)
+        # The image tokens are removed to be consistent with HuggingFace
+        new_prompt = prompt.replace(image_token_str, replacement_str, 1)
 
+    new_token_ids: List[int] = []
+    for i, token in enumerate(prompt_token_ids):
+        if token == image_token_id:
+            replacement_ids = repeat_and_pad_token(
+                image_token_id,
+                repeat_count=repeat_count,
+                pad_token_left=pad_token_left,
+                pad_token_right=pad_token_right,
+            )
+            new_token_ids.extend(replacement_ids)
 
-def get_dummy_image_data(
-    seq_len: int,
-    model_config: ModelConfig,
-    vlm_config: VisionLanguageConfig,
-) -> Tuple[SequenceData, MultiModalData]:
-    """Standard dummy data factory for image data (to be used in
-    :meth:`vlm.multimodal.MultiModalRegistry.register_dummy_data`)."""
-    seq_data = _get_dummy_seq_data(seq_len, vlm_config)
-    values = _get_dummy_values(vlm_config)
+            # No need to further scan the list since we only replace once
+            new_token_ids.extend(prompt_token_ids[i + 1:])
+            break
+        else:
+            new_token_ids.append(token)
 
-    config_input_type = vlm_config.image_input_type
-    ImageInputType = VisionLanguageConfig.ImageInputType
-
-    fake_mm_data: MultiModalData
-    if config_input_type == ImageInputType.PIXEL_VALUES:
-        fake_mm_data = ImagePixelData(values)
-    elif config_input_type == ImageInputType.IMAGE_FEATURES:
-        fake_mm_data = ImageFeatureData(values)
-    else:
-        raise NotImplementedError
-
-    return seq_data, fake_mm_data
+    return new_prompt, new_token_ids
 
 
 class ImagePixelData(MultiModalData):
     """
     The pixel data of an image. Can be one of:
 
-    - :class:``PIL.Image``: An image object. Requires that a HuggingFace
+    - :class:`PIL.Image.Image`: An image object. Requires that a HuggingFace
       processor is available to the model.
-    - :class:``torch.Tensor``: The raw pixel data which is passed to the model
+    - :class:`torch.Tensor`: The raw pixel data which is passed to the model
       without additional pre-processing.
     """
 
@@ -89,8 +118,8 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
     def get_data_type(self) -> Type[ImagePixelData]:
         return ImagePixelData
 
-    def _get_hf_image_processor(self, model_config: ModelConfig,
-                                vlm_config: VisionLanguageConfig):
+    def _get_hf_image_processor(self, model_config: ModelConfig):
+        vlm_config = model_config.multimodal_config
         if vlm_config is None or vlm_config.image_processor is None:
             return None
 
@@ -100,27 +129,29 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
             revision=vlm_config.image_processor_revision,
         )
 
-    def _default_input_processor(
-            self, data: ImagePixelData, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+    def _default_input_mapper(self, ctx: InputContext,
+                              data: ImagePixelData) -> MultiModalInputs:
+        model_config = ctx.model_config
         image = data.image
 
         if isinstance(image, Image.Image):
-            image_processor = self._get_hf_image_processor(
-                model_config, vlm_config)
+            image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available"
                                    "to process the image object")
             try:
-                return image_processor.preprocess(image, return_tensors="pt") \
-                    .to(model_config.dtype).data
+                batch_data = image_processor \
+                    .preprocess(image, return_tensors="pt") \
+                    .data
             except Exception:
                 logger.error("Failed to process image (%s)", image)
                 raise
-        elif isinstance(image, torch.Tensor):
-            pixel_values = image.to(model_config.dtype)
 
-            return {"pixel_values": pixel_values}
+            return MultiModalInputs(batch_data)
+        elif isinstance(image, torch.Tensor):
+            pixel_values = image
+
+            return MultiModalInputs({"pixel_values": pixel_values})
 
         raise TypeError(f"Invalid image type: {type(image)}")
 
@@ -147,9 +178,8 @@ class ImageFeaturePlugin(MultiModalPlugin[ImageFeatureData]):
     def get_data_type(self) -> Type[ImageFeatureData]:
         return ImageFeatureData
 
-    def _default_input_processor(
-            self, data: ImageFeatureData, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
-        image_features = data.image_features.to(model_config.dtype)
+    def _default_input_mapper(self, ctx: InputContext,
+                              data: ImageFeatureData) -> MultiModalInputs:
+        image_features = data.image_features
 
-        return {"image_features": image_features}
+        return MultiModalInputs({"image_features": image_features})

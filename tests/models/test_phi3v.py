@@ -1,21 +1,23 @@
-from typing import List, Tuple
+import itertools
+import re
+from typing import List, Optional, Tuple
 
 import pytest
-from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+from vllm.multimodal.image import ImagePixelData
+from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_ASSETS
 
 pytestmark = pytest.mark.vlm
 
-# The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
     "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
     "cherry_blossom":
-    "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",  # noqa: E501
+    "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
 })
 
 
@@ -53,17 +55,20 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     output_ids, output_str = vllm_output
     image_token_id = vlm_config.image_token_id
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    image_token_str = tokenizer.decode(image_token_id)
+    hf_output_ids: List[int] = []
+    for idx, token_id in enumerate(output_ids):
+        if token_id != image_token_id:
+            hf_output_ids.append(token_id)
+        else:
+            hf_output_ids.append(0)
 
-    hf_output_ids = [
-        token_id if token_id != image_token_id else 0
-        for idx, token_id in enumerate(output_ids)
-    ]
-    hf_output_str = output_str \
-        .replace(image_token_str * vlm_config.image_feature_size, "") \
-        .replace("<s>", " ").replace("<|user|>", "") \
+            if output_ids[idx + 1] != image_token_id:
+                hf_output_ids.extend([1, 29871])
+
+    hf_output_str = output_str.replace("<|user|>", "") \
         .replace("<|end|>\n<|assistant|>", " ")
+    hf_output_str = re.sub(r"(<\|image\|>)+", " ", hf_output_str)
+    hf_output_str = re.sub(r"(<\|image_\d+\|>)+", " ", hf_output_str)
 
     return hf_output_ids, hf_output_str
 
@@ -73,17 +78,12 @@ if is_cpu():
     target_dtype = "bfloat16"
 
 
-# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
-# Since we use _attn_implementation="eager" for hf_runner, here is
-# numeric difference for longer context and test can't pass
-@pytest.mark.xfail(
-    reason="Inconsistent image processor being used due to lack "
-    "of support for dynamic image token replacement")
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("is_multiscale", [True, False])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
-                dtype: str, max_tokens: int) -> None:
+                dtype: str, max_tokens: int, is_multiscale: bool) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -97,36 +97,74 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     hf_images = [asset.for_hf() for asset in image_assets]
     vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
-    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
-    hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model_id, dtype=dtype,
-                   model_kwargs=hf_model_kwargs) as hf_model:
-        hf_outputs = hf_model.generate_greedy(
-            HF_IMAGE_PROMPTS,
-            max_tokens,
-            images=hf_images,
-            eos_token_id=hf_model.processor.tokenizer.eos_token_id)
-
-    vllm_image_prompts = [
-        p.replace("<|image_1|>",
-                  "<|image|>" * vlm_config.image_feature_size + "<s>")
-        for p in HF_IMAGE_PROMPTS
+    size_factors = (0.25, 0.5, 1.0) if is_multiscale else (1, )
+    image_inputs = [
+        (rescale_image_size(hf_image, factor),
+         ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
+         prompt) for hf_image, vllm_image, prompt in zip(
+             hf_images, vllm_images, HF_IMAGE_PROMPTS)
+        for factor in size_factors
     ]
+    prompt_inputs = [prompt for _, _, prompt in image_inputs]
+    hf_image_inputs = [hf_image for hf_image, _, _ in image_inputs]
+    vllm_image_inputs = [vllm_image for _, vllm_image, _ in image_inputs]
 
+    # max_model_len should be greater than image_feature_size
     with vllm_runner(model_id,
                      max_model_len=2048,
                      dtype=dtype,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+        vllm_outputs = vllm_model.generate_greedy(prompt_inputs,
                                                   max_tokens,
-                                                  images=vllm_images)
+                                                  images=vllm_image_inputs)
 
+    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
+    hf_model_kwargs = {"_attn_implementation": "eager"}
+    with hf_runner(model_id, dtype=dtype,
+                   model_kwargs=hf_model_kwargs) as hf_model:
+        hf_outputs = hf_model.generate_greedy(
+            prompt_inputs,
+            max_tokens,
+            images=hf_image_inputs,
+            eos_token_id=hf_model.processor.tokenizer.eos_token_id,
+        )
+        hf_dummy_outputs = hf_model.generate_greedy(
+            prompt_inputs,
+            max_tokens=1,
+            images=hf_image_inputs,
+            eos_token_id=hf_model.processor.tokenizer.eos_token_id,
+        )
+
+    # Since we use _attn_implementation="eager", there is numeric
+    # difference for longer context (max_tokens=128) and test can't pass
+    best_max_tokens_exc_list: List[Tuple[int, Optional[AssertionError]]] = []
     for i in range(len(HF_IMAGE_PROMPTS)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_to_hf_output(
-            vllm_outputs[i], vlm_config, model_id)
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+        try:
+            hf_output_ids, hf_output_str = hf_outputs[i]
+            vllm_output_ids, vllm_output_str = vllm_to_hf_output(
+                vllm_outputs[i], vlm_config, model_id)
+            assert hf_output_str == vllm_output_str, (
+                f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
+            assert hf_output_ids == vllm_output_ids, (
+                f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+        except AssertionError as e:
+            num_match_tokens = sum(1 for _ in itertools.takewhile(
+                lambda pair: pair[0] == pair[1],
+                zip(hf_output_ids, vllm_output_ids),
+            ))
+            num_prefix_tokens = len(hf_dummy_outputs[i][0]) - 1
+
+            best_max_tokens = num_match_tokens - num_prefix_tokens
+            best_max_tokens_exc_list.append((best_max_tokens, e))
+        else:
+            best_max_tokens_exc_list.append((max_tokens, None))
+
+    best_max_tokens = min(pair[0] for pair in best_max_tokens_exc_list)
+    if best_max_tokens < max_tokens:
+        exc_list = [pair[1] for pair in best_max_tokens_exc_list]
+
+        pytest.xfail(
+            f"Test only fully passes when max_tokens={best_max_tokens} "
+            f"(instead of {max_tokens}). Errors encountered per item: "
+            f"{exc_list}")
