@@ -141,6 +141,17 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+
+        if (not self.disable_sliding_window
+                and self.hf_text_config.model_type == "gemma2"
+                and self.hf_text_config.sliding_window is not None):
+            print_warning_once(
+                "Gemma 2 uses sliding window attention for every odd layer, "
+                "which is currently not supported by vLLM. Disabling sliding "
+                "window and capping the max length to the sliding window size "
+                f"({self.hf_text_config.sliding_window}).")
+            self.disable_sliding_window = True
+
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
@@ -258,16 +269,6 @@ class ModelConfig:
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled."""
-
-        if (self.hf_text_config.model_type == "gemma2"
-                and self.hf_text_config.sliding_window is not None):
-            print_warning_once(
-                "While Gemma 2 uses sliding window attention for every odd "
-                "layer, vLLM currently ignores it and uses global attention "
-                "for all layers. This might affect the model's behavior when "
-                "the context length is larger than the sliding window size "
-                f"({self.hf_text_config.sliding_window}).")
-            return None
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
         # addition to sliding window size. We check if that field is present
@@ -929,15 +930,19 @@ class SpeculativeConfig:
                 max_logprobs=target_model_config.max_logprobs,
             )
 
-            if (draft_model_config.hf_config.model_type == "mlp_speculator"
+            draft_hf_config = draft_model_config.hf_config
+            if (draft_hf_config.model_type == "mlp_speculator"
                     and target_parallel_config.world_size != 1):
                 # MLPSpeculator TP support will be added very soon
                 raise ValueError(
                     "Speculative decoding with mlp_speculator models does not "
                     "yet support distributed inferencing (TP > 1).")
 
-            n_predict = getattr(draft_model_config.hf_config, "n_predict",
-                                None)
+            if (num_speculative_tokens is not None
+                    and hasattr(draft_hf_config, "num_lookahead_tokens")):
+                draft_hf_config.num_lookahead_tokens = num_speculative_tokens
+
+            n_predict = getattr(draft_hf_config, "n_predict", None)
             if n_predict is not None:
                 if num_speculative_tokens is None:
                     # Default to max value defined in draft model config.
