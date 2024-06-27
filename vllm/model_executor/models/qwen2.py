@@ -48,6 +48,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 
+from .interfaces import SupportsLoRA
+
 
 class Qwen2MLP(nn.Module):
 
@@ -263,7 +265,9 @@ class Qwen2Model(nn.Module):
         return hidden_states
 
 
-class Qwen2ForCausalLM(nn.Module):
+class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
+    supports_lora = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -293,7 +297,6 @@ class Qwen2ForCausalLM(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        del lora_config
         # TODO (@robertgshaw2): see if this can be moved out
         if (cache_config.sliding_window is not None
                 and hasattr(config, "max_window_layers")):
@@ -307,7 +310,10 @@ class Qwen2ForCausalLM(nn.Module):
                              ))
 
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.quant_config = quant_config
         self.model = Qwen2Model(config, cache_config, quant_config)
 
