@@ -27,7 +27,6 @@ def is_custom_op_supported(op_name: str) -> bool:
 
 
 def hint_on_error(fn):
-
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
@@ -228,12 +227,35 @@ def cutlass_scaled_mm(a: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.shape[0] == b.shape[1] and bias.dtype == out_dtype
 
     m = a.shape[0]
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
     torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+
+    return out
+
+
+def cutlass_scaled_mm_azp(a: torch.Tensor,
+                          b: torch.Tensor,
+                          scale_a: torch.Tensor,
+                          scale_b: torch.Tensor,
+                          out_dtype: Type[torch.dtype],
+                          azp: torch.Tensor,
+                          azp_adj: torch.Tensor,
+                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.shape[0] == b.shape[1] and bias.dtype == out_dtype
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    if bias is None:
+        bias = torch.zeros((n,), device=a.device, dtype=out_dtype)
+    torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, bias, azp, azp_adj)
 
     return out
 
@@ -322,8 +344,8 @@ def scaled_fp8_quant(
 
 # int8
 def scaled_int8_quant(
-        input: torch.Tensor,
-        scale: Optional[torch.Tensor] = None
+    input: torch.Tensor,
+    scale: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize the input tensor to int8 and return the quantized tensor and scale.
@@ -519,7 +541,7 @@ for k, v in names_and_values.items():
     if isinstance(v, fn_type) \
         and v.__code__.co_filename == __file__ \
         and any(arg is torch.Tensor or arg == "torch.Tensor"
-                   for arg in v.__annotations__.values()):
+                for arg in v.__annotations__.values()):
         names_and_values_to_update[k] = hint_on_error(v)
 
 names_and_values.update(names_and_values_to_update)

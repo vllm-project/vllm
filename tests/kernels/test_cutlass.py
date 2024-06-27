@@ -259,7 +259,7 @@ def test_cutlass_int8_azp():
 
     azp_a = torch.rand((1,), device="cuda", dtype=torch.float32) + 2.0
     azp_aq_i8 = (azp_a / scale_a).to(dtype=torch.int8)
-    azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a # correct for rounding
+    azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a  # correct for rounding
 
     a_dq = scale_a * (aq_i32 + azp_aq_i8).to(dtype=torch.float32)
     torch.allclose(a_dq, scale_a * aq_f32 + azp_a)
@@ -281,6 +281,50 @@ def test_cutlass_int8_azp():
                                 scale_b,
                                 out_dtype=out_dtype,
                                 bias=azp_bias[0, :])
+    assert torch.allclose(out, baseline_dq, rtol=1e-2, atol=1e0)
+    assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
+
+
+def test_cutlass_int8_per_token_azp():
+    m = 32
+    n = 16
+    k = 64
+
+    scale_a = torch.randn((m, 1), device="cuda", dtype=torch.float32) / 10
+    scale_b = torch.randn((1, n), device="cuda", dtype=torch.float32) / 10
+
+    aq_i8 = rand_int8((m, k))
+    bq_i8 = rand_int8((n, k)).t()
+
+    aq_i32 = aq_i8.to(dtype=torch.int32)
+    bq_i32 = bq_i8.to(dtype=torch.int32)
+
+    aq_f32 = aq_i8.to(dtype=torch.float32)
+    bq_f32 = bq_i8.to(dtype=torch.float32)
+
+    b_dq = scale_b * bq_f32
+
+    azp_a = torch.rand((m, 1), device="cuda", dtype=torch.float32) + 2.0
+    azp_aq_i8 = (azp_a / scale_a).to(dtype=torch.int8)
+    azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a  # correct for rounding
+
+    a_dq = scale_a * (aq_i32 + azp_aq_i8).to(dtype=torch.float32)
+    torch.allclose(a_dq, scale_a * aq_f32 + azp_a)
+
+    out_dtype = torch.bfloat16
+    baseline_dq = torch.mm(a_dq, b_dq).to(out_dtype)
+
+    J = torch.ones((1, k), device="cuda", dtype=torch.float32)
+    azp_adj = scale_b * (J @ bq_f32).to(dtype=torch.float32)
+
+    baseline_q = (scale_a * scale_b * naive_mm(aq_i32 + azp_aq_i8, bq_i32)).to(dtype=out_dtype)
+
+    out = ops.cutlass_scaled_mm_azp(aq_i8,
+                                    bq_i8,
+                                    scale_a,
+                                    scale_b,
+                                    out_dtype,
+                                    azp_a[:,0], azp_adj[0,:])
     assert torch.allclose(out, baseline_dq, rtol=1e-2, atol=1e0)
     assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
 
