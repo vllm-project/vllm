@@ -70,7 +70,7 @@ def cutlass_fp8_gemm_helper(m: int,
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
-    assert torch.allclose(out, baseline, rtol=5e-2, atol=5e-2)
+    assert torch.allclose(out, baseline, rtol=1e-2, atol=5e-2)
 
 
 def cutlass_int8_gemm_helper(m: int,
