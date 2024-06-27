@@ -1,9 +1,11 @@
 from torch.nn import Parameter
-from typing import Optional, Callable
+from typing import Optional, Callable, List, Tuple, Union
 import torch
 from vllm.logger import init_logger
 
-__all__ = ["vLLMParameter", "PackedvLLMParameter"]
+__all__ = [
+    "vLLMParameter", "PackedvLLMParameter", "ScalerToArrayvLLMParameter"
+]
 
 logger = init_logger(__name__)
 
@@ -20,23 +22,37 @@ class vLLMParameter(Parameter):
     def __init__(self,
                  data: torch.Tensor,
                  requires_grad: Optional[bool] = False,
+                 use_row_loading: Optional[bool] = False,
+                 use_col_loading: Optional[bool] = False,
                  input_dim: Optional[int] = None,
                  output_dim: Optional[int] = None,
                  weight_loader: Optional[Callable] = None,
                  packed: Optional[bool] = False,
+                 use_col_shard_split: Optional[bool] = False,
                  ignore_warnings: Optional[bool] = True):
 
         self._ignore_warnings = True
+        self._use_row_loading = use_row_loading
+        self._use_col_loading = use_col_loading
+
+        if self._use_row_loading and input_dim is None:
+            raise ValueError(
+                "In order to use row loading, an input dim must be set")
+        if self._use_col_loading and output_dim is None:
+            raise ValueError(
+                "In order to use col loading, an output dim must be set")
+
         self._input_dim = input_dim
         self._output_dim = output_dim
         self._weight_loader = weight_loader
         self._is_packed = packed
-        self._use_column_loading = True if self._output_dim is not None else False
-        self._use_row_loading = True if self._input_dim is not None else False
-        self._use_row_shard_splitting = False
-        self._use_col_shard_splitting = False
+        self._use_col_shard_split = use_col_shard_split
+        if not self._use_col_loading and not self._use_col_shard_split:
+            logger.warning(
+                "Loading a weight without using default column loading "
+                "or column shard splitting, assume the weight is the same "
+                "for all partitions.")
         self._use_metadata_loading = False
-        self._use_bits_and_bytes = False
 
     @property
     def input_dim(self):
@@ -55,42 +71,18 @@ class vLLMParameter(Parameter):
         return self._is_packed
 
     @property
-    def use_row_loading(self):
-        return self._use_row_loading
+    def use_col_shard_split(self):
+        return self._use_col_shard_split
 
     @property
     def use_column_loading(self):
-        return self._use_column_loading
+        return self._use_col_loading
 
     @property
-    def use_row_shard_splitting(self):
-        return self._use_row_shard_splitting
+    def use_row_loading(self):
+        return self._use_row_loading
 
-    @use_row_shard_splitting.setter
-    def use_row_shard_splitting(self, value: bool):
-        if self.use_row_loading and value:
-            raise ValueError(
-                "Can only use one of row shard splitting or row default loading"
-            )
-        self._use_row_shard_splitting = value
-
-    @property
-    def use_col_shard_splitting(self):
-        return self._use_col_shard_splitting
-
-    @use_col_shard_splitting.setter
-    def use_col_shard_splitting(self, value: bool):
-        if self._use_column_loading and value:
-            raise ValueError(
-                "Can only use one of column shard splitting or column default loading"
-            )
-        if not self._use_column_loading and not value:
-            logger.warning(
-                "Loading a weight without using default column loading "
-                "or column shard splitting, assume the weight is the same "
-                "for all partitions.")
-        self._use_col_shard_splitting = value
-
+    # TODO: should be part of ScalerToArrayvLLMParameter logic?
     @property
     def use_metadata_loading(self):
         return self._use_metadata_loading
@@ -99,23 +91,36 @@ class vLLMParameter(Parameter):
     def use_metadata_loading(self, value: bool):
         self._use_metadata_loading = value
 
-    @property
-    def use_bits_and_bytes(self):
-        return self._use_bits_and_bytes
 
-    @use_bits_and_bytes.setter
-    def use_bits_and_bytes(self, value: bool):
-        self._use_bits_and_bytes = value
+class ScalerToArrayvLLMParameter(vLLMParameter):
 
-    # Should shard splitting params be in a another param?
-    # Packed Parameters which are sharded?
-    def row_shard_splitter(self, *args, **kwargs):
-        return NotImplementedError(
-            "A row shard splitter is not defined for this param")
+    def __init__(self, logical_widths: List[int], **kwargs):
+        self.logical_widths = logical_widths
+        self.qkv_idxs = {"q": 0, "k": 1, "v": 2}
 
-    def col_shard_splitter(self, *args, **kwargs):
-        return NotImplementedError(
-            "A column shard splitter is not defined for this param")
+        super().__init__(**kwargs, use_col_shard_split=True)
+
+        if self.use_column_loading:
+            raise ValueError("Can only use one of column shard splitting "
+                             "or column default loading")
+
+    def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
+        if isinstance(shard_id, int):
+            return shard_id
+
+        assert isinstance(shard_id, str)
+        assert shard_id in self.qkv_idxs
+        return self.qkv_idxs[shard_id]
+
+    def col_shard_splitter(
+            self, param_data: torch.Tensor, loaded_weight: torch.Tensor,
+            shard_id: Union[str, int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        shard_id = self._shard_id_as_int(shard_id)
+        offset = sum(self.logical_widths[:shard_id])
+        size = self.logical_widths[shard_id]
+        # update loaded weight with copies for broadcast.
+        loaded_weight = loaded_weight.repeat(size)
+        return param_data[offset:offset + size], loaded_weight
 
 
 class PackedvLLMParameter(vLLMParameter):
@@ -124,7 +129,6 @@ class PackedvLLMParameter(vLLMParameter):
                  packed_factor: int,
                  packed_dim: int,
                  marlin_tile_size: Optional[int] = None,
-                 use_bitsandbytes: Optional[int] = False,
                  **kwargs):
         self._packed_factor = packed_factor
         self._packed_dim = packed_dim
