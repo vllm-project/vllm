@@ -335,7 +335,6 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
-    @torch.no_grad()
     def forward(
         self,
         input_ids: torch.Tensor,
