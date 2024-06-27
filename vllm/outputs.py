@@ -2,8 +2,6 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
-import numpy as np
-
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
@@ -30,7 +28,7 @@ class CompletionOutput:
 
     index: int
     text: str
-    token_ids: Union[List[int], np.ndarray]
+    token_ids: List[int]
     cumulative_logprob: float
     logprobs: Optional[SampleLogprobs]
     finish_reason: Optional[str] = None
@@ -84,7 +82,7 @@ class RequestOutput:
         self,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: Union[List[int], np.ndarray],
+        prompt_token_ids: List[int],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
@@ -174,8 +172,7 @@ class EmbeddingRequestOutput:
     """
 
     def __init__(self, request_id: str, outputs: "EmbeddingOutput",
-                 prompt_token_ids: Union[List[int],
-                                         np.ndarray], finished: bool):
+                 prompt_token_ids: List[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished
