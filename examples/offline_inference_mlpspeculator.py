@@ -52,7 +52,6 @@ if __name__ == "__main__":
         speculative_model="ibm-fms/llama-13b-accelerator",
         # These are currently required for MLPSpeculator decoding
         use_v2_block_manager=True,
-        enforce_eager=True,
     )
 
     print("With speculation")
