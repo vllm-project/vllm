@@ -582,7 +582,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 if fp8_scales_shard_indexer is not None:
                     param_data, loaded_weight = fp8_scales_shard_indexer(
                         param_data, loaded_weight, loaded_shard_id)
-                    
+
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return

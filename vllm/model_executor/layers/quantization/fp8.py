@@ -171,8 +171,9 @@ class Fp8LinearMethod(LinearMethodBase):
                     **extra_weight_attrs)
 
     def scales_shard_indexer(
-            self, param: torch.Tensor, loaded_weight: torch.Tensor,
-            shard_id: Optional[Union[str, int]]) -> Tuple[torch.Tensor, torch.Tensor]:
+        self, param: torch.Tensor, loaded_weight: torch.Tensor,
+        shard_id: Optional[Union[str,
+                                 int]]) -> Tuple[torch.Tensor, torch.Tensor]:
         qkv_idxs = {"q": 0, "k": 1, "v": 2}
 
         if shard_id is None:
@@ -215,8 +216,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 start = 0
                 for idx, logical_width in enumerate(layer.logical_widths):
                     end = start + logical_width
-                    weight_dq = per_tensor_dequantize(layer.weight[start:end, :],
-                                                    layer.weight_scale[idx])
+                    weight_dq = per_tensor_dequantize(
+                        layer.weight[start:end, :], layer.weight_scale[idx])
 
                     layer.weight[start:end, :] = per_tensor_quantize(
                         weight_dq, layer.weight_scale.max())
