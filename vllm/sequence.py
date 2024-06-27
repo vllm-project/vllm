@@ -11,6 +11,7 @@ from vllm.block import LogicalTokenBlock
 from vllm.inputs import LLMInputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
@@ -219,18 +220,20 @@ class Sequence:
     """
 
     def __init__(
-        self,
-        seq_id: int,
-        inputs: LLMInputs,
-        block_size: int,
-        eos_token_id: Optional[int] = None,
-        lora_request: Optional[LoRARequest] = None,
+            self,
+            seq_id: int,
+            inputs: LLMInputs,
+            block_size: int,
+            eos_token_id: Optional[int] = None,
+            lora_request: Optional[LoRARequest] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> None:
         self.seq_id = seq_id
         self.inputs = inputs
         self.block_size = block_size
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
+        self.prompt_adapter_request = prompt_adapter_request
 
         self.data = SequenceData(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
@@ -263,6 +266,11 @@ class Sequence:
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
+
+    @property
+    def prompt_adapter_id(self) -> int:
+        return self.prompt_adapter_request.prompt_adapter_id \
+                        if self.prompt_adapter_request else 0
 
     def get_output_text_to_return(self, buffer_length: int):
         # We return the full output text if the sequence is finished.
@@ -428,6 +436,7 @@ class SequenceGroup:
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Dict[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -442,6 +451,7 @@ class SequenceGroup:
         self.state = SequenceGroupState()
         self.embeddings = embeddings
         self.pooling_params = pooling_params
+        self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
 
@@ -466,6 +476,16 @@ class SequenceGroup:
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
+
+    @property
+    def prompt_adapter_id(self) -> int:
+        return self.prompt_adapter_request.prompt_adapter_id \
+                        if self.prompt_adapter_request else 0
+
+    @property
+    def prompt_adapter_num_virtual_tokens(self) -> int:
+        return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens\
+                         if self.prompt_adapter_request else 0
 
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
@@ -643,6 +663,7 @@ class SequenceGroupMetadata:
         multi_modal_data: Optional["MultiModalData"] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -651,6 +672,7 @@ class SequenceGroupMetadata:
         self.block_tables = block_tables
         self.pooling_params = pooling_params
         self.lora_request = lora_request
+        self.prompt_adapter_request = prompt_adapter_request
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
@@ -674,6 +696,16 @@ class SequenceGroupMetadata:
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
+
+    @property
+    def prompt_adapter_id(self) -> int:
+        return self.prompt_adapter_request.prompt_adapter_id \
+                        if self.prompt_adapter_request else 0
+
+    @property
+    def prompt_adapter_num_virtual_tokens(self) -> int:
+        return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
+                        if self.prompt_adapter_request else 0
 
     @property
     def token_chunk_size(self) -> int:
