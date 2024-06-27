@@ -607,6 +607,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             else:
                 tmp_block = self.allocate_mutable_block(
                     prev_block=block.prev_block)
+                tmp_block.append_token_ids(block.token_ids)
 
             block_id = tmp_block.block_id
             self._block_pool.free_block(tmp_block)

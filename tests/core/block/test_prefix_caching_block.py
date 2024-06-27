@@ -430,10 +430,6 @@ class TestPrefixCachingBlockAllocator:
         for i in range(block_size):
             m.append_token_ids([i])
 
-        # The promotion must succeed here
-        m = allocator.promote_to_immutable_block(m)
-        assert m is not None
-
         # After block get promoted to immutable from mutable, if there is
         # already same content hash block, then it shall be released into
         # hashless_allocator

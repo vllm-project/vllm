@@ -388,6 +388,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                                                          src_device=Device.CPU,
                                                          dst_device=Device.GPU)
 
+            # Refresh the block ids of the table (post-swap)
+            self.block_tables[seq.seq_id].update(blocks)
+
             seq_physical_block_id_mapping = {
                 self.block_allocator.get_physical_block_id(
                     Device.CPU, cpu_block_id):

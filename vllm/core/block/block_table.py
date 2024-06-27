@@ -90,8 +90,14 @@ class BlockTable:
         blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                      token_ids=token_ids,
                                                      device=device)
-        self._blocks.update(blocks)
+        self.update(blocks)
         self._num_full_slots = len(token_ids)
+
+    def update(self, blocks):
+        """Resets the table to the newly provided blocks 
+        (with their corresponding block ids)
+        """
+        self._blocks.update(blocks)
 
     def append_token_ids(self,
                          token_ids: List[int],

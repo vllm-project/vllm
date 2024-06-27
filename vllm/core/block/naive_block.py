@@ -323,8 +323,23 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def swap_in(self, blocks: List[Block]) -> None:
         for block in blocks:
-            assert block.block_id is None  # Must be swapped out
-            block.block_id = self._allocate_block_id()
+            # Here we allocate either immutable or mutable block and then
+            # extract its block_id. Note that the block object is released
+            # and the block_id is assigned to "block" to allow reusing the
+            # existing "block" object
+            if block.is_full:
+                tmp_block = self.allocate_immutable_block(
+                    prev_block=block.prev_block, token_ids=block.token_ids)
+            else:
+                tmp_block = self.allocate_mutable_block(
+                    prev_block=block.prev_block)
+                tmp_block.append_token_ids(block.token_ids)
+
+            block_id = tmp_block.block_id
+            tmp_block.block_id = None
+            self._block_pool.free_block(tmp_block)
+
+            block.block_id = block_id  # Assign block_id
 
 
 class NaiveBlock(Block):
