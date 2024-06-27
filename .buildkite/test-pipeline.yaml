@@ -193,18 +193,16 @@ steps:
 - label: LM Eval Small Models
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
-  - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@9516087b81a61d0e220b22cc1b75be76de23bc10
-  - pip install openai==1.3.9
-  - bash ./run-lm-eval-vllm.sh -c configs/small-models.txt
+  - pip install lm-eval
+  - LM_EVAL_TP_SIZE=1 LM_EVAL_TEST_DATA_FILE=small-models.yaml pytest -s test_lm_eval_correctness.py
 
 - label: LM Eval Large Models
   gpus: a100
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
-  - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@9516087b81a61d0e220b22cc1b75be76de23bc10
-  - pip install openai==1.3.9
-  - bash ./run-lm-eval-vllm.sh -c configs/large-models.txt
+  - pip install lm-eval
+  - LM_EVAL_TP_SIZE=4 LM_EVAL_TEST_DATA_FILE=large-models.yaml pytest -s test_lm_eval_correctness.py
 
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
