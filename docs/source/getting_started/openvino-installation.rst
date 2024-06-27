@@ -1,7 +1,7 @@
 .. _installation_openvino:
 
 Installation with OpenVINO
-========================
+==========================
 
 vLLM powered by OpenVINO supports all LLM models from :ref:`vLLM supported models list <_supported_models>` and can perform optimal model serving on all x86-64 CPUs with, at least, AVX2 support. OpenVINO vLLM backend supports the following advanced vLLM features:
 
@@ -37,7 +37,7 @@ Quick start using Dockerfile
 .. _install_openvino_backend_from_source:
 
 Install from source
------------------
+-------------------
 
 - First, install Python. For example, on Ubuntu 22.04, you can run:
 
@@ -62,7 +62,7 @@ Install from source
 .. _openvino_backend_performance_tips:
 
 Performance tips
------------------
+----------------
 
 vLLM OpenVINO backend uses the following environment variables to control behavior:
 
@@ -84,7 +84,7 @@ OpenVINO best known configuration is:
 .. _openvino_backend_limitations:
 
 Limitations
------------------
+-----------
 
 - LoRA serving is not supported.
 
