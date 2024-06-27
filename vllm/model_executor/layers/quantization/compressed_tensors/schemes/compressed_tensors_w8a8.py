@@ -63,7 +63,6 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
                 weight_scale, {
                     "weight_loader": weight_loader,
                     "is_per_tensor_scale": True,
-                    "ignore_warning": True,
                 })
 
 
