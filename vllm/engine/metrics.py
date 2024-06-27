@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Protocol, Union
 
 import numpy as np
 #from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
- #                              disable_created_metrics)
+#                              disable_created_metrics)
 import prometheus_client
 
 from vllm.executor.ray_utils import ray
@@ -109,12 +109,13 @@ class Metrics:
             labelnames=labelnames,
             buckets=build_1_2_5_buckets(max_model_len),
         )
-        self.histogram_num_generation_tokens_request = self._base_library.Histogram(
-            name="vllm:request_generation_tokens",
-            documentation="Number of generation tokens processed.",
-            labelnames=labelnames,
-            buckets=build_1_2_5_buckets(max_model_len),
-        )
+        self.histogram_num_generation_tokens_request = \
+            self._base_library.Histogram(
+                name="vllm:request_generation_tokens",
+                documentation="Number of generation tokens processed.",
+                labelnames=labelnames,
+                buckets=build_1_2_5_buckets(max_model_len),
+            )
         self.histogram_best_of_request = self._base_library.Histogram(
             name="vllm:request_params_best_of",
             documentation="Histogram of the best_of request parameter.",
@@ -150,6 +151,7 @@ class Metrics:
             if hasattr(collector, "_name") and "vllm" in collector._name:
                 self._base_library.REGISTRY.unregister(collector)
 
+
 class RayMetrics(Metrics):
     """
     RayMetrics is used by RayPrometheusStatLogger to log to Ray metrics.
@@ -159,6 +161,7 @@ class RayMetrics(Metrics):
 
     def _unregister_vllm_metrics(self) -> None:
         pass
+
 
 # end-metrics-definitions
 
@@ -224,17 +227,21 @@ class SupportsMetricsInfo(Protocol):
     def metrics_info(self) -> Dict[str, str]:
         ...
 
+
 def local_interval_elapsed(now: float, last_log: float,
                            local_interval: float) -> bool:
     elapsed_time = now - last_log
     return elapsed_time > local_interval
 
+
 def get_throughput(tracked_stats: List[int], now: float,
                    last_log: float) -> float:
     return float(np.sum(tracked_stats) / (now - last_log))
 
+
 class StatLoggerBase(ABC):
     """Base class for StatLogger."""
+
     def __init__(self, local_interval: float) -> None:
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: List[int] = []
@@ -250,9 +257,10 @@ class StatLoggerBase(ABC):
     def log(self, stats: Stats) -> None:
         raise NotImplementedError
 
+
 class LoggingStatLogger(StatLoggerBase):
     """LoggingStatLogger is used in LLMEngine to log to Stdout."""
-    
+
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         raise NotImplementedError
 
@@ -314,6 +322,7 @@ class LoggingStatLogger(StatLoggerBase):
                 f"Number of draft tokens tokens: {metrics.draft_tokens}, "
                 f"Number of emitted tokens tokens: {metrics.emitted_tokens}.")
 
+
 class PrometheusStatLogger(StatLoggerBase):
     """PrometheusStatLogger is used LLMEngine to log to Promethus."""
     _base_library = prometheus_client
@@ -330,26 +339,26 @@ class PrometheusStatLogger(StatLoggerBase):
         if type == "cache_config":
             self.metrics.info_cache_config.info(obj.metrics_info())
 
-    def _log_gauge(self, gauge: _base_library.Gauge, data: Union[int, float]) -> None:
+    def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
 
-    def _log_counter(self, counter: _base_library.Counter, data: Union[int, float]) -> None:
+    def _log_counter(self, counter, data: Union[int, float]) -> None:
         # Convenience function for logging to counter.
         counter.labels(**self.labels).inc(data)
 
-    def _log_counter_labels(self, counter: _base_library.Counter, data: CollectionsCounter,
+    def _log_counter_labels(self, counter, data: CollectionsCounter,
                             label_key: str) -> None:
         # Convenience function for collection counter of labels.
         for label, count in data.items():
             counter.labels(**{**self.labels, label_key: label}).inc(count)
 
-    def _log_histogram(self, histogram: _base_library.Histogram,
-                       data: Union[List[int], List[float]]) -> None:
+    def _log_histogram(self, histogram, data: Union[List[int],
+                                                    List[float]]) -> None:
         # Convenience function for logging list to histogram.
         for datum in data:
             histogram.labels(**self.labels).observe(datum)
-            
+
     def _log_prometheus(self, stats: Stats) -> None:
         # System state data
         self._log_gauge(self.metrics.gauge_scheduler_running,
@@ -425,7 +434,7 @@ class PrometheusStatLogger(StatLoggerBase):
             prompt_throughput = get_throughput(self.num_prompt_tokens,
                                                now=stats.now,
                                                last_log=self.last_local_log)
-            generation_throughput = self._get_throughput(
+            generation_throughput = get_throughput(
                 self.num_generation_tokens,
                 now=stats.now,
                 last_log=self.last_local_log)
@@ -438,6 +447,7 @@ class PrometheusStatLogger(StatLoggerBase):
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
             self.last_local_log = stats.now
+
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
     _base_library = ray_metrics

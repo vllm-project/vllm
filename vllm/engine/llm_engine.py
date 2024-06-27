@@ -13,8 +13,8 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import (StatLoggerBase, LoggingStatLogger, 
-                                 PrometheusStatLogger, Stats)
+from vllm.engine.metrics import (LoggingStatLogger, PrometheusStatLogger,
+                                 StatLoggerBase, Stats)
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -161,7 +161,7 @@ class LLMEngine:
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Dict[str, StatLoggerBase] = None,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -296,16 +296,18 @@ class LLMEngine:
         if self.log_stats:
             if stat_loggers:
                 self.stat_loggers = stat_loggers
-            else:  
+            else:
                 self.stat_loggers = {
-                    'logging': LoggingStatLogger(
+                    'logging':
+                    LoggingStatLogger(
                         local_interval=_LOCAL_LOGGING_INTERVAL_SEC),
-                    'prometheus': PrometheusStatLogger(
+                    'prometheus':
+                    PrometheusStatLogger(
                         local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                         labels=dict(model_name=model_config.served_model_name),
                         max_model_len=self.model_config.max_model_len),
                 }
-                self.stat_loggers['prometheus'].info("cache_config", 
+                self.stat_loggers['prometheus'].info("cache_config",
                                                      self.cache_config)
 
         self.tracer = None
