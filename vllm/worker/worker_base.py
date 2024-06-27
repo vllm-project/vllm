@@ -124,7 +124,6 @@ class WorkerInput:
     blocks_to_swap_in: Optional[torch.Tensor] = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
-    finished_request_ids: Optional[List[str]] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -140,7 +139,6 @@ class WorkerInput:
             blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
-            finished_request_ids=tensor_dict.pop("finished_request_ids"),
         )
 
     def as_broadcastable_tensor_dict(
@@ -152,8 +150,7 @@ class WorkerInput:
             "num_seq_groups": self.num_seq_groups,
             "blocks_to_swap_in": self.blocks_to_swap_in,
             "blocks_to_swap_out": self.blocks_to_swap_out,
-            "blocks_to_copy": self.blocks_to_copy,
-            "finished_request_ids": self.finished_request_ids,
+            "blocks_to_copy": self.blocks_to_copy
         }
 
         return tensor_dict
@@ -230,7 +227,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 execute_model_req=execute_model_req)
             model_input: ModelRunnerInputBase = (
                 self.model_runner.prepare_model_input(
-                    execute_model_req.seq_group_metadata_list))
+                    execute_model_req.seq_group_metadata_list,
+                    execute_model_req.finished_request_ids
+                ))
 
             if self.do_metadata_broadcast:
                 broadcast_data = worker_input.as_broadcastable_tensor_dict()
@@ -256,7 +255,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             return []
 
         output = self.model_runner.execute_model(
-            model_input, self.kv_cache, worker_input.finished_request_ids)
+            model_input, self.kv_cache)
         # Worker only supports single-step execution. Wrap the output in a
         # list to conform to interface.
         return [output]

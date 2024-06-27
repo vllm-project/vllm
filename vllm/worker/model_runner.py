@@ -69,6 +69,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
+    finished_request_ids: Optional[List[str]] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -78,6 +79,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
+            "finished_request_ids": self.finished_request_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         return tensor_dict
@@ -112,6 +114,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
+            "finished_request_ids": self.finished_request_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -311,6 +314,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        finished_request_ids: Optional[List[str]]
     ) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -729,7 +733,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             lora_mapping=lora_mapping,
             lora_requests=lora_requests,
             multi_modal_kwargs=multi_modal_kwargs,
-            request_ids_to_seq_ids=request_ids_to_seq_ids)
+            request_ids_to_seq_ids=request_ids_to_seq_ids,
+            finished_request_ids=finished_request_ids)
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -803,9 +808,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        model_input = self.prepare_model_input(seqs)
         finished_request_ids = [seq.request_id for seq in seqs]
-        self.execute_model(model_input, kv_caches, finished_request_ids)
+        model_input = self.prepare_model_input(seqs,finished_request_ids)
+        self.execute_model(model_input, kv_caches)
         torch.cuda.synchronize()
         return
 
@@ -972,6 +977,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        finished_request_ids: Optional[List[str]]
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -987,7 +993,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         If cuda graph is required, this API automatically pads inputs.
         """
         model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list)
+            seq_group_metadata_list,
+            finished_request_ids)
         sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
                                                      model_input.seq_lens,
                                                      model_input.query_lens,
@@ -1023,7 +1030,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         seqlen_agnostic_kwargs = {
-            "finished_request_ids": finished_request_ids,
+            "finished_request_ids": model_input.finished_request_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         }
         hidden_states = model_executable(
