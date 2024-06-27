@@ -1,4 +1,5 @@
 import time
+import base64
 from typing import AsyncIterator, List, Optional, Tuple
 
 from fastapi import Request
@@ -24,12 +25,17 @@ def request_output_to_embedding_response(
     request_id: str,
     created_time: int,
     model_name: str,
+    encoding_format: str = "float"
 ) -> EmbeddingResponse:
     data: List[EmbeddingResponseData] = []
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
         assert final_res is not None
         prompt_token_ids = final_res.prompt_token_ids
+
+        embedding = final_res.outputs.embedding
+        if encoding_format == "base64":
+            embedding = base64.b64encode(embedding).decode('utf-8')
 
         embedding_data = EmbeddingResponseData(
             index=idx, embedding=final_res.outputs.embedding)
@@ -129,7 +135,8 @@ class OpenAIServingEmbedding(OpenAIServing):
                     return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
             response = request_output_to_embedding_response(
-                final_res_batch, request_id, created_time, model_name)
+                final_res_batch, request_id, created_time, model_name,
+                encoding_format=request.encoding_format)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
