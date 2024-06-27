@@ -108,6 +108,7 @@ class LRUEvictor(Evictor):
                                                   last_accessed)
 
     def update(self, block_id: int, last_accessed: float):
+        # put newest element to the end of free_table to make sure free_table is sorted by last_accessed
         self.free_table[block_id].last_accessed = last_accessed
         self.free_table.move_to_end(block_id)
 
