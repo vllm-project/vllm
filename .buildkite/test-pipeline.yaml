@@ -210,3 +210,4 @@ steps:
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
   - pytest -v -s -x lora/test_mixtral.py
+  - pytest -v -s -x lora/test_unexpected_modules.py

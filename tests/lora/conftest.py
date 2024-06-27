@@ -169,6 +169,13 @@ def mixtral_lora_files():
 
 
 @pytest.fixture(scope="session")
+def mixtral_lora_files_unexpected_modules():
+    # This adapter has incorrect adapter_config.json.
+    # See https://github.com/vllm-project/vllm/pull/5909
+    return snapshot_download(repo_id="SangBinCho/mixtral-lora")
+
+
+@pytest.fixture(scope="session")
 def gemma_lora_files():
     return snapshot_download(repo_id="wskwon/gemma-7b-test-lora")
 
