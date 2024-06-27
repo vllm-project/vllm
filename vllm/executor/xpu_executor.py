@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 
@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
@@ -62,8 +62,8 @@ class XPUExecutor(GPUExecutor):
         return (worker_module_name, worker_class_name)
 
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 
