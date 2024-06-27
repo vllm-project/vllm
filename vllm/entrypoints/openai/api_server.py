@@ -19,10 +19,17 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               CompletionRequest,
-                                              EmbeddingRequest, ErrorResponse)
+                                              DetokenizeRequest,
+                                              DetokenizeResponse,
+                                              EmbeddingRequest, ErrorResponse,
+                                              TokenizeRequest,
+                                              TokenizeResponse)
+# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -83,6 +90,28 @@ async def health() -> Response:
     """Health check."""
     await openai_serving_chat.engine.check_health()
     return Response(status_code=200)
+
+
+@app.post("/tokenize")
+async def tokenize(request: TokenizeRequest):
+    generator = await openai_serving_completion.create_tokenize(request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        assert isinstance(generator, TokenizeResponse)
+        return JSONResponse(content=generator.model_dump())
+
+
+@app.post("/detokenize")
+async def detokenize(request: DetokenizeRequest):
+    generator = await openai_serving_completion.create_detokenize(request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        assert isinstance(generator, DetokenizeResponse)
+        return JSONResponse(content=generator.model_dump())
 
 
 @app.get("/v1/models")

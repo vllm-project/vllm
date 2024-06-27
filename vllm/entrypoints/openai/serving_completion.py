@@ -2,7 +2,7 @@ import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
                     Optional)
 from typing import Sequence as GenericSequence
-from typing import Tuple
+from typing import Tuple, Union
 
 from fastapi import Request
 
@@ -16,7 +16,11 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              UsageInfo)
+                                              DetokenizeRequest,
+                                              DetokenizeResponse,
+                                              ErrorResponse, TokenizeRequest,
+                                              TokenizeResponse, UsageInfo)
+# yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
@@ -443,3 +447,35 @@ class OpenAIServingCompletion(OpenAIServing):
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
         )
+
+    async def create_tokenize(
+        self,
+        request: TokenizeRequest,
+    ) -> Union[TokenizeResponse, ErrorResponse]:
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        prompt_input = self._tokenize_prompt_input(
+            request,
+            request.prompt,
+            add_special_tokens=request.add_special_tokens,
+        )
+        input_ids = prompt_input["prompt_token_ids"]
+
+        return TokenizeResponse(tokens=input_ids,
+                                count=len(input_ids),
+                                max_model_len=self.max_model_len)
+
+    async def create_detokenize(
+        self,
+        request: DetokenizeRequest,
+    ) -> Union[DetokenizeResponse, ErrorResponse]:
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        prompt_input = self._tokenize_prompt_input(request, request.tokens)
+        input_text = prompt_input["prompt"]
+
+        return DetokenizeResponse(prompt=input_text)
