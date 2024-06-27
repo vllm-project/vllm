@@ -154,7 +154,6 @@ class PersimmonAttention(nn.Module):
 
         q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        print("attn_output", attn_output.mean().item())
         output, _ = self.dense(attn_output)
         return output
 

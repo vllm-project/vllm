@@ -11,7 +11,7 @@ pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    "What's the content of the image?\n",  # noqa: E501
+    "What color is the stop sign?\n",  # noqa: E501
     "cherry_blossom":
     "What is the season?\n",  # noqa: E501
 })
@@ -77,6 +77,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     model_id, vlm_config = model_and_config
     _, _, H, W = vlm_config.image_input_shape
 
+    # resize images to the model's input shape
     hf_images = [asset.for_hf().resize((W, H)) for asset in image_assets]
     vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
     for i in range(len(image_assets)):
@@ -112,40 +113,3 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
-
-
-# @pytest.mark.parametrize("model_and_config", model_and_vl_config)
-# @pytest.mark.parametrize("dtype", ["half"])
-# @pytest.mark.parametrize("max_tokens", [1])
-# def test_models_text_only(
-#     hf_runner,
-#     vllm_runner,
-#     # example_prompts,
-#     model_and_config,
-#     dtype: str,
-#     max_tokens: int,
-# ) -> None:
-#     # To pass the small model tests, we need full precision.
-#     # assert dtype == "float"
-#     example_prompts = [
-#         "Write a short story about a robot that dreams for the first time."
-#     ]
-#     model, vlm_config = model_and_config
-
-#     with hf_runner(model, dtype=dtype) as hf_model:
-#         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-
-#     with vllm_runner(model,
-#                      dtype=dtype,
-#                      enforce_eager=True,
-#                      gpu_memory_utilization=0.95,
-#                      **vlm_config.as_cli_args_dict()) as vllm_model:
-#         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-
-#     for i in range(len(example_prompts)):
-#         hf_output_ids, hf_output_str = hf_outputs[i]
-#         vllm_output_ids, vllm_output_str = vllm_outputs[i]
-#         assert hf_output_str == vllm_output_str, (
-#             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-#         assert hf_output_ids == vllm_output_ids, (
-#             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
