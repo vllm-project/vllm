@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 import openai
 import pytest
@@ -216,7 +216,7 @@ async def test_chat_streaming_image(client: openai.AsyncOpenAI,
         temperature=0.0,
         stream=True,
     )
-    chunks = []
+    chunks: List[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta
