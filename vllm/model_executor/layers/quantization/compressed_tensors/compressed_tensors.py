@@ -15,6 +15,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     find_first_name_or_class_match)
 
+__all__ = ["CompressedTensorsLinearMethod"]
+
 
 class CompressedTensorsConfig(QuantizationConfig):
 

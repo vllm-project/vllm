@@ -1,6 +1,8 @@
-from torch.nn import Parameter
-from typing import Optional, Callable, List, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
+
 import torch
+from torch.nn import Parameter
+
 from vllm.logger import init_logger
 
 __all__ = [

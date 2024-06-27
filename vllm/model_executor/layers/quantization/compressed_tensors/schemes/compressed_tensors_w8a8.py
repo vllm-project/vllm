@@ -6,7 +6,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
-from vllm.model_executor.parameter import vLLMParameter, ScalerToArrayvLLMParameter
+from vllm.model_executor.parameter import (ScalerToArrayvLLMParameter,
+                                           vLLMParameter)
 
 
 class CompressedTensorsW8A8(CompressedTensorsScheme):
