@@ -71,8 +71,8 @@ def test_apply_lora(m, n, k, rank, dtype) -> None:
 
     output[:] = 0
     _apply_lora(input, lora_a_stack, lora_b_stack,
-                torch.full((len(input), ), -1, device="cuda"),
-                output, lora_bias)
+                torch.full((len(input), ), -1, device="cuda"), output,
+                lora_bias)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -123,11 +123,8 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
                     dtype=dtype) for i in range(2)
     ]
     lora_bias_stacks = [
-        torch.zeros(8,
-                    1,
-                    lora_1.lora_b.shape[1],
-                    device="cuda",
-                    dtype=dtype) for i in range(2)
+        torch.zeros(8, 1, lora_1.lora_b.shape[1], device="cuda", dtype=dtype)
+        for i in range(2)
     ]
     for i in range(lora_a_stacks[0].shape[0]):
         lora_a_stacks[0][i][0] = lora_1.lora_a.T
@@ -141,7 +138,7 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
         torch.randint(0,
                       lora_a_stacks[0].shape[0], (len(input), ),
                       device="cuda"), output, (m // 2, m // 2),
-                       lora_bias_stacks)
+        lora_bias_stacks)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
@@ -213,17 +210,10 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
                     dtype=dtype) for i in range(2)
     ]
     lora_bias_stacks = [
-        torch.zeros(8,
-                    1,
-                    lora_q.lora_b.shape[1],
-                    device="cuda",
-                    dtype=dtype)
+        torch.zeros(8, 1, lora_q.lora_b.shape[1], device="cuda", dtype=dtype)
     ] + [
-        torch.zeros(8,
-                    1,
-                    lora_k.lora_b.shape[1],
-                    device="cuda",
-                    dtype=dtype) for i in range(2)
+        torch.zeros(8, 1, lora_k.lora_b.shape[1], device="cuda", dtype=dtype)
+        for i in range(2)
     ]
     for i in range(lora_a_stacks[0].shape[0]):
         lora_a_stacks[0][i][0] = lora_q.lora_a.T
@@ -239,16 +229,16 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
         torch.randint(0,
                       lora_a_stacks[0].shape[0], (len(input), ),
                       device="cuda"), output, (qkv[0], qkv[1], qkv[2]),
-                      lora_bias_stacks)
+        lora_bias_stacks)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
 
     output[:] = 0
     _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks,
-                              torch.full((len(input), ), -1, device="cuda"),
-                              output, (qkv[0], qkv[1], qkv[2]),
-                              lora_bias_stacks)
+                              torch.full((len(input), ), -1,
+                                         device="cuda"), output,
+                              (qkv[0], qkv[1], qkv[2]), lora_bias_stacks)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
