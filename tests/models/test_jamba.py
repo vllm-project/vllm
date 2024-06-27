@@ -1,8 +1,6 @@
 import pytest
 
-MODELS = [
-    "ai21labs/Jamba-tiny-random"
-]
+MODELS = ["ai21labs/Jamba-tiny-random"]
 
 
 @pytest.mark.parametrize("model", MODELS)

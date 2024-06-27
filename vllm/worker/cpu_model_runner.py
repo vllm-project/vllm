@@ -327,7 +327,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
     def prepare_model_input(
             self,
             seq_group_metadata_list: List[SequenceGroupMetadata],
-            finished_request_ids: Optional[List[str]] = None) -> CPUModelInput:
+            finished_requests_ids: Optional[List[str]] = None
+    ) -> CPUModelInput:
         multi_modal_kwargs = None
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.

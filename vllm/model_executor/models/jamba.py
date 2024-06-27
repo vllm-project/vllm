@@ -681,8 +681,8 @@ class JambaForCausalLM(nn.Module):
                 indices,
             ) = self._prepare_current_run_mamba_cache(request_ids_to_seq_ids,
                                                       batch_size)
-            finished_request_ids = kwargs["finished_request_ids"]
-            self._release_seqlen_agnostic_cache(finished_request_ids)
+            finished_requests_ids = kwargs["finished_requests_ids"]
+            self._release_mamba_cache(finished_requests_ids)
         else:
             ## CG capturing runs
             current_seqlen_agnostic_cache, indices = (
@@ -772,8 +772,8 @@ class JambaForCausalLM(nn.Module):
                                                   batch_size)
         self.current_indices = indices
 
-        finished_request_ids = kwargs["finished_request_ids"]
-        self._release_seqlen_agnostic_cache(finished_request_ids)
+        finished_requests_ids = kwargs["finished_requests_ids"]
+        self._release_mamba_cache(finished_requests_ids)
 
         for i in [0, 1]:
             input_buffers["seqlen_agnostic_capture_inputs"][i].copy_(
@@ -790,8 +790,7 @@ class JambaForCausalLM(nn.Module):
             self.mamba_gc_cache_buffer[1][:, :batch_size],
         )
 
-    def _release_seqlen_agnostic_cache(self,
-                                       finished_seq_groups_req_ids: List[str]):
+    def _release_mamba_cache(self, finished_seq_groups_req_ids: List[str]):
         for req_id in finished_seq_groups_req_ids:
             if req_id in self.mamba_cache_indices_mapping:
                 self.mamba_cache_indices_mapping.pop(req_id)

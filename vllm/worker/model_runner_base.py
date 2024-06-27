@@ -135,9 +135,10 @@ class ModelRunnerBase(ABC, Generic[T]):
 
     @abstractmethod
     def prepare_model_input(
-            self,
-            seq_group_metadata_list: List[SequenceGroupMetadata],
-            finished_request_ids: Optional[List[str]] = None) -> T:
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        finished_requests_ids: Optional[List[str]] = None,
+    ) -> T:
         """
         Prepare the inputs to ModelRunnerBase.execute_model from an execution
         request. This method may move data to the worker's local device. It is

@@ -291,7 +291,7 @@ class Scheduler:
         # Contain decode requests that are swapped out.
         self.swapped: Deque[SequenceGroup] = deque()
         # Sequence groups finished since last step iter.
-        self.finished_request_id: List[str] = list()
+        self.finished_requests_ids: List[str] = list()
         # Time at previous scheduling step
         self.prev_time = 0.0
         # Did we schedule a prompt at previous step?
@@ -365,11 +365,11 @@ class Scheduler:
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
-    def flush_finished_request_ids(self) -> List[str]:
+    def flush_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""
-        finished_request_ids = self.finished_request_id
-        self.finished_request_id = []
-        return finished_request_ids
+        finished_requests_ids = self.finished_requests_ids
+        self.finished_requests_ids = []
+        return finished_requests_ids
 
     def _schedule_running(
         self,
@@ -1034,7 +1034,7 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
-        self.finished_request_id += [
+        self.finished_requests_ids += [
             seq_group.request_id for seq_group in self.running
             if seq_group.is_finished()
         ]

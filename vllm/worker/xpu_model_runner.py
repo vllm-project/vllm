@@ -190,7 +190,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
     def prepare_model_input(
             self,
             seq_group_metadata_list: List[SequenceGroupMetadata],
-            finished_request_ids: Optional[List[str]] = None
+            finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForXPU:
         multi_modal_input = None
         if self.is_driver_worker:

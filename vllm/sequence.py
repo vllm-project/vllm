@@ -904,7 +904,7 @@ class ExecuteModelRequest:
     # Optional hidden states from prior step.
     previous_hidden_states: Optional[HiddenStates] = None
     # Finished request ids since last step.
-    finished_request_ids: List[str] = field(default_factory=list)
+    finished_requests_ids: List[str] = field(default_factory=list)
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -918,4 +918,4 @@ class ExecuteModelRequest:
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
             previous_hidden_states=self.previous_hidden_states,
-            finished_request_ids=self.finished_request_ids)
+            finished_requests_ids=self.finished_requests_ids)
