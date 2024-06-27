@@ -228,5 +228,7 @@ def override_env(name: str, value: str):
 
     yield
 
-    if prev_value is not None:
+    if prev_value is None:
+        del os.environ[name]
+    else:
         os.environ[name] = prev_value
