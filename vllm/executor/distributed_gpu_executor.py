@@ -64,8 +64,8 @@ class DistributedGPUExecutor(GPUExecutor):
                           num_cpu_blocks=num_cpu_blocks)
 
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[SamplerOutput]]:
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
@@ -79,7 +79,7 @@ class DistributedGPUExecutor(GPUExecutor):
         if self.parallel_worker_tasks is None:
             return
 
-        self._driver_execute_model()
+        self._driver_execute_model(execute_model_req=None)
         parallel_worker_tasks = self.parallel_worker_tasks
         self.parallel_worker_tasks = None
         # Ensure that workers exit model loop cleanly
@@ -100,6 +100,13 @@ class DistributedGPUExecutor(GPUExecutor):
             lora_id=lora_id,
         )
 
+    def pin_lora(self, lora_id: int) -> bool:
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self._run_workers(
+            "pin_lora",
+            lora_id=lora_id,
+        )
+
     def list_loras(self) -> Set[int]:
         return self._run_workers("list_loras")
 
@@ -116,13 +123,13 @@ class DistributedGPUExecutor(GPUExecutor):
 
     @abstractmethod
     def _driver_execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
-        Passing None will cause the driver to stop the model execution
-        loop running in each of the remote workers.
+        Passing None will cause the driver to stop the model execution loop
+        running in each of the remote workers. In this case, this method
+        returns None. Otherwise, this method returns the model output.
         """
         raise NotImplementedError
 

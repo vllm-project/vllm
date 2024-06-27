@@ -1,6 +1,4 @@
-import argparse
 import asyncio
-import sys
 from io import StringIO
 from typing import Awaitable, List
 
@@ -16,14 +14,14 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import random_uuid
+from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible batch runner.")
     parser.add_argument(
         "-i",
@@ -137,9 +135,6 @@ async def main(args):
 
     output_buffer.seek(0)
     await write_file(args.output_file, output_buffer.read().strip())
-
-    # Temporary workaround for https://github.com/vllm-project/vllm/issues/4789
-    sys.exit(0)
 
 
 if __name__ == "__main__":
