@@ -40,15 +40,15 @@ tensor; otherwise, this is a list of tensors with one element per batch.
 
 if sys.version_info < (3, 9):
     # UserDict cannot be subscripted
-    class MultiModalInputsBase(UserDict):
+    class _MultiModalInputsBase(UserDict):
         pass
 else:
 
-    class MultiModalInputsBase(UserDict[str, torch.Tensor]):
+    class _MultiModalInputsBase(UserDict[str, torch.Tensor]):
         pass
 
 
-class MultiModalInputs(MultiModalInputsBase):
+class MultiModalInputs(_MultiModalInputsBase):
     """
     A dictionary that represents the keyword arguments to
     :meth:`~torch.nn.Module.forward`.
