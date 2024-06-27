@@ -294,7 +294,7 @@ class LLMEngine:
 
         # Metric Logging.
         if self.log_stats:
-            if stat_loggers:
+            if stat_loggers is not None:
                 self.stat_loggers = stat_loggers
             else:
                 self.stat_loggers = {
