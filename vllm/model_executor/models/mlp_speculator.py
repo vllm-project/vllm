@@ -132,13 +132,26 @@ class MLPSpeculator(nn.Module):
             last_tokens = output.sampled_token_ids
             next_tokens.append(output)
 
+            remaining = num_predict_tokens - 1 - head_index
+            if remaining and (output.logprobs.gather(1, last_tokens) <
+                              self.cutoff).all():
+                # Don't execute the model for any more tokens, just fill
+                # remaining token slots with the same output
+                next_tokens.extend([output] * remaining)
+                break
+
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
+        weight = None
         for name, loaded_weight in weights:
             param = params_dict.get(name.replace("speculator.", ""))
             if param is not None:
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+                weight = loaded_weight
+
+        # 0.35 probability cutoff determined empirically :)
+        self.cutoff = torch.log(torch.tensor(0.35, device=weight.device))
