@@ -130,6 +130,8 @@ To consume the server, you can use the OpenAI client like in the example below:
     )
     print("Chat response:", chat_response)
 
+A full code example can be found in `examples/openai_vision_api_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_vision_api_client.py>`_.
+
 .. note::
 
     By default, the timeout for fetching images through http url is ``5`` seconds. You can override this by setting the environment variable:
