@@ -373,16 +373,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         """
         physical_block_id_mapping = []
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
-            src_blocks = self.block_tables[seq.seq_id].blocks
-            if len(src_blocks) == 0:
+            blocks = self.block_tables[seq.seq_id].blocks
+            if len(blocks) == 0:
                 continue
 
-            dst_blocks, seq_swap_mapping = self.block_allocator.swap(
-                src_blocks=src_blocks,
-                src_device=Device.CPU,
-                dst_device=Device.GPU)
-
-            self.block_tables[seq.seq_id].update(dst_blocks)
+            seq_swap_mapping = self.block_allocator.swap(blocks=blocks,
+                                                         src_device=Device.CPU,
+                                                         dst_device=Device.GPU)
 
             seq_physical_block_id_mapping = {
                 self.block_allocator.get_physical_block_id(
@@ -428,16 +425,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         """
         physical_block_id_mapping = []
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            src_blocks = self.block_tables[seq.seq_id].blocks
-            if len(src_blocks) == 0:
+            blocks = self.block_tables[seq.seq_id].blocks
+            if len(blocks) == 0:
                 continue
 
-            dst_blocks, seq_swap_mapping = self.block_allocator.swap(
-                src_blocks=src_blocks,
-                src_device=Device.GPU,
-                dst_device=Device.CPU)
-
-            self.block_tables[seq.seq_id].update(dst_blocks)
+            seq_swap_mapping = self.block_allocator.swap(blocks=blocks,
+                                                         src_device=Device.GPU,
+                                                         dst_device=Device.CPU)
 
             seq_physical_block_id_mapping = {
                 self.block_allocator.get_physical_block_id(

@@ -257,7 +257,7 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def swap(self, src_blocks: List[Block], src_device: Device,
+    def swap(self, blocks: List[Block], src_device: Device,
              dst_device: Device) -> Dict[int, int]:
         pass
 

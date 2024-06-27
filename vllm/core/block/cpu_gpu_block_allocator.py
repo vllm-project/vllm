@@ -322,11 +322,11 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def all_block_ids(self) -> FrozenSet[int]:
         return frozenset(self._block_ids_to_allocator.keys())
 
-    def promote_to_immutable_block(self, block: Block) -> Optional[Block]:
+    def promote_to_immutable_block(self, block: Block) -> BlockId:
         device = Device.GPU
         return self._allocators[device].promote_to_immutable_block(block)
 
-    def cow_block_if_not_appendable(self, block: Block) -> Optional[Block]:
+    def cow_block_if_not_appendable(self, block: Block) -> BlockId:
         device = Device.GPU
         return self._allocators[device].cow_block_if_not_appendable(block)
 

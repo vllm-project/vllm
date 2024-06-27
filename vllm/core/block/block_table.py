@@ -1,8 +1,7 @@
 from typing import List, Optional
 
 from vllm.core.block.common import BlockList
-from vllm.core.block.interfaces import (Block, BlockId,
-                                        DeviceAwareBlockAllocator)
+from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
 from vllm.utils import Device, cdiv, chunk_list
 
 
@@ -73,11 +72,6 @@ class BlockTable:
         """
         return cdiv(len(token_ids), block_size)
 
-    def update(self, blocks: List[Block]) -> None:
-        """Resets and sets the blocks of the block table to the given blocks
-        """
-        self._blocks.update(blocks)
-
     def allocate(self,
                  token_ids: List[int],
                  device: Device = Device.GPU) -> None:
@@ -96,7 +90,7 @@ class BlockTable:
         blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                      token_ids=token_ids,
                                                      device=device)
-        self.update(blocks)
+        self._blocks.update(blocks)
         self._num_full_slots = len(token_ids)
 
     def append_token_ids(self,

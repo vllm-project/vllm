@@ -152,7 +152,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                             block_size=self._block_size,
                                             physical_block_id=None)
         assert block.content_hash is not None
-        
+
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
             block.block_id = cached_block_id
@@ -260,7 +260,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def _allocate_block_id(self) -> BlockId:
         """First tries to allocate a block id from the hashless allocator,
-        and if there are no blocks, then tries to evict an unused cached block.  
+        and if there are no blocks, then tries to evict an unused cached block.
         """
         hashless_block_id = self._maybe_allocate_hashless_block_id()
         if hashless_block_id is not None:
@@ -459,10 +459,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
-        if self._cow_tracker.is_appendable(block):
-            return block.block_id
-
         src_block_id = block.block_id
+        assert src_block_id is not None
+
+        if self._cow_tracker.is_appendable(block):
+            return src_block_id
+
         self._free_block_id(block)
         trg_block_id = self._allocate_block_id()
 

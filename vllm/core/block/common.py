@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Dict, Deque, Iterable, List, Optional, Protocol, Tuple
+from typing import Deque, Dict, Iterable, List, Optional, Protocol, Tuple
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 

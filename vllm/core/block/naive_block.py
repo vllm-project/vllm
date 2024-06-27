@@ -1,7 +1,7 @@
 from collections import deque
 from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
 
-from vllm.core.block.common import (CopyOnWriteTracker, RefCounter, BlockPool,
+from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.utils import cdiv
@@ -224,10 +224,12 @@ class NaiveBlockAllocator(BlockAllocator):
                 operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
-        if self._cow_tracker.is_appendable(block):
-            return block.block_id
-
         src_block_id = block.block_id
+        assert src_block_id is not None
+
+        if self._cow_tracker.is_appendable(block):
+            return src_block_id
+
         self._free_block_id(block)
         trg_block_id = self._allocate_block_id()
 
@@ -276,8 +278,8 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         return []
 
-    def promote_to_immutable_block(self, block: Block) -> Optional[Block]:
-        return None
+    def promote_to_immutable_block(self, block: Block) -> BlockId:
+        raise NotImplementedError("There is no promotion for naive blocks")
 
     def get_num_blocks_touched(self,
                                blocks: List[Block],
@@ -364,10 +366,12 @@ class NaiveBlock(Block):
         self._append_token_ids_no_cow(token_ids)
 
     def append_token_ids(self, token_ids: Optional[List[int]]) -> None:
-        """Appends the given token IDs to the block and performs a copy-on-write if necessary.
+        """Appends the given token IDs to the block and performs a 
+        copy-on-write if necessary.
 
         Args:
-            token_ids (Optional[List[int]]): The token IDs to be appended to the block.
+            token_ids (Optional[List[int]]): The token IDs to be appended 
+                to the block.
         """
         self._append_token_ids_no_cow(token_ids)
 
@@ -379,7 +383,8 @@ class NaiveBlock(Block):
         """Appends the given token IDs to the block
 
         Args:
-            token_ids (Optional[List[int]]): The token IDs to be appended to the block.
+            token_ids (Optional[List[int]]): The token IDs to be appended
+                to the block.
         """
         if token_ids is None:
             return
