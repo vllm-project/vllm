@@ -216,12 +216,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
-        # Flashinfer fields
-        self.flashinfer_prefill_wrapper: Optional[
-            BatchPrefillWithPagedKVCacheWrapper] = None
-        self.flashinfer_decode_wrapper: Optional[
-            Union[BatchDecodeWithPagedKVCacheWrapper,
-                  CUDAGraphBatchDecodeWithPagedKVCacheWrapper]] = None
+        self.flashinfer_decode_workspace_buffer = None
+        self.flashinfer_decode_wrapper = None
+        self.flashinfer_prefill_workspace_buffer = None
+        self.flashinfer_prefill_wrapper = None
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -758,30 +756,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             multi_modal_kwargs=multi_modal_kwargs,
         )
 
-    def _create_flashinfer_wrapper(self, use_cuda_graph: bool,
-                                   is_profile_run: bool, batch_size: int):
-
-        if use_cuda_graph and not is_profile_run:
-            self.flashinfer_decode_wrapper = self.graph_runners[
-                batch_size].flashinfer_decode_wrapper
-        elif self.flashinfer_decode_wrapper is None:
-            self.flashinfer_decode_workspace_buffer = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                dtype=torch.uint8,
-                device=self.device)
-            self.flashinfer_decode_wrapper = \
-                BatchDecodeWithPagedKVCacheWrapper(
-                self.flashinfer_decode_workspace_buffer, "NHD")
-
-        if self.flashinfer_prefill_wrapper is None:
-            self.flashinfer_prefill_workspace_buffer = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                dtype=torch.uint8,
-                device=self.device)
-            self.flashinfer_prefill_wrapper = \
-                BatchPrefillWithPagedKVCacheWrapper(
-                self.flashinfer_prefill_workspace_buffer, "NHD")
-
     @torch.inference_mode()
     def profile_run(self) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
@@ -1082,21 +1056,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 tensor_dict,
                 attn_backend=self.attn_backend,
             )
-        print("==================Create tensor==================")
-        if self.attn_backend.get_name() == "flashinfer":
-            attn_metadata = tensor_dict["attn_metadata"]
-            assert model_input.input_tokens is not None
-            assert model_input.attn_metadata is not None
-            batch_size = model_input.input_tokens.shape[0]
-            is_profile_run = _is_block_tables_empty(
-                model_input.attn_metadata.block_tables)
-            self._create_flashinfer_wrapper(attn_metadata.use_cuda_graph,
-                                            is_profile_run, batch_size)
-            print("===============Create wrapper===================")
-            attn_metadata.prefill_wrapper = self.flashinfer_prefill_wrapper
-            attn_metadata.decode_wrapper = self.flashinfer_decode_wrapper
-            attn_metadata.begin_forward()
-
         return model_input
 
     def prepare_model_input(
@@ -1140,6 +1099,36 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             assert model_input.lora_mapping is not None
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
+
+        if self.attn_backend.get_name() == "flashinfer":
+            assert model_input.attn_metadata is not None
+            assert model_input.input_tokens is not None
+            if self.flashinfer_decode_workspace_buffer is None:
+                self.flashinfer_decode_workspace_buffer = torch.empty(
+                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                    dtype=torch.uint8,
+                    device=self.device)
+                self.flashinfer_decode_wrapper = \
+                    BatchDecodeWithPagedKVCacheWrapper(
+                    self.flashinfer_decode_workspace_buffer, "NHD")
+                self.flashinfer_prefill_workspace_buffer = torch.empty(
+                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                    dtype=torch.uint8,
+                    device=self.device)
+                self.flashinfer_prefill_wrapper = \
+                    BatchPrefillWithPagedKVCacheWrapper(
+                    self.flashinfer_prefill_workspace_buffer, "NHD")
+
+            model_input.attn_metadata.prefill_wrapper = \
+                self.flashinfer_prefill_wrapper
+            if model_input.attn_metadata.use_cuda_graph:
+                batch_size = model_input.input_tokens.shape[0]
+                model_input.attn_metadata.decode_wrapper = self.graph_runners[
+                    batch_size].flashinfer_decode_wrapper
+            else:
+                model_input.attn_metadata.decode_wrapper = \
+                    self.flashinfer_decode_wrapper
+            model_input.attn_metadata.begin_forward()
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
