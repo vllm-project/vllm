@@ -88,8 +88,6 @@ LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
 class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
-    supports_vision = True
-
     def __init__(self,
                  config: LlavaConfig,
                  vlm_config: VisionLanguageConfig,
