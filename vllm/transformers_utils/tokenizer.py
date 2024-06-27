@@ -54,6 +54,13 @@ def get_cached_tokenizer(
     return tokenizer
 
 
+# BLIP-2 tokenizer does not support image token, so we
+# have to manually add it in
+# TODO: Remove the need for this dirty hack
+BLIP2_IMAGE_TOKEN = "<image>"
+BLIP2_IMAGE_TOKEN_ID = 50265
+
+
 def get_tokenizer(
     tokenizer_name: str,
     *args,
@@ -121,6 +128,13 @@ def get_tokenizer(
                 **kwargs)
         else:
             raise e
+
+    if "/blip2" in tokenizer.name_or_path:
+        tokenizer.add_tokens(BLIP2_IMAGE_TOKEN)
+        encoded_image_token, = tokenizer.encode(BLIP2_IMAGE_TOKEN,
+                                                add_special_tokens=False)
+
+        assert encoded_image_token == BLIP2_IMAGE_TOKEN_ID
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.warning(

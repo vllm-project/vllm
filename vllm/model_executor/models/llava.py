@@ -57,13 +57,13 @@ def merge_vision_embeddings(input_ids: torch.Tensor,
     """In place merges in vision_embeddings with inputs_embeds."""
     mask = (input_ids == image_token_id)
 
-    image_feature_size = vision_embeddings.shape[0] * vision_embeddings.shape[1]
-    if mask.sum() != image_feature_size:
-        raise ValueError(f"image_feature_size should be {image_feature_size}, "
-                         f"but found: {mask.sum()}")
+    batch_size, image_feature_size, *_, embed_dim = vision_embeddings.shape
+    mask_size = batch_size * image_feature_size
+    if mask.sum() != mask_size:
+        raise ValueError(f"Expected {batch_size} x {image_feature_size} = "
+                         f"{mask_size} image tokens, but found: {mask.sum()}")
 
-    inputs_embeds[mask] = vision_embeddings.view(image_feature_size,
-                                                 vision_embeddings.shape[-1])
+    inputs_embeds[mask] = vision_embeddings.view(mask_size, embed_dim)
 
     return inputs_embeds
 
