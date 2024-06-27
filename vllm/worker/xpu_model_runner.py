@@ -175,7 +175,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        model_input = self.prepare_model_input(seqs, None)
+        model_input = self.prepare_model_input(seqs)
         self.execute_model(model_input, kv_caches)
         torch.xpu.synchronize()
         return
