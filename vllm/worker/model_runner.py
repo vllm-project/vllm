@@ -1003,8 +1003,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                    is_prompt=is_prompt)
 
     @torch.inference_mode()
-    def execute_model(self, model_input: ModelInputForGPUWithSamplingMetadata,
-                      kv_caches: List[torch.Tensor]) -> SamplerOutput:
+    def execute_model(
+        self,
+        model_input: ModelInputForGPUWithSamplingMetadata,
+        kv_caches: List[torch.Tensor],
+    ) -> SamplerOutput:
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None

@@ -150,7 +150,7 @@ class WorkerInput:
             "num_seq_groups": self.num_seq_groups,
             "blocks_to_swap_in": self.blocks_to_swap_in,
             "blocks_to_swap_out": self.blocks_to_swap_out,
-            "blocks_to_copy": self.blocks_to_copy
+            "blocks_to_copy": self.blocks_to_copy,
         }
 
         return tensor_dict

@@ -146,7 +146,9 @@ class ModelRunnerBase(ABC, Generic[T]):
 
     @torch.inference_mode()
     def execute_model(
-            self, model_input: T, kv_caches: Optional[List[torch.Tensor]]
+        self,
+        model_input: T,
+        kv_caches: Optional[List[torch.Tensor]],
     ) -> Optional[SamplerOutput]:
         """
         Execute the model on the given input.

@@ -47,11 +47,6 @@ COPY requirements-mamba.txt requirements-mamba.txt
 RUN python3 -m pip install packaging
 RUN python3 -m pip install -r requirements-mamba.txt
 
-# install development dependencies
-COPY requirements-dev.txt requirements-dev.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-dev.txt
-
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
 # explicitly set the list to avoid issues with torch 2.2

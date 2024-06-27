@@ -105,6 +105,7 @@ class CacheEngine:
         head_size = model_config.get_head_size()
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_attention_layers(parallel_config)
+
         key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block
         total = num_layers * (key_cache_block + value_cache_block)

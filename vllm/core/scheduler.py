@@ -290,10 +290,8 @@ class Scheduler:
         # Sequence groups in the SWAPPED state.
         # Contain decode requests that are swapped out.
         self.swapped: Deque[SequenceGroup] = deque()
-
-        # Sequence groups finished in after the last step iter.
+        # Sequence groups finished since last step iter.
         self.finished_request_id: List[str] = list()
-
         # Time at previous scheduling step
         self.prev_time = 0.0
         # Did we schedule a prompt at previous step?
