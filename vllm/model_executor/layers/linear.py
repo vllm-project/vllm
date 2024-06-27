@@ -17,7 +17,6 @@ from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
-
 def adjust_marlin_shard(param, shard_size, shard_offset):
     marlin_tile_size = getattr(param, "marlin_tile_size", None)
     if marlin_tile_size is None:
@@ -40,6 +39,16 @@ def adjust_bitsandbytes_shard(param: Parameter,
 
     return quantized_size, quantized_offset
 
+
+def load_weight_into_param_array(param, loaded_weight, shard_id):
+    qkv_idxs = {"q": 0, "k": 1, "v": 2}
+
+    if isinstance(shard_id, str):
+        shard_id = qkv_idxs[shard_id]
+    elif not isinstance(shard_id, int):
+        raise ValueError(f"Unknown Shard Id {shard_id}")
+    
+    return param[shard_id], loaded_weight
 
 class LinearMethodBase(QuantizeMethodBase):
     """Base class for different (maybe quantized) linear methods."""
