@@ -1218,6 +1218,30 @@ class VisionLanguageConfig:
 
         return result
 
+@dataclass
+class WhisperConfig:
+    whisper_processor: Optional[str]
+    whisper_processor_revision: Optional[str]
+
+    def as_cli_args_dict(self) -> Dict[str, Any]:
+        """Flatten vision language config to pure args.
+
+        Compatible with what llm entrypoint expects.
+        """
+        result: Dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, enum.Enum):
+                result[f.name] = value.name.lower()
+            elif isinstance(value, tuple):
+                result[f.name] = ",".join([str(item) for item in value])
+            else:
+                result[f.name] = value
+
+        result["disable_image_processor"] = self.image_processor is None
+
+        return result
+
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,

@@ -111,21 +111,31 @@ class WhisperAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        encoder_hidden_states = None,
         past_key_value = None,
         kv_cache: torch.Tensor = None,
         attn_metadata: AttentionMetadata = None,
     ):
-        is_cross_attention = past_key_value is not None
+        is_cross_attention = encoder_hidden_states is not None
         bsz, tgt_len, _ = hidden_states.size()
         q, _ = self.q_proj(hidden_states) * self.scaling
         
+        past_key_value = None
         
         if kv_cache is None:
             q = self._shape(q, tgt_len, bsz)
 
             if is_cross_attention:
-                k = past_key_value[0]
-                v = past_key_value[1]
+                if past_key_value is not None:
+                    k = past_key_value[0]
+                    v = past_key_value[1]
+                else:
+                    k, _ = self.k_proj(encoder_hidden_states)
+                    v, _ = self.v_proj(encoder_hidden_states)
+                    k = self._shape(k, -1, bsz)
+                    v = self._shape(v, -1, bsz)
+
+                    past_key_value = (k, v)
             else:
                 k, _ = self.k_proj(key_value_states)
                 v, _ = self.v_proj(hidden_states)
@@ -147,7 +157,7 @@ class WhisperAttention(nn.Module):
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
             output, _ = self.o_proj(attn_output)
-        return output
+        return output, past_key_value
 
 class WhisperEncoderLayer(nn.Module):
     def __init__(
@@ -190,7 +200,7 @@ class WhisperEncoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states = self.self_attn(
+        hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
         )
         hidden_states = residual + hidden_states
@@ -211,7 +221,7 @@ class WhisperDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.embed_dim = config.d_model
-        self.self_attn = WhisperAttention(
+        self.self_attn, _ = WhisperAttention(
             embed_dim=self.embed_dim,
             num_heads=config.decoder_attention_heads,
             is_decoder=True,
@@ -249,10 +259,11 @@ class WhisperDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        past_key_value: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        past_key_value: Tuple[torch.Tensor, torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
+    ):
 
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -264,8 +275,9 @@ class WhisperDecoderLayer(nn.Module):
         )
         hidden_states = residual + hidden_states
 
-        hidden_states = self.self_attn(
+        hidden_states, cross_attention_past_key_value = self.self_attn(
             hidden_states=hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
             past_key_value=past_key_value,
             attn_metadata=attn_metadata
         )
@@ -277,7 +289,7 @@ class WhisperDecoderLayer(nn.Module):
         hidden_states = self.fc2(hidden_states)
         hidden_states = residual + hidden_states
 
-    return outputs
+    return outputs, cross_attention_past_key_value
 
 class WhisperEncoder(nn.Module):
     def __init__(
@@ -333,7 +345,7 @@ class WhisperDecoder(nn.Module):
         self.max_source_positions = config.max_source_positions
         self.embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
 
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.d_model)
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model, self.padding_idx)
         self.embed_positions = WhisperPositionalEmbedding(self.max_target_positions, config.d_model)
         self.layers = nn.ModuleList([WhisperDecoderLayer(config, quant_config=quant_config, cache_config=cache_config)
                                      for layer_idx in range(config.decoder_layers)])
@@ -343,26 +355,97 @@ class WhisperDecoder(nn.Module):
         self,
         input_ids,
         positions: torch.Tensor,
-        past_key_values,
+        encoder_hidden_states: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        past_key_values = None,
     ):
         inputs_embeds = self.embed_tokens(input_ids)
         positions = self.embed_positions(input_ids, positions)
         hidden_states = inputs_embeds + positions
+
+        cross_attention_past_key_values = []
+
         for idx, decoder_layer in enumerate(self.layers):
-            hidden_states = decoder_layer(
+            hidden_states, cross_attention_past_key_value = decoder_layer(
                 hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                past_key_value=None if past_key_values is None else past_key_values[idx],
                 kv_cache=kv_caches[idx],
                 output_attentions=output_attentions,
                 attn_metadata=attn_metadata
             )
+            cross_attention_past_key_values.append(cross_attention_past_key_value)
 
         hidden_states = self.layer_norm(hidden_states)
-        return hidden_states
+        return hidden_states, cross_attention_past_key_values
 
+class WhisperModel(nn.Module):
+    def __init__(
+        self, 
+        config: WhisperConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__(config)
 
+        self.encoder = WhisperEncoder(config, cache_config=cache_config, quant_config=quant_config)
+        self.decoder = WhisperDecoder(config, cache_config=cache_config, quant_config=quant_config)
+    
+    def forward(
+        self,
+        input_features: torch.FloatTensor,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        past_key_values = None,
+    ):
+
+        encoder_outputs = self.encoder(
+            input_features,
+        )
+        decoder_outputs, cross_attention_past_key_values = self.decoder(
+            input_ids=input_ids,
+            positions=positions,
+            encoder_hidden_states=encoder_outputs,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+            past_key_values=past_key_values
+        )
+        return decoder_outputs, cross_attention_past_key_values
         
 
+class WhisperForConditionalGeneration(nn.Module):
+    def __init__(
+        self, 
+        config: WhisperConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__(config)
+        self.model = WhisperModel(config, cache_config=cache_config, quant_config=quant_config)
+        self.proj_out = RowParallelLinear(
+            input_size = config.d_model,
+            output_size = config.vocab_size,
+            bias = False,
+            quant_config=quant_config,
+        )
 
+    def forward(
+        self,
+        input_features: torch.FloatTensor,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        past_key_values = None,
+    ):
+        outputs = self.model(
+            input_features=input_features,
+            input_ids=input_ids,
+            positions=positions,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+            past_key_values=past_key_values,
+        )

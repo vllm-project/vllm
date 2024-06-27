@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig,
-                         VisionLanguageConfig)
+                         VisionLanguageConfig, WhisperConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser, str_to_int_tuple
 
@@ -88,6 +88,11 @@ class EngineArgs:
     image_processor_revision: Optional[str] = None
     disable_image_processor: bool = False
 
+    # Related to Whisper
+    whisper_input_type = 'input_features'
+    whisper_processor: Optional[str] = None
+    whisper_processor_revision: Optional[str] = None
+
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
@@ -135,6 +140,30 @@ class EngineArgs:
             type=int,
             default=None,
             help=('The image feature size along the context dimension.'))
+        parser.add_argument(
+            '--image-processor',
+            type=str,
+            default=EngineArgs.image_processor,
+            help='Name or path of the huggingface image processor to use. '
+            'If unspecified, model name or path will be used.')
+        parser.add_argument(
+            '--image-processor-revision',
+            type=str,
+            default=None,
+            help='Revision of the huggingface image processor version to use. '
+            'It can be a branch name, a tag name, or a commit id. '
+            'If unspecified, will use the default version.')
+        parser.add_argument(
+            '--disable-image-processor',
+            action='store_true',
+            help='Disables the use of image processor, even if one is defined '
+            'for the model on huggingface.')
+
+        return parser
+
+    @staticmethod
+    def add_cli_args_for_whisper(
+            parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         parser.add_argument(
             '--image-processor',
             type=str,
@@ -772,6 +801,8 @@ class EngineArgs:
             )
         else:
             vision_language_config = None
+        
+        if self.whisper_input_type
 
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
