@@ -52,6 +52,7 @@ from vllm.utils import is_hip, print_warning_once
 
 import os.path
 
+
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -438,27 +439,24 @@ class LlamaForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-                
-    def load_quantized_weights(self, 
-                               model_name_or_path: str,
+
+    def load_quantized_weights(self, model_name_or_path: str,
                                quant_config: QuantizationConfig):
-        weights = safetensors_weights_iterator(
-                [os.path.join(model_name_or_path,
-                    quant_config.quantized_weights_path)])
+        weights = safetensors_weights_iterator([
+            os.path.join(model_name_or_path,
+                         quant_config.quantized_weights_path)
+        ])
         params_dict = dict(self.named_parameters())
         quant_shards = [
-            (param_name, weight_name, quant_config.shard_layers[param_name][weight_name]) 
-                for param_name in quant_config.shard_layers 
-                    for weight_name in quant_config.shard_layers[param_name]
+            (param_name, weight_name,
+             quant_config.shard_layers[param_name][weight_name])
+            for param_name in quant_config.shard_layers
+            for weight_name in quant_config.shard_layers[param_name]
         ]
-        quant_map = [
-            (param_name, quant_config.quant_layers[param_name]) 
-                for param_name in quant_config.quant_layers
-        ]
-        scale_map = [
-            (param_name, quant_config.scaling_factors[param_name]) 
-                for param_name in quant_config.scaling_factors
-        ]
+        quant_map = [(param_name, quant_config.quant_layers[param_name])
+                     for param_name in quant_config.quant_layers]
+        scale_map = [(param_name, quant_config.scaling_factors[param_name])
+                     for param_name in quant_config.scaling_factors]
         for name, loaded_weight in weights:
             if "zero_point" in name:
                 continue
@@ -491,9 +489,9 @@ class LlamaForCausalLM(nn.Module):
                         continue
                     name = name.replace(weight_name, param_name)
                     param = params_dict[name]
-                    if "activation_scaling_factor" in name or "weight_scaling_factor" in name:
-                        param.data.copy_(loaded_weight)
-                    elif "output_scaling_factor" in name:
+                    if ("activation_scaling_factor" in name
+                            or "weight_scaling_factor" in name
+                            or "output_scaling_factor" in name):
                         param.data.copy_(loaded_weight)
                     else:
                         weight_loader = getattr(param, "weight_loader",
