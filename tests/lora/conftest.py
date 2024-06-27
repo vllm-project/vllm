@@ -165,8 +165,7 @@ def sql_lora_files():
 
 @pytest.fixture(scope="session")
 def mixtral_lora_files():
-    # return snapshot_download(repo_id="terrysun/mixtral-lora-adapter")
-    return snapshot_download(repo_id="SangBinCho/mixtral-lora")
+    return snapshot_download(repo_id="terrysun/mixtral-lora-adapter")
 
 
 @pytest.fixture(scope="session")

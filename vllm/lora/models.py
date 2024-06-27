@@ -304,7 +304,7 @@ class LoRAModel:
             config = json.load(f)
         if os.path.isfile(lora_tensor_path):
             tensors: Dict[torch.Tensor] = {}
-            # Load tensors and find unexpected modules.
+            # Find unexpected modules.
             # Use safetensor key as a source of truth to find expected modules.
             # in peft if you have target_modules A, B, C and C does not exist
             # in the model it won’t error and model will be trained with A, B
@@ -324,6 +324,7 @@ class LoRAModel:
                         f" but received {unexpected_modules}."
                         f" Please verify that the loaded LoRA module is correct"
                     )
+                # Load tensors if there are only expected modules.
                 for module in f.keys():
                     tensors[module] = f.get_tensor(module)
         elif os.path.isfile(lora_bin_file_path):
@@ -336,7 +337,10 @@ class LoRAModel:
                 part_name = module.split(".")[-1]
                 if part_name not in expected_lora_modules:
                     unexpected_modules.append(module)
-            # loaded lora's target modules must be a subset of expected_lora_modules
+            # loaded lora's target modules must be a subset of
+            # expected_lora_modules. It is not reliable. See
+            # https://github.com/vllm-project/vllm/pull/5909. But there's no
+            # other better mechanism.
             if unexpected_modules:
                 print(unexpected_modules, "modules")
                 raise ValueError(
