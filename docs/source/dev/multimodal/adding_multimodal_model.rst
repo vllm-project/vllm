@@ -54,6 +54,9 @@ This decorator accepts a function that maps multi-modal inputs to the keyword ar
 
 A default mapper is available for each modality in the core vLLM library. This input mapper will be used if you do not provide your own function.
 
+.. seealso::
+    :ref:`input_processing_pipeline`
+
 
 2. (Optional) Register dummy data
 ---------------------------------
@@ -74,6 +77,9 @@ Here are some examples:
 
 - Image inputs (static feature size): `LLaVA-1.5 Model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava.py>`__
 - Image inputs (dynamic feature size): `LLaVA-NeXT Model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava_next.py>`__
+
+.. seealso::
+    :ref:`input_processing_pipeline`
 
 
 3. (Optional) Register input processor
@@ -97,3 +103,6 @@ Here are some examples:
 
 - Insert static number of image tokens: `LLaVA-1.5 Model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava.py>`__
 - Insert dynamic number of image tokens: `LLaVA-NeXT Model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava_next.py>`__
+
+.. seealso::
+    :ref:`input_processing_pipeline`
