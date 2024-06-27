@@ -158,7 +158,7 @@ class SequenceData:
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
-        self._output_token_ids_tuple += (token_id,)
+        self._output_token_ids_tuple += (token_id, )
         self._cached_all_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
@@ -218,10 +218,10 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
-    def get_prompt_token_ids(self) -> List[int]:
+    def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.prompt_token_ids
 
-    def get_output_token_ids(self) -> List[int]:
+    def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.output_token_ids
 
     @property
@@ -337,13 +337,13 @@ class Sequence:
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
 
-    def get_prompt_token_ids(self) -> List[int]:
+    def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.data.get_prompt_token_ids()
 
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
 
-    def get_output_token_ids(self) -> List[int]:
+    def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.data.output_token_ids
 
     def get_cumulative_logprob(self) -> float:

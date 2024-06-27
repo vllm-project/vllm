@@ -675,6 +675,9 @@ class PrefixCachingBlock(Block):
         self._update_num_token_ids()
 
     def _update_num_token_ids(self):
+        """Incrementally computes the number of tokens that there is
+        till the current block (included)
+        """
         res = 0
         if self._prev_block is not None:
             res += self._prev_block.num_token_ids

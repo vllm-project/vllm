@@ -215,8 +215,12 @@ class BlockPool:
         self._free_ids.appendleft(block.pool_id)  # type: ignore[attr-defined]
 
 
-# This class is an optimization to allow fast-access to physical block ids
 class BlockList:
+    """This class is an optimization to allow fast-access to physical 
+    block ids. It maintains a block id list that is updated with the 
+    block list and this avoids the need to reconstruct the block id 
+    list on every iteration of the block manager
+    """
 
     def __init__(self, blocks: List[Block]):
         self._blocks: List[Block] = []
