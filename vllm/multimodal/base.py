@@ -1,3 +1,4 @@
+import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from typing import (Callable, Dict, Generic, List, Optional, Type, TypeVar,
@@ -37,8 +38,17 @@ If each input tensor in the batch has the same size, this is a single batched
 tensor; otherwise, this is a list of tensors with one element per batch.
 """
 
+if sys.version_info < (3, 9):
+    # UserDict cannot be subscripted
+    class MultiModalInputsBase(UserDict):
+        pass
+else:
 
-class MultiModalInputs(UserDict[str, torch.Tensor]):
+    class MultiModalInputsBase(UserDict[str, torch.Tensor]):
+        pass
+
+
+class MultiModalInputs(MultiModalInputsBase):
     """
     A dictionary that represents the keyword arguments to
     :meth:`~torch.nn.Module.forward`.
