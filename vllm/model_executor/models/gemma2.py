@@ -293,8 +293,6 @@ class Gemma2Model(nn.Module):
 
 
 class Gemma2ForCausalLM(nn.Module, SupportsLoRA):
-    supports_lora = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
