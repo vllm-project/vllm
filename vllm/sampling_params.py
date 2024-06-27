@@ -28,7 +28,7 @@ first argument, and returns a modified tensor of logits
 to sample from."""
 
 
-class BadTokenLogitsProcessor:
+class NoBadWordsLogitsProcessor:
     _SMALLEST_LOGIT = float("-inf")
     _NEUTRAL_LOGIT = 0.0
 
@@ -150,6 +150,9 @@ class SamplingParams:
         stop_token_ids: List of tokens that stop the generation when they are
             generated. The returned output will contain the stop tokens unless
             the stop tokens are special tokens.
+        bad_words_ids: List of lists of token ids that are not allowed to be generated.
+            More precisely, only the last token of a token sequence is not allowed
+            when the next generated token can complete the sequence.
         include_stop_str_in_output: Whether to include the stop strings in
             output text. Defaults to False.
         ignore_eos: Whether to ignore the EOS token and continue generating
@@ -246,10 +249,14 @@ class SamplingParams:
         self.logits_processors = logits_processors
 
         if bad_words_ids is not None:
-            self.logits_processors = [
-                BadTokenLogitsProcessor(bad_words_ids=bad_words_ids)
-            ]
+            no_bad_words_processor = NoBadWordsLogitsProcessor(bad_words_ids=bad_words_ids)
 
+            if self.logits_processors is not None:
+                self.logits_processors.append(no_bad_words_processor)
+            else:
+                self.logits_processors = [no_bad_words_processor]
+
+        self.bad_words_ids = bad_words_ids
         self.include_stop_str_in_output = include_stop_str_in_output
         self.truncate_prompt_tokens = truncate_prompt_tokens
         # Number of characters to hold back for stop string evaluation
