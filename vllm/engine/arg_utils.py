@@ -708,7 +708,7 @@ class EngineArgs:
             preemption_mode=self.preemption_mode,
         )
         lora_config = LoRAConfig(
-            bias_enabled = self.enable_lora_bias,
+            bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
             fully_sharded_loras=self.fully_sharded_loras,
