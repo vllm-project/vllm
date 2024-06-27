@@ -31,8 +31,7 @@ def test_models(
 ) -> None:
     # Run sparseml.
     with hf_runner(model_name=model_name,
-                   is_sparseml_model=True,
-                   torch_dtype="auto") as sparseml_model:
+                   is_sparseml_model=True) as sparseml_model:
 
         sparseml_outputs = sparseml_model.generate_greedy_logprobs_limit(
             example_prompts, MAX_TOKENS, NUM_LOGPROBS)
