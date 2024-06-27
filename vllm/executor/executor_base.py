@@ -69,8 +69,8 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences."""
         raise NotImplementedError
 
@@ -85,6 +85,10 @@ class ExecutorBase(ABC):
     @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
+
+    @abstractmethod
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError  # type: ignore
 
     @abstractmethod
     def list_loras(self) -> Set[int]:

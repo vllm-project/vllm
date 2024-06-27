@@ -28,6 +28,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import ChatGLMConfig
 
+from .interfaces import SupportsLoRA
+
 
 class GLMAttention(nn.Module):
 
@@ -322,7 +324,7 @@ class ChatGLMModel(nn.Module):
         return hidden_states
 
 
-class ChatGLMForCausalLM(nn.Module):
+class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"]
@@ -345,7 +347,10 @@ class ChatGLMForCausalLM(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
-        self.config: ChatGLMConfig = config
+
+        self.config = config
+        self.lora_config = lora_config
+
         self.quant_config = quant_config
         self.max_position_embeddings = getattr(config, "max_sequence_length",
                                                8192)
