@@ -4,9 +4,10 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
-from vllm.utils import is_cpu
+from vllm.utils import cuda_device_count_stateless, is_cpu
 
 from ..conftest import IMAGE_ASSETS
+from ..utils import override_env
 
 pytestmark = pytest.mark.vlm
 
@@ -73,17 +74,31 @@ if is_cpu():
     target_dtype = "bfloat16"
 
 
-# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
+@pytest.fixture(autouse=True)
+def tensor_parallel_ctx(tensor_parallel_size: int):
+    if cuda_device_count_stateless() < tensor_parallel_size:
+        pytest.skip(
+            f"Need at least {tensor_parallel_size} GPUs to run the test.")
+
+    if tensor_parallel_size > 1:
+        with override_env("VLLM_WORKER_MULTIPROC_METHOD", "spawn"):
+            yield
+    else:
+        yield
+
+
 # Since we use _attn_implementation="eager" for hf_runner, here is
 # numeric difference for longer context and test can't pass
 @pytest.mark.xfail(
     reason="Inconsistent image processor being used due to lack "
     "of support for dynamic image token replacement")
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
-                dtype: str, max_tokens: int) -> None:
+                tensor_parallel_size: int, dtype: str,
+                max_tokens: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -116,6 +131,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     with vllm_runner(model_id,
                      max_model_len=2048,
                      dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,

@@ -4,8 +4,10 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+from vllm.utils import cuda_device_count_stateless
 
 from ..conftest import IMAGE_ASSETS
+from ..utils import override_env
 
 pytestmark = pytest.mark.vlm
 
@@ -65,12 +67,26 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     return hf_output_ids, hf_output_str
 
 
-# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
+@pytest.fixture(autouse=True)
+def tensor_parallel_ctx(tensor_parallel_size: int):
+    if cuda_device_count_stateless() < tensor_parallel_size:
+        pytest.skip(
+            f"Need at least {tensor_parallel_size} GPUs to run the test.")
+
+    if tensor_parallel_size > 1:
+        with override_env("VLLM_WORKER_MULTIPROC_METHOD", "spawn"):
+            yield
+    else:
+        yield
+
+
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
-                dtype: str, max_tokens: int) -> None:
+                tensor_parallel_size: int, dtype: str,
+                max_tokens: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -96,6 +112,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
 
     with vllm_runner(model_id,
                      dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
