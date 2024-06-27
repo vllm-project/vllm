@@ -278,8 +278,8 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
 
-        # Special case for loading scales off disk, which often
-        # do not have a shape.
+        # Special case for loading scales off disk, which do not
+        # have a shape in the case of AutoFP8
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
