@@ -68,12 +68,6 @@ class Phi3ImageEmbeddingBase(nn.Module):
         self.type_feature: str
         self.img_processor: CLIPVisionModel
 
-    def set_img_features(self, img_features: torch.FloatTensor) -> None:
-        self.img_features = img_features
-
-    def set_img_sizes(self, img_sizes: torch.LongTensor) -> None:
-        self.img_sizes = img_sizes
-
     def get_img_features(self,
                          img_embeds: torch.FloatTensor) -> torch.FloatTensor:
         LAYER_IDX = self.layer_idx
@@ -115,7 +109,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.num_img_tokens = config.img_processor['num_img_tokens']
 
         self.image_dim_out = image_dim_out
-        self.img_sizes = None
 
         # global_gn and sub_gn for hd transform, serves as line separator
         self.use_hd_transform = config.embd_layer.get('use_hd_transform',
@@ -142,7 +135,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.img_projection = nn.Sequential(*layers)
 
         self.vocab_size = config.vocab_size
-        self.img_features = None
 
         self.layer_idx = config.img_processor.get('layer_idx', -2)
         self.type_feature = config.img_processor.get('type_feature', 'patch')
@@ -150,18 +142,11 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
     def forward(self,
                 input_ids: torch.LongTensor,
                 pixel_values: torch.FloatTensor,
-                image_sizes=None) -> torch.FloatTensor:
+                image_sizes: Optional[torch.Tensor]) -> torch.FloatTensor:
         """process and merge text embeddings with image embeddings."""
 
         img_embeds = pixel_values
-        img_sizes = image_sizes
-
-        if self.img_features is not None:
-            img_embeds = self.img_features.clone()
-            self.img_features = None
-
-        if self.img_sizes is not None:
-            img_sizes = self.img_sizes
+        img_sizes = [] if image_sizes is None else image_sizes
 
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
@@ -193,11 +178,8 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             output_imgs = []
             output_len = []
 
-            if isinstance(img_sizes, torch.Tensor):
-                img_sizes.squeeze_(0)
-
             for _bs in range(bs):
-                h, w = img_sizes
+                h, w = img_sizes[_bs]
                 h = h // 336
                 w = w // 336
                 B_ = h * w
