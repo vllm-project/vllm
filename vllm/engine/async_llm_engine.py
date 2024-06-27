@@ -502,6 +502,14 @@ class AsyncLLMEngine:
         for new_request in new_requests:
             # Add the request into the vLLM engine's waiting queue.
             # TODO: Maybe add add_request_batch to reduce Ray overhead
+            # curr_queue_len = len(self.engine.scheduler.waiting)
+            # max_queue_len = self.engine.scheduler.scheduler_config.get_max_queue_length(
+            # )
+            # if max_queue_len > -1 and curr_queue_len >= max_queue_len:
+            #     raise QueueOverflowError(
+            #         message=
+            #         "Request would exceed the indicated maximum queue length.",
+            #         status_code=HTTPStatus.SERVICE_UNAVAILABLE)
             try:
                 if self.engine_use_ray:
                     await self.engine.add_request.remote(  # type: ignore
@@ -566,14 +574,14 @@ class AsyncLLMEngine:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Dict[str, str]] = None,
     ) -> AsyncStream:
-        curr_queue_len = len(self.engine.scheduler.waiting)
-        max_queue_len = self.engine.scheduler.scheduler_config.get_max_queue_length(
-        )
-        if max_queue_len > -1 and curr_queue_len >= max_queue_len:
-            raise QueueOverflowError(
-                message=
-                "Request would exceed the indicated maximum queue length.",
-                status_code=HTTPStatus.SERVICE_UNAVAILABLE)
+        # curr_queue_len = len(self.engine.scheduler.waiting)
+        # max_queue_len = self.engine.scheduler.scheduler_config.get_max_queue_length(
+        # )
+        # if max_queue_len > -1 and curr_queue_len >= max_queue_len:
+        #     raise QueueOverflowError(
+        #         message=
+        #         "Request would exceed the indicated maximum queue length.",
+        #         status_code=HTTPStatus.SERVICE_UNAVAILABLE)
         if self.log_requests:
             if isinstance(inputs, str):
                 shortened_prompt = inputs

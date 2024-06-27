@@ -76,6 +76,8 @@ TEST_CHOICE = [
     "Swift", "Kotlin"
 ]
 
+MAX_QUEUE_LEN = "3"
+
 pytestmark = pytest.mark.openai
 
 # @pytest.fixture(scope="session")
@@ -789,7 +791,7 @@ async def test_max_queue_length(server, client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_max_queue_length(client: openai.AsyncOpenAI, model_name: str):
+async def test_max_queue_length(client: openai.AsyncOpenAI, model_name: str, capsys):
     sample_prompts = [
         "Who won the world series in 2020?",
         "Where was the 2020 world series played?",
@@ -810,9 +812,22 @@ async def test_max_queue_length(client: openai.AsyncOpenAI, model_name: str):
     ]
     responses = await asyncio.gather(*coroutines, return_exceptions=True)
 
+    # cli_output = capsys.readouterr()
+
+    # for i in range(int(MAX_QUEUE_LEN), len(sample_prompts)+1):
+    #     # krishna
+    #     print("detecting cli output:")
+    #     print(f"pending {i}")
+    #     print(f"Pending: {i}" not in cli_output)
+    #     assert f"Pending: {i}" not in cli_output
+
     for response in responses:
-        if hasattr(response, 'status_code') and response.status_code != 200:
-            assert response.status_code == 503
+        # krishna
+        print("async responses: ", response.__dict__)
+        if "code" in response.__dict__:
+            # krishna
+            print("code pls: ", response.__dict__["code"])
+            assert response.__dict__["code"] == 503
 
 
 @pytest.mark.asyncio

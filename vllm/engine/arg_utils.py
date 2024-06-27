@@ -379,10 +379,6 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_num_seqs,
                             help='Maximum number of sequences per iteration.')
-        parser.add_argument('--max-queue-length',
-                            type=int,
-                            default=EngineArgs.max_queue_length,
-                            help='maximum number of requests in waiting queue')
         parser.add_argument(
             '--max-logprobs',
             type=int,

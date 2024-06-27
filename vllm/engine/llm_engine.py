@@ -468,6 +468,14 @@ class LLMEngine:
         lora_request: Optional[LoRARequest],
         trace_headers: Optional[Dict[str, str]] = None,
     ) -> None:
+        # Check if request would exceed max queue length
+        curr_queue_len = len(self.scheduler.waiting)
+        max_queue_len = self.scheduler.scheduler_config.get_max_queue_length()
+        if max_queue_len > -1 and curr_queue_len >= max_queue_len:
+            raise QueueOverflowError(
+                f"Request {request_id} would exceed the indicated maximum "
+                f"queue length of {max_queue_len}",
+                HTTPStatus.SERVICE_UNAVAILABLE)
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
@@ -575,13 +583,13 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
-        curr_queue_len = len(self.scheduler.waiting)
-        max_queue_len = self.scheduler.scheduler_config.get_max_queue_length()
-        if max_queue_len > -1 and curr_queue_len >= max_queue_len:
-            raise QueueOverflowError(
-                f"Request {request_id} would exceed the indicated maximum "
-                f"queue length of {max_queue_len}",
-                HTTPStatus.SERVICE_UNAVAILABLE)
+        # curr_queue_len = len(self.scheduler.waiting)
+        # max_queue_len = self.scheduler.scheduler_config.get_max_queue_length()
+        # if max_queue_len > -1 and curr_queue_len >= max_queue_len:
+        #     raise QueueOverflowError(
+        #         f"Request {request_id} would exceed the indicated maximum "
+        #         f"queue length of {max_queue_len}",
+        #         HTTPStatus.SERVICE_UNAVAILABLE)
 
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
