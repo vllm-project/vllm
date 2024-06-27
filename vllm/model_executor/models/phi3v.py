@@ -276,25 +276,44 @@ class Phi3VImagePixelInputs(TypedDict):
     """Shape: (batch_size, 2)"""
 
 
+def _get_phi3v_image_feature_size(
+    *,
+    input_height: int,
+    input_width: int,
+) -> int:
+    h, w = input_height, input_width
+
+    # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L178
+    return (h // 336 * w // 336 + 1) * 144 + 1 + (h // 336 + 1) * 12
+
+
 def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
+    multimodal_config = ctx.get_multimodal_config()
+
+    #TODO: change the logic for dummy data to support dynamic shape
+    _, _, dummy_height, dummy_width = multimodal_config.image_input_shape
+    image_feature_size = _get_phi3v_image_feature_size(
+        input_height=dummy_height,
+        input_width=dummy_width,
+    )
+
     seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
         image_token_id=32044,
-        image_feature_size_override=1921,
+        image_feature_size_override=image_feature_size,
     )
     mm_data = dummy_pixel_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-        image_width_override=1344,
-        image_height_override=1008,
+        image_width_override=dummy_width,
+        image_height_override=dummy_height,
     )
 
     return seq_data, mm_data
 
 
-# FIXME(Isotr0py): Remove these after dynamic num_img_tokens is supported
-# copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
-def calc_padded_size(width, height, padding_unit=336):
+# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
+def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
     target_height = int(np.ceil(height / padding_unit) * padding_unit)
     top_padding = int((target_height - height) / 2)
     bottom_padding = target_height - height - top_padding
@@ -303,8 +322,8 @@ def calc_padded_size(width, height, padding_unit=336):
     return padded_width, padded_height
 
 
-# copied from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
-def calc_hd_transform_size(width, height, hd_num=16):
+# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
+def _calc_hd_transform_size(*, width: int, height: int, hd_num: int = 16):
     transposed = False
     if width < height:
         width, height = height, width
@@ -319,7 +338,8 @@ def calc_hd_transform_size(width, height, hd_num=16):
     new_width = int(scale * 336)
     new_height = int(new_width / ratio)
 
-    padded_width, padded_height = calc_padded_size(new_width, new_height)
+    padded_width, padded_height = _calc_padded_size(width=new_width,
+                                                    height=new_height)
 
     if transposed:
         padded_width, padded_height = padded_height, padded_width
@@ -334,7 +354,8 @@ def _image_processor(ctx: InputContext,
     if isinstance(image, Image.Image):
         # Temporary patch before dynamic number of image tokens is supported
         _, _, h, w = ctx.get_multimodal_config().image_input_shape
-        if (w, h) != calc_hd_transform_size(image.width, image.height):
+        if (w, h) != _calc_hd_transform_size(width=image.width,
+                                             height=image.height):
             logger.warning(
                 "Dynamic image shape is currently not supported. "
                 "Resizing input image to (%d, %d).", w, h)
