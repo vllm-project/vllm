@@ -18,8 +18,9 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionMessageParam, ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-    FunctionCall, ToolCall, UsageInfo)
+    ChatCompletionStreamResponse, ChatMessage, DeltaMessage, DetokenizeRequest,
+    DetokenizeResponse, ErrorResponse, FunctionCall, TokenizeRequest,
+    TokenizeResponse, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.inputs import PromptInputs
@@ -611,3 +612,49 @@ class OpenAIServingChat(OpenAIServing):
                             step_top_logprobs, num_output_top_logprobs)))
 
         return ChatCompletionLogProbs(content=logprobs_content)
+
+    async def create_tokenize(self,
+                              request: TokenizeRequest) -> TokenizeResponse:
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        if not (request.prompt or request.messages):
+            return self.create_error_response(
+                "Either `prompt` or `messages` should be provided.")
+
+        if (request.prompt and request.messages):
+            return self.create_error_response(
+                "Only one of `prompt` or `messages` should be provided.")
+
+        if request.messages:
+            conversation: List[ConversationMessage] = []
+
+            for message in request.messages:
+                conversation.extend(
+                    self._parse_chat_message_content(message).messages)
+
+            request.prompt = self.tokenizer.apply_chat_template(
+                add_generation_prompt=request.add_generation_prompt,
+                conversation=conversation,
+                tokenize=False)
+
+        (input_ids, input_text) = self._validate_prompt_and_tokenize(
+            request,
+            prompt=request.prompt,
+            add_special_tokens=request.add_special_tokens)
+
+        return TokenizeResponse(tokens=input_ids,
+                                count=len(input_ids),
+                                max_model_len=self.max_model_len)
+
+    async def create_detokenize(
+            self, request: DetokenizeRequest) -> DetokenizeResponse:
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        (input_ids, input_text) = self._validate_prompt_and_tokenize(
+            request, prompt_ids=request.tokens)
+
+        return DetokenizeResponse(prompt=input_text)
