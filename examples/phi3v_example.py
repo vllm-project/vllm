@@ -16,7 +16,6 @@ def run_phi3v():
         image_token_id=32044,
         image_input_shape="1,3,1008,1344",
         image_feature_size=1921,
-        disable_image_processor=False,
     )
 
     image = Image.open("images/cherry_blossom.jpg")
