@@ -80,9 +80,8 @@ def run_deepseek_vl_image_features():
 
 
 def get_image_features():
-    image_feature = VLMImageProcessor(1024)(Image.open("images/stop_sign.jpg"))[
-        "pixel_values"
-    ]
+    image_feature = VLMImageProcessor(1024)(
+        Image.open("images/stop_sign.jpg"))["pixel_values"]
     torch.save(image_feature, "images/deepseek_vl_stop_sign.pt")
     return torch.load("images/deepseek_vl_stop_sign.pt")
 
@@ -112,14 +111,12 @@ if __name__ == "__main__":
     os.makedirs(local_directory, exist_ok=True)
 
     # Use AWS CLI to sync the directory, assume anonymous access
-    subprocess.check_call(
-        [
-            "aws",
-            "s3",
-            "sync",
-            s3_bucket_path,
-            local_directory,
-            "--no-sign-request",
-        ]
-    )
+    subprocess.check_call([
+        "aws",
+        "s3",
+        "sync",
+        s3_bucket_path,
+        local_directory,
+        "--no-sign-request",
+    ])
     main(args)

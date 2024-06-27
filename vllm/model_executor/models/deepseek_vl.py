@@ -1004,7 +1004,7 @@ class ImageEncoderViT(nn.Module):
         super().__init__()
         self.img_size = img_size
 
-        self.patch_embed = PatchEmbed(
+        self.patch_embed = ImagePatchEmbed(
             kernel_size=(patch_size, patch_size),
             stride=(patch_size, patch_size),
             in_chans=in_chans,
@@ -1384,7 +1384,7 @@ def add_decomposed_rel_pos(
     return attn
 
 
-class PatchEmbed(nn.Module):
+class ImagePatchEmbed(nn.Module):
     """
     Image to Patch Embedding.
     """
@@ -1551,8 +1551,8 @@ class CLIPVisionTower(nn.Module):
             vision_tower = create_sam_vit(**vision_tower_params)
             forward_kwargs = dict()
 
-        else:  # huggingface
-            from transformers import CLIPVisionModel
+        else:  
+            from vllm.model_executor.models.clip import CLIPVisionModel
 
             vision_tower = CLIPVisionModel.from_pretrained(
                 **vision_tower_params)
@@ -1734,7 +1734,8 @@ class DeepSeekMultiModalityCausalLM(VisionLanguageModelBase):
         self.aligner = aligner_cls(aligner_config.params)
 
         language_config = config.language_config
-        self.language_model = LlamaModel(language_config, cache_config, quant_config)
+        self.language_model = LlamaModel(language_config, cache_config,
+                                         quant_config)
         self.image_processor = VLMImageProcessor(self.image_size)
         self.logits_processor = LogitsProcessor(language_config.vocab_size)
         self.sampler = Sampler()

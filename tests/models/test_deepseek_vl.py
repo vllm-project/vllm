@@ -46,9 +46,8 @@ model_and_vl_config = [
 ]
 
 
-def vllm_to_hf_output(
-    vllm_output: Tuple[List[int], str], vlm_config: VisionLanguageConfig, model_id: str
-):
+def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
+                      vlm_config: VisionLanguageConfig, model_id: str):
     """Sanitize vllm output to be comparable with hf output.
     The function reduces `input_ids` from 1, 32000, 32000, ..., 32000,
     x1, x2, x3 ... to 1, 32000, x1, x2, x3 ...
@@ -61,13 +60,11 @@ def vllm_to_hf_output(
     image_token_str = tokenizer.decode(image_token_id)
 
     hf_input_ids = [
-        input_id
-        for idx, input_id in enumerate(input_ids)
+        input_id for idx, input_id in enumerate(input_ids)
         if input_id != image_token_id or input_ids[idx - 1] != image_token_id
     ]
     hf_output_str = output_str.replace(
-        image_token_str * vlm_config.image_feature_size, ""
-    )
+        image_token_str * vlm_config.image_feature_size, "")
 
     return hf_input_ids, hf_output_str
 
@@ -97,32 +94,30 @@ def test_models(
     model_id, vlm_config = model_and_config
 
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
-        hf_outputs = hf_model.generate_greedy(
-            HF_IMAGE_PROMPTS, max_tokens, images=hf_images
-        )
+        hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
+                                              max_tokens,
+                                              images=hf_images)
 
     vllm_image_prompts = [
-        p.replace(
-            "<image_placeholder>", "<image_placeholder>" * vlm_config.image_feature_size
-        )
+        p.replace("<image_placeholder>",
+                  "<image_placeholder>" * vlm_config.image_feature_size)
         for p in HF_IMAGE_PROMPTS
     ]
 
-    with vllm_runner(
-        model_id, dtype=dtype, enforce_eager=True, **vlm_config.as_cli_args_dict()
-    ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(
-            vllm_image_prompts, max_tokens, images=vllm_images
-        )
+    with vllm_runner(model_id,
+                     dtype=dtype,
+                     enforce_eager=True,
+                     **vlm_config.as_cli_args_dict()) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+                                                  max_tokens,
+                                                  images=vllm_images)
 
     for i in range(len(HF_IMAGE_PROMPTS)):
         hf_output_ids, hf_output_str = hf_outputs[i]
         vllm_output_ids, vllm_output_str = vllm_to_hf_output(
-            vllm_outputs[i], vlm_config, model_id
-        )
+            vllm_outputs[i], vlm_config, model_id)
         assert (
             hf_output_str == vllm_output_str
         ), f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}"
-        assert (
-            hf_output_ids == vllm_output_ids
-        ), f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
+        assert (hf_output_ids == vllm_output_ids
+                ), f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
