@@ -96,26 +96,21 @@ class CopyOnWriteTracker:
 
     The CopyOnWriteTracker class maintains a mapping of source block indices to
         their corresponding copy-on-write destination block indices. It works in
-        conjunction with a RefCounter and a BlockAllocator to handle reference
-        counting and block allocation.
+        conjunction with a RefCounter.
 
     Args:
         refcounter (RefCounter): The reference counter used to track block
             reference counts.
-        allocator (BlockAllocator): The block allocator used to allocate and
-            free blocks.
     """
 
-    def __init__(
-        self,
-        refcounter: RefCounterProtocol,
-        allocator: BlockAllocator,
-    ):
+    def __init__(self, refcounter: RefCounterProtocol):
         self._copy_on_writes: List[Tuple[BlockId, BlockId]] = []
         self._refcounter = refcounter
-        self._allocator = allocator
 
-    def _is_appendable(self, block: Block) -> bool:
+    def is_appendable(self, block: Block) -> bool:
+        """Checks if the block is shared or not. If shared, then it cannot
+        be appended and needs to be duplicated via copy-on-write
+        """
         block_id = block.block_id
         if block_id is None:
             return True
@@ -123,42 +118,55 @@ class CopyOnWriteTracker:
         refcount = self._refcounter.get(block_id)
         return refcount <= 1
 
-    def cow_block_if_not_appendable(self, block: Block) -> BlockId:
-        """Performs a copy-on-write operation on the given block if it is not
-        appendable.
-
-        This method checks the reference count of the given block. If the
-        reference count is greater than 1, indicating that the block is shared,
-        a copy-on-write operation is performed. The original block id is freed,
-        and a new block id is allocated (which will hold the same content)
-
+    def record_cow(self, src_block_id: BlockId, trg_block_id: BlockId) -> None:
+        """Records a copy-on-write operation from source to target block id
         Args:
-            block (Block): The block to check for copy-on-write.
-
-        Returns:
-            BlockId: The block index of the new block if a copy-on-write 
-                operation was performed, or the original block index if
-                no copy-on-write was necessary.
+            src_block_id (BlockId): The source block id from which to copy 
+                the data
+            trg_block_id (BlockId): The target block id to which the data
+                is copied
         """
-        if self._is_appendable(block):
-            # No CoW needed
-            return block.block_id
-
-        # Perform CoW
-        src_block_id = block.block_id
-
-        # Decrement refcount of the source block id
-        self._allocator.free_block_id(block)
-
-        # Allocate a new target block id
-        trg_block_id = self._allocator.allocate_block_id()
-
-        # Track src => trg block id mapping (for the CoW GPU kernel)
         assert src_block_id is not None
         assert trg_block_id is not None
         self._copy_on_writes.append((src_block_id, trg_block_id))
 
-        return trg_block_id
+    # TODO: Remove
+    # def cow_block_if_not_appendable(self, block: Block) -> BlockId:
+    #     """Performs a copy-on-write operation on the given block if it is not
+    #     appendable.
+
+    #     This method checks the reference count of the given block. If the
+    #     reference count is greater than 1, indicating that the block is shared,
+    #     a copy-on-write operation is performed. The original block id is freed,
+    #     and a new block id is allocated (which will hold the same content)
+
+    #     Args:
+    #         block (Block): The block to check for copy-on-write.
+
+    #     Returns:
+    #         BlockId: The block index of the new block if a copy-on-write
+    #             operation was performed, or the original block index if
+    #             no copy-on-write was necessary.
+    #     """
+    #     if self._is_appendable(block):
+    #         # No CoW needed
+    #         return block.block_id
+
+    #     # Perform CoW
+    #     src_block_id = block.block_id
+
+    #     # Decrement refcount of the source block id
+    #     self._allocator.free_block_id(block)
+
+    #     # Allocate a new target block id
+    #     trg_block_id = self._allocator.allocate_block_id()
+
+    #     # Track src => trg block id mapping (for the CoW GPU kernel)
+    #     assert src_block_id is not None
+    #     assert trg_block_id is not None
+    #     self._copy_on_writes.append((src_block_id, trg_block_id))
+
+    #     return trg_block_id
 
     def clear_cows(self) -> List[Tuple[BlockId, BlockId]]:
         """Clears the copy-on-write tracking information and returns the current

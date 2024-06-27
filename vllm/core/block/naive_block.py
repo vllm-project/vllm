@@ -46,9 +46,7 @@ class NaiveBlockAllocator(BlockAllocator):
         self._block_size = block_size
 
         self._cow_tracker = CopyOnWriteTracker(
-            refcounter=self._refcounter.as_readonly(),
-            allocator=self,
-        )
+            refcounter=self._refcounter.as_readonly())
 
         if block_pool is None:
             extra_factor = 4
@@ -94,7 +92,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
         block_ids = []
         for i in range(num_blocks):
-            block_ids.append(self.allocate_block_id())
+            block_ids.append(self._allocate_block_id())
 
         blocks = []
         for i in range(num_blocks):
@@ -121,14 +119,22 @@ class NaiveBlockAllocator(BlockAllocator):
             Block: The newly allocated mutable block.
         """
         assert device is None
-        block_id = self.allocate_block_id()
+        block_id = self._allocate_block_id()
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=None,
                                             block_size=self._block_size,
                                             physical_block_id=block_id)
         return block
 
-    def free_block_id(self, block: Block) -> None:
+    def _allocate_block_id(self) -> BlockId:
+        if not self._free_block_indices:
+            raise BlockAllocator.NoFreeBlocksError()
+
+        block_id = self._free_block_indices.popleft()
+        self._refcounter.incr(block_id)
+        return block_id
+
+    def _free_block_id(self, block: Block) -> None:
         block_id = block.block_id
         assert block_id is not None
 
@@ -138,12 +144,13 @@ class NaiveBlockAllocator(BlockAllocator):
 
         block.block_id = None
 
-    def free(self, block: Block) -> None:
-        # Release the physical block
-        self.free_block_id(block)
+    def free(self, block: Block, keep_block_object: bool = False) -> None:
+        # Release the physical block id
+        self._free_block_id(block)
 
         # Release the block object
-        self._block_pool.free_block(block)
+        if not keep_block_object:
+            self._block_pool.free_block(block)
 
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
@@ -184,14 +191,6 @@ class NaiveBlockAllocator(BlockAllocator):
     def get_num_total_blocks(self) -> int:
         return len(self._all_block_indices)
 
-    def allocate_block_id(self) -> BlockId:
-        if not self._free_block_indices:
-            raise BlockAllocator.NoFreeBlocksError()
-
-        block_id = self._free_block_indices.popleft()
-        self._refcounter.incr(block_id)
-        return block_id
-
     def get_physical_block_id(self, absolute_id: int) -> int:
         """Returns the zero-offset block id on certain block allocator
         given the absolute block id.
@@ -225,7 +224,16 @@ class NaiveBlockAllocator(BlockAllocator):
                 operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
-        return self._cow_tracker.cow_block_if_not_appendable(block)
+        if self._cow_tracker.is_appendable(block):
+            return block.block_id
+
+        src_block_id = block.block_id
+        self._free_block_id(block)
+        trg_block_id = self._allocate_block_id()
+
+        self._cow_tracker.record_cow(src_block_id, trg_block_id)
+
+        return trg_block_id
 
     def clear_copy_on_writes(self) -> List[Tuple[BlockId, BlockId]]:
         """Returns the copy-on-write source->destination mapping and clears it.
@@ -309,12 +317,12 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def swap_out(self, blocks: List[Block]) -> None:
         for block in blocks:
-            self.free_block_id(block)
+            self._free_block_id(block)
 
     def swap_in(self, blocks: List[Block]) -> None:
         for block in blocks:
             assert block.block_id is None  # Must be swapped out
-            block.block_id = self.allocate_block_id()
+            block.block_id = self._allocate_block_id()
 
 
 class NaiveBlock(Block):
