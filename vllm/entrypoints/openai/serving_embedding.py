@@ -1,5 +1,5 @@
-import time
 import base64
+import time
 from typing import AsyncIterator, List, Optional, Tuple
 
 from fastapi import Request
@@ -21,12 +21,11 @@ TypeTokenIDs = List[int]
 
 
 def request_output_to_embedding_response(
-    final_res_batch: List[EmbeddingRequestOutput],
-    request_id: str,
-    created_time: int,
-    model_name: str,
-    encoding_format: str = "float"
-) -> EmbeddingResponse:
+        final_res_batch: List[EmbeddingRequestOutput],
+        request_id: str,
+        created_time: int,
+        model_name: str,
+        encoding_format: str = "float") -> EmbeddingResponse:
     data: List[EmbeddingResponseData] = []
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
@@ -38,7 +37,7 @@ def request_output_to_embedding_response(
             embedding = base64.b64encode(embedding).decode('utf-8')
 
         embedding_data = EmbeddingResponseData(
-            index=idx, embedding=final_res.outputs.embedding)
+            index=idx, embedding=embedding)  # Use the converted embedding
         data.append(embedding_data)
 
         num_prompt_tokens += len(prompt_token_ids)
@@ -77,14 +76,13 @@ class OpenAIServingEmbedding(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
-        # Return error for unsupported features.
-        if request.encoding_format == "base64":
-            return self.create_error_response(
-                "base64 encoding is not currently supported")
         if request.dimensions is not None:
             return self.create_error_response(
                 "dimensions is currently not supported")
+
+        # Ensure encoding_format is always a str
+        encoding_format = (request.encoding_format
+                           if request.encoding_format else "float")
 
         model_name = request.model
         request_id = f"cmpl-{random_uuid()}"
@@ -135,8 +133,11 @@ class OpenAIServingEmbedding(OpenAIServing):
                     return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
             response = request_output_to_embedding_response(
-                final_res_batch, request_id, created_time, model_name,
-                encoding_format=request.encoding_format)
+                final_res_batch,
+                request_id,
+                created_time,
+                model_name,
+                encoding_format=encoding_format)  # Pass encoding_format
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
