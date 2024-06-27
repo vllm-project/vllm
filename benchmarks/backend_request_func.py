@@ -253,6 +253,7 @@ async def async_request_openai_completions(
             async with session.post(url=api_url, json=payload,
                                     headers=headers) as response:
                 if response.status == 200:
+                    first_valid_chunk_received = False
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
@@ -268,7 +269,8 @@ async def async_request_openai_completions(
                             if data["choices"][0]["text"]:
                                 timestamp = time.perf_counter()
                                 # First token
-                                if ttft == 0.0:
+                                if not first_valid_chunk_received:
+                                    first_chunk_received = True
                                     ttft = time.perf_counter() - st
                                     output.ttft = ttft
 
@@ -282,9 +284,14 @@ async def async_request_openai_completions(
 
                                 most_recent_timestamp = timestamp
                                 generated_text += data["choices"][0]["text"]
-
+                    if first_chunk_received:
+                        output.success = True
+                    else:
+                        output.success = False
+                        output.error = (
+                            "Never received a valid chunk to calculate TTFT."
+                            "This response will be marked as failed!")
                     output.generated_text = generated_text
-                    output.success = True
                     output.latency = latency
                 else:
                     output.error = response.reason or ""
