@@ -313,7 +313,7 @@ class LoRAModel:
             unexpected_modules = []
             with safetensors.safe_open(lora_tensor_path,
                                        framework="pt") as f:  # type: ignore
-                for lora_module in f:
+                for lora_module in f.keys(): # noqa
                     module_name, _ = parse_fine_tuned_lora_name(lora_module)
                     part_name = module_name.split(".")[-1]
                     if part_name not in expected_lora_modules:
@@ -326,7 +326,7 @@ class LoRAModel:
                         f" Please verify that the loaded LoRA module is correct"
                     )
                 # Load tensors if there are only expected modules.
-                for module in f:
+                for module in f.keys(): # noqa
                     tensors[module] = f.get_tensor(module)
         elif os.path.isfile(lora_bin_file_path):
             # When a bin file is provided, we rely on config to find unexpected
