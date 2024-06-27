@@ -13,7 +13,6 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.opt import OPTModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -489,13 +488,11 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
                                        quant_config)
 
         self.unpadded_vocab_size = config.text_config.vocab_size
-        self.lm_head = ParallelLMHead(self.unpadded_vocab_size,
-                                      config.text_config.hidden_size)
-        logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.text_config.vocab_size,
-                                                logit_scale)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size)
         self.sampler = Sampler()
+    
+    def get_lm_head_weights(self):
+        return self.language_model.decoder.embed_tokens.weight
 
     def _validate_image_data(self, data: torch.Tensor) -> torch.Tensor:
         if list(data.shape[1:]) != list(self.vlm_config.image_input_shape[1:]):
@@ -658,7 +655,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        logits = self.logits_processor(self.get_lm_head_weights(),
+                                       hidden_states,
                                        sampling_metadata)
         return logits
 
@@ -683,6 +681,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
         params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in weights:
+            if "lm_head.weight" in name:
+                continue
             if "rotary_emb.inv_freq" in name:
                 continue
             # post_layernorm is not needed in CLIPVisionModel
