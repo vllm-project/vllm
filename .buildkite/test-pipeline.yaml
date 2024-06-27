@@ -194,8 +194,8 @@ steps:
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
   - pip install lm-eval
-  - LM_EVAL_TP_SIZE=1 LM_EVAL_TEST_DATA_FILE=configs/Meta-Llama-3-8B-Instruct.yaml pytest -s test_lm_eval_correctness.py
-  - LM_EVAL_TP_SIZE=1 LM_EVAL_TEST_DATA_FILE=configs/Meta-Llama-3-8B-Instruct-FP8.yaml pytest -s test_lm_eval_correctness.py
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
 - label: LM Eval Large Models
   gpus: a100
@@ -203,8 +203,8 @@ steps:
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
   - pip install lm-eval
-  - LM_EVAL_TP_SIZE=4 LM_EVAL_TEST_DATA_FILE=configs/Meta-Llama-3-70B-Instruct.yaml pytest -s test_lm_eval_correctness.py
-  - LM_EVAL_TP_SIZE=4 LM_EVAL_TEST_DATA_FILE=configs/Mixtral-8x7B-Instruct-v0.1.yaml pytest -s test_lm_eval_correctness.py
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh -c configs/models-large.txt -t 4
 
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
