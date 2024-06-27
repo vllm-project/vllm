@@ -3,18 +3,18 @@
 Installation with OpenVINO
 ==========================
 
-vLLM powered by OpenVINO supports all LLM models from :ref:`vLLM supported models list <_supported_models>` and can perform optimal model serving on all x86-64 CPUs with, at least, AVX2 support. OpenVINO vLLM backend supports the following advanced vLLM features:
+vLLM powered by OpenVINO supports all LLM models from :doc:`vLLM supported models list <../models/supported_models>` and can perform optimal model serving on all x86-64 CPUs with, at least, AVX2 support. OpenVINO vLLM backend supports the following advanced vLLM features:
 
 - Prefix caching (``--enable-prefix-caching``)
 - Chunked prefill (``--enable-chunked-prefill``)
 
-Table of contents:
+**Table of contents**:
 
-#. :ref:`Requirements <openvino_backend_requirements>`
-#. :ref:`Quick start using Dockerfile <openvino_backend_quick_start_dockerfile>`
-#. :ref:`Build from source <binstall_openvino_backend_from_source>`
-#. :ref:`Performance tips <openvino_backend_performance_tips>`
-#. :ref:`Limitations <openvino_backend_limitations>`
+- :ref:`Requirements <openvino_backend_requirements>`
+- :ref:`Quick start using Dockerfile <openvino_backend_quick_start_dockerfile>`
+- :ref:`Build from source <install_openvino_backend_from_source>`
+- :ref:`Performance tips <openvino_backend_performance_tips>`
+- :ref:`Limitations <openvino_backend_limitations>`
 
 .. _openvino_backend_requirements:
 
@@ -41,23 +41,23 @@ Install from source
 
 - First, install Python. For example, on Ubuntu 22.04, you can run:
 
-.. code-block:: console
+  .. code-block:: console
 
-    $ sudo apt-get update  -y
-    $ sudo apt-get install python3
+      $ sudo apt-get update  -y
+      $ sudo apt-get install python3
 
 - Second, install prerequisites vLLM OpenVINO backend installation:
 
-.. code-block:: console
+  .. code-block:: console
 
-    $ pip install --upgrade pip
-    $ pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+      $ pip install --upgrade pip
+      $ pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 - Finally, install vLLM with OpenVINO backend: 
 
-.. code-block:: console
+  .. code-block:: console
 
-    $ PIP_PRE=1 PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu https://storage.openvinotoolkit.org/simple/wheels/nightly/" VLLM_TARGET_DEVICE=openvino python -m pip install -v .
+      $ PIP_PRE=1 PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu https://storage.openvinotoolkit.org/simple/wheels/nightly/" VLLM_TARGET_DEVICE=openvino python -m pip install -v .
 
 .. _openvino_backend_performance_tips:
 
