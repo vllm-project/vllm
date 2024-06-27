@@ -277,7 +277,7 @@ async def async_request_openai_completions(
 
                                 # Decoding phase
                                 output.itl.append(timestamp -
-                                                      most_recent_timestamp)
+                                                  most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
                                 generated_text += data["choices"][0]["text"]
