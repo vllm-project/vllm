@@ -33,9 +33,8 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16]
 
-    # Need to figure it out
     def get_min_capability(self) -> int:
-        return 60
+        return 75 # 75 for int8, 80 for gpt/gptq_marlin kernels
 
     def get_name(self) -> str:
         return "compressed_tensors"
