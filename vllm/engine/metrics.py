@@ -37,7 +37,7 @@ class Metrics:
         self._unregister_vllm_metrics()
 
         # Config Information
-        self.info_cache_config = prometheus_client.Info(
+        self.info_cache_config = self._base_library.Info(
             name='vllm:cache_config',
             documentation='information of cache_config')
 
