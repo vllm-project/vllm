@@ -1,75 +1,9 @@
 from typing import List, Optional
 
+from vllm.core.block.common import BlockList
 from vllm.core.block.interfaces import (Block, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.utils import Device, cdiv, chunk_list
-
-
-# This class is an optimization to allow fast-access to physical block ids
-class BlockList:
-
-    def __init__(self, blocks: List[Block]):
-        self._blocks: List[Block] = []
-        self._block_ids: List[int] = []
-
-        self.update(blocks)
-
-    def _add_block_id(self, block_id: Optional[BlockId]) -> None:
-        assert block_id is not None
-        self._block_ids.append(block_id)
-
-    def _update_block_id(self, block_index: int,
-                         new_block_id: Optional[BlockId]) -> None:
-        assert new_block_id is not None
-        self._block_ids[block_index] = new_block_id
-
-    def update(self, blocks: List[Block]):
-        self._blocks = blocks
-
-        # Cache block ids for fast query
-        self._block_ids = []
-        for block in self._blocks:
-            self._add_block_id(block.block_id)
-
-    def append(self, new_block: Block):
-        self._blocks.append(new_block)
-        self._add_block_id(new_block.block_id)
-
-    def __len__(self) -> int:
-        return len(self._blocks)
-
-    def __getitem__(self, block_index: int) -> Block:
-        return self._blocks[block_index]
-
-    def __setitem__(self, block_index: int, new_block: Block) -> None:
-        self._blocks[block_index] = new_block
-        self._update_block_id(block_index, new_block.block_id)
-
-    def reset(self):
-        self._blocks = []
-        self._block_ids = []
-
-    def list(self) -> List[Block]:
-        return self._blocks
-
-    def ids(self) -> List[int]:
-        return self._block_ids
-
-
-def append_token_ids_and_update_allocator(
-        block: Block, token_ids: List[int],
-        allocator: DeviceAwareBlockAllocator) -> Block:
-    new_block = allocator.cow_block_if_not_appendable(block)
-    if new_block:
-        block = new_block
-
-    block.append_token_ids(token_ids)
-
-    immutable_block = allocator.promote_to_immutable_block(block)
-    if immutable_block:
-        block = immutable_block
-
-    return block
 
 
 class BlockTable:
@@ -140,6 +74,8 @@ class BlockTable:
         return cdiv(len(token_ids), block_size)
 
     def update(self, blocks: List[Block]) -> None:
+        """Resets and sets the blocks of the block table to the given blocks
+        """
         self._blocks.update(blocks)
 
     def allocate(self,
@@ -215,9 +151,7 @@ class BlockTable:
 
         for i, token_block in enumerate(token_blocks):
             cur_block_idx = first_block_idx + i
-            self._blocks[
-                cur_block_idx] = append_token_ids_and_update_allocator(
-                    self._blocks[cur_block_idx], token_block, self._allocator)
+            self._blocks[cur_block_idx].append_token_ids(token_block)
 
         self._num_full_slots += len(token_ids)
 
@@ -348,9 +282,6 @@ class BlockTable:
 
             block = self._allocator.allocate_mutable_block(
                 prev_block=prev_block, device=device)
-
-            # Note that no copy-on-write or immutable promotion can happen
-            # here since this block is fresh and not full
             block.append_token_ids(cur_token_ids)
 
             blocks.append(block)
@@ -377,9 +308,7 @@ class BlockTable:
 
         res = 0
         for block in self.blocks:
-            cur_token_ids = block.token_ids
-            if cur_token_ids is not None:
-                res += len(cur_token_ids)
+            res += block.num_token_ids
 
         return res
 

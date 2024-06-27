@@ -152,11 +152,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                             block_size=self._block_size,
                                             physical_block_id=None)
         assert block.content_hash is not None
-
-        cached_block_id = self._maybe_allocate_cached_block_id(
-            block.content_hash)
+        
+        cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
             block.block_id = cached_block_id
+            self._incr_refcount_cached_block(block)
             return block
         self._block_pool.free_block(block)
 
@@ -276,7 +276,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def _maybe_allocate_hashless_block_id(self) -> Optional[BlockId]:
         try:
             # Allocate mutable block and extract its block_id
-            block = self._hashless_allocator.allocate_mutable_block()
+            block = self._hashless_allocator.allocate_mutable_block(
+                prev_block=None)
             block_id = block.block_id
             self._block_pool.free_block(block)
 
@@ -307,15 +308,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._track_block_id(block_id, computed=False)
 
         return block_id
-
-    def _maybe_allocate_cached_block_id(
-            self, content_hash: int) -> Optional[BlockId]:
-        cached_block_id = self._cached_blocks.get(content_hash, None)
-        if cached_block_id is None:
-            return None
-
-        self._incr_refcount_cached_block(cached_block_id)
-        return cached_block_id
 
     def _free_block_id(self, block: Block) -> None:
         """Decrements the refcount of the block. The block may be in two 

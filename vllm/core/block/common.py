@@ -130,44 +130,6 @@ class CopyOnWriteTracker:
         assert trg_block_id is not None
         self._copy_on_writes.append((src_block_id, trg_block_id))
 
-    # TODO: Remove
-    # def cow_block_if_not_appendable(self, block: Block) -> BlockId:
-    #     """Performs a copy-on-write operation on the given block if it is not
-    #     appendable.
-
-    #     This method checks the reference count of the given block. If the
-    #     reference count is greater than 1, indicating that the block is shared,
-    #     a copy-on-write operation is performed. The original block id is freed,
-    #     and a new block id is allocated (which will hold the same content)
-
-    #     Args:
-    #         block (Block): The block to check for copy-on-write.
-
-    #     Returns:
-    #         BlockId: The block index of the new block if a copy-on-write
-    #             operation was performed, or the original block index if
-    #             no copy-on-write was necessary.
-    #     """
-    #     if self._is_appendable(block):
-    #         # No CoW needed
-    #         return block.block_id
-
-    #     # Perform CoW
-    #     src_block_id = block.block_id
-
-    #     # Decrement refcount of the source block id
-    #     self._allocator.free_block_id(block)
-
-    #     # Allocate a new target block id
-    #     trg_block_id = self._allocator.allocate_block_id()
-
-    #     # Track src => trg block id mapping (for the CoW GPU kernel)
-    #     assert src_block_id is not None
-    #     assert trg_block_id is not None
-    #     self._copy_on_writes.append((src_block_id, trg_block_id))
-
-    #     return trg_block_id
-
     def clear_cows(self) -> List[Tuple[BlockId, BlockId]]:
         """Clears the copy-on-write tracking information and returns the current
         state.
@@ -251,6 +213,57 @@ class BlockPool:
 
     def free_block(self, block: Block) -> None:
         self._free_ids.appendleft(block.pool_id)  # type: ignore[attr-defined]
+
+
+# This class is an optimization to allow fast-access to physical block ids
+class BlockList:
+
+    def __init__(self, blocks: List[Block]):
+        self._blocks: List[Block] = []
+        self._block_ids: List[int] = []
+
+        self.update(blocks)
+
+    def _add_block_id(self, block_id: Optional[BlockId]) -> None:
+        assert block_id is not None
+        self._block_ids.append(block_id)
+
+    def _update_block_id(self, block_index: int,
+                         new_block_id: Optional[BlockId]) -> None:
+        assert new_block_id is not None
+        self._block_ids[block_index] = new_block_id
+
+    def update(self, blocks: List[Block]):
+        self._blocks = blocks
+
+        # Cache block ids for fast query
+        self._block_ids = []
+        for block in self._blocks:
+            self._add_block_id(block.block_id)
+
+    def append(self, new_block: Block):
+        self._blocks.append(new_block)
+        self._add_block_id(new_block.block_id)
+
+    def __len__(self) -> int:
+        return len(self._blocks)
+
+    def __getitem__(self, block_index: int) -> Block:
+        return self._blocks[block_index]
+
+    def __setitem__(self, block_index: int, new_block: Block) -> None:
+        self._blocks[block_index] = new_block
+        self._update_block_id(block_index, new_block.block_id)
+
+    def reset(self):
+        self._blocks = []
+        self._block_ids = []
+
+    def list(self) -> List[Block]:
+        return self._blocks
+
+    def ids(self) -> List[int]:
+        return self._block_ids
 
 
 def get_all_blocks_recursively(last_block: Block) -> List[Block]:

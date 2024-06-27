@@ -169,11 +169,6 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def is_appendable(self, block: Block) -> bool:
-        """NOTE: This should not be used besides Block"""
-        pass
-
-    @abstractmethod
     def cow_block_if_not_appendable(self, block: Block) -> BlockId:
         pass
 
