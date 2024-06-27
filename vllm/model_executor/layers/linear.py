@@ -277,7 +277,7 @@ class ColumnParallelLinear(LinearBase):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
-        
+
         # Special case for loading scales off disk, which often
         # do not have a shape.
         if len(loaded_weight.shape) == 0:
