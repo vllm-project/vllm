@@ -167,22 +167,6 @@ class Fp8LinearMethod(LinearMethodBase):
                     output_partition_sizes=output_partition_sizes,
                     **extra_weight_attrs)
 
-    # def scales_shard_indexer(
-    #         self, param: torch.Tensor, loaded_weight: torch.Tensor,
-    #         shard_id: Union[str, int]) -> Tuple[torch.Tensor, torch.Tensor]:
-    #     qkv_idxs = {"q": 0, "k": 1, "v": 2}
-
-    #     if isinstance(shard_id, int):
-    #         pass
-    #     elif isinstance(shard_id, str):
-    #         if shard_id not in qkv_idxs:
-    #             raise ValueError(f"Unknown shard_id: {shard_id}")
-    #         shard_id = qkv_idxs[shard_id]
-    #     else:
-    #         ValueError(f"Shard id must be int or str but got {type(shard_id)}")
-
-    #     return param[shard_id], loaded_weight
-
     def process_weights_after_loading(self, layer: Module) -> None:
         if (not hasattr(layer, "process_after_load")
                 or not layer.process_after_load):
