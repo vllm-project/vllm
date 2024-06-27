@@ -1241,6 +1241,7 @@ class LoRAConfig:
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
+    bias_enabled: bool = False
 
     def __post_init__(self):
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h

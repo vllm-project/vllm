@@ -68,7 +68,8 @@ class LoRALayerWeights:
             rank: int,
             dtype: torch.dtype,
             device: torch.types.Device,
-            embeddings_tensor_dim: Optional[int] = None) -> "LoRALayerWeights":
+            embeddings_tensor_dim: Optional[int] = None,
+            bias_enabled: Optional[bool] = False) -> "LoRALayerWeights":
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         lora_a = torch.zeros([input_dim, rank],
                              dtype=dtype,
@@ -78,10 +79,13 @@ class LoRALayerWeights:
                              dtype=dtype,
                              device=device,
                              pin_memory=pin_memory)
-        bias = torch.zeros([output_dim],
-                             dtype=dtype,
-                             device=device,
-                             pin_memory=pin_memory)
+        if bias_enabled:
+            bias = torch.zeros([output_dim],
+                                 dtype=dtype,
+                                 device=device,
+                                 pin_memory=pin_memory)
+        else:
+            bias = None
 
         embeddings_tensor = torch.rand(
             10,
