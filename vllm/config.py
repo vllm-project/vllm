@@ -920,15 +920,19 @@ class SpeculativeConfig:
                 max_logprobs=target_model_config.max_logprobs,
             )
 
-            if (draft_model_config.hf_config.model_type == "mlp_speculator"
+            draft_hf_config = draft_model_config.hf_config
+            if (draft_hf_config.model_type == "mlp_speculator"
                     and target_parallel_config.world_size != 1):
                 # MLPSpeculator TP support will be added very soon
                 raise ValueError(
                     "Speculative decoding with mlp_speculator models does not "
                     "yet support distributed inferencing (TP > 1).")
 
-            n_predict = getattr(draft_model_config.hf_config, "n_predict",
-                                None)
+            if (num_speculative_tokens is not None
+                    and hasattr(draft_hf_config, "num_lookahead_tokens")):
+                draft_hf_config.num_lookahead_tokens = num_speculative_tokens
+
+            n_predict = getattr(draft_hf_config, "n_predict", None)
             if n_predict is not None:
                 if num_speculative_tokens is None:
                     # Default to max value defined in draft model config.
