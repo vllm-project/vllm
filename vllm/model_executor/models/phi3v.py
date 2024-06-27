@@ -139,8 +139,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.layer_idx = config.img_processor.get('layer_idx', -2)
         self.type_feature = config.img_processor.get('type_feature', 'patch')
 
-    def forward(self,
-                input_ids: torch.LongTensor,
+    def forward(self, input_ids: torch.LongTensor,
                 pixel_values: torch.FloatTensor,
                 image_sizes: Optional[torch.Tensor]) -> torch.FloatTensor:
         """process and merge text embeddings with image embeddings."""
