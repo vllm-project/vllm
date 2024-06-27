@@ -26,15 +26,6 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsW8A8):
             params_dtype=params_dtype,
             weight_loader=weight_loader)
 
-        # Note: in the case where we have a fused module (QKV, MLP),
-        # there will be N scales on disk, but each of these scales
-        # will be the same value (since it is the same input to all).
-        # In the weight_loader, we will load each of these scales
-        # into this location - which is okay.
-        #
-        # TODO (robertgshaw2-neuralmagic): update this to follow the
-        # same (more explicit) logic as the fp8 input_scale case
-        # or convert the fp8 case to follow this for consistency
         input_scale = Parameter(torch.empty(1, dtype=torch.float32),
                                 requires_grad=False)
 
