@@ -22,8 +22,6 @@ def run_phi3v():
 
     # single-image prompt
     prompt = "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n"  # noqa: E501
-    prompt = prompt.replace("<|image_1|>", "<|image|>" * 1921 + "<s>")
-
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
 
     outputs = llm.generate(

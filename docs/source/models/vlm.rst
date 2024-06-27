@@ -47,12 +47,12 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
 
-* ``prompt``: The prompt is expected to have a single ``<image>`` token per image.
+* ``prompt``: The prompt should follow the same format as that for the HuggingFace version of the model.
 * ``multi_modal_data``: This should be an instance of :class:`~vllm.multimodal.image.ImagePixelData` or :class:`~vllm.multimodal.image.ImageFeatureData`.
 
 .. code-block:: python
 
-    prompt = "<image>\nUSER: What is the content of this image?\nASSISTANT:"
+    prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     # Load the image using PIL.Image
     image = ...
@@ -68,8 +68,6 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
 
 A code example can be found in `examples/llava_example.py <https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py>`_.
 
-.. important::
-    We will remove the need to format image tokens in a future release. Afterwards, the input text will follow the same format as that for the original HuggingFace model.
 
 Online OpenAI Vision API Compatible Inference
 ----------------------------------------------
@@ -139,5 +137,4 @@ A full code example can be found in `examples/openai_vision_api_client.py <https
         export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 .. note::
-    The prompt formatting with the image token ``<image>`` is not needed when serving VLMs with the API server since the prompt will be 
-    processed automatically by the server.
+    There is no need to format the prompt in the API request when since it will be handled by the server.

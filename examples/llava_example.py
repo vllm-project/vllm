@@ -48,7 +48,7 @@ def run_llava_image_features():
         image_feature_size=576,
     )
 
-    prompt = "<image>\nUSER: What is the content of this image?\nASSISTANT:"
+    prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     image: torch.Tensor = torch.load("images/stop_sign_image_features.pt")
 
