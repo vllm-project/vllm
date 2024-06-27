@@ -53,6 +53,8 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                                       input_dim=0,
                                       output_dim=1,
                                       packed_dim=1,
+                                      use_row_loading=True,
+                                      use_col_loading=True,
                                       packed_factor=pack_factor,
                                       marlin_tile_size=self.tile_size,
                                       weight_loader=weight_loader)
@@ -60,14 +62,19 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         input_groups = (1 if self.group_size is None else
                         input_size_per_partition // self.group_size)
 
-        scales = vLLMParameter(data=torch.empty(
-            input_groups,
-            output_size_per_partition,
-            dtype=params_dtype,
-        ),
-                               output_dim=1,
-                               input_dim=None if input_groups == 1 else 0,
-                               weight_loader=weight_loader)
+        input_dim = None if input_groups == 1 else 0
+
+        scales = vLLMParameter(
+            data=torch.empty(
+                input_groups,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            output_dim=1,
+            input_dim=input_dim,
+            use_col_loading=True,
+            use_row_loading=True if input_dim is not None else False,
+            weight_loader=weight_loader)
 
         weight_shape = vLLMParameter(data=torch.empty(2, dtype=torch.int64),
                                      weight_loader=weight_loader)
@@ -79,6 +86,8 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         ),
                                    input_dim=0,
                                    output_dim=1,
+                                   use_col_loading=True,
+                                   use_row_loading=True,
                                    packed_dim=1,
                                    packed_factor=1,
                                    marlin_tile_size=2,

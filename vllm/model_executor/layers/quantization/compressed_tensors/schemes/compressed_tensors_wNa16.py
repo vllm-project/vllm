@@ -77,6 +77,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         weight = PackedvLLMParameter(input_dim=1,
                                      output_dim=0,
+                                     use_row_loading=True,
+                                     use_col_loading=True,
                                      weight_loader=weight_loader,
                                      packed_factor=pack_factor,
                                      packed_dim=1,
@@ -87,14 +89,17 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                          dtype=torch.int32,
                                      ))
 
-        weight_scale = vLLMParameter(input_dim=weight_scale_dim,
-                                     output_dim=0,
-                                     weight_loader=weight_loader,
-                                     data=torch.empty(
-                                         output_size_per_partition,
-                                         scales_and_zp_size,
-                                         dtype=params_dtype,
-                                     ))
+        weight_scale = vLLMParameter(
+            input_dim=weight_scale_dim,
+            output_dim=0,
+            use_col_loading=True,
+            use_row_loading=True if weight_scale_dim is not None else False,
+            weight_loader=weight_loader,
+            data=torch.empty(
+                output_size_per_partition,
+                scales_and_zp_size,
+                dtype=params_dtype,
+            ))
 
         # A 2D array defining the original shape of the weights
         # before packing
