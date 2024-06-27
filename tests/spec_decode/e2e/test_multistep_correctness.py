@@ -640,7 +640,7 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
             "num_speculative_tokens": k,
             "spec_decoding_acceptance_method": "typical_acceptance_sampler"
         }
-        # Try a range of common k, as well as large speculation.
+        # Try a range of common k.
         for k in [1, 2, 3]
     ])
 @pytest.mark.parametrize("batch_size", [1, 32])
