@@ -4,7 +4,7 @@ import sys
 import time
 import warnings
 from contextlib import contextmanager
-from typing import List
+from typing import Dict, List
 
 import openai
 import ray
@@ -13,7 +13,32 @@ import requests
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.utils import get_open_port
+from vllm.utils import get_open_port, is_hip
+
+if is_hip():
+    from amdsmi import (amdsmi_get_gpu_vram_usage,
+                        amdsmi_get_processor_handles, amdsmi_init,
+                        amdsmi_shut_down)
+
+    @contextmanager
+    def _nvml():
+        try:
+            amdsmi_init()
+            yield
+        finally:
+            amdsmi_shut_down()
+else:
+    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
+                        nvmlInit, nvmlShutdown)
+
+    @contextmanager
+    def _nvml():
+        try:
+            nvmlInit()
+            yield
+        finally:
+            nvmlShutdown()
+
 
 # Path to root of repository so that utilities can be imported by ray workers
 VLLM_PATH = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir))
@@ -125,7 +150,7 @@ def init_test_distributed_environment(
     ensure_model_parallel_initialized(tp_size, pp_size)
 
 
-def multi_process_tensor_parallel(
+def multi_process_parallel(
     tp_size: int,
     pp_size: int,
     test_target,
@@ -154,3 +179,43 @@ def error_on_warning():
         warnings.simplefilter("error")
 
         yield
+
+
+@_nvml()
+def wait_for_gpu_memory_to_clear(devices: List[int],
+                                 threshold_bytes: int,
+                                 timeout_s: float = 120) -> None:
+    # Use nvml instead of pytorch to reduce measurement error from torch cuda
+    # context.
+    start_time = time.time()
+    while True:
+        output: Dict[int, str] = {}
+        output_raw: Dict[int, float] = {}
+        for device in devices:
+            if is_hip():
+                dev_handle = amdsmi_get_processor_handles()[device]
+                mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
+                gb_used = mem_info["vram_used"] / 2**10
+            else:
+                dev_handle = nvmlDeviceGetHandleByIndex(device)
+                mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
+                gb_used = mem_info.used / 2**30
+            output_raw[device] = gb_used
+            output[device] = f'{gb_used:.02f}'
+
+        print('gpu memory used (GB): ', end='')
+        for k, v in output.items():
+            print(f'{k}={v}; ', end='')
+        print('')
+
+        dur_s = time.time() - start_time
+        if all(v <= (threshold_bytes / 2**30) for v in output_raw.values()):
+            print(f'Done waiting for free GPU memory on devices {devices=} '
+                  f'({threshold_bytes/2**30=}) {dur_s=:.02f}')
+            break
+
+        if dur_s >= timeout_s:
+            raise ValueError(f'Memory of devices {devices=} not free after '
+                             f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
+
+        time.sleep(5)

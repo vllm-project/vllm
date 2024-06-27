@@ -137,6 +137,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
             node_workers[node_id].append(i)
+            # `gpu_ids` can be a list of strings or integers.
+            # convert them to integers for consistency.
+            # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
+            # string sorting is not sufficient.
+            # see https://github.com/vllm-project/vllm/issues/5590
+            gpu_ids = [int(x) for x in gpu_ids]
             node_gpus[node_id].extend(gpu_ids)
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
@@ -155,6 +161,16 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._run_workers("update_environment_variables",
                           all_args=all_args_to_update_environment_variables)
 
+        if len(node_gpus) == 1:
+            # in single node case, we don't need to get the IP address.
+            # the loopback address is sufficient
+            # NOTE: a node may have several IP addresses, one for each
+            # network interface. `get_ip()` might return any of them,
+            # while they might not work for communication inside the node
+            # if the network setup is complicated. Using the loopback address
+            # solves this issue, as it always works for communication inside
+            # the node.
+            driver_ip = "127.0.0.1"
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 
@@ -174,9 +190,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                           max_parallel_loading_workers)
 
     def _driver_execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution

@@ -456,7 +456,9 @@ def test_k_equals_zero(k: int, batch_size: int):
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
-    target_worker.execute_model.return_value = [MagicMock(spec=SamplerOutput)]
+    sampler_output = MagicMock(spec=SamplerOutput)
+    sampler_output.hidden_states = None
+    target_worker.execute_model.return_value = [sampler_output]
 
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
@@ -497,7 +499,9 @@ def test_empty_input_batch(k: int, batch_size: int):
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
-    target_worker.execute_model.return_value = [MagicMock(spec=SamplerOutput)]
+    sampler_output = MagicMock(spec=SamplerOutput)
+    sampler_output.hidden_states = None
+    target_worker.execute_model.return_value = [sampler_output]
 
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'

@@ -5,17 +5,17 @@ from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
 
-from ..conftest import IMAGE_FILES
+from ..conftest import IMAGE_ASSETS
 
-pytestmark = pytest.mark.llava
+pytestmark = pytest.mark.vlm
 
 # The image token is placed before "user" on purpose so that the test can pass
-HF_IMAGE_PROMPTS = [
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    "stop_sign":
     "<image>\nUSER: What's the content of the image?\nASSISTANT:",
+    "cherry_blossom":
     "<image>\nUSER: What is the season?\nASSISTANT:",
-]
-
-assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
+})
 
 
 def iter_llava_configs(model_name: str):
@@ -49,28 +49,28 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     x1, x2, x3 ... to 1, 32000, x1, x2, x3 ...
     It also reduces `output_str` from "<image><image>bla" to "bla".
     """
-    input_ids, output_str = vllm_output
+    output_ids, output_str = vllm_output
     image_token_id = vlm_config.image_token_id
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     image_token_str = tokenizer.decode(image_token_id)
 
-    hf_input_ids = [
-        input_id for idx, input_id in enumerate(input_ids)
-        if input_id != image_token_id or input_ids[idx - 1] != image_token_id
+    hf_output_ids = [
+        token_id for idx, token_id in enumerate(output_ids)
+        if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
     hf_output_str = output_str \
         .replace(image_token_str * vlm_config.image_feature_size, "")
 
-    return hf_input_ids, hf_output_str
+    return hf_output_ids, hf_output_str
 
 
 # TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
-                model_and_config, dtype: str, max_tokens: int) -> None:
+def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
+                dtype: str, max_tokens: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -81,6 +81,8 @@ def test_models(hf_runner, vllm_runner, hf_images, vllm_images,
     The text output is sanitized to be able to compare with hf.
     """
     model_id, vlm_config = model_and_config
+    hf_images = [asset.for_hf() for asset in image_assets]
+    vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
         hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,

@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import datetime
 import enum
@@ -14,7 +15,7 @@ from collections import defaultdict
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
+                    Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
                     Union)
 
 import numpy as np
@@ -43,6 +44,13 @@ K = TypeVar("K")
 T = TypeVar("T")
 
 
+class _Sentinel:
+    ...
+
+
+ALL_PINNED_SENTINEL = _Sentinel()
+
+
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
@@ -66,6 +74,7 @@ class LRUCache(Generic[T]):
 
     def __init__(self, capacity: int):
         self.cache: OrderedDict[Hashable, T] = OrderedDict()
+        self.pinned_items: Set[Hashable] = set()
         self.capacity = capacity
 
     def __contains__(self, key: Hashable) -> bool:
@@ -101,14 +110,36 @@ class LRUCache(Generic[T]):
         self.cache.move_to_end(key)
         self._remove_old_if_needed()
 
+    def pin(self, key: Hashable) -> None:
+        """
+        Pins a key in the cache preventing it from being
+        evicted in the LRU order.
+        """
+        if key not in self.cache:
+            raise ValueError(f"Cannot pin key: {key} not in cache.")
+        self.pinned_items.add(key)
+
+    def _unpin(self, key: Hashable) -> None:
+        self.pinned_items.remove(key)
+
     def _on_remove(self, key: Hashable, value: Optional[T]):
         pass
 
-    def remove_oldest(self):
+    def remove_oldest(self, remove_pinned=False):
         if not self.cache:
             return
-        key, value = self.cache.popitem(last=False)
-        self._on_remove(key, value)
+
+        if not remove_pinned:
+            # pop the oldest item in the cache that is not pinned
+            lru_key = next(
+                (key for key in self.cache if key not in self.pinned_items),
+                ALL_PINNED_SENTINEL)
+            if lru_key is ALL_PINNED_SENTINEL:
+                raise RuntimeError("All items are pinned, "
+                                   "cannot remove oldest from the cache.")
+        else:
+            lru_key = next(iter(self.cache))
+        self.pop(lru_key)
 
     def _remove_old_if_needed(self) -> None:
         while len(self.cache) > self.capacity:
@@ -119,13 +150,16 @@ class LRUCache(Generic[T]):
             default_value: Optional[T] = None) -> Optional[T]:
         run_on_remove = key in self.cache
         value: Optional[T] = self.cache.pop(key, default_value)
+        # remove from pinned items
+        if key in self.pinned_items:
+            self._unpin(key)
         if run_on_remove:
             self._on_remove(key, value)
         return value
 
     def clear(self):
         while len(self.cache) > 0:
-            self.remove_oldest()
+            self.remove_oldest(remove_pinned=True)
         self.cache.clear()
 
 
@@ -158,6 +192,26 @@ def is_tpu() -> bool:
     except ImportError:
         libtpu = None
     return libtpu is not None
+
+
+@lru_cache(maxsize=None)
+def is_xpu() -> bool:
+    from importlib.metadata import version
+    is_xpu_flag = "xpu" in version("vllm")
+    # vllm is not build with xpu
+    if not is_xpu_flag:
+        return False
+    try:
+        import intel_extension_for_pytorch as ipex  # noqa: F401
+        _import_ipex = True
+    except ImportError as e:
+        logger.warning("Import Error for IPEX: %s", e.msg)
+        _import_ipex = False
+    # ipex dependency is not ready
+    if not _import_ipex:
+        logger.warning("not found ipex lib")
+        return False
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 @lru_cache(maxsize=None)
@@ -322,6 +376,10 @@ def get_open_port() -> int:
 
 
 def update_environment_variables(envs: Dict[str, str]):
+    if is_hip() and "CUDA_VISIBLE_DEVICES" in envs:
+        # Propagate changes to CUDA_VISIBLE_DEVICES to
+        # ROCm's HIP_VISIBLE_DEVICES as well
+        envs["HIP_VISIBLE_DEVICES"] = envs["CUDA_VISIBLE_DEVICES"]
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
@@ -482,6 +540,9 @@ def is_pin_memory_available() -> bool:
         print_warning_once("Using 'pin_memory=False' as WSL is detected. "
                            "This may slow down the performance.")
         return False
+    elif is_xpu():
+        print_warning_once("Pin memory is not supported on XPU.")
+        return False
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
@@ -497,8 +558,12 @@ class CudaMemoryProfiler:
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        torch.cuda.reset_peak_memory_stats(self.device)
-        mem = torch.cuda.max_memory_allocated(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.device)
+            mem = torch.cuda.max_memory_allocated(self.device)
+        elif is_xpu():
+            torch.xpu.reset_peak_memory_stats(self.device)
+            mem = torch.xpu.max_memory_allocated(self.device)
         return mem
 
     def __enter__(self):
@@ -718,9 +783,14 @@ def _cuda_device_count_stateless(
 
     if not torch.cuda._is_compiled():
         return 0
-    # bypass _device_count_nvml() if rocm (not supported)
-    nvml_count = -1 if torch.version.hip else torch.cuda._device_count_nvml()
-    r = torch._C._cuda_getDeviceCount() if nvml_count < 0 else nvml_count
+    if is_hip():
+        # ROCm uses amdsmi instead of nvml for stateless device count
+        # This requires a sufficiently modern version of Torch 2.4.0
+        raw_count = torch.cuda._device_count_amdsmi() if (hasattr(
+            torch.cuda, "_device_count_amdsmi")) else -1
+    else:
+        raw_count = torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
     return r
 
 
@@ -734,5 +804,40 @@ def cuda_device_count_stateless() -> int:
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
-
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+#From: https://stackoverflow.com/a/4104188/2749989
+def run_once(f):
+
+    def wrapper(*args, **kwargs) -> Any:
+        if not wrapper.has_run:  # type: ignore[attr-defined]
+            wrapper.has_run = True  # type: ignore[attr-defined]
+            return f(*args, **kwargs)
+
+    wrapper.has_run = False  # type: ignore[attr-defined]
+    return wrapper
+
+
+class FlexibleArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that allows both underscore and dash in names."""
+
+    def parse_args(self, args=None, namespace=None):
+        if args is None:
+            args = sys.argv[1:]
+
+        # Convert underscores to dashes and vice versa in argument names
+        processed_args = []
+        for arg in args:
+            if arg.startswith('--'):
+                if '=' in arg:
+                    key, value = arg.split('=', 1)
+                    key = '--' + key[len('--'):].replace('_', '-')
+                    processed_args.append(f'{key}={value}')
+                else:
+                    processed_args.append('--' +
+                                          arg[len('--'):].replace('_', '-'))
+            else:
+                processed_args.append(arg)
+
+        return super().parse_args(processed_args, namespace)

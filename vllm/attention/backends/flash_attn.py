@@ -25,8 +25,8 @@ class FlashAttentionBackend(AttentionBackend):
         return FlashAttentionImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "FlashAttentionMetadata":
-        return FlashAttentionMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return FlashAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -83,7 +83,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
-    # |-------------------- seq_len ----------------------|
+    # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
 
     # Maximum query length in the batch. None for decoding.
