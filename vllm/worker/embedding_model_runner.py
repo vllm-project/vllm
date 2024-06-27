@@ -96,7 +96,7 @@ class EmbeddingModelRunner(
 
         # Only perform pooling in the driver worker.
         if not self.is_driver_worker:
-            return None
+            return []
 
         return [
             self.model.pooler(hidden_states=hidden_states,

@@ -242,12 +242,12 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             if not broadcast_data:
                 return None
 
+            num_steps = broadcast_data.pop("num_steps")
             worker_input = WorkerInput.from_broadcasted_tensor_dict(
                 broadcast_data)
             model_input = (
                 self.model_runner.
                 make_model_input_from_broadcasted_tensor_dict(broadcast_data))
-            num_steps = broadcast_data["num_steps"]
 
         self.execute_worker(worker_input)
 

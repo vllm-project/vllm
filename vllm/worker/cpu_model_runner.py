@@ -387,7 +387,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
-            return None
+            return []
 
         # Sample the next token.
         output = self.model.sample(
