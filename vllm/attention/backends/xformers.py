@@ -276,10 +276,9 @@ def _get_attn_bias(attn_metadata: XFormersMetadata,
         return attn_metadata.attn_bias
     elif attn_type == AttentionType.ENCODER:
         return attn_metadata.encoder_attn_bias
-    elif attn_type == AttentionType.ENCODER_DECODER:
-        return attn_metadata.cross_attn_bias
     else:
-        raise AttributeError(f"Invalid attention type {str(attn_type)}")
+        # attn_type == AttentionType.ENCODER_DECODER
+        return attn_metadata.cross_attn_bias
 
 
 def _set_attn_bias(attn_metadata: XFormersMetadata,
