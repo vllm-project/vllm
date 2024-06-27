@@ -41,6 +41,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
+from .interfaces import SupportsLoRA
+
 
 class GPTBigCodeAttention(nn.Module):
 
@@ -230,7 +232,7 @@ class GPTBigCodeModel(nn.Module):
         return hidden_states
 
 
-class GPTBigCodeForCausalLM(nn.Module):
+class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
     supported_lora_modules = ["c_fc", "c_proj", "wte", "lm_head", "c_attn"]
@@ -250,7 +252,10 @@ class GPTBigCodeForCausalLM(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.quant_config = quant_config
         self.transformer = GPTBigCodeModel(config, cache_config, quant_config,
                                            lora_config)
