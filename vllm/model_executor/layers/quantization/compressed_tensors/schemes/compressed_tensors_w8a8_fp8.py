@@ -19,6 +19,8 @@ class CompressedTensorsFp8(CompressedTensorsScheme):
                        params_dtype: torch.dtype,
                        weight_loader: Callable,
                        **kwargs):
+        
+        self.process_weights=True
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
 
