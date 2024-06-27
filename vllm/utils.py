@@ -579,6 +579,16 @@ class CudaMemoryProfiler:
         gc.collect()
 
 
+def str_to_int_tuple(s: str) -> Tuple[int, ...]:
+    """Convert a string to a tuple of integers."""
+    try:
+        return tuple(map(int, s.split(",")))
+    except ValueError as e:
+        raise ValueError(
+            "String must be a series of integers separated by commas "
+            f"(e.g., 1, 2, 3). Given input: {s}") from e
+
+
 def make_tensor_with_pad(
     x: List[List[int]],
     max_len: int,
@@ -596,16 +606,6 @@ def make_tensor_with_pad(
         assert len(blocktb) <= max_len
         padded_x[ind, :len(blocktb)] = blocktb
     return torch.tensor(padded_x, dtype=dtype, device=device)
-
-
-def str_to_int_tuple(s: str) -> Tuple[int, ...]:
-    """Convert a string to a tuple of integers."""
-    try:
-        return tuple(map(int, s.split(",")))
-    except ValueError as e:
-        raise ValueError(
-            "String must be a series of integers separated by commas "
-            f"(e.g., 1, 2, 3). Given input: {s}") from e
 
 
 def async_tensor_h2d(
