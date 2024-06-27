@@ -1,0 +1,41 @@
+.. _bits_and_bytes:
+
+BitsAndBytes
+==================
+
+vLLM now supports `BitsAndBytes <https://github.com/TimDettmers/bitsandbytes>`_ for more efficient model inference.
+BitsAndBytes quantizes models to reduce memory usage and enhance performance without significantly sacrificing accuracy.
+This is particularly useful for deploying large language models in resource-constrained environments.
+Below are the steps to utilize BitsAndBytes with vLLM.
+
+.. code-block:: console
+
+    $ pip install bitsandbytes>=0.42.0
+
+vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.
+
+Read quantized checkpoint
+--------------------------
+
+.. code-block:: python
+
+    from vllm import LLM, SamplingParams
+    import torch
+    import time
+    #unsloth/tinyllama-bnb-4bit is a pre-quantized checkpoint.
+    model_id = "unsloth/tinyllama-bnb-4bit"
+    llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True, \
+    ,quantization="bitsandbytes", load_format="bitsandbytes")
+
+Inflight quantization: load as 4bit quantization
+------------------------------------------------
+
+.. code-block:: python
+
+    from vllm import LLM, SamplingParams
+    import torch
+    import time
+    model_id = "huggyllama/llama-7b"
+    llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True, \
+    ,quantization="bitsandbytes", load_format="bitsandbytes")
+
