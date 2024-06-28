@@ -111,10 +111,10 @@ class SequenceDataPool:
     def __init__(self) -> None:
         self.pool: Dict[int, List[np.ndarray]] = defaultdict(list)
 
-    def alloc_array(self, max_tokens) -> np.ndarray:
+    def alloc_array(self, max_tokens: int) -> np.ndarray:
         if max_tokens in self.pool and self.pool[max_tokens]:
             return self.pool[max_tokens].pop()
-        return np.zeros(max_tokens, dtype=np.int64)
+        return np.zeros((max_tokens, ), dtype=np.int64)
 
     def del_array(self, arr: np.ndarray) -> None:
         self.pool[len(arr)].append(arr)
@@ -159,7 +159,7 @@ class SequenceData:
         max_seq_len: Optional[int] = None,
     ) -> None:
         self.max_seq_len = max_seq_len or 16 * 1024
-        self.tokens = _SEQUENCE_DATA_POOL.alloc_array(max_seq_len)
+        self.tokens = _SEQUENCE_DATA_POOL.alloc_array(self.max_seq_len)
         self.prompt_token_ids_list = prompt_token_ids
         self.num_prompt_tokens = len(prompt_token_ids)
         self.tokens[:self.num_prompt_tokens] = prompt_token_ids
