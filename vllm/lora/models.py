@@ -19,6 +19,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
+from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.utils import LRUCache, is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -383,7 +384,7 @@ class LoRAModelManager:
 
     def __init__(
         self,
-        model: nn.Module,
+        model: SupportsLoRA,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
@@ -431,7 +432,7 @@ class LoRAModelManager:
         # embeddings_indices,long_lora_indices,prefilling or decoding
         self.indices_len: List[Optional[int]] = [None] * 6
 
-        self.model: nn.Module = model
+        self.model = model
         if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
                 self.model.supported_lora_modules)
@@ -449,7 +450,6 @@ class LoRAModelManager:
         self._last_mapping: Optional[LoRAMapping] = None
         self._convert_flag = True
         self._create_lora_modules()
-        self.model.lora_manager = self
 
     @property
     def capacity(self) -> int:
