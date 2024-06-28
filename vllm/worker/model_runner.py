@@ -476,7 +476,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 query_len = sliding_seq_len - sliding_context_len
                 query_lens.append(query_len)
                 input_tokens.append(tokens)
-                batch_size += len(tokens)
+                batch_size += seq_len - context_len
                 input_positions.append(np.arange(context_len, seq_len))
                 lora_id = seq_group_metadata.lora_int_id
 
@@ -614,10 +614,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         input_tokens_array = np.concatenate(input_tokens)
         input_tokens_tensor = torch.from_numpy(input_tokens_array).to(
-            device=self.device, non_blocking=True)
+            device=self.device)
         input_positions_array = np.concatenate(input_positions)
         input_positions_tensor = torch.from_numpy(input_positions_array).to(
-            device=self.device, non_blocking=True)
+            device=self.device)
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,
                                            device=self.device)
