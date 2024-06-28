@@ -354,8 +354,6 @@ def _image_processor(ctx: InputContext,
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
 class Phi3VForCausalLM(nn.Module, SupportsVision):
 
-    supports_vision = True
-
     def __init__(self,
                  config: PretrainedConfig,
                  vlm_config: VisionLanguageConfig,

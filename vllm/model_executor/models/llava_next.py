@@ -188,8 +188,6 @@ def _pixel_mapper(ctx: InputContext,
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
-    supports_vision = True
-
     def __init__(self,
                  config: LlavaNextConfig,
                  vlm_config: VisionLanguageConfig,

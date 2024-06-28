@@ -116,8 +116,6 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int):
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
 class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
-    supports_vision = True
-
     def __init__(self,
                  config: LlavaConfig,
                  vlm_config: VisionLanguageConfig,
