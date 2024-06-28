@@ -50,6 +50,7 @@ from vllm.sequence import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import safetensors_weights_iterator
 from vllm.utils import is_hip, print_warning_once
 
+from .interfaces import SupportsLoRA
 import os.path
 
 
@@ -299,7 +300,7 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-class LlamaForCausalLM(nn.Module):
+class LlamaForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -339,7 +340,10 @@ class LlamaForCausalLM(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.model = LlamaModel(config,
                                 cache_config,
                                 quant_config,

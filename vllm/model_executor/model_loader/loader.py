@@ -32,7 +32,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
-from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
+from vllm.model_executor.models.interfaces import (supports_lora,
+                                                   supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_tpu
 
@@ -64,12 +65,15 @@ def _get_quantization_config(
 
 
 def _get_model_initialization_kwargs(
-        model_class: Type[nn.Module], lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig]
+    model_class: Type[nn.Module],
+    lora_config: Optional[LoRAConfig],
+    vlm_config: Optional[VisionLanguageConfig],
 ) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
     extra_kwargs: Dict[str, Any] = {}
-    if hasattr(model_class, "supported_lora_modules"):
+
+    if supports_lora(model_class):
+        # lora_config=None is used to disable LoRA
         extra_kwargs["lora_config"] = lora_config
     elif lora_config:
         raise ValueError(
@@ -77,13 +81,15 @@ def _get_model_initialization_kwargs(
             "but LoRA is enabled. Support for this model may "
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
-    elif issubclass(model_class, VisionLanguageModelBase):
-        if vision_language_config is None:
+
+    if supports_vision(model_class):
+        if vlm_config is None:
             raise ValueError("Provide `image_input_type` and other vision "
                              "related configurations through LLM entrypoint "
                              "or engine arguments.")
 
-        extra_kwargs["vision_language_config"] = vision_language_config
+        extra_kwargs["vlm_config"] = vlm_config
+
     return extra_kwargs
 
 

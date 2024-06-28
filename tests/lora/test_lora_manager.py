@@ -209,6 +209,34 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model):
     assert manager.activate_lora(3)
     assert manager.lora_index_to_id[0] == 2
     assert manager.lora_index_to_id[1] == 3
+    assert manager.pin_lora(2)
+    assert manager.lora_index_to_id[0] == 2
+    assert manager.lora_index_to_id[1] == 3
+    assert manager.activate_lora(1)
+    assert manager.lora_index_to_id[0] == 2
+    assert manager.lora_index_to_id[1] == 1
+    assert manager.deactivate_lora(2)
+    assert manager.lora_index_to_id[0] is None
+    assert manager.lora_index_to_id[1] == 1
+    assert manager.activate_lora(3)
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] == 1
+    assert manager.pin_lora(3)
+    assert manager.pin_lora(1)
+    with pytest.raises(RuntimeError):
+        assert manager.pin_lora(2)
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] == 1
+    with pytest.raises(RuntimeError):
+        assert manager.activate_lora(2)
+
+    assert manager.deactivate_lora(3)
+    assert manager.pin_lora(2)
+    assert manager.lora_index_to_id[0] == 2
+    assert manager.lora_index_to_id[1] == 1
+    assert manager.remove_lora(3)
+    with pytest.raises(ValueError):
+        assert manager.pin_lora(3)
 
 
 def test_lru_lora_model_manager(dist_init, dummy_model):
@@ -287,6 +315,42 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     assert not manager.remove_oldest_lora()
     assert set(manager.list_loras()) == set()
     assert all(x is None for x in manager.lora_index_to_id)
+
+    # pinning
+    assert manager.add_lora(model_lora3)
+    assert manager.activate_lora(3)
+    assert manager.add_lora(model_lora4)
+    assert manager.activate_lora(4)
+    assert set(manager.list_loras()) == {3, 4}
+    with pytest.raises(ValueError):
+        assert manager.pin_lora(1)
+    assert manager.pin_lora(3)
+    # Remove manually
+    assert manager.remove_lora(3)
+    assert not manager.remove_lora(3)
+
+    assert set(manager.list_loras()) == {4}
+    assert manager.lora_index_to_id[0] is None
+    assert manager.lora_index_to_id[1] == 4
+
+    assert manager.add_lora(model_lora1)
+    assert manager.pin_lora(1)
+    assert manager.add_lora(model_lora2)
+    assert manager.activate_lora(2)
+
+    assert set(manager.list_loras()) == {1, 2}
+    assert manager.lora_index_to_id[0] == 1
+    assert manager.lora_index_to_id[1] == 2
+
+    assert manager.remove_oldest_lora()
+    assert set(manager.list_loras()) == {1}
+    assert manager.lora_index_to_id[0] == 1
+    assert manager.lora_index_to_id[1] is None
+
+    with pytest.raises(RuntimeError):
+        assert manager.remove_oldest_lora()
+
+    assert set(manager.list_loras()) == {1}
 
 
 def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,

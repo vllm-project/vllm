@@ -5,6 +5,7 @@ if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: Optional[int] = None
     VLLM_USE_MODELSCOPE: bool = False
+    VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_INSTANCE_ID: Optional[str] = None
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_XLA_CACHE_PATH: str = "~/.vllm/xla_cache/"
     VLLM_USE_RAY_COMPILED_DAG: bool = False
-    VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
+    VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
@@ -116,6 +117,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # instance should have the same instance id.
     "VLLM_INSTANCE_ID":
     lambda: os.environ.get("VLLM_INSTANCE_ID", None),
+
+    # Interval in seconds to log a warning message when the ring buffer is full
+    "VLLM_RINGBUFFER_WARNING_INTERVAL":
+    lambda: int(os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")),
 
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
@@ -215,7 +220,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
-    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
+    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "fork"),
 
     # Timeout for fetching images when serving multimodal models
     # Default is 5 seconds

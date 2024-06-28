@@ -7,13 +7,15 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
 import torch
 from transformers import PretrainedConfig, PreTrainedTokenizerBase
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_tpu, is_xpu)
+                        is_hip, is_neuron, is_tpu, is_xpu, print_warning_once,
+                        update_environment_variables)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -139,6 +141,17 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+
+        if (not self.disable_sliding_window
+                and self.hf_text_config.model_type == "gemma2"
+                and self.hf_text_config.sliding_window is not None):
+            print_warning_once(
+                "Gemma 2 uses sliding window attention for every odd layer, "
+                "which is currently not supported by vLLM. Disabling sliding "
+                "window and capping the max length to the sliding window size "
+                f"({self.hf_text_config.sliding_window}).")
+            self.disable_sliding_window = True
+
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
@@ -230,7 +243,8 @@ class ModelConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        total_num_attention_heads = self.hf_text_config.num_attention_heads
+        total_num_attention_heads = getattr(self.hf_text_config,
+                                            "num_attention_heads", 0)
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
@@ -238,7 +252,8 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
-        total_num_hidden_layers = self.hf_text_config.num_hidden_layers
+        total_num_hidden_layers = getattr(self.hf_text_config,
+                                          "num_hidden_layers", 0)
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if total_num_hidden_layers % pipeline_parallel_size != 0:
             raise ValueError(
@@ -253,8 +268,7 @@ class ModelConfig:
                 "BitAndBytes quantization with TP or PP is not supported yet.")
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
-        """Get the sliding window size, or None if disabled.
-        """
+        """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
         # addition to sliding window size. We check if that field is present
@@ -341,8 +355,8 @@ class ModelConfig:
 
     def get_num_attention_heads(self,
                                 parallel_config: "ParallelConfig") -> int:
-        return self.hf_text_config.num_attention_heads // \
-            parallel_config.tensor_parallel_size
+        num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
+        return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
@@ -632,6 +646,12 @@ class ParallelConfig:
             self.distributed_executor_backend = backend
             logger.info("Defaulting to use %s for distributed inference",
                         backend)
+        # If CUDA_VISIBLE_DEVICES is set on ROCm prior to vLLM init,
+        # propagate changes to HIP_VISIBLE_DEVICES (conversion handled by
+        # the update_environment_variables function)
+        if is_hip() and envs.CUDA_VISIBLE_DEVICES:
+            update_environment_variables(
+                {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
 
         self._verify_args()
 
@@ -795,6 +815,7 @@ class SpeculativeConfig:
         target_parallel_config: ParallelConfig,
         target_dtype: str,
         speculative_model: Optional[str],
+        speculative_draft_tensor_parallel_size: Optional[int],
         num_speculative_tokens: Optional[int],
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
@@ -817,8 +838,11 @@ class SpeculativeConfig:
             target_dtype (str): The data type used for the target model.
             speculative_model (Optional[str]): The name of the speculative
                 model, if provided.
+            speculative_draft_tensor_parallel_size (Optional[int]): The degree
+                of the tensor parallelism for the draft model.
             num_speculative_tokens (Optional[int]): The number of speculative
-                tokens, if provided.
+                tokens, if provided. Will default to the number in the draft
+                model config if present, otherwise is required.
             speculative_max_model_len (Optional[int]): The maximum model len of
                 the speculative model. Used when testing the ability to skip
                 speculation for some sequences.
@@ -841,23 +865,17 @@ class SpeculativeConfig:
                 the necessary conditions are met, else None.
         """
 
-        if speculative_model is None and num_speculative_tokens is None:
+        if speculative_model is None:
+            if num_speculative_tokens is not None:
+                raise ValueError("num_speculative_tokens was provided without "
+                                 "speculative_model.")
             return None
-
-        if speculative_model is not None and num_speculative_tokens is None:
-            raise ValueError(
-                "Expected both speculative_model and "
-                "num_speculative_tokens to be provided, but found "
-                f"{speculative_model=} and {num_speculative_tokens=}.")
 
         if (speculative_disable_by_batch_size is not None
                 and speculative_disable_by_batch_size < 2):
             raise ValueError("Expect the batch size threshold of disabling "
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
-
-        assert (speculative_model is not None
-                and num_speculative_tokens is not None)
 
         if enable_chunked_prefill:
             raise ValueError(
@@ -912,6 +930,31 @@ class SpeculativeConfig:
                 max_logprobs=target_model_config.max_logprobs,
             )
 
+            draft_hf_config = draft_model_config.hf_config
+            if (draft_hf_config.model_type == "mlp_speculator"
+                    and target_parallel_config.world_size != 1):
+                # MLPSpeculator TP support will be added very soon
+                raise ValueError(
+                    "Speculative decoding with mlp_speculator models does not "
+                    "yet support distributed inferencing (TP > 1).")
+
+            if (num_speculative_tokens is not None
+                    and hasattr(draft_hf_config, "num_lookahead_tokens")):
+                draft_hf_config.num_lookahead_tokens = num_speculative_tokens
+
+            n_predict = getattr(draft_hf_config, "n_predict", None)
+            if n_predict is not None:
+                if num_speculative_tokens is None:
+                    # Default to max value defined in draft model config.
+                    num_speculative_tokens = n_predict
+                elif num_speculative_tokens > n_predict:
+                    # Verify provided value doesn't exceed the maximum
+                    # supported by the draft model.
+                    raise ValueError(
+                        "Expected both speculative_model and "
+                        "num_speculative_tokens to be provided, but found "
+                        f"{speculative_model=} and {num_speculative_tokens=}.")
+
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
                     speculative_max_model_len,
@@ -921,7 +964,14 @@ class SpeculativeConfig:
 
             draft_parallel_config = (
                 SpeculativeConfig.create_draft_parallel_config(
-                    target_parallel_config))
+                    target_parallel_config,
+                    speculative_draft_tensor_parallel_size))
+
+        if num_speculative_tokens is None:
+            raise ValueError(
+                "num_speculative_tokens must be provided with "
+                "speculative_model unless the draft model config contains an "
+                "n_predict parameter.")
 
         return SpeculativeConfig(
             draft_model_config,
@@ -969,16 +1019,26 @@ class SpeculativeConfig:
 
     @staticmethod
     def create_draft_parallel_config(
-            target_parallel_config: ParallelConfig) -> ParallelConfig:
+        target_parallel_config: ParallelConfig,
+        speculative_draft_tensor_parallel_size: Optional[int]
+    ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
-        This is mostly a copy of the target parallel config. In the future the
-        draft worker can have a different parallel strategy, e.g. TP=1.
+        This is mostly a copy of the target parallel config, except the tp_size.
         """
+        if speculative_draft_tensor_parallel_size is None:
+            speculative_draft_tensor_parallel_size = \
+                  target_parallel_config.tensor_parallel_size
+        elif speculative_draft_tensor_parallel_size != 1:
+            # TODO(wooyeon): allow tp values larger than 1
+            raise ValueError(
+                f"{speculative_draft_tensor_parallel_size=} cannot be"
+                f"other value than 1")
+
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
-            tensor_parallel_size=target_parallel_config.tensor_parallel_size,
+            tensor_parallel_size=speculative_draft_tensor_parallel_size,
             distributed_executor_backend=target_parallel_config.
             distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
@@ -1206,10 +1266,16 @@ def _get_and_verify_dtype(
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
-                # Following the common practice, we use float16 for float32
-                # models.
-                logger.info("Casting torch.float32 to torch.float16.")
-                torch_dtype = torch.float16
+                if config.model_type == "gemma2":
+                    logger.info(
+                        "For Gemma 2, we downcast float32 to bfloat16 instead "
+                        "of float16 by default. Please specify `dtype` if you "
+                        "want to use float16.")
+                    torch_dtype = torch.bfloat16
+                else:
+                    # Following the common practice, we use float16 for float32
+                    # models.
+                    torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
         else:
