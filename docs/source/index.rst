@@ -120,6 +120,7 @@ Documentation
    dev/offline_inference/offline_index
    dev/engine/engine_index
    dev/kernel/paged_attention
+   dev/input_processing/model_inputs_index
    dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
 
