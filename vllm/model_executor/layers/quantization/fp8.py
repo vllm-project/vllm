@@ -9,6 +9,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import print_warning_once
 
@@ -279,26 +280,15 @@ class Fp8LinearMethod(LinearMethodBase):
         return torch.narrow(output, 0, 0, x.shape[0])
 
 
-class Fp8KVCacheMethod(QuantizeMethodBase):
+class Fp8KVCacheMethod(BaseKVCacheMethod):
     """Supports loading kv-cache scaling factors from FP8 checkpoints.
     """
 
     def __init__(self, quant_config: Fp8Config):
-        self.quant_config = quant_config
+        super().__init__(quant_config)
 
     def create_weights(self, layer: torch.nn.Module):
-        """Create "weight" (aka kv_scale) for an attention layer.
-
-        Args:
-            layer: The layer that is using the QuantizeMethodBase factory.
-        """
-        # Initialize the KV cache scale to 1.0 as the default value.
-        # If the kv_scale appears in the checkpoint, it will be
-        # overwritten when loading weights.
         layer.kv_scale = Parameter(torch.tensor(1.0), requires_grad=False)
-
-    def apply(self, layer: torch.nn.Module) -> torch.Tensor:
-        raise RuntimeError("Fp8KVCacheMethod.apply should not be called.")
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # If the kv-cache dtype is auto, we enforce the kv-scale to be 1.0

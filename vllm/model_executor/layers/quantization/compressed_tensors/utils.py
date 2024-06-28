@@ -6,6 +6,26 @@ from pydantic import BaseModel, Field
 from torch.nn import Module
 
 
+def get_compressed_tensors_cache_scale(name: str) -> Optional[str]:
+    """
+    Check whether the param name matches the format for
+    kv cache scales in compressed-tensors. If this is
+    the case, return its equivalent param name expected by
+    vLLM
+
+    :param name: param name
+    :return: matching param name for KV cache scale in vLLM
+    """
+    remapped_scale_name = None
+    if name.endswith("input_scale") and "k_proj" in name:
+        remapped_scale_name = name.replace(".k_proj.input_scale",
+                                           ".attn.k_scale")
+    elif name.endswith("input_scale") and "v_proj" in name:
+        remapped_scale_name = name.replace(".v_proj.input_scale",
+                                           ".attn.v_scale")
+    return remapped_scale_name
+
+
 class CompressionFormat(Enum):
     dense = "dense"
     sparse_bitmask = "sparse-bitmask"

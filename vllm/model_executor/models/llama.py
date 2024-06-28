@@ -39,6 +39,8 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -409,6 +411,18 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+
+            remapped_scale_name = get_compressed_tensors_cache_scale(name)
+            if remapped_scale_name:
+                # loading kv cache scales for
+                # compressed-tensors quantization
+                param = params_dict[remapped_scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = loaded_weight[0]
+                weight_loader(param, loaded_weight)
+                continue
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
