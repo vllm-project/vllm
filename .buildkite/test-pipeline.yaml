@@ -211,5 +211,5 @@ steps:
   num_nodes: 2
   commands:
   - docker network create --subnet=192.168.10.0/24 docker-net
-  - docker run --gpus '"device=0,1"' -it --network my-custom-network --ip 192.168.10.10 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f31c1f90e381967d25591a8928782d8a6a13693e nvidia-smi
-  - docker run --gpus '"device=2,3"' -it --network my-custom-network --ip 192.168.10.11 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f31c1f90e381967d25591a8928782d8a6a13693e nvidia-smi
+  - docker run --gpus 'device=0,1' -it --network my-custom-network --ip 192.168.10.10 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f31c1f90e381967d25591a8928782d8a6a13693e nvidia-smi
+  - docker run --gpus 'device=2,3' -it --network my-custom-network --ip 192.168.10.11 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f31c1f90e381967d25591a8928782d8a6a13693e nvidia-smi
