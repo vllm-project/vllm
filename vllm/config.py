@@ -956,9 +956,9 @@ class SpeculativeConfig:
                     # Verify provided value doesn't exceed the maximum
                     # supported by the draft model.
                     raise ValueError(
-                        "Expected both speculative_model and "
-                        "num_speculative_tokens to be provided, but found "
-                        f"{speculative_model=} and {num_speculative_tokens=}.")
+                        "This speculative model supports a maximum of "
+                        f"num_speculative_tokens={n_predict}, but "
+                        f"{num_speculative_tokens=} was provided.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
