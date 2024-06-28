@@ -265,7 +265,7 @@ class GemmTuner:
         df = self.gemm_problems
         soldf = pd.DataFrame()
         for i in range(len(df)):
-            ds = df.iloc[i]
+            ds = df.loc[i, :]
             gemmobj = Gemm(ds['M'],
                            ds['N'],
                            ds['K'],
@@ -280,5 +280,6 @@ class GemmTuner:
         soldf['outdtype'] = self.outdtype
         finaldf = pd.concat([self.gemm_problems, soldf], axis=1)
         finaldf = pd.concat([finaldf, self.gdf])
+        finaldf['solidx'] = finaldf['solidx'].astype('int64')
         finaldf.to_csv(self.tuned_file, index=False)
         print(finaldf)
