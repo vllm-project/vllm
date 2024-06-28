@@ -52,35 +52,35 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             - The block IDs are assigned contiguously, with GPU block IDs coming
                 before CPU block IDs.
         """
-        block_ids = list(range(num_gpu_blocks + num_cpu_blocks))
-        gpu_block_ids = block_ids[:num_gpu_blocks]
-        cpu_block_ids = block_ids[num_gpu_blocks:]
-
         if allocator_type == "naive":
             gpu_allocator: BlockAllocator = NaiveBlockAllocator(
                 create_block=NaiveBlock,  # type: ignore
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
-                block_ids=gpu_block_ids,
+                block_index_start=0,
+                block_index_end=num_gpu_blocks,
             )
 
             cpu_allocator: BlockAllocator = NaiveBlockAllocator(
                 create_block=NaiveBlock,  # type: ignore
                 num_blocks=num_cpu_blocks,
                 block_size=block_size,
-                block_ids=cpu_block_ids,
+                block_index_start=num_gpu_blocks,
+                block_index_end=num_gpu_blocks + num_cpu_blocks,
             )
         elif allocator_type == "prefix_caching":
             gpu_allocator = PrefixCachingBlockAllocator(
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
-                block_ids=gpu_block_ids,
+                block_index_start=0,
+                block_index_end=num_gpu_blocks,
             )
 
             cpu_allocator = PrefixCachingBlockAllocator(
                 num_blocks=num_cpu_blocks,
                 block_size=block_size,
-                block_ids=cpu_block_ids,
+                block_index_start=num_gpu_blocks,
+                block_index_end=num_gpu_blocks + num_cpu_blocks,
             )
         else:
             raise ValueError(f"Unknown allocator type {allocator_type=}")

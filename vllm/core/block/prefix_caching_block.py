@@ -2,7 +2,7 @@
 
 from itertools import takewhile
 from os.path import commonprefix
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -38,7 +38,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self,
         num_blocks: int,
         block_size: int,
-        block_ids: Optional[Iterable[int]] = None,
+        block_index_start: int,
+        block_index_end: int,
         eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
     ):
         # A mapping of prefix hash to block index. All blocks which have a
@@ -52,8 +53,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._hashless_allocator = NaiveBlockAllocator(
             create_block=self._create_block,  # type: ignore
             num_blocks=num_blocks,
-            block_size=block_size,
-            block_ids=block_ids,
+            block_index_start=block_index_start,
+            block_index_end=block_index_end,
         )
 
         self._block_size = block_size
