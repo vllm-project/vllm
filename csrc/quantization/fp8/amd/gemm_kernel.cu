@@ -34,6 +34,10 @@
     }
 #endif
 
+/* TODO(HaiShaw): Have hipblasLt support mixed precision, s.t. input Tensors
+                  a and b can be float16 or bfloat16 type (performance A.I.)
+		  Extend interface to be more generic, to include bias, etc.
+ */
 void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
             torch::Tensor& scale_a, torch::Tensor& scale_b,
             const c10::optional<torch::Tensor>& scale_result, int64_t solidx) {
@@ -44,14 +48,14 @@ void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
 
   TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fnuz &&
                   b.dtype() == torch::kFloat8_e4m3fnuz,
-              "The input tensors should be in fp8.");
+              "The input tensors type should be float8_e4m3fnuz.");
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2, "Input tensors must be 2-D.");
   TORCH_CHECK(a_sizes[1] == b_sizes[0], "a dim 1 must match b dim 0.");
 
   auto out_dtype = result.dtype();
   TORCH_CHECK(out_dtype == torch::kFloat8_e4m3fnuz ||
                   out_dtype == torch::kFloat16 || out_dtype == torch::kBFloat16,
-              "Only float16, bfloat16 or float8e4m3fnuz are supported as the "
+              "Only float16, bfloat16 or float8_e4m3fnuz are supported as the "
               "output dtype.");
   hipblasDatatype_t hipblas_out_type;
   if (out_dtype == torch::kFloat8_e4m3fnuz) {
@@ -122,6 +126,7 @@ void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
                            hipblas_out_type, hipblas_out_type,
                            HIPBLAS_COMPUTE_32F);
 
+  // TODO(HaiShaw): Add Epilogue usage in cases to support Bias, etc.
   hipblaslt_ext::GemmEpilogue
       epilogue{};  // No action needed, default is HIPBLASLT_EPILOGUE_DEFAULT.
                    // (Gemm only)
