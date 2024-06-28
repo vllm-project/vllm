@@ -1,5 +1,6 @@
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
+import math
 import torch
 from torch import nn
 from transformers import WhisperConfig
@@ -26,6 +27,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.audio import get_dummy_audio_data
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
+from xformers import ops as xops
+from vllm.utils import is_hip
 
 def sinusoids(length: int, channels: int, max_timescale: float = 10000) -> torch.Tensor:
     """Returns sinusoids for positional embedding"""
@@ -98,17 +101,20 @@ class WhisperAttention(nn.Module):
             bias = bias,
             quant_config=quant_config
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config
-        )
+        if self.is_causal:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config
+            )
+        else:
+            self.attn = None
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return tensor.view(1, seq_len, self.num_heads, self.head_dim).contiguous()
         
     def forward(
         self,
@@ -117,54 +123,56 @@ class WhisperAttention(nn.Module):
         past_key_value = None,
         kv_cache: torch.Tensor = None,
         attn_metadata: AttentionMetadata = None,
+        is_cross_attention = False,
     ):
-        is_cross_attention = encoder_hidden_states is not None
         sizes = hidden_states.size()
         if len(sizes) == 3:
             bsz, tgt_len, _ = sizes
         else:
             tgt_len, _ = sizes
-        print(sizes)
         q, _ = self.q_proj(hidden_states)
         q = q * self.scaling
         
         past_key_value = None
-        
-        if kv_cache is None:
-            q = self._shape(q, tgt_len, bsz)
 
-            if is_cross_attention:
+        if is_cross_attention or not self.is_decoder:
+            if is_cross_attention and encoder_hidden_states is not None:
                 if past_key_value is not None:
                     k = past_key_value[0]
                     v = past_key_value[1]
                 else:
                     k, _ = self.k_proj(encoder_hidden_states)
                     v, _ = self.v_proj(encoder_hidden_states)
-                    k = self._shape(k, -1, bsz)
-                    v = self._shape(v, -1, bsz)
 
                     past_key_value = (k, v)
             else:
                 k, _ = self.k_proj(hidden_states)
                 v, _ = self.v_proj(hidden_states)
-                k = self._shape(k, -1, bsz)
-                v = self._shape(v, -1, bsz)
 
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
+            q = self._shape(q, -1, 1)
+            k = self._shape(k, -1, 1)
+            v = self._shape(k, -1, 1)
+
+            attn_output = xops.memory_efficient_attention_forward(
                 q,
                 k,
                 v,
-                dropout_p=0.0,
-                is_causal=self.is_causal and tgt_len > 1,
+                attn_bias=None,
+                p=0.0,
+                scale=None,
+                op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+                (is_hip()) else None,
             )
-            attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
-            output, _ = self.out_proj(attn_output)
+            
+            attn_output = attn_output.reshape(-1, self.embed_dim)
+
         else:
             k, _ = self.k_proj(hidden_states)
             v, _ = self.v_proj(hidden_states)
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
-            output, _ = self.out_proj(attn_output)
+        output, _ = self.out_proj(attn_output)
+
         return output, past_key_value
 
 class WhisperEncoderLayer(nn.Module):
@@ -274,7 +282,7 @@ class WhisperDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
 
-        hidden_states = self.self_attn(
+        hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata
@@ -285,7 +293,8 @@ class WhisperDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
             past_key_value=past_key_value,
-            attn_metadata=attn_metadata
+            attn_metadata=attn_metadata,
+            is_cross_attention=True,
         )
         hidden_states = residual + hidden_states
 
@@ -296,7 +305,7 @@ class WhisperDecoderLayer(nn.Module):
         hidden_states, _ = self.fc2(hidden_states)
         hidden_states = residual + hidden_states
 
-        return outputs, cross_attention_past_key_value
+        return hidden_states, cross_attention_past_key_value
 
 class WhisperEncoder(nn.Module):
     def __init__(
@@ -321,6 +330,10 @@ class WhisperEncoder(nn.Module):
                                      for layer_idx in range(config.encoder_layers)])
         
         self.layer_norm = nn.LayerNorm(config.d_model)
+
+        with torch.no_grad():
+            embed_positions = self.embed_positions.weight
+            embed_positions.copy_(sinusoids(*embed_positions.shape))
     
     def forward(
         self,
@@ -328,7 +341,8 @@ class WhisperEncoder(nn.Module):
     ):
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
-        inputs_embeds = inputs_embeds.permute(0, 2, 1)
+        inputs_embeds = inputs_embeds.permute(1, 0)
+    
         embed_pos = self.embed_positions.weight
 
         hidden_states = inputs_embeds + embed_pos
@@ -408,10 +422,12 @@ class WhisperModel(nn.Module):
         attn_metadata: AttentionMetadata,
         past_key_values = None,
     ):
-
-        encoder_outputs = self.encoder(
-            input_features,
-        )
+        if input_features is not None:
+            encoder_outputs = self.encoder(
+                input_features[0],
+            )
+        else:
+            encoder_outputs = None
         decoder_outputs, cross_attention_past_key_values = self.decoder(
             input_ids=input_ids,
             positions=positions,
@@ -433,12 +449,17 @@ class WhisperForConditionalGeneration(nn.Module):
     ):
         super().__init__()
         self.model = WhisperModel(config, cache_config=cache_config, quant_config=quant_config)
+        self.unpadded_vocab_size = config.vocab_size
         self.proj_out = RowParallelLinear(
             input_size = config.d_model,
             output_size = config.vocab_size,
             bias = False,
             quant_config=quant_config,
         )
+        logit_scale = getattr(config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size, logit_scale)
+        self.sampler = Sampler()
 
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> torch.Tensor:
@@ -457,7 +478,6 @@ class WhisperForConditionalGeneration(nn.Module):
     ) -> SamplerOutput:
 
         input_features = self._parse_and_validate_audio_input(**kwargs)
-        print(input_features, input_ids.shape, kv_caches)
 
         decoder_outputs, cross_attention_past_key_values = self.model(
             input_features=input_features,
@@ -484,4 +504,9 @@ class WhisperForConditionalGeneration(nn.Module):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        pass
+        params_dict = dict(self.named_parameters())
+        for name, loaded_weight in weights:
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)

@@ -229,8 +229,6 @@ class LLMEngine:
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
-        print(executor_class)
-
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,

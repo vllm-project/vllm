@@ -850,8 +850,6 @@ class ModelRunner:
                 seq_data = SequenceData([0] * seq_len)
                 dummy_multi_modal_data = None
 
-            print(group_id, seq_len, dummy_multi_modal_data)
-
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -936,6 +934,11 @@ class ModelRunner:
         slot_mapping.fill_(_PAD_SLOT_ID)
         seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
+        _, dummy_multi_modal_data = MULTIMODAL_REGISTRY.dummy_data_for_profiling(
+            max_batch_size, 
+            self.model_config, 
+            self.whisper_config
+        )
 
         # Prepare buffer for outputs. These will be reused for all batch sizes.
         # It will be filled after the first graph capture.

@@ -17,7 +17,6 @@ def get_whisper_processor(
 ) -> WhisperProcessor:
     """Gets an whisper processor for the given model name via HuggingFace."""
     try:
-        print('processor_name', processor_name)
         processor: WhisperProcessor = WhisperProcessor.from_pretrained(
             processor_name,
             *args,
