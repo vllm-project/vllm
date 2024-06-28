@@ -77,8 +77,9 @@ class LinearMethodBase(QuantizeMethodBase):
 
     @abstractmethod
     def create_weights_moe(self, layer: torch.nn.Module,
-                           num_total_experts: int, top_k: int,
-                           hidden_size: int, intermediate_size: int,
+                           num_total_experts: int,
+                           hidden_size: int,
+                           intermediate_size: int,
                            params_dtype: torch.dtype,
                            **extra_weight_attrs):
         raise NotImplementedError
@@ -919,6 +920,23 @@ class FusedMoELinear(torch.nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
+
+        # FIXME: This is going to be brittle.
+        if "input_scale" in weight_name or "w2.weight_scale" in weight_name:
+            if param_data[expert_id] != 1 and (param_data[expert_id] -
+                                               loaded_weight).abs() > 1e-5:
+                raise ValueError(
+                    "input_scales of w1 and w3 of a layer "
+                    f"must be equal. But got {param_data[expert_id]} "
+                    f"vs. {loaded_weight}")
+            param_data[expert_id] = loaded_weight
+        elif "weight_scale" in weight_name:
+            # We have to keep the weight scales of w1 and w3 because
+            # we need to re-quantize w1/w3 weights after weight loading.
+            assert "w1" in weight_name or "w3" in weight_name
+            shard_id = 0 if "w1" in weight_name else 1
+            param_data[expert_id][shard_id] = loaded_weight
+        
 
 
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):

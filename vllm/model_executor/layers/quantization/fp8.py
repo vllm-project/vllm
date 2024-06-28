@@ -7,7 +7,7 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase, FusedMoELinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -70,7 +70,7 @@ class Fp8Config(QuantizationConfig):
             self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
-        if isinstance(layer, LinearBase):
+        if isinstance(layer, LinearBase) or isinstance(layer, FusedMoELinear):
             return Fp8LinearMethod(self)
         if isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -173,7 +173,6 @@ class Fp8LinearMethod(LinearMethodBase):
         self, 
         layer: Module,
         num_total_experts: int,
-        top_k: int,
         hidden_size: int,
         intermediate_size: int,
         params_dtype: torch.dtype,
@@ -181,32 +180,33 @@ class Fp8LinearMethod(LinearMethodBase):
 
         layer.is_moe = True
         layer.process_after_load = True
+        self.num_total_experts = num_total_experts
 
         if self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(torch.empty(num_total_experts,
-                                                         2 * self.intermediate_size,
-                                                         self.hidden_size,
+                                                         2 * intermediate_size,
+                                                         hidden_size,
                                                          dtype=params_dtype),
                                             requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(torch.empty(num_total_experts,
-                                                        hidden_size,
-                                                        intermediate_size,
-                                                        dtype=params_dtype),
-                                            requires_grad=False)
+                                                   hidden_size,
+                                                   intermediate_size,
+                                                   dtype=params_dtype),
+                                       requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
         # WEIGHT_SCALES
         w13_scale = torch.nn.Parameter(torch.ones(num_total_experts,
-                                                       2,
-                                                       dtype=torch.float32),
-                                                       requires_grad=False)
+                                                  2,
+                                                  dtype=torch.float32),
+                                      requires_grad=False)
         layer.register_parameter("w13_scale", w13_scale)
         set_weight_attrs(w13_scale, extra_weight_attrs)
         
@@ -226,12 +226,12 @@ class Fp8LinearMethod(LinearMethodBase):
             a13_scale = torch.nn.Parameter(torch.ones(
                 num_total_experts, dtype=torch.float32), requires_grad=False)
             layer.register_parameter("a13_scale", a13_scale)
-            set_weight_attrs(w13_scale, extra_weight_attrs)
+            set_weight_attrs(a13_scale, extra_weight_attrs)
 
             a2_scale = torch.nn.Parameter(torch.ones(
                 num_total_experts, dtype=torch.float32), requires_grad=False)
             layer.register_parameter("a2_scale", a2_scale)
-            set_weight_attrs(w2_scale, extra_weight_attrs)
+            set_weight_attrs(a2_scale, extra_weight_attrs)
         else:
             layer.a13_scale = None
             layer.a2_scale = None
@@ -267,8 +267,8 @@ class Fp8LinearMethod(LinearMethodBase):
                         raise ValueError(
                             "QuantConfig has static quantization, but found "
                             "activation scales are None.")
-                    if (not all_close_1d(self.a13_scale)
-                        or not all_close_1d(self.a2_scale)):
+                    if (not all_close_1d(layer.a13_scale)
+                        or not all_close_1d(layer.a2_scale)):
                         print_warning_once(
                             "Found input_scales that are not equal for "
                             "fp8 MoE layer. Using the maximum across experts "
@@ -281,9 +281,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 # Fp8 moe kernels require a single weight scale for w13 per expert.
                 # We take the max then dequantize and requantize each expert.
                 assert layer.w13_scale is not None
-                shard_size = self.intermediate_size
+                shard_size = layer.intermediate_size_per_partition
                 max_w13_scales = layer.w13_scale.max(dim=1).values
-                for expert_id in range(layer.num_total_experts):
+                for expert_id in range(self.num_total_experts):
                     start = 0
                     for shard_id in range(2):
                         dq_weight = per_tensor_dequantize(
@@ -298,9 +298,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.w13_scale = torch.nn.Parameter(max_w13_scales, requires_grad=False)
                 return
         
-        # Dense case.
+        # Dense case:
         else:
-            # If checkpoint is fp/bf16 (not serialized fp8), quantize the weights.
+            # If checkpoint is fp16/bf16 (not serialized fp8), quantize the weights.
             if not self.quant_config.is_checkpoint_fp8_serialized:
                 qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                             scale=None)
