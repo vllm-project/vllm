@@ -1,5 +1,6 @@
 from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
+import numpy as np
 from vllm.core.block.interfaces import Block, BlockAllocator
 
 BlockId = int
@@ -30,36 +31,33 @@ class RefCounter(RefCounterProtocol):
             to initialize the reference counter with.
     """
 
-    def __init__(self, all_block_indices: Iterable[BlockId]):
-        deduped = set(all_block_indices)
-        self._refcounts: Dict[BlockId,
-                              RefCount] = {index: 0
-                                           for index in deduped}
+    def __init__(self, block_index_start, block_index_end):
+        self.block_index_start = block_index_start
+        self.block_index_end = block_index_end
+        self._refcounts = np.zeros((block_index_end - block_index_start),
+                                   dtype=np.int64)
 
     def incr(self, block_id: BlockId) -> RefCount:
-        assert block_id in self._refcounts
-        pre_incr_refcount = self._refcounts[block_id]
-
-        assert pre_incr_refcount >= 0
-
-        post_incr_refcount = pre_incr_refcount + 1
-        self._refcounts[block_id] = post_incr_refcount
-        return post_incr_refcount
+        assert self.block_index_start <= block_id < self.block_index_end
+        idx = block_id - self.block_index_start
+        self._refcounts[idx] += 1
+        ans = int(self._refcounts[idx])
+        assert ans > 0
+        return ans
 
     def decr(self, block_id: BlockId) -> RefCount:
-        assert block_id in self._refcounts
-        refcount = self._refcounts[block_id]
-
-        assert refcount > 0
-        refcount -= 1
-
-        self._refcounts[block_id] = refcount
-
-        return refcount
+        assert self.block_index_start <= block_id < self.block_index_end
+        idx = block_id - self.block_index_start
+        self._refcounts[idx] -= 1
+        ans = int(self._refcounts[idx])
+        assert ans >= 0
+        return ans
 
     def get(self, block_id: BlockId) -> RefCount:
-        assert block_id in self._refcounts
-        return self._refcounts[block_id]
+        assert self.block_index_start <= block_id < self.block_index_end
+        idx = block_id - self.block_index_start
+        ans = int(self._refcounts[idx])
+        return ans
 
     def as_readonly(self) -> "ReadOnlyRefCounter":
         return ReadOnlyRefCounter(self)

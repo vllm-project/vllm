@@ -30,17 +30,16 @@ class NaiveBlockAllocator(BlockAllocator):
         create_block: Block.Factory,
         num_blocks: int,
         block_size: int,
-        block_ids: Optional[Iterable[int]] = None,
+        block_index_start: int,
+        block_index_end: int,
     ):
-        if block_ids is None:
-            block_ids = range(num_blocks)
-
-        self._free_block_indices: Set[BlockId] = set(block_ids)
+        self._free_block_indices = list(
+            range(block_index_start, block_index_end))
         self._all_block_indices = frozenset(block_ids)
         assert len(self._all_block_indices) == num_blocks
 
-        self._refcounter = RefCounter(
-            all_block_indices=self._free_block_indices)
+        self._refcounter = RefCounter(block_index_start=block_index_start,
+                                      block_index_end=block_index_end)
         self._create_block = create_block
         self._block_size = block_size
 
@@ -142,15 +141,14 @@ class NaiveBlockAllocator(BlockAllocator):
         if not self._free_block_indices:
             raise BlockAllocator.NoFreeBlocksError()
 
-        block_id = next(iter(self._free_block_indices))
+        block_id = self._free_block_indices.pop()
         self._refcounter.incr(block_id)
-        self._free_block_indices.remove(block_id)
         return block_id
 
     def _free_block_id(self, block_id: BlockId) -> None:
         refcount = self._refcounter.decr(block_id)
         if refcount == 0:
-            self._free_block_indices.add(block_id)
+            self._free_block_indices.append(block_id)
 
     def get_physical_block_id(self, absolute_id: int) -> int:
         """Returns the zero-offset block id on certain block allocator
