@@ -57,7 +57,12 @@ class EmbeddingModelRunner(
         self,
         model_input: ModelInputForGPUWithPoolingMetadata,
         kv_caches: List[torch.Tensor],
-    ) -> Optional[PoolerOutput]:
+        num_steps: int = 1,
+    ) -> Optional[List[PoolerOutput]]:
+        if num_steps > 1:
+            raise ValueError(
+                "EmbeddingModelRunner does not support multi-step execution.")
+
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None
@@ -91,10 +96,12 @@ class EmbeddingModelRunner(
 
         # Only perform pooling in the driver worker.
         if not self.is_driver_worker:
-            return None
+            return []
 
-        return self.model.pooler(hidden_states=hidden_states,
-                                 pooling_metadata=model_input.pooling_metadata)
+        return [
+            self.model.pooler(hidden_states=hidden_states,
+                              pooling_metadata=model_input.pooling_metadata)
+        ]
 
     def make_model_input_from_broadcasted_tensor_dict(
             self,

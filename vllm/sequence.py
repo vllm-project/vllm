@@ -880,6 +880,8 @@ class ExecuteModelRequest:
     running_queue_size: int = 0
     # Optional hidden states from prior step.
     previous_hidden_states: Optional[HiddenStates] = None
+    # The number of forward steps to run.
+    num_steps: int = 1
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -893,4 +895,5 @@ class ExecuteModelRequest:
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
             previous_hidden_states=self.previous_hidden_states,
+            num_steps=self.num_steps,
         )

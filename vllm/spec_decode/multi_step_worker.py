@@ -6,6 +6,7 @@ import torch
 
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
+from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -67,22 +68,24 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         copied_execute_model_req = execute_model_req.clone(
             copied_seq_group_metadata_list)
 
-        # Assert enough KV space for sample_len tokens per sequence.
-        self._assert_enough_kv_space(execute_model_req.seq_group_metadata_list,
-                                     sample_len)
-
         # Run model sample_len times.
         model_outputs: List[SamplerOutput] = []
-        for _ in range(sample_len):
-            model_output: List[SamplerOutput] = super().execute_model(
+        if isinstance(self.model_runner, TP1DraftModelRunner):
+            copied_execute_model_req.num_steps = sample_len
+            model_outputs = self.execute_model(
                 execute_model_req=copied_execute_model_req)
-            assert (len(model_output) == 1
-                    ), "composing multistep workers not supported"
-            model_output = model_output[0]
+        else:
+            # TODO: Remove this branch once DraftModelRunner supports TP>1.
+            for _ in range(sample_len):
+                model_output: List[SamplerOutput] = super().execute_model(
+                    execute_model_req=copied_execute_model_req)
+                assert (len(model_output) == 1
+                        ), "composing multistep workers not supported"
+                model_output = model_output[0]
 
-            self._append_new_tokens(model_output,
-                                    copied_seq_group_metadata_list)
-            model_outputs.append(model_output)
+                self._append_new_tokens(model_output,
+                                        copied_seq_group_metadata_list)
+                model_outputs.append(model_output)
 
         return model_outputs, True
 

@@ -444,7 +444,12 @@ class TPUModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-    ) -> SamplerOutput:
+        num_steps: int = 1,
+    ) -> List[SamplerOutput]:
+        if num_steps > 1:
+            raise ValueError(
+                "TPUModelRunner does not support multi-step execution.")
+
         assert seq_group_metadata_list is not None
         assert len(seq_group_metadata_list) > 0
         if seq_group_metadata_list[0].is_prompt:
@@ -462,7 +467,7 @@ class TPUModelRunner:
         else:
             sampler_outputs = self._execute_model(seq_group_metadata_list,
                                                   kv_caches)
-        return SamplerOutput(sampler_outputs)
+        return [SamplerOutput(sampler_outputs)]
 
 
 class ModelWrapper(nn.Module):
