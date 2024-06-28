@@ -5,6 +5,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.worker import Worker
 
+
 def test_swap() -> None:
     # Configure the engine.
     engine_args = EngineArgs(model="facebook/opt-125m",

@@ -8,6 +8,7 @@ from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
+
 def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
