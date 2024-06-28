@@ -490,7 +490,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
         self.unpadded_vocab_size = config.text_config.vocab_size
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size)
         self.sampler = Sampler()
-    
+
     def get_lm_head_weights(self):
         return self.language_model.decoder.embed_tokens.weight
 
@@ -656,8 +656,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logits_processor(self.get_lm_head_weights(),
-                                       hidden_states,
-                                       sampling_metadata)
+                                       hidden_states, sampling_metadata)
         return logits
 
     def sample(
