@@ -47,9 +47,11 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+from vllm.model_executor.model_loader.weight_utils import safetensors_weights_iterator
 from vllm.utils import is_hip, print_warning_once
 
 from .interfaces import SupportsLoRA
+import os.path
 
 
 class LlamaMLP(nn.Module):
@@ -441,6 +443,65 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+    def load_quantized_weights(self, model_name_or_path: str,
+                               quant_config: QuantizationConfig):
+        weights = safetensors_weights_iterator([
+            os.path.join(model_name_or_path,
+                         quant_config.quantized_weights_path)
+        ])
+        params_dict = dict(self.named_parameters())
+        quant_shards = [
+            (param_name, weight_name,
+             quant_config.shard_layers[param_name][weight_name])
+            for param_name in quant_config.shard_layers
+            for weight_name in quant_config.shard_layers[param_name]
+        ]
+        quant_map = [(param_name, quant_config.quant_layers[param_name])
+                     for param_name in quant_config.quant_layers]
+        scale_map = [(param_name, quant_config.scaling_factors[param_name])
+                     for param_name in quant_config.scaling_factors]
+        for name, loaded_weight in weights:
+            if "zero_point" in name:
+                continue
+            if len(loaded_weight.shape) == 0:
+                loaded_weight = torch.Tensor([loaded_weight])
+            # replace the name for scaling factor
+            for (scale_name, weight_name) in scale_map:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, scale_name)
+            if is_hip() and loaded_weight.dtype == torch.int8:
+                loaded_weight[loaded_weight == -128] = 0
+                assert loaded_weight.is_contiguous
+                loaded_weight = loaded_weight.view(torch.float8_e4m3fnuz)
+            for (param_name, weight_name, shard_id) in quant_shards:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                for (param_name, weight_name) in quant_map:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    param = params_dict[name]
+                    if ("activation_scaling_factor" in name
+                            or "weight_scaling_factor" in name
+                            or "output_scaling_factor" in name):
+                        param.data.copy_(loaded_weight)
+                    else:
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
+                        weight_loader(param, loaded_weight)
+                    break
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

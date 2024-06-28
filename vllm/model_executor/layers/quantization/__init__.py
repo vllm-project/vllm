@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.deepspeedfp import (
     DeepSpeedFPConfig)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.fp8fnuz import Fp8FnuzConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
@@ -18,12 +19,13 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQMarlin24Config)
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
+from vllm.utils import is_hip
 
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,
     "awq": AWQConfig,
     "deepspeedfp": DeepSpeedFPConfig,
-    "fp8": Fp8Config,
+    "fp8": Fp8Config if not is_hip() else Fp8FnuzConfig,
     # The order of gptq methods is important for config.py iteration over
     # override_quantization_method(..)
     "marlin": MarlinConfig,

@@ -42,6 +42,9 @@ if TYPE_CHECKING:
     VLLM_INSTALL_PUNICA_KERNELS: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
+    VLLM_TUNE_FP8: bool = False
+    VLLM_FP8_UNTUNED_FILE: str = "~/.vllm/untuned_fp8.csv"
+    VLLM_FP8_TUNED_FILE: str = "~/.vllm/tuned_fp8.csv"
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -248,6 +251,19 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH":
     lambda: os.getenv("VLLM_XLA_CACHE_PATH", "~/.vllm/xla_cache/"),
+    
+    # Whether to tune fp8 gemm or not.
+    # Will record all shapes of fp8 gemm.
+    "VLLM_TUNE_FP8":
+    lambda: bool(os.getenv("VLLM_TUNE_FP8", 0)),
+    
+    # The file storing the all fp8 gemm shapes.
+    "VLLM_FP8_UNTUNED_FILE":
+    lambda: os.getenv("VLLM_FP8_UNTUNED_FILE", "~/.vllm/untuned_fp8.csv"),
+
+    # The file storing the tuned result for fp8 gemm.
+    "VLLM_FP8_TUNED_FILE":
+    lambda: os.getenv("VLLM_FP8_TUNED_FILE", "~/.vllm/tuned_fp8.csv"),
 }
 
 # end-env-vars-definition

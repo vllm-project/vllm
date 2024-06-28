@@ -132,6 +132,13 @@ if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 #
+# Set rocm version dev int.
+#
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  list(APPEND VLLM_GPU_FLAGS "-DROCM_VERSION=${ROCM_VERSION_DEV_INT}")
+endif()
+
+#
 # Define extension targets
 #
 
@@ -152,6 +159,11 @@ set(VLLM_EXT_SRC
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
   "csrc/torch_bindings.cpp")
+
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  list(APPEND VLLM_EXT_SRC
+    "csrc/quantization/fp8/amd/gemm_kernel.cu")
+endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   include(FetchContent)

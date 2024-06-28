@@ -177,6 +177,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "()");
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
 
+#ifdef USE_ROCM
+  ops.def("fp8_mm(Tensor a, Tensor b, Tensor result,"
+          "       Tensor scale_a, Tensor scale_b,"
+          "       Tensor? scale_result, int solidx) -> ()");
+  ops.impl("fp8_mm", torch::kCUDA, &fp8_mm);
+#endif
+
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.
   ops.def(
@@ -198,6 +205,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
+
+  // Convert the key and value cache to fp8 data type.
+  ops.def(
+      "convert_fp8(Tensor! dst_cache, Tensor src_cache, Tensor scale) -> "
+      "()");
+  ops.impl("convert_fp8", torch::kCUDA, &convert_fp8);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
@@ -232,11 +245,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
                  &reshape_and_cache_flash);
 
-  // Convert the key and value cache to fp8 data type.
-  cache_ops.def(
-      "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, str "
-      "kv_cache_dtype) -> ()");
-  cache_ops.impl("convert_fp8", torch::kCUDA, &convert_fp8);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {

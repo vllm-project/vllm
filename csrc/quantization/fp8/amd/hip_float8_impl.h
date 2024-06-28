@@ -31,7 +31,7 @@ HIP_FP8_DEVICE uint8_t to_fp8_from_fp32(float v) {
 
   if ((val.i32val & 0x7F800000) !=
       0x7F800000) {  /// propagate NAN/INF, no clipping
-    val.fval = __builtin_amdgcn_fmed3f(val.fval, 240.0, -240.0);
+    val.fval = __builtin_amdgcn_fmed3f(val.fval, 224.0, -224.0);
   }
 
   ival = __builtin_amdgcn_cvt_pk_fp8_f32(val.fval, val.fval, ival,
