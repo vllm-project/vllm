@@ -499,8 +499,10 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[List[MultiModalData]] = None,
+        stop_token_ids: Optional[List[int]] = None,
     ) -> List[Tuple[List[int], str]]:
-        greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+        greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens,
+                                       stop_token_ids=stop_token_ids)
         outputs = self.generate(prompts, greedy_params, images=images)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
