@@ -52,12 +52,10 @@ class BlockTable:
         self._blocks: List[Block] = _blocks
 
         self._max_block_sliding_window = max_block_sliding_window
-        # Use helper method instead of directly calculating, as blocks
-        # may not be allocated.
+
         _num_full_slots = 0
-        if self._is_allocated:
-            for block in self._blocks:
-                _num_full_slots += block.num_tokens
+        for block in self._blocks:
+            _num_full_slots += block.num_tokens
         self._num_full_slots = _num_full_slots
 
     @staticmethod
@@ -92,7 +90,7 @@ class BlockTable:
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
         """
-        assert not self._is_allocated
+        assert not self._blocks
         len_token_ids = len(token_ids)
         assert len_token_ids > 0
         self._blocks = self._allocate_blocks_for_token_ids(prev_block=None,
@@ -126,7 +124,7 @@ class BlockTable:
                 Without chunked prefill, it should be the same as
                 _num_full_slots.
         """
-        assert self._is_allocated, "no blocks have been allocated"
+        assert self._blocks, "no blocks have been allocated"
         assert len(self._blocks) > 0
 
         # Drop blocks that are no longer needed due to sliding window
@@ -170,7 +168,7 @@ class BlockTable:
         # Currently the block table only supports
         # appending tokens to GPU blocks.
         device = Device.GPU
-        assert self._is_allocated
+        assert self._blocks
 
         if self._num_empty_slots >= num_empty_slots:
             return
@@ -197,8 +195,7 @@ class BlockTable:
             BlockTable: A new BlockTable instance with a copy of the blocks from
                 the current instance.
         """
-        assert self._is_allocated
-        assert len(self._blocks) > 0
+        assert self._blocks
         forked_blocks = self._allocator.fork(self._blocks[-1])
         return BlockTable(
             block_size=self._block_size,
@@ -215,7 +212,6 @@ class BlockTable:
         occupied by each block. After freeing all the blocks, the `_blocks` list
         is set to `None`.
         """
-        assert self._is_allocated
         for block in self._blocks:
             self._allocator.free(block)
         self._blocks = []
@@ -234,7 +230,6 @@ class BlockTable:
             List[int]: A list of physical block indices for the blocks in the
                 BlockTable.
         """
-        assert self._is_allocated
         return [block.block_id for block in self._blocks]
 
     def get_unseen_token_ids(self,
@@ -280,15 +275,11 @@ class BlockTable:
         # NOTE: This function is O(seq_len); use only for testing.
         token_id_arrays: List[np.ndarray] = []
 
-        if self._is_allocated:
+        if self._blocks:
             for block in self._blocks:
                 token_id_arrays.append(block.token_ids)
 
         return np.concatenate(token_id_arrays)
-
-    @property
-    def _is_allocated(self) -> bool:
-        return len(self._blocks) > 0
 
     @property
     def blocks(self) -> Optional[List[Block]]:
@@ -296,7 +287,7 @@ class BlockTable:
 
     @property
     def _num_empty_slots(self) -> int:
-        assert self._is_allocated
+        assert self._blocks
         return len(self._blocks) * self._block_size - self._num_full_slots
 
     @property
