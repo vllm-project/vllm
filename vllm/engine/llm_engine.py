@@ -225,7 +225,7 @@ class LLMEngine:
         self.scheduler = [
             Scheduler(scheduler_config, cache_config, parallel_config,
                       lora_config)
-            for _ in range(parallel_config.pipeline_parallel_size)
+            for _ in range(parallel_config.pipeline_parallel_size-1)
         ]
 
         # Metric Logging.

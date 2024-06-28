@@ -145,6 +145,10 @@ class SchedulerOutputs:
         return (not self.scheduled_seq_groups and not self.blocks_to_swap_in
                 and not self.blocks_to_swap_out and not self.blocks_to_copy)
 
+    def has_no_output(self) -> bool:
+        return (not self.scheduled_seq_groups
+                and not self.ignored_seq_groups and not self.preempted)
+
     def _sort_by_lora_ids(self):
         self.scheduled_seq_groups = sorted(
             self.scheduled_seq_groups,
@@ -957,27 +961,28 @@ class Scheduler:
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
 
-        print('scheduler num mb', self.num_running_batches)
-        # if self.num_running_batches >= 1:
-        #     print('reutning due to mb')
-        #     return [], SchedulerOutputs(
-        #         scheduled_seq_groups=[],
-        #         num_prefill_groups=0,
-        #         num_batched_tokens=0,
-        #         blocks_to_swap_in=[],
-        #         blocks_to_swap_out=[],
-        #         blocks_to_copy=[],
-        #         ignored_seq_groups=[],
-        #         num_lookahead_slots=0,
-        #         running_queue_size=0,
-        #         preempted=0,
-        #     )
+        if self.num_running_batches > 0:
+            print('scheduler num mb', self.num_running_batches)
+        if self.num_running_batches >= 3:
+            print('reutning due to mb')
+            return [], SchedulerOutputs(
+                scheduled_seq_groups=[],
+                num_prefill_groups=0,
+                num_batched_tokens=0,
+                blocks_to_swap_in=[],
+                blocks_to_swap_out=[],
+                blocks_to_copy=[],
+                ignored_seq_groups=[],
+                num_lookahead_slots=0,
+                running_queue_size=0,
+                preempted=0,
+            )
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
-        print('before _schedule')
+        # print('before _schedule')
         scheduler_outputs = self._schedule()
-        print('after _schedule')
+        # print('after _schedule')
         now = time.time()
 
         # Create input data structures.
@@ -1041,7 +1046,7 @@ class Scheduler:
             )
             seq_group_metadata_list.append(seq_group_metadata)
             
-        print('after _schedule 2')
+        # print('after _schedule 2')
         if not scheduler_outputs.is_empty():
             self.num_running_batches += 1
 
@@ -1052,7 +1057,7 @@ class Scheduler:
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group)
-        print('after _schedule 3')
+        # print('after _schedule 3')
 
         return seq_group_metadata_list, scheduler_outputs
 

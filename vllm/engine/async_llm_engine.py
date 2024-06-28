@@ -17,7 +17,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import ExecuteModelRequest, MultiModalData, SamplerOutput
+from vllm.sequence import SequenceStatus, ExecuteModelRequest, MultiModalData, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
 from threading import Thread
 from threading import Event, Semaphore
@@ -531,7 +531,7 @@ class AsyncLLMEngine:
         while True:
         #     await self._request_tracker.wait_for_new_requests()
             # print('waiting on timer event')
-            time.sleep(2.01)
+            time.sleep(0.01)
             # print('after on timer event')
             self.sched_event.set()
         # print('ahhh')
@@ -545,7 +545,8 @@ class AsyncLLMEngine:
 
             # print('waiting on mb watch get_output')
             output = self.engine.model_executor._run_worker(0, 'get_output')
-            print('after mb watch get_output=====================')
+            # print('after mb watch get_output=====================')
+            
 
             self.sched_event.set()
 
@@ -553,10 +554,10 @@ class AsyncLLMEngine:
         virtual_engine = 0
         print('starting sched thread')
         while True:
-            print('waiting on sched event')
+            # print('waiting on sched event')
             self.sched_event.wait()
             self.sched_event.clear()
-            print('after watiing sched event=========')
+            # print('after watiing sched event=========')
 
 
             new_requests, finished_requests = (
@@ -583,23 +584,30 @@ class AsyncLLMEngine:
                 # print('after watiing sched event==========2=')
                 await self._engine_abort(finished_requests)
                 # print('after watiing sched event==========1=')
-            print('after watiing sched event==========2=')
+            # print('after watiing sched event==========2=')
 
                 
 
 
             seq_group_metadata_list, scheduler_outputs = self.engine.scheduler[
                 virtual_engine].schedule()
+
+            if scheduler_outputs.has_no_output():
+                # print('-------------------------has no output')
+                continue
+            
+            for seq_group in scheduler_outputs.scheduled_seq_groups:
+                for seq in seq_group.seq_group.get_seqs():
+                    seq.status = SequenceStatus.PAUSED
             # if scheduler_outputs.is_empty():
             #     continue
 
-            print('sched thread after schedule()!!!!!!!!!!!!!')
+            # print('sched thread after schedule()!!!!!!!!!!!!!')
 
             # self.mb_slot.acquire()
-            self.sched_queue.put((seq_group_metadata_list, scheduler_outputs, virtual_engine))
-            print('sched thread after put')
+            # print('sched thread after put')
             if not scheduler_outputs.is_empty():
-                print('sched thread not empty')
+                # print('sched thread not empty')
                 # Execute the model.
                 execute_model_req = ExecuteModelRequest(
                     seq_group_metadata_list=seq_group_metadata_list,
@@ -613,12 +621,13 @@ class AsyncLLMEngine:
                 self.mb_event.set()
                 # print('enqueue')
                 # self.engine.model_executor._run_workers('enqueue', execute_model_req)
-                print('after watiing sched event==========4=')
+                # print('after watiing sched event==========4=')
                 # import pdb; pdb.set_trace()
                 # output = await self.engine.model_executor.execute_model_async(
                 #     execute_model_req)
                 self.engine.model_executor._run_workers('enqueue', execute_model_req)
-                print('after watiing sched event==========5=')
+                # print('after watiing sched event==========5=')
+            self.sched_queue.put((seq_group_metadata_list, scheduler_outputs, virtual_engine))
             # else:
             #     print('empty')
             #     print(seq_group_metadata_list)
@@ -637,20 +646,26 @@ class AsyncLLMEngine:
             # print('|||||||||||sched wait output_loop')
 
             if not scheduler_outputs.is_empty():
+                # print('|||||||||||| before get_output')
                 output = self.engine.model_executor._run_worker(1, 'get_output')
             # if not scheduler_outputs.is_empty():
                 # print('|||||||||||| after get_output')
+                # print(output)
             else:
                 output = []
 
 
-            # print(output)
             # import pdb; pdb.set_trace()
+            for seq_group in scheduler_outputs.scheduled_seq_groups:
+                for seq in seq_group.seq_group.get_seqs():
+                    seq.status = SequenceStatus.RUNNING
             request_outputs = self.engine._process_model_outputs(
                 output, scheduler_outputs.scheduled_seq_groups,
                 scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
-            # if not scheduler_outputs.is_empty():
-            self.engine.scheduler[virtual_engine].complete_mb()
+            
+                
+            if not scheduler_outputs.is_empty():
+                self.engine.scheduler[virtual_engine].complete_mb()
             # print('|||||||||||| after process model') 
 
             # Log stats.

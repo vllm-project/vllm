@@ -93,7 +93,7 @@ class Worker(WorkerBase):
         self.cache_engine: List[CacheEngine]
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: List[Optional[List[torch.tensor]]] = [
-            None for _ in range(parallel_config.pipeline_parallel_size)
+            None for _ in range(parallel_config.pipeline_parallel_size-1)
         ]
         self.execution_queue = Queue()
         self.output_queue = Queue()
@@ -209,11 +209,11 @@ class Worker(WorkerBase):
         self.cache_engine = [
             CacheEngine(self.cache_config, self.model_config,
                         self.parallel_config)
-            for _ in range(self.parallel_config.pipeline_parallel_size)
+            for _ in range(self.parallel_config.pipeline_parallel_size-1)
         ]
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
-            for ve in range(self.parallel_config.pipeline_parallel_size)
+            for ve in range(self.parallel_config.pipeline_parallel_size-1)
         ]
         self.driver_thread.start()
 
@@ -324,10 +324,15 @@ class Worker(WorkerBase):
         print('done start driver threads')
     
     def enqueue(self, req: ExecuteModelRequest) -> None:
+        # print('enqueue')
         self.execution_queue.put(req)
+        # print('after enqueue')
 
     def get_output(self) -> Union[SamplerOutput, PoolerOutput]:
-        return self.output_queue.get()
+        # print('before get output')
+        output = self.output_queue.get()
+        # print('after get output')
+        return output
 
     @torch.inference_mode()
     def driver_execution_loop(self)->None:
