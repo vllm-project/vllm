@@ -804,7 +804,8 @@ def get_rope(
             }
             rotary_emb = DeepseekScalingRotaryEmbedding(
                 head_size, rotary_dim, original_max_position, base,
-                is_neox_style, scaling_factor, **extra_kwargs)
+                is_neox_style, scaling_factor,
+                dtype=torch.get_default_dtype(), *extra_kwargs)
         # The correct one should be "longrope" but keep "su" here
         # for backward compatible
         elif scaling_type == "su" or scaling_type == "longrope":
