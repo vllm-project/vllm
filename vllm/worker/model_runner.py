@@ -218,10 +218,9 @@ class ModelInputForGPUBuilder(
         # sliding window is 8, and block size is 4, the first two
         # tokens are masked and the slot mapping will be
         # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
-        if start_idx > context_len:
-            self.slot_mapping.extend([_PAD_SLOT_ID] *
-                                     (start_idx - context_len))
-        for i in range(start_idx, seq_len):
+        self.slot_mapping.extend([_PAD_SLOT_ID] *
+                                 max(0, start_idx - context_len))
+        for i in range(max(start_idx, context_len), seq_len):
             block_number = block_table[i // self.block_size]
             block_offset = i % self.block_size
             slot = block_number * self.block_size + block_offset
