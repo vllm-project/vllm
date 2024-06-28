@@ -882,9 +882,9 @@ class FusedMoELinear(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
 
-        tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = top_k
-        self.intermediate_size_per_partition = intermediate_size // tp_size
+        self.intermediate_size_per_partition = intermediate_size // self.tp_size
         
         if quant_config is None:
             self.quant_method: Optional[

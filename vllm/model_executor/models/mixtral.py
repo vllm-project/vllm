@@ -27,13 +27,9 @@ import torch
 from torch import nn
 from transformers import MixtralConfig
 
-from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (FusedMoELinear,
                                                QKVParallelLinear,
@@ -42,16 +38,12 @@ from vllm.model_executor.layers.linear import (FusedMoELinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
-                                                         per_tensor_dequantize,
-                                                         per_tensor_quantize)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 
@@ -74,10 +66,10 @@ class MixtralMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
-        tp_size: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        self.hidden_size = hidden_size
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(hidden_size,
@@ -99,7 +91,7 @@ class MixtralMLP(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.moe(hidden_states=hidden_states,
+        final_hidden_states = self.mlp(hidden_states=hidden_states,
                                        router_logits=router_logits)
 
         return final_hidden_states.view(num_tokens, hidden_size)
