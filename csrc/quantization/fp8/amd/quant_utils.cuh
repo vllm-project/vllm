@@ -569,6 +569,7 @@ __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, __nv_bfloat16>(
 }
 
 // bf16x2 -> fp8x2
+// TODO(HaiShaw): Add packed convert (performance A.I.)
 template <>
 __inline__ __device__ uint16_t scaled_vec_conversion<uint16_t, __nv_bfloat162>(
     const __nv_bfloat162& a, float scale) {
