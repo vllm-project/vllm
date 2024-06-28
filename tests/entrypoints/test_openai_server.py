@@ -88,8 +88,7 @@ def ray_ctx():
 
 
 @pytest.fixture(scope="module")
-# def server(zephyr_lora_files, ray_ctx):
-def server(ray_ctx):
+def server(zephyr_lora_files, ray_ctx):
     return RemoteOpenAIServer([
         "--model",
         MODEL_NAME,
