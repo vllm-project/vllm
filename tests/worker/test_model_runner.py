@@ -137,7 +137,7 @@ def test_prepare_prompt(batch_size):
                             dtype=actual.dtype)
     torch.testing.assert_close(actual, expected)
 
-"""
+
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_decode_cuda_graph(batch_size):
     model_runner = _create_model_runner(
@@ -246,7 +246,7 @@ def test_prepare_decode_cuda_graph(batch_size):
                             device=actual.device,
                             dtype=actual.dtype)
     torch.testing.assert_close(actual, expected)
-"""
+
 
 def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output."""

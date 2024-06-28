@@ -5,7 +5,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.worker import Worker
 
-"""
+
 def test_swap() -> None:
     # Configure the engine.
     engine_args = EngineArgs(model="facebook/opt-125m",
@@ -87,4 +87,3 @@ def test_swap() -> None:
         for src, dst in execute_model_req.blocks_to_swap_in:
             assert allclose(gpu_key_cache[dst], cpu_key_cache[src])
             assert allclose(gpu_value_cache[dst], cpu_value_cache[src])
-"""

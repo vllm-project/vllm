@@ -26,7 +26,6 @@ def test_metric_counter_prompt_tokens(
     vllm_model = vllm_runner(model,
                              dtype=dtype,
                              disable_log_stats=False,
-                             enforce_eager=True,
                              gpu_memory_utilization=0.4)
     tokenizer = vllm_model.model.get_tokenizer()
     prompt_token_counts = [len(tokenizer.encode(p)) for p in example_prompts]
@@ -60,7 +59,6 @@ def test_metric_counter_generation_tokens(
     vllm_model = vllm_runner(model,
                              dtype=dtype,
                              disable_log_stats=False,
-                             enforce_eager=True,
                              gpu_memory_utilization=0.4)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     tokenizer = vllm_model.model.get_tokenizer()
@@ -90,7 +88,6 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
     vllm_model = vllm_runner(model,
                              dtype=dtype,
                              disable_log_stats=False,
-                             enforce_eager=True,
                              gpu_memory_utilization=0.3,
                              served_model_name=served_model_name)
     stat_logger = vllm_model.model.llm_engine.stat_logger
@@ -108,7 +105,7 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
             f"{served_model_name[0]!r}\n"
             f"actual: {metrics_tag_content!r}")
 
-"""
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [4])
@@ -121,11 +118,11 @@ async def test_async_engine_log_metrics_regression(
     max_tokens: int,
     disable_log_stats: bool,
 ) -> None:
-    " ""
+    """
     Regression test ensuring async engine generates metrics
     when disable_log_stats=False
     (see: https://github.com/vllm-project/vllm/pull/4150#pullrequestreview-2008176678)
-    " ""
+    """
     engine_args = AsyncEngineArgs(model=model,
                                   dtype=dtype,
                                   disable_log_stats=disable_log_stats)
@@ -142,7 +139,6 @@ async def test_async_engine_log_metrics_regression(
 
     assert_metrics(async_engine.engine, disable_log_stats,
                    len(example_prompts))
-
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -162,7 +158,7 @@ def test_engine_log_metrics_regression(
     engine = LLMEngine.from_engine_args(engine_args)
     for i, prompt in enumerate(example_prompts):
         engine.add_request(
-            f\"request-id-{i}\",
+            f"request-id-{i}",
             prompt,
             SamplingParams(max_tokens=max_tokens),
         )
@@ -170,7 +166,7 @@ def test_engine_log_metrics_regression(
         engine.step()
 
     assert_metrics(engine, disable_log_stats, len(example_prompts))
-"""
+
 
 def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
                    num_requests: int) -> None:
