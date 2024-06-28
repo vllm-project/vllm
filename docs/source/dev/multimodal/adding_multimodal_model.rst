@@ -3,7 +3,7 @@
 Adding a New Multimodal Model
 =============================
 
-This document provides a high-level guide on integrating a :ref:`multimodal model <multi_modality>` into vLLM.
+This document provides a high-level guide on integrating a :ref:`multi-modal model <multi_modality>` into vLLM.
 
 .. note::
     The complexity of adding a new model depends heavily on the model's architecture.
@@ -15,8 +15,8 @@ This document provides a high-level guide on integrating a :ref:`multimodal mode
     We will be happy to help you out!
 
 
-1. Set up a base vLLM model
----------------------------
+1. Set up the base vLLM model
+-----------------------------
 
 As usual, follow :ref:`these steps <adding_a_new_model>` to implement the model in vLLM, but note the following:
 
@@ -99,7 +99,7 @@ Here are some examples:
 --------------------------------------
 
 Sometimes, there is a need to process inputs at the :class:`~vllm.LLMEngine` level before they are passed to the model executor.
-You can register input processors via :meth:`vllm.inputs.INPUT_REGISTRY.register_input_processor <vllm.inputs.registry.InputRegistry.register_input_processor>`.
+You can register input processors via :meth:`INPUT_REGISTRY.register_input_processor <vllm.inputs.registry.InputRegistry.register_input_processor>`.
 
 .. code-block:: diff
 
