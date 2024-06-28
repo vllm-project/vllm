@@ -2,7 +2,6 @@
 
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
-import os
 import weakref
 
 import pytest
@@ -13,7 +12,6 @@ MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
 ]
-VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 
 def test_vllm_gc_ed():
@@ -39,10 +37,6 @@ def test_models(
     max_tokens: int,
     enforce_eager: bool,
 ) -> None:
-    backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
-    if backend_by_env_var == "FLASHINFER" and enforce_eager is False:
-        pytest.skip("Skipping non-eager test for FlashInferBackend.")
-
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
