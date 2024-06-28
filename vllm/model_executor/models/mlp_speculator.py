@@ -180,10 +180,8 @@ class MLPSpeculator(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            try:
-                param = params_dict[name.replace("speculator.", "")]
+            param = params_dict.get(name.replace("speculator.", ""))
+            if param is not None:
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-            except:
-                pass
