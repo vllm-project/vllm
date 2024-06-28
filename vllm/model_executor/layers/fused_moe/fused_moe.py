@@ -346,11 +346,15 @@ def fused_topk(
                                topk,
                                dtype=torch.float32,
                                device=hidden_states.device)
+    topk_ids = torch.empty(M,
+                           topk,
+                           dtype=torch.int32,
+                           device=hidden_states.device)
     token_expert_indicies = torch.empty(M,
                                         topk,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
-    moe_kernels.topk_softmax(
+    ops.topk_softmax(
         topk_weights,
         topk_ids,
         token_expert_indicies,
