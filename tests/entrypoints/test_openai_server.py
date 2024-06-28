@@ -76,8 +76,6 @@ TEST_CHOICE = [
     "Swift", "Kotlin"
 ]
 
-# MAX_QUEUE_LEN = "1"
-
 pytestmark = pytest.mark.openai
 
 
@@ -94,7 +92,8 @@ def ray_ctx():
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_files, ray_ctx):
+# def server(zephyr_lora_files, ray_ctx):
+def server(ray_ctx):
     return RemoteOpenAIServer([
         "--model",
         MODEL_NAME,
@@ -115,12 +114,7 @@ def server(zephyr_lora_files, ray_ctx):
         "2",
         "--max-num-seqs",
         "128",
-        # "--max-queue-length",
-        # MAX_QUEUE_LEN,
-        # "--max-num-seqs",
-        # "1",
     ])
-
 
 @pytest.fixture(scope="module")
 def client(server):
@@ -760,39 +754,27 @@ async def test_logits_bias(client: openai.AsyncOpenAI):
     )
     assert first_response != completion.choices[0].text
 
-
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_max_queue_length(server, client: openai.AsyncOpenAI,
-                                model_name: str):
-    sample_prompts = [
-        "Who won the world series in 2020?",
-        "Where was the 2020 world series played?",
-        "How long did the 2020 world series last?",
-        "What were some television viewership statistics?",
-        "Why was the 2020 world series so popular?"
-    ]
-
-    coroutines = [
-        client.completions.create(
-            prompt=sample_prompt,
-            model=model_name,
-            temperature=0.8,
-            presence_penalty=0.2,
-            max_tokens=400,
-        ) for sample_prompt in sample_prompts
-    ]
-
-    responses = await asyncio.gather(*coroutines, return_exceptions=True)
-
-    for response in responses:
-        if response.status_code != 200:
-            assert response.status_code == 503
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_max_queue_length(client: openai.AsyncOpenAI, model_name: str,
-                                capsys):
+@pytest.mark.parametrize("max_queue_len", [1, 2, 3, 4])
+async def test_max_queue_length(model_name: str, max_queue_len: str):
+
+    server = RemoteOpenAIServer([
+        "--model",
+        MODEL_NAME,
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",  # use half precision for speed and memory savings in CI environment
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",
+        "--max-queue-length",
+        str(max_queue_len),
+        "--max-num-seqs",
+        "1",
+    ])
+
+    client = server.get_async_client()
 
     sample_prompts = [
         "Who won the world series in 2020?",
@@ -821,7 +803,7 @@ async def test_max_queue_length(client: openai.AsyncOpenAI, model_name: str,
             err_cnt += 1
 
     # Ensure that # of err requests == (# of requests - max_queue_len - run_queue_len)
-    correctness_check = err_cnt == (len(sample_prompts) - int(MAX_QUEUE_LEN) -
+    correctness_check = err_cnt == (len(sample_prompts) - max_queue_len -
                                     1)
     print("Correct number of errors? ", correctness_check)
     assert correctness_check
