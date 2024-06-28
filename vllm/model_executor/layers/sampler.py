@@ -1,5 +1,6 @@
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
+from itertools import zip_longest
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -107,9 +108,22 @@ class Sampler(nn.Module):
         else:
             on_device_tensors = None
 
-        # Get the logprobs query results.
-        prompt_logprobs, sample_logprobs = _get_logprobs(
-            logprobs, sampling_metadata, sample_results)
+        # Check if logprobs are required
+        get_logprobs = False
+        for seq_group in sampling_metadata.seq_groups:
+            sampling_type = seq_group.sampling_params.sampling_type
+            if sampling_type is not SamplingType.GREEDY:
+                get_logprobs = True
+                break
+
+        if get_logprobs:
+            # Get the logprobs query results.
+            prompt_logprobs, sample_logprobs = _get_logprobs(
+                logprobs, sampling_metadata, sample_results)
+        else:
+            prompt_logprobs = []
+            sample_logprobs = []
+
         return _build_sampler_output(sample_results,
                                      sampling_metadata,
                                      prompt_logprobs,
@@ -988,15 +1002,17 @@ def _build_sampler_output(
 
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,
-         group_sample_logprobs) in zip(sampling_metadata.seq_groups,
+         group_sample_logprobs) in zip_longest(sampling_metadata.seq_groups,
                                        sample_results, prompt_logprobs,
-                                       sample_logprobs):
+                                       sample_logprobs, fillvalue=None):
         seq_ids = seq_group.seq_ids
         next_token_ids, parent_ids = sample_result
         seq_outputs = []
-        for parent_id, next_token_id, logprobs in zip(parent_ids,
+        if group_sample_logprobs is None:
+            group_sample_logprobs = []
+        for parent_id, next_token_id, logprobs in zip_longest(parent_ids,
                                                       next_token_ids,
-                                                      group_sample_logprobs):
+                                                      group_sample_logprobs, fillvalue={}):
             seq_outputs.append(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(

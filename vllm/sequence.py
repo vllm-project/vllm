@@ -127,7 +127,7 @@ class SequenceData:
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
-        self.cumulative_logprob += logprob
+        self.cumulative_logprob += logprob if logprob is not None else 0.0
 
     def get_len(self) -> int:
         return len(self.output_token_ids) + len(self.prompt_token_ids)
@@ -289,10 +289,9 @@ class Sequence:
         token_id: int,
         logprobs: Dict[int, Logprob],
     ) -> None:
-        assert token_id in logprobs
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id].logprob)
+        self.data.append_token_id(token_id, logprobs[token_id].logprob if token_id in logprobs else None)
 
     def get_len(self) -> int:
         return self.data.get_len()
