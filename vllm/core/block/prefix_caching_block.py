@@ -39,7 +39,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         num_blocks: int,
         block_size: int,
         block_index_start: int,
-        block_index_end: int,
         eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
     ):
         # A mapping of prefix hash to block index. All blocks which have a
@@ -54,7 +53,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             create_block=self._create_block,  # type: ignore
             num_blocks=num_blocks,
             block_index_start=block_index_start,
-            block_index_end=block_index_end,
         )
 
         self._block_size = block_size

@@ -58,7 +58,6 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
                 block_index_start=0,
-                block_index_end=num_gpu_blocks,
             )
 
             cpu_allocator: BlockAllocator = NaiveBlockAllocator(
@@ -66,21 +65,18 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 num_blocks=num_cpu_blocks,
                 block_size=block_size,
                 block_index_start=num_gpu_blocks,
-                block_index_end=num_gpu_blocks + num_cpu_blocks,
             )
         elif allocator_type == "prefix_caching":
             gpu_allocator = PrefixCachingBlockAllocator(
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
                 block_index_start=0,
-                block_index_end=num_gpu_blocks,
             )
 
             cpu_allocator = PrefixCachingBlockAllocator(
                 num_blocks=num_cpu_blocks,
                 block_size=block_size,
                 block_index_start=num_gpu_blocks,
-                block_index_end=num_gpu_blocks + num_cpu_blocks,
             )
         else:
             raise ValueError(f"Unknown allocator type {allocator_type=}")
