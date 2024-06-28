@@ -27,7 +27,7 @@ from transformers import FuyuConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -125,7 +125,7 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
         self.vlm_config = vlm_config
         self.image_token_id = vlm_config.image_token_id
 
-        self.vision_embed_tokens = RowParallelLinear(
+        self.vision_embed_tokens = ColumnParallelLinear(
             config.patch_size * config.patch_size * config.num_channels,
             config.hidden_size,
             quant_config=quant_config,
