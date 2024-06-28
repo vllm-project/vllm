@@ -355,6 +355,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             input_positions=input_positions,
             attn_metadata=attn_metadata,
             sampling_metadata=sampling_metadata,
+            multi_modal_kwargs=multi_modal_kwargs,
         )
 
     @torch.inference_mode()
