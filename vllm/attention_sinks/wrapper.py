@@ -16,16 +16,17 @@ def apply_attn_sinks_to_model(
 ) -> None:
     # need to grab a {Model}Attention object for get_attention_sink
     model_attn = None
-    # save StreamingAttentionSinks for initializing _Identity modules
+    # save StreamingAttentionSinks for initializing _RopeIdentity modules
     attn_sink_modules = {}
 
     for module_name, module in model.named_modules(remove_duplicate=False):
         parts = module_name.split(".")
-        if len(parts) == 4 and "Attention" in module.__class__.__name__: # sus
+        if len(parts) == 4 and "Attention" in module.__class__.__name__:
             # e.g. 'LlamaAttention'
             model_attn = module
         elif len(parts) == 5 and parts[-1] == "attn":
             # e.g. 'model.layers.21.self_attn.attn'
+            assert module.__class__.__name__ == "Attention"
             attn_sink_module = _get_attention_sink(model_attn, model_config, cache_config, chunked_prefill_enabled)
             replace_submodule(model, module_name, attn_sink_module)
             layer_idx = parts[2]
@@ -35,6 +36,7 @@ def apply_attn_sinks_to_model(
         parts = module_name.split(".")
         if len(parts) == 5 and parts[-1] == "rotary_emb":
             # e.g. 'model.layers.21.self_attn.rotary_emb'
+            assert module.__class__.__name__ == "RotaryEmbedding"
             layer_idx = parts[2]
             rope_patch = _RopeIdentity(attn_sink_modules[layer_idx])
             replace_submodule(model, module_name, rope_patch)
