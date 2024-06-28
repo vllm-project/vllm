@@ -20,3 +20,6 @@ aiohttp
 
 # quantization
 bitsandbytes==0.42.0
+
+# Model
+deepseek_vl@git+https://github.com/deepseek-ai/DeepSeek-VL.git@681bffb

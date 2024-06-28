@@ -1,6 +1,7 @@
 from typing import List, Tuple
 
 import pytest
+import deepseek_vl.models
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
@@ -18,7 +19,7 @@ HF_IMAGE_PROMPTS = [
 assert len(HF_IMAGE_PROMPTS) == len(IMAGE_FILES)
 
 
-def iter_llava_configs(model_name: str):
+def iter_deepseek_vl_configs(model_name: str):
     image_hw_to_feature_size = {
         (1024, 1024): 576,
     }
@@ -42,7 +43,7 @@ def iter_llava_configs(model_name: str):
 
 
 model_and_vl_config = [
-    *iter_llava_configs("deepseek-ai/deepseek-vl-7b-chat"),
+    *iter_deepseek_vl_configs("deepseek-ai/deepseek-vl-7b-chat"),
 ]
 
 
@@ -93,6 +94,14 @@ def test_models(
     """
     model_id, vlm_config = model_and_config
 
+    with vllm_runner(model_id,
+                     dtype=dtype,
+                     enforce_eager=True,
+                     **vlm_config.as_cli_args_dict()) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+                                                  max_tokens,
+                                                  images=vllm_images)
+
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
         hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
                                               max_tokens,
@@ -104,13 +113,6 @@ def test_models(
         for p in HF_IMAGE_PROMPTS
     ]
 
-    with vllm_runner(model_id,
-                     dtype=dtype,
-                     enforce_eager=True,
-                     **vlm_config.as_cli_args_dict()) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
-                                                  max_tokens,
-                                                  images=vllm_images)
 
     for i in range(len(HF_IMAGE_PROMPTS)):
         hf_output_ids, hf_output_str = hf_outputs[i]
