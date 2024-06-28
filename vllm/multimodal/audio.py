@@ -74,7 +74,7 @@ class AudioPlugin(MultiModalPlugin[AudioData]):
             raise RuntimeError("No HuggingFace processor is available"
                                 "to process the audio object")
         try:
-            return processor(audio, return_tensors="pt").to(model_config.dtype)
+            return processor(audio, return_tensors="pt", sampling_rate = 16000).to(model_config.dtype)
         except Exception:
             logger.error("Failed to process audio (%s)", audio)
             raise

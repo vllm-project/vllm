@@ -114,7 +114,7 @@ class WhisperAttention(nn.Module):
             self.attn = None
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(1, seq_len, self.num_heads, self.head_dim).contiguous()
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).contiguous()
         
     def forward(
         self,
@@ -131,7 +131,6 @@ class WhisperAttention(nn.Module):
         else:
             tgt_len, _ = sizes
         q, _ = self.q_proj(hidden_states)
-        q = q * self.scaling
         
         past_key_value = None
 
@@ -151,7 +150,7 @@ class WhisperAttention(nn.Module):
 
             q = self._shape(q, -1, 1)
             k = self._shape(k, -1, 1)
-            v = self._shape(k, -1, 1)
+            v = self._shape(v, -1, 1)
 
             attn_output = xops.memory_efficient_attention_forward(
                 q,
@@ -223,6 +222,12 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = self.activation_fn(hidden_states)
         hidden_states, _ = self.fc2(hidden_states)
         hidden_states = residual + hidden_states
+
+        if hidden_states.dtype == torch.float16 and (
+            torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
+        ):
+            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
+            hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
 
         return hidden_states
 
@@ -332,8 +337,7 @@ class WhisperEncoder(nn.Module):
         self.layer_norm = nn.LayerNorm(config.d_model)
 
         with torch.no_grad():
-            embed_positions = self.embed_positions.weight
-            embed_positions.copy_(sinusoids(*embed_positions.shape))
+            self.embed_positions.weight.copy_(sinusoids(*self.embed_positions.weight.shape))
     
     def forward(
         self,
@@ -510,3 +514,11 @@ class WhisperForConditionalGeneration(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+
+            if name == 'model.decoder.embed_tokens.weight':
+                param = params_dict['proj_out.weight']
+                weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+                weight_loader(param, loaded_weight)
+
+        param = params_dict[name]
