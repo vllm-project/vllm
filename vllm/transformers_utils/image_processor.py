@@ -1,5 +1,3 @@
-from typing import Optional
-
 from transformers import AutoImageProcessor
 from transformers.image_processing_utils import BaseImageProcessor
 

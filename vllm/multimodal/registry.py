@@ -6,7 +6,8 @@ from torch import nn
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 
-from .base import EXTERNAL_MM_DATA_TYPE, MultiModalData, MultiModalPlugin, MultiModalInputMapper
+from .base import (EXTERNAL_MM_DATA_TYPE, MultiModalData,
+                   MultiModalInputMapper, MultiModalPlugin)
 from .image import ImageData, ImagePlugin
 
 logger = init_logger(__name__)
@@ -63,7 +64,8 @@ class MultiModalRegistry:
     def _process_external_input(self, key, value, model_config: ModelConfig):
         plugin = self._get_plugin_for_external_data_type(key, type(value))
         if plugin:
-            return plugin.map_input(model_config, plugin.get_internal_data_type()(value))
+            return plugin.map_input(model_config,
+                                    plugin.get_internal_data_type()(value))
         msg = f"Unknown multi-modal data type: {type(value)}"
         raise NotImplementedError(msg)
 
@@ -100,9 +102,9 @@ class MultiModalRegistry:
         return self._get_plugin_for_internal_data_type(data_type) \
             .register_input_mapper(mapper)
 
-    def register_image_input(
-            self,
-            mapper: Optional[MultiModalInputMapper[ImageData]] = None):
+    def register_image_input(self,
+                             mapper: Optional[
+                                 MultiModalInputMapper[ImageData]] = None):
         """
         Register an input mapper for image pixel data to a model class.
 
@@ -110,8 +112,9 @@ class MultiModalRegistry:
         """
         return self.register_input_mapper(ImageData, mapper)
 
-    def map_input(self, model_config: ModelConfig, data: Union[MultiModalData,
-                                        Dict[str, EXTERNAL_MM_DATA_TYPE]]):
+    def map_input(self, model_config: ModelConfig,
+                  data: Union[MultiModalData, Dict[str,
+                                                   EXTERNAL_MM_DATA_TYPE]]):
         """
         Apply an input mapper to a :class:`~MultiModalData` instance passed
         to the model.

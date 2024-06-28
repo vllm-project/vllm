@@ -1,4 +1,4 @@
-from .base import MultiModalData, MultiModalPlugin, EXTERNAL_MM_DATA_TYPE
+from .base import EXTERNAL_MM_DATA_TYPE, MultiModalData, MultiModalPlugin
 from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()

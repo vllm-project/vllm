@@ -36,7 +36,6 @@ N = TypeVar("N", bound=Type["nn.Module"])
 
 EXTERNAL_MM_DATA_TYPE = Union["Image.Image", "torch.Tensor"]
 MultiModalInputMapper = Callable[[InputContext, D], Dict[str, "torch.Tensor"]]
-
 """Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
 and processors in HuggingFace Transformers."""

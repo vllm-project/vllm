@@ -24,8 +24,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
 from vllm.multimodal.image import ImageData
 from vllm.sequence import SamplerOutput
 
-from .clip import (dummy_pixel_data_for_clip,
-                   dummy_seq_data_for_clip, get_clip_patch_grid_length)
+from .clip import (dummy_pixel_data_for_clip, dummy_seq_data_for_clip,
+                   get_clip_patch_grid_length)
 from .interfaces import SupportsVision
 from .llava import LlavaMultiModalProjector, merge_vision_embeddings
 

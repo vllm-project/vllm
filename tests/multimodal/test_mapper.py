@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from transformers import CLIPImageProcessor, LlavaNextImageProcessor
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import ImageData
 
@@ -12,7 +12,6 @@ from ..conftest import _STR_DTYPE_TO_TORCH_DTYPE
 @pytest.mark.parametrize("dtype", ["half", "float"])
 def test_clip_image_processor(image_assets, dtype):
     MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
-    IMAGE_HEIGHT = IMAGE_WIDTH = 560
 
     hf_processor = CLIPImageProcessor.from_pretrained(MODEL_NAME)
     assert isinstance(hf_processor, CLIPImageProcessor)
@@ -25,11 +24,6 @@ def test_clip_image_processor(image_assets, dtype):
         seed=0,
         dtype=dtype,
         revision=None,
-    )
-    multimodal_config=VisionLanguageConfig(
-        image_token_id=32000,
-        image_input_shape=(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH),
-        image_feature_size=576,
     )
 
     for asset in image_assets:
@@ -57,7 +51,6 @@ def test_clip_image_processor(image_assets, dtype):
 @pytest.mark.parametrize("dtype", ["half", "float"])
 def test_llava_next_image_processor(image_assets, dtype):
     MODEL_NAME = "llava-hf/llava-v1.6-34b-hf"
-    IMAGE_HEIGHT = IMAGE_WIDTH = 560
 
     hf_processor = LlavaNextImageProcessor.from_pretrained(MODEL_NAME)
     assert isinstance(hf_processor, LlavaNextImageProcessor)
@@ -71,10 +64,6 @@ def test_llava_next_image_processor(image_assets, dtype):
         dtype=dtype,
         revision=None,
     )
-    multimodal_config = VisionLanguageConfig(image_token_id=64000,
-                                      image_input_shape=(1, 3, IMAGE_HEIGHT,
-                                                         IMAGE_WIDTH),
-                                      image_feature_size=2928)
 
     for asset in image_assets:
         hf_result = hf_processor.preprocess(
@@ -100,7 +89,6 @@ def test_llava_next_image_processor(image_assets, dtype):
 @pytest.mark.parametrize("dtype", ["float"])
 def test_image_pixel_types(image_assets, dtype):
     MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
-    IMAGE_HEIGHT = IMAGE_WIDTH = 560
 
     model_config = ModelConfig(
         model=MODEL_NAME,
@@ -111,10 +99,6 @@ def test_image_pixel_types(image_assets, dtype):
         dtype=dtype,
         revision=None,
     )
-    multimodal_config = VisionLanguageConfig(image_token_id=32000,
-                                      image_input_shape=(1, 3, IMAGE_HEIGHT,
-                                                         IMAGE_WIDTH),
-                                      image_feature_size=576)
     for asset in image_assets:
         image_result = MULTIMODAL_REGISTRY.map_input(
             model_config,

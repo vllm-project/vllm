@@ -79,7 +79,6 @@ LlavaImageInputs = LlavaImagePixelInputs
 
 
 def dummy_data_for_llava(ctx: InputContext, seq_len: int):
-    multimodal_config = ctx.get_multimodal_config()
     hf_config = ctx.get_hf_config(LlavaConfig)
     vision_config = hf_config.vision_config
 
@@ -153,13 +152,12 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
         if not isinstance(pixel_values, torch.Tensor):
             raise ValueError("Incorrect type of pixel values. "
-                                f"Got type: {type(pixel_values)}")
+                             f"Got type: {type(pixel_values)}")
 
         return LlavaImagePixelInputs(
             type="pixel_values",
             data=self._validate_image_data(pixel_values),
         )
-
 
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
