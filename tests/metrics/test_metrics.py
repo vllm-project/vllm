@@ -8,14 +8,11 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 
-from ..test_utils import xfail_if_rocm62
-
 MODELS = [
     "facebook/opt-125m",
 ]
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -49,7 +46,6 @@ def test_metric_counter_prompt_tokens(
         f"metric: {metric_count!r}")
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -82,7 +78,6 @@ def test_metric_counter_generation_tokens(
         f"metric: {metric_count!r}")
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize(
@@ -111,7 +106,6 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
             f"actual: {metrics_tag_content!r}")
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [4])
@@ -147,7 +141,6 @@ async def test_async_engine_log_metrics_regression(
                    len(example_prompts))
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [4])
