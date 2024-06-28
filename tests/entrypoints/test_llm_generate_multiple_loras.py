@@ -44,7 +44,7 @@ def llm():
     cleanup()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def zephyr_lora_files():
     return snapshot_download(repo_id=LORA_NAME)
 
