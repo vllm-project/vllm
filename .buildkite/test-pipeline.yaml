@@ -200,7 +200,7 @@ steps:
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
 - label: LM Eval Large Models
-  gpus: a100
+  gpu: a100
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
