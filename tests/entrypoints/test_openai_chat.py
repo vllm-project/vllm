@@ -9,10 +9,13 @@ import pytest
 # using Ray for overall ease of process management, parallel requests,
 # and debugging.
 import ray
+import requests
 import torch
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
+
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ..utils import VLLM_PATH, RemoteOpenAIServer
 
@@ -72,7 +75,7 @@ TEST_CHOICE = [
 pytestmark = pytest.mark.openai
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def zephyr_lora_files():
     return snapshot_download(repo_id=LORA_NAME)
 
@@ -873,3 +876,48 @@ async def test_long_seed(client: openai.AsyncOpenAI):
 
         assert ("greater_than_equal" in exc_info.value.message
                 or "less_than_equal" in exc_info.value.message)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_tokenize(client: openai.AsyncOpenAI, model_name: str):
+    base_url = str(client.base_url)[:-3]
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
+
+    for add_generation in [False, True]:
+        for add_special in [False, True]:
+            conversation = [{
+                "role": "user",
+                "content": "Hi there!"
+            }, {
+                "role": "assistant",
+                "content": "Nice to meet you!"
+            }, {
+                "role": "user",
+                "content": "Can I ask a question?"
+            }]
+
+            prompt = tokenizer.apply_chat_template(
+                add_generation_prompt=add_generation,
+                conversation=conversation,
+                tokenize=False)
+            tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
+
+            response = requests.post(base_url + "tokenize",
+                                     json={
+                                         "add_generation_prompt":
+                                         add_generation,
+                                         "add_special_tokens": add_special,
+                                         "messages": conversation,
+                                         "model": model_name
+                                     })
+            response.raise_for_status()
+
+            assert response.json() == {
+                "tokens": tokens,
+                "count": len(tokens),
+                "max_model_len": 8192
+            }
