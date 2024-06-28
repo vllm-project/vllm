@@ -58,6 +58,9 @@ def _split_tensor_dict(
     metadata_list: List[Tuple[str, Any]] = []
     tensor_list = []
     for key, value in tensor_dict.items():
+        assert "%" not in key, (
+            "Avoid having '%' in key "
+            "as it is used as a separator for nested entries.")
         if isinstance(value, torch.Tensor):
             # Note: we cannot use `value.device` here,
             # because it contains not only the device type but also the device
