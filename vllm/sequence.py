@@ -5,6 +5,7 @@ import hashlib
 import math
 import weakref
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
@@ -107,27 +108,20 @@ class SequenceDataPool:
     """A pool of numpy array to hold sequence data.
     """
 
-    def __init__(self, max_tokens: int, initial_pool_size: int) -> None:
-        self.max_tokens = max_tokens
-        self.pool: List[np.ndarray] = []
-        if initial_pool_size > 0:
-            self.pool = [
-                np.zeros(max_tokens, dtype=np.int64)
-                for _ in range(initial_pool_size)
-            ]
+    def __init__(self) -> None:
+        self.pool: Dict[int, List[np.ndarray]] = defaultdict(list)
 
-    def alloc_array(self) -> np.ndarray:
-        if self.pool:
-            return self.pool.pop()
-        return np.zeros(self.max_tokens, dtype=np.int64)
+    def alloc_array(self, max_tokens) -> np.ndarray:
+        if max_tokens in self.pool and self.pool[max_tokens]:
+            return self.pool[max_tokens].pop()
+        return np.zeros(max_tokens, dtype=np.int64)
 
     def del_array(self, arr: np.ndarray) -> None:
-        assert arr.size == self.max_tokens
-        self.pool.append(arr)
+        self.pool[len(arr)].append(arr)
 
 
 # for 128k context size
-_SEQUENCE_DATA_POOL = SequenceDataPool(128 * 1024, 32)
+_SEQUENCE_DATA_POOL = SequenceDataPool()
 
 
 class SequenceData:
@@ -158,8 +152,9 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
+        max_seq_len: int = 1024,
     ) -> None:
-        self.tokens = _SEQUENCE_DATA_POOL.alloc_array()
+        self.tokens = _SEQUENCE_DATA_POOL.alloc_array(max_seq_len)
         self.prompt_token_ids_list = prompt_token_ids
         self.num_prompt_tokens = len(prompt_token_ids)
         self.tokens[:self.num_prompt_tokens] = prompt_token_ids
