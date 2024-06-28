@@ -1,12 +1,7 @@
 # coding=utf-8
-# Adapted from
-# https://huggingface.co/xverse/XVERSE-7B/blob/main/modeling_xverse.py
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 The vLLM team.
+# Copyright 2024 Google Inc. HuggingFace Inc. team. All rights reserved.
 #
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,42 +14,43 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only Xverse model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import Gemma2Config
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.activation import GeluAndMul
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import GemmaRotaryEmbedding
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+from vllm.utils import print_warning_once
 
 from .interfaces import SupportsLoRA
 
 
-class XverseMLP(nn.Module):
+class Gemma2MLP(nn.Module):
 
     def __init__(
         self,
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
+        hidden_activation: str,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -66,71 +62,93 @@ class XverseMLP(nn.Module):
                                            hidden_size,
                                            bias=False,
                                            quant_config=quant_config)
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+        if not (hidden_act == hidden_activation == "gelu_pytorch_tanh"):
+            raise ValueError(
+                "Gemma2 uses `gelu_pytorch_tanh` as the hidden activation "
+                "function. Please set `hidden_act` and `hidden_activation` to "
+                "`gelu_pytorch_tanh`.")
+        self.act_fn = GeluAndMul(approximate="tanh")
 
-    def forward(self, x):
-        gate, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
 
 
-class XverseAttention(nn.Module):
+class Gemma2Attention(nn.Module):
 
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
-        bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-    ) -> None:
+    def __init__(self,
+                 layer_idx: int,
+                 config: Gemma2Config,
+                 hidden_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 head_dim: int,
+                 max_position_embeddings: int,
+                 rope_theta: float,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
+        self.layer_idx = layer_idx
+        self.config = config
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
-        # partition the KV heads across multiple tensor parallel GPUs.
-        assert self.total_num_kv_heads % tp_size == 0
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        self.head_dim = head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
+        self.scaling = config.query_pre_attn_scalar**-0.5
         self.rope_theta = rope_theta
-        self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=bias,
+            bias=config.attention_bias,
             quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=bias,
+            bias=config.attention_bias,
             quant_config=quant_config,
         )
-
-        self.rotary_emb = get_rope(
+        # TODO(woosuk): Use the `get_rope` interface.
+        self.rotary_emb = GemmaRotaryEmbedding(
             self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            self.head_dim,
+            max_position_embeddings,
+            base=self.rope_theta,
+            is_neox_style=True,
+            dtype=torch.get_default_dtype(),
         )
+
+        if self.config.attn_logit_softcapping is not None:
+            print_warning_once(
+                "Gemma 2 normally uses attention logit soft-capping; "
+                "soft-capping is currently incompatible with the flash "
+                "attention kernels, so vLLM removes it to enable speed and "
+                "efficiency gains of flash attention.")
+        # FIXME(woosuk): While Gemma 2 uses sliding window attention for every
+        # odd layer, vLLM currently ignores it and uses global attention for
+        # all layers.
+        use_sliding_window = (layer_idx % 2 == 1
+                              and config.sliding_window is not None)
+        del use_sliding_window  # Unused.
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
@@ -153,42 +171,45 @@ class XverseAttention(nn.Module):
         return output
 
 
-class XverseDecoderLayer(nn.Module):
+class Gemma2DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        layer_idx: int,
+        config: Gemma2Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
-        self.self_attn = XverseAttention(
+        self.self_attn = Gemma2Attention(
+            layer_idx=layer_idx,
+            config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=getattr(config, "num_key_value_heads",
-                                 config.num_attention_heads),
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
-            max_position_embeddings=max_position_embeddings,
-            quant_config=quant_config,
-            bias=getattr(config, "bias", False),
+            num_kv_heads=config.num_key_value_heads,
+            head_dim=config.head_dim,
+            max_position_embeddings=config.max_position_embeddings,
+            rope_theta=config.rope_theta,
             cache_config=cache_config,
+            quant_config=quant_config,
         )
-        self.mlp = XverseMLP(
+        self.hidden_size = config.hidden_size
+        self.mlp = Gemma2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
+            hidden_activation=config.hidden_activation,
             quant_config=quant_config,
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.input_layernorm = GemmaRMSNorm(config.hidden_size,
+                                            eps=config.rms_norm_eps)
+        self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size,
+                                                     eps=config.rms_norm_eps)
+        self.pre_feedforward_layernorm = GemmaRMSNorm(config.hidden_size,
+                                                      eps=config.rms_norm_eps)
+        self.post_feedforward_layernorm = GemmaRMSNorm(config.hidden_size,
+                                                       eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -198,7 +219,6 @@ class XverseDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -211,40 +231,42 @@ class XverseDecoderLayer(nn.Module):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
+        hidden_states = self.post_attention_layernorm(hidden_states)
 
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
+        hidden_states, residual = self.pre_feedforward_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
         return hidden_states, residual
 
 
-class XverseModel(nn.Module):
+class Gemma2Model(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Gemma2Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
-        self.padding_idx = config.pad_token_id
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            XverseDecoderLayer(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
+            Gemma2DecoderLayer(layer_idx, config, cache_config, quant_config)
+            for layer_idx in range(config.num_hidden_layers)
         ])
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # Normalize the embedding by sqrt(hidden_size)
+        # The normalizer's data type should be downcasted to the model's
+        # data type such as bfloat16, not float32.
+        # See https://github.com/huggingface/transformers/pull/29402
+        normalizer = self.config.hidden_size**0.5
+        self.register_buffer("normalizer", torch.tensor(normalizer))
 
     def forward(
         self,
@@ -254,6 +276,8 @@ class XverseModel(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
+        hidden_states *= self.normalizer
+
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -268,7 +292,7 @@ class XverseModel(nn.Module):
         return hidden_states
 
 
-class XverseForCausalLM(nn.Module, SupportsLoRA):
+class Gemma2ForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -287,31 +311,25 @@ class XverseForCausalLM(nn.Module, SupportsLoRA):
         "o_proj",
         "gate_up_proj",
         "down_proj",
-        "embed_tokens",
-        "lm_head",
     ]
-    embedding_modules = {
-        "embed_tokens": "input_embeddings",
-        "lm_head": "output_embeddings",
-    }
-    embedding_padding_modules = ["lm_head"]
+    # Gemma does not apply LoRA to the embedding layer.
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Gemma2Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
+        del lora_config  # Unused.
         super().__init__()
-
         self.config = config
-        self.lora_config = lora_config
-
         self.quant_config = quant_config
-        self.model = XverseModel(config, cache_config, quant_config)
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.model = Gemma2Model(config, cache_config, quant_config)
+        self.logits_processor = LogitsProcessor(
+            config.vocab_size, soft_cap=config.final_logit_softcapping)
         self.sampler = Sampler()
 
     def forward(
@@ -327,8 +345,8 @@ class XverseForCausalLM(nn.Module, SupportsLoRA):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.model.embed_tokens.weight,
+                                       hidden_states, sampling_metadata)
         return logits
 
     def sample(
@@ -341,6 +359,7 @@ class XverseForCausalLM(nn.Module, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
@@ -348,15 +367,12 @@ class XverseForCausalLM(nn.Module, SupportsLoRA):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            if ("rotary_emb.inv_freq" in name
-                    or "rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
+            for (param_name, shard_name, shard_id) in stacked_params_mapping:
+                if shard_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
+                name = name.replace(shard_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -365,6 +381,10 @@ class XverseForCausalLM(nn.Module, SupportsLoRA):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # lm_head is not used in vllm as it is tied with embed_token.
+                # To prevent errors, skip loading lm_head.weight.
+                if "lm_head.weight" in name:
+                    continue
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -372,3 +392,10 @@ class XverseForCausalLM(nn.Module, SupportsLoRA):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+
+        unloaded_params = params_dict.keys() - loaded_params
+        if unloaded_params:
+            raise RuntimeError(
+                "Some weights are not initialized from checkpoints: "
+                f"{unloaded_params}")
