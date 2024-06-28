@@ -94,6 +94,7 @@ class EngineArgs:
     guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
+    speculative_draft_tensor_parallel_size: Optional[int] = None
     num_speculative_tokens: Optional[int] = None
     speculative_max_model_len: Optional[int] = None
     speculative_disable_by_batch_size: Optional[int] = None
@@ -503,12 +504,14 @@ class EngineArgs:
                   'Enabling this will use the fully sharded layers. '
                   'At high sequence length, max rank or '
                   'tensor parallel size, this is likely faster.'))
-        parser.add_argument(
-            "--device",
-            type=str,
-            default=EngineArgs.device,
-            choices=["auto", "cuda", "neuron", "cpu", "tpu", "xpu"],
-            help='Device type for vLLM execution.')
+        parser.add_argument("--device",
+                            type=str,
+                            default=EngineArgs.device,
+                            choices=[
+                                "auto", "cuda", "neuron", "cpu", "openvino",
+                                "tpu", "xpu"
+                            ],
+                            help='Device type for vLLM execution.')
 
         # Related to Vision-language models such as llava
         parser = EngineArgs.add_cli_args_for_vlm(parser)
@@ -536,6 +539,13 @@ class EngineArgs:
             type=int,
             default=EngineArgs.num_speculative_tokens,
             help='The number of speculative tokens to sample from '
+            'the draft model in speculative decoding.')
+        parser.add_argument(
+            '--speculative-draft-tensor-parallel-size',
+            '-spec-draft-tp',
+            type=int,
+            default=EngineArgs.speculative_draft_tensor_parallel_size,
+            help='Number of tensor parallel replicas for '
             'the draft model in speculative decoding.')
 
         parser.add_argument(
@@ -635,6 +645,36 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
+        if self.image_input_type:
+            if (not self.image_token_id or not self.image_input_shape
+                    or not self.image_feature_size):
+                raise ValueError(
+                    'Specify `image_token_id`, `image_input_shape` and '
+                    '`image_feature_size` together with `image_input_type`.')
+
+            if self.image_processor is None:
+                self.image_processor = self.model
+            if self.disable_image_processor:
+                if self.image_processor != self.model:
+                    warnings.warn(
+                        "You've specified an image processor "
+                        f"({self.image_processor}) but also disabled "
+                        "it via `--disable-image-processor`.",
+                        stacklevel=2)
+
+                self.image_processor = None
+
+            vision_language_config = VisionLanguageConfig(
+                image_input_type=VisionLanguageConfig.
+                get_image_input_enum_type(self.image_input_type),
+                image_token_id=self.image_token_id,
+                image_input_shape=str_to_int_tuple(self.image_input_shape),
+                image_feature_size=self.image_feature_size,
+                image_processor=self.image_processor,
+                image_processor_revision=self.image_processor_revision,
+            )
+        else:
+            vision_language_config = None
 
         device_config = DeviceConfig(device=self.device)
         model_config = ModelConfig(
@@ -658,7 +698,8 @@ class EngineArgs:
             max_logprobs=self.max_logprobs,
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
-            served_model_name=self.served_model_name)
+            served_model_name=self.served_model_name,
+            multimodal_config=vision_language_config)
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -686,6 +727,8 @@ class EngineArgs:
             target_parallel_config=parallel_config,
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
+            speculative_draft_tensor_parallel_size = \
+                self.speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
             speculative_disable_by_batch_size=self.
             speculative_disable_by_batch_size,
@@ -731,37 +774,6 @@ class EngineArgs:
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
         )
-
-        if self.image_input_type:
-            if (not self.image_token_id or not self.image_input_shape
-                    or not self.image_feature_size):
-                raise ValueError(
-                    'Specify `image_token_id`, `image_input_shape` and '
-                    '`image_feature_size` together with `image_input_type`.')
-
-            if self.image_processor is None:
-                self.image_processor = self.model
-            if self.disable_image_processor:
-                if self.image_processor != self.model:
-                    warnings.warn(
-                        "You've specified an image processor "
-                        f"({self.image_processor}) but also disabled "
-                        "it via `--disable-image-processor`.",
-                        stacklevel=2)
-
-                self.image_processor = None
-
-            vision_language_config = VisionLanguageConfig(
-                image_input_type=VisionLanguageConfig.
-                get_image_input_enum_type(self.image_input_type),
-                image_token_id=self.image_token_id,
-                image_input_shape=str_to_int_tuple(self.image_input_shape),
-                image_feature_size=self.image_feature_size,
-                image_processor=self.image_processor,
-                image_processor_revision=self.image_processor_revision,
-            )
-        else:
-            vision_language_config = None
 
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)

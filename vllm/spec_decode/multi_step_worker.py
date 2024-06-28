@@ -6,7 +6,9 @@ import torch
 
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.spec_decode.interfaces import SpeculativeProposals
+from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+from vllm.spec_decode.interfaces import (SpeculativeProposals,
+                                         SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
@@ -28,9 +30,9 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         super().__init__(*args, **kwargs)
 
         # Lazy initialization list.
-        self._proposer: Top1Proposer
+        self._proposer: SpeculativeProposer
 
-    def init_device(self):
+    def init_device(self) -> None:
         super().init_device()
 
         self._proposer = Top1Proposer(
@@ -40,7 +42,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             max_proposal_len=self.max_model_len,
         )
 
-    def set_include_gpu_probs_tensor(self):
+    def set_include_gpu_probs_tensor(self) -> None:
         # Need include_gpu_probs_tensor for multi_step_worker
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
 
@@ -66,22 +68,24 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         copied_execute_model_req = execute_model_req.clone(
             copied_seq_group_metadata_list)
 
-        # Assert enough KV space for sample_len tokens per sequence.
-        self._assert_enough_kv_space(execute_model_req.seq_group_metadata_list,
-                                     sample_len)
-
         # Run model sample_len times.
         model_outputs: List[SamplerOutput] = []
-        for _ in range(sample_len):
-            model_output = super().execute_model(
+        if isinstance(self.model_runner, TP1DraftModelRunner):
+            copied_execute_model_req.num_steps = sample_len
+            model_outputs = self.execute_model(
                 execute_model_req=copied_execute_model_req)
-            assert (len(model_output) == 1
-                    ), "composing multistep workers not supported"
-            model_output = model_output[0]
+        else:
+            # TODO: Remove this branch once DraftModelRunner supports TP>1.
+            for _ in range(sample_len):
+                model_output: List[SamplerOutput] = super().execute_model(
+                    execute_model_req=copied_execute_model_req)
+                assert (len(model_output) == 1
+                        ), "composing multistep workers not supported"
+                model_output = model_output[0]
 
-            self._append_new_tokens(model_output,
-                                    copied_seq_group_metadata_list)
-            model_outputs.append(model_output)
+                self._append_new_tokens(model_output,
+                                        copied_seq_group_metadata_list)
+                model_outputs.append(model_output)
 
         return model_outputs, True
 
