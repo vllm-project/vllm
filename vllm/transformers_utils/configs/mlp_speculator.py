@@ -41,10 +41,13 @@ class MLPSpeculatorConfig(PretrainedConfig):
             n_candidates: int
                 number of child candidates to create per sequence
             tie_weights: bool
-                If true, use a single set of weights for every model head/stage after the first. The initial projection
-                from the base model may have a different size, so that stays separate.
+                If true, use a single set of weights for every model
+                head/stage after the first. The initial projection
+                from the base model may have a different size, so that
+                stays separate.
             scale_input: bool
-                if True, will scale the initial hidden states from the base model
+                if True, will scale the initial hidden states from
+                the base model.
         """
         if top_k_tokens_per_head is None:
             top_k_tokens_per_head = [5, 4, 3]

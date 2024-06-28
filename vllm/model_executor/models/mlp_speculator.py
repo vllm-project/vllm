@@ -13,6 +13,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import MLPSpeculatorConfig
 
+SQRT2 = 2**0.5
+
 
 class MLPSpeculatorLayerNorm(nn.Module):
     """
@@ -44,7 +46,6 @@ class MLPSpeculatorLayerNorm(nn.Module):
             self.bias = nn.Parameter(torch.empty(normalized_shape))
         self.eps = eps
 
-
     def forward(self, x):
         xf = x
         xf = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
@@ -72,29 +73,30 @@ class MLPSpeculator(nn.Module):
         self.scale_input = config.scale_input
 
         if self.tie_weights:
-            assert (self.n_predict > 1), "You cannot tie weights between stages when only 1 exists"
-            embedding = VocabParallelEmbedding(config.vocab_size, self.inner_dim, org_num_embeddings=config.vocab_size)
-            self.emb = nn.ModuleList([
-                embedding
-                for _ in range(self.max_speculative_tokens)
-            ])
+            assert (
+                self.n_predict >
+                1), "You cannot tie weights between stages when only 1 exists"
+            embedding = VocabParallelEmbedding(
+                config.vocab_size,
+                self.inner_dim,
+                org_num_embeddings=config.vocab_size)
+            self.emb = nn.ModuleList([embedding] * self.max_speculative_tokens)
 
-            # the initial projection from the base model may have a different size, so that stays separate.
+            # the initial projection from the base model may
+            # have a different size, so that stays separate.
             proj_first = nn.Linear(self.emb_dim, self.inner_dim, bias=False)
             proj_tied = nn.Linear(self.inner_dim, self.inner_dim, bias=False)
-            self.proj = nn.ModuleList([proj_first] + [proj_tied for _ in range(self.max_speculative_tokens - 1)])
+            self.proj = nn.ModuleList([proj_first] + [proj_tied] *
+                                      (self.max_speculative_tokens - 1))
 
             head = nn.Linear(self.inner_dim, self.vocab_size, bias=False)
-            self.head = nn.ModuleList([
-                head
-                for _ in range(self.max_speculative_tokens)
-            ])
+            self.head = nn.ModuleList([head] * self.max_speculative_tokens)
 
-            ln = MLPSpeculatorLayerNorm(self.inner_dim, elementwise_shift=True, elementwise_scale=True)
-            self.ln = nn.ModuleList([
-                ln
-                for _ in range(self.max_speculative_tokens)
-            ])
+            ln = MLPSpeculatorLayerNorm(self.inner_dim,
+                                        elementwise_shift=True,
+                                        elementwise_scale=True)
+            self.ln = nn.ModuleList([ln] * self.max_speculative_tokens)
+
         else:
             self.emb = nn.ModuleList([
                 VocabParallelEmbedding(config.vocab_size,
@@ -106,7 +108,8 @@ class MLPSpeculator(nn.Module):
             self.proj = nn.ModuleList([
                 nn.Linear((self.emb_dim if i == 0 else self.inner_dim),
                           self.inner_dim,
-                          bias=False) for i in range(self.max_speculative_tokens)
+                          bias=False)
+                for i in range(self.max_speculative_tokens)
             ])
 
             self.head = nn.ModuleList([
@@ -114,17 +117,20 @@ class MLPSpeculator(nn.Module):
                 for _ in range(self.max_speculative_tokens)
             ])
             self.ln = nn.ModuleList([
-                MLPSpeculatorLayerNorm(self.inner_dim, elementwise_shift=True, elementwise_scale=True)
+                MLPSpeculatorLayerNorm(self.inner_dim,
+                                       elementwise_shift=True,
+                                       elementwise_scale=True)
                 for _ in range(self.max_speculative_tokens)
             ])
         if self.scale_input:
-            self.ln0 = MLPSpeculatorLayerNorm(self.emb_dim, elementwise_shift=False, elementwise_scale=False)
+            self.ln0 = MLPSpeculatorLayerNorm(self.emb_dim,
+                                              elementwise_shift=False,
+                                              elementwise_scale=False)
 
         self.state_weight = 0.5**(0.5 / config.n_predict)
         self.emb_weight = math.sqrt(
             (1 - self.state_weight**2) * (self.inner_dim / 2))
         self.activation = nn.GELU()
-
         self.config = config
         self.logits_processor = LogitsProcessor(config.vocab_size,
                                                 config.vocab_size, 1.0)
@@ -146,7 +152,7 @@ class MLPSpeculator(nn.Module):
         previous_hidden_states = previous_hidden_states.unsqueeze(1)
 
         if self.scale_input:
-            previous_hidden_states = self.ln0(previous_hidden_states) / (2**0.5)
+            previous_hidden_states = self.ln0(previous_hidden_states) / SQRT2
 
         # b x 1
         last_tokens = input_ids.unsqueeze(1)
