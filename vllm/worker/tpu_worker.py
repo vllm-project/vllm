@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch_xla.core.xla_model as xm
+import torch_xla.experimental.dynamo_set_buffer_donor  # noqa: F401
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
@@ -232,11 +233,9 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             for i in range(num_layers):
                 tpu_k_cache, tpu_v_cache = self.tpu_cache[i]
                 cpu_k_cache, cpu_v_cache = self.cpu_cache[i]
-                tpu_k_cache[:, dst_indices] = cpu_k_cache[:, src_indices].to(
-                    self.device)
-                tpu_v_cache[:, dst_indices] = cpu_v_cache[:, src_indices].to(
-                    self.device)
-            xm.mark_step()
+                k = cpu_k_cache[:, src_indices].to(self.device)
+                v = cpu_v_cache[:, src_indices].to(self.device)
+                _insert_kv(k, v, dst_indices, tpu_k_cache, tpu_v_cache)
 
         if blocks_to_swap_out:
             # Swap from TPU to CPU.
@@ -276,3 +275,17 @@ def _make_src_to_dst(
                                device=dst_device,
                                dtype=torch.int64)
     return src_indices, dst_indices
+
+
+@torch.compile(backend="openxla")
+def _insert_kv(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    indices: torch.Tensor,
+    tpu_k_cache: torch.Tensor,
+    tpu_v_cache: torch.Tensor,
+) -> None:
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_k_cache, True)
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_v_cache, True)
+    tpu_k_cache[:, indices] = k
+    tpu_v_cache[:, indices] = v
