@@ -14,8 +14,8 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_tpu, is_xpu, print_warning_once,
-                        update_environment_variables)
+                        is_hip, is_neuron, is_openvino, is_tpu, is_xpu,
+                        print_warning_once, update_environment_variables)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -109,6 +109,7 @@ class ModelConfig:
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
+        multimodal_config: Optional["VisionLanguageConfig"] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -159,6 +160,8 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window())
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
+        self.multimodal_config = multimodal_config
+
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_embedding_mode()
@@ -777,6 +780,8 @@ class DeviceConfig:
             # Automated device type detection
             if is_neuron():
                 self.device_type = "neuron"
+            elif is_openvino():
+                self.device_type = "openvino"
             elif is_tpu():
                 self.device_type = "tpu"
             elif is_cpu():
@@ -792,7 +797,7 @@ class DeviceConfig:
             self.device_type = device
 
         # Some device types require processing inputs on CPU
-        if self.device_type in ["neuron"]:
+        if self.device_type in ["neuron", "openvino"]:
             self.device = torch.device("cpu")
         elif self.device_type in ["tpu"]:
             self.device = None
