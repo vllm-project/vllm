@@ -298,16 +298,16 @@ class LLMEngine:
                 self.stat_loggers = stat_loggers
             else:
                 self.stat_loggers = {
-                    'logging':
+                    "logging":
                     LoggingStatLogger(
                         local_interval=_LOCAL_LOGGING_INTERVAL_SEC),
-                    'prometheus':
+                    "prometheus":
                     PrometheusStatLogger(
                         local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                         labels=dict(model_name=model_config.served_model_name),
                         max_model_len=self.model_config.max_model_len),
                 }
-                self.stat_loggers['prometheus'].info("cache_config",
+                self.stat_loggers["prometheus"].info("cache_config",
                                                      self.cache_config)
 
         self.tracer = None
