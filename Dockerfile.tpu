@@ -14,6 +14,7 @@ RUN pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases
 RUN pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
 # Build vLLM.
-RUN cd /workspace/vllm && python setup.py develop
+RUN --mount=type=bind,source=.git,target=.git \
+    cd /workspace/vllm && python setup.py develop
 
 CMD ["/bin/bash"]

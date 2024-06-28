@@ -12,6 +12,7 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
+from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME
 
 
@@ -304,45 +305,33 @@ def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
 
 
-def find_version(filepath: str) -> str:
-    """Extract version information from the given filepath.
-
-    Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
-    """
-    with open(filepath) as fp:
-        version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]",
-                                  fp.read(), re.M)
-        if version_match:
-            return version_match.group(1)
-        raise RuntimeError("Unable to find version string.")
-
-
 def get_vllm_version() -> str:
-    version = find_version(get_path("vllm", "version.py"))
+    version = get_version()
+    sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
-            version += f"+cu{cuda_version_str}"
+            version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
         if hipcc_version != MAIN_CUDA_VERSION:
             rocm_version_str = hipcc_version.replace(".", "")[:3]
-            version += f"+rocm{rocm_version_str}"
+            version += f"{sep}rocm{rocm_version_str}"
     elif _is_neuron():
         # Get the Neuron version
         neuron_version = str(get_neuronxcc_version())
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
-            version += f"+neuron{neuron_version_str}"
+            version += f"{sep}neuron{neuron_version_str}"
     elif _is_tpu():
-        version += "+tpu"
+        version += f"{sep}tpu"
     elif _is_cpu():
-        version += "+cpu"
+        version += f"{sep}cpu"
     elif _is_xpu():
-        version += "+xpu"
+        version += f"{sep}xpu"
     else:
         raise RuntimeError("Unknown runtime environment")
 
