@@ -4,8 +4,8 @@
 set -euo pipefail
 
 # Install system packages
-yum update
-yum install -y curl jq
+sudo yum update -y
+sudo yum install -y curl jq
 
 # Install minijinja for templating
 curl -sSfL https://github.com/mitsuhiko/minijinja/releases/latest/download/minijinja-cli-installer.sh | sh
