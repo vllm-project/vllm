@@ -20,8 +20,10 @@
 import math
 import warnings
 import copy
+import collections.abc
 
 from dataclasses import dataclass
+from enum import Enum
 from functools import partial
 from typing import (
     Callable,
@@ -36,11 +38,14 @@ from typing import (
     Type,
     Union,
 )
+from itertools import repeat
 
 import torch
 import torch.nn as nn
 import torchvision.transforms
 import torch.nn.functional as F
+from torch import _assert
+from torch.utils.checkpoint import checkpoint
 import numpy as np
 import torchvision
 import torchvision.transforms.functional
@@ -52,16 +57,6 @@ from transformers.image_processing_utils import (
     BatchFeature,
 )
 from transformers.image_utils import to_numpy_array
-from timm.layers import (
-    AttentionPoolLatent,
-    DropPath,
-    LayerType,
-    Mlp,
-    PatchDropout,
-    PatchEmbed,
-    resample_abs_pos_embed,
-)
-from timm.models._manipulate import checkpoint_seq
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
@@ -84,6 +79,490 @@ IMAGENET_MEAN = (0.48145466, 0.4578275, 0.40821073)
 IMAGENET_STD = (0.26862954, 0.26130258, 0.27577711)
 IMAGENET_INCEPTION_MEAN = (0.5, 0.5, 0.5)
 IMAGENET_INCEPTION_STD = (0.5, 0.5, 0.5)
+LayerType = Union[str, Callable, Type[torch.nn.Module]]
+
+
+# From PyTorch internals
+def _ntuple(n):
+
+    def parse(x):
+        if isinstance(x, collections.abc.Iterable) and not isinstance(x, str):
+            return tuple(x)
+        return tuple(repeat(x, n))
+
+    return parse
+
+
+to_2tuple = _ntuple(2)
+
+
+class Format(str, Enum):
+    NCHW = "NCHW"
+    NHWC = "NHWC"
+    NCL = "NCL"
+    NLC = "NLC"
+
+
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/attention_pool.py
+class AttentionPoolLatent(nn.Module):
+    """Attention pooling w/ latent query"""
+
+    fused_attn: torch.jit.Final[bool]
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int = None,
+        embed_dim: int = None,
+        num_heads: int = 8,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        qk_norm: bool = False,
+        latent_len: int = 1,
+        latent_dim: int = None,
+        pos_embed: str = "",
+        pool_type: str = "token",
+        norm_layer: Optional[nn.Module] = None,
+        drop: float = 0.0,
+    ):
+        super().__init__()
+        embed_dim = embed_dim or in_features
+        out_features = out_features or in_features
+        assert embed_dim % num_heads == 0
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim**-0.5
+        self.pool = pool_type
+        self.fused_attn = True
+
+        if pos_embed == "abs":
+            spatial_len = self.feat_size
+            self.pos_embed = nn.Parameter(torch.zeros(spatial_len,
+                                                      in_features))
+        else:
+            self.pos_embed = None
+
+        self.latent_dim = latent_dim or embed_dim
+        self.latent_len = latent_len
+        self.latent = nn.Parameter(torch.zeros(1, self.latent_len, embed_dim))
+
+        self.q = nn.Linear(embed_dim, embed_dim, bias=qkv_bias)
+        self.kv = nn.Linear(embed_dim, embed_dim * 2, bias=qkv_bias)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.proj = nn.Linear(embed_dim, embed_dim)
+        self.proj_drop = nn.Dropout(drop)
+
+        self.norm = (norm_layer(out_features)
+                     if norm_layer is not None else nn.Identity())
+        self.mlp = Mlp(embed_dim, int(embed_dim * mlp_ratio))
+
+    def forward(self, x):
+        B, N, C = x.shape
+
+        if self.pos_embed is not None:
+            # FIXME interpolate
+            x = x + self.pos_embed.unsqueeze(0).to(x.dtype)
+
+        q_latent = self.latent.expand(B, -1, -1)
+        q = (self.q(q_latent).reshape(B, self.latent_len, self.num_heads,
+                                      self.head_dim).transpose(1, 2))
+
+        kv = (self.kv(x).reshape(B, N, 2, self.num_heads,
+                                 self.head_dim).permute(2, 0, 3, 1, 4))
+        k, v = kv.unbind(0)
+
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(q, k, v)
+        else:
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            attn = attn.softmax(dim=-1)
+            x = attn @ v
+        x = x.transpose(1, 2).reshape(B, self.latent_len, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+
+        x = x + self.mlp(self.norm(x))
+
+        # optional pool if latent seq_len > 1 and pooled output is desired
+        if self.pool == "token":
+            x = x[:, 0]
+        elif self.pool == "avg":
+            x = x.mean(1)
+        return x
+
+
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/drop.py
+def drop_path(x,
+              drop_prob: float = 0.0,
+              training: bool = False,
+              scale_by_keep: bool = True):
+    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
+
+    This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
+    the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...
+    See discussion: https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for
+    changing the layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use
+    'survival rate' as the argument.
+
+    """
+    if drop_prob == 0.0 or not training:
+        return x
+    keep_prob = 1 - drop_prob
+    shape = (x.shape[0], ) + (1, ) * (
+        x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+    random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
+    if keep_prob > 0.0 and scale_by_keep:
+        random_tensor.div_(keep_prob)
+    return x * random_tensor
+
+
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/drop.py
+class DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
+
+    def __init__(self, drop_prob: float = 0.0, scale_by_keep: bool = True):
+        super(DropPath, self).__init__()
+        self.drop_prob = drop_prob
+        self.scale_by_keep = scale_by_keep
+
+    def forward(self, x):
+        return drop_path(x, self.drop_prob, self.training, self.scale_by_keep)
+
+    def extra_repr(self):
+        return f"drop_prob={round(self.drop_prob,3):0.3f}"
+
+
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/mlp.py
+class Mlp(nn.Module):
+    """MLP as used in Vision Transformer, MLP-Mixer and related networks"""
+
+    def __init__(
+        self,
+        in_features,
+        hidden_features=None,
+        out_features=None,
+        act_layer=nn.GELU,
+        norm_layer=None,
+        bias=True,
+        drop=0.0,
+        use_conv=False,
+    ):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        bias = to_2tuple(bias)
+        drop_probs = to_2tuple(drop)
+        linear_layer = partial(nn.Conv2d,
+                               kernel_size=1) if use_conv else nn.Linear
+
+        self.fc1 = linear_layer(in_features, hidden_features, bias=bias[0])
+        self.act = act_layer()
+        self.drop1 = nn.Dropout(drop_probs[0])
+        self.norm = (norm_layer(hidden_features)
+                     if norm_layer is not None else nn.Identity())
+        self.fc2 = linear_layer(hidden_features, out_features, bias=bias[1])
+        self.drop2 = nn.Dropout(drop_probs[1])
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        x = self.norm(x)
+        x = self.fc2(x)
+        x = self.drop2(x)
+        return x
+
+
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/patch_dropout.py
+class PatchDropout(nn.Module):
+    """
+    https://arxiv.org/abs/2212.00794
+    """
+
+    return_indices: torch.jit.Final[bool]
+
+    def __init__(
+        self,
+        prob: float = 0.5,
+        num_prefix_tokens: int = 1,
+        ordered: bool = False,
+        return_indices: bool = False,
+    ):
+        super().__init__()
+        assert 0 <= prob < 1.0
+        self.prob = prob
+        self.num_prefix_tokens = (
+            num_prefix_tokens  # exclude CLS token (or other prefix tokens)
+        )
+        self.ordered = ordered
+        self.return_indices = return_indices
+
+    def forward(
+            self, x
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        if not self.training or self.prob == 0.0:
+            if self.return_indices:
+                return x, None
+            return x
+
+        if self.num_prefix_tokens:
+            prefix_tokens, x = (
+                x[:, :self.num_prefix_tokens],
+                x[:, self.num_prefix_tokens:],
+            )
+        else:
+            prefix_tokens = None
+
+        B = x.shape[0]
+        L = x.shape[1]
+        num_keep = max(1, int(L * (1.0 - self.prob)))
+        keep_indices = torch.argsort(torch.randn(B, L, device=x.device),
+                                     dim=-1)[:, :num_keep]
+        if self.ordered:
+            # NOTE does not need to maintain patch order in typical transformer use,
+            # but possibly useful for debug / visualization
+            keep_indices = keep_indices.sort(dim=-1)[0]
+        x = x.gather(1,
+                     keep_indices.unsqueeze(-1).expand((-1, -1) + x.shape[2:]))
+
+        if prefix_tokens is not None:
+            x = torch.cat((prefix_tokens, x), dim=1)
+
+        if self.return_indices:
+            return x, keep_indices
+        return x
+
+
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/patch_embed.py
+class PatchEmbed(nn.Module):
+    """2D Image to Patch Embedding"""
+
+    output_fmt: Format
+    dynamic_img_pad: torch.jit.Final[bool]
+
+    def __init__(
+        self,
+        img_size: Optional[int] = 224,
+        patch_size: int = 16,
+        in_chans: int = 3,
+        embed_dim: int = 768,
+        norm_layer: Optional[Callable] = None,
+        flatten: bool = True,
+        output_fmt: Optional[str] = None,
+        bias: bool = True,
+        strict_img_size: bool = True,
+        dynamic_img_pad: bool = False,
+    ):
+        super().__init__()
+        self.patch_size = to_2tuple(patch_size)
+        if img_size is not None:
+            self.img_size = to_2tuple(img_size)
+            self.grid_size = tuple(
+                [s // p for s, p in zip(self.img_size, self.patch_size)])
+            self.num_patches = self.grid_size[0] * self.grid_size[1]
+        else:
+            self.img_size = None
+            self.grid_size = None
+            self.num_patches = None
+
+        if output_fmt is not None:
+            self.flatten = False
+            self.output_fmt = Format(output_fmt)
+        else:
+            # flatten spatial dim and transpose to channels last, kept for bwd compat
+            self.flatten = flatten
+            self.output_fmt = Format.NCHW
+        self.strict_img_size = strict_img_size
+        self.dynamic_img_pad = dynamic_img_pad
+
+        self.proj = nn.Conv2d(in_chans,
+                              embed_dim,
+                              kernel_size=patch_size,
+                              stride=patch_size,
+                              bias=bias)
+        self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
+
+    def feat_ratio(self, as_scalar=True) -> Union[Tuple[int, int], int]:
+        if as_scalar:
+            return max(self.patch_size)
+        else:
+            return self.patch_size
+
+    def dynamic_feat_size(self, img_size: Tuple[int, int]) -> Tuple[int, int]:
+        """Get grid (feature) size for given image size taking account of dynamic padding.
+        NOTE: must be torchscript compatible so using fixed tuple indexing
+        """
+        if self.dynamic_img_pad:
+            return math.ceil(img_size[0] / self.patch_size[0]), math.ceil(
+                img_size[1] / self.patch_size[1])
+        else:
+            return img_size[0] // self.patch_size[0], img_size[
+                1] // self.patch_size[1]
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        if self.img_size is not None:
+            if self.strict_img_size:
+                _assert(
+                    H == self.img_size[0],
+                    f"Input height ({H}) doesn't match model ({self.img_size[0]}).",
+                )
+                _assert(
+                    W == self.img_size[1],
+                    f"Input width ({W}) doesn't match model ({self.img_size[1]}).",
+                )
+            elif not self.dynamic_img_pad:
+                _assert(
+                    H % self.patch_size[0] == 0,
+                    f"Input height ({H}) should be divisible by patch size ({self.patch_size[0]}).",
+                )
+                _assert(
+                    W % self.patch_size[1] == 0,
+                    f"Input width ({W}) should be divisible by patch size ({self.patch_size[1]}).",
+                )
+        if self.dynamic_img_pad:
+            pad_h = (self.patch_size[0] -
+                     H % self.patch_size[0]) % self.patch_size[0]
+            pad_w = (self.patch_size[1] -
+                     W % self.patch_size[1]) % self.patch_size[1]
+            x = F.pad(x, (0, pad_w, 0, pad_h))
+        x = self.proj(x)
+        if self.flatten:
+            x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC
+        elif self.output_fmt != Format.NCHW:
+            x = nchw_to(x, self.output_fmt)
+        x = self.norm(x)
+        return x
+
+
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/pos_embed.py
+def resample_abs_pos_embed(
+    posemb,
+    new_size: List[int],
+    old_size: Optional[List[int]] = None,
+    num_prefix_tokens: int = 1,
+    interpolation: str = "bicubic",
+    antialias: bool = True,
+    verbose: bool = False,
+):
+    # sort out sizes, assume square if old size not provided
+    num_pos_tokens = posemb.shape[1]
+    num_new_tokens = new_size[0] * new_size[1] + num_prefix_tokens
+    if num_new_tokens == num_pos_tokens and new_size[0] == new_size[1]:
+        return posemb
+
+    if old_size is None:
+        hw = int(math.sqrt(num_pos_tokens - num_prefix_tokens))
+        old_size = hw, hw
+
+    if num_prefix_tokens:
+        posemb_prefix, posemb = (
+            posemb[:, :num_prefix_tokens],
+            posemb[:, num_prefix_tokens:],
+        )
+    else:
+        posemb_prefix, posemb = None, posemb
+
+    # do the interpolation
+    embed_dim = posemb.shape[-1]
+    orig_dtype = posemb.dtype
+    posemb = posemb.float()  # interpolate needs float32
+    posemb = posemb.reshape(1, old_size[0], old_size[1],
+                            -1).permute(0, 3, 1, 2)
+    posemb = F.interpolate(posemb,
+                           size=new_size,
+                           mode=interpolation,
+                           antialias=antialias)
+    posemb = posemb.permute(0, 2, 3, 1).reshape(1, -1, embed_dim)
+    posemb = posemb.to(orig_dtype)
+
+    # add back extra (class, etc) prefix tokens
+    if posemb_prefix is not None:
+        posemb = torch.cat([posemb_prefix, posemb], dim=1)
+
+    if not torch.jit.is_scripting() and verbose:
+        print(f"Resized position embedding: {old_size} to {new_size}.")
+
+    return posemb
+
+
+def checkpoint_seq(functions,
+                   x,
+                   every=1,
+                   flatten=False,
+                   skip_last=False,
+                   preserve_rng_state=True):
+    r"""A helper function for checkpointing sequential models.
+
+    Sequential models execute a list of modules/functions in order
+    (sequentially). Therefore, we can divide such a sequence into segments
+    and checkpoint each segment. All segments except run in :func:`torch.no_grad`
+    manner, i.e., not storing the intermediate activations. The inputs of each
+    checkpointed segment will be saved for re-running the segment in the backward pass.
+
+    See :func:`~torch.utils.checkpoint.checkpoint` on how checkpointing works.
+
+    .. warning::
+        Checkpointing currently only supports :func:`torch.autograd.backward`
+        and only if its `inputs` argument is not passed. :func:`torch.autograd.grad`
+        is not supported.
+
+    .. warning:
+        At least one of the inputs needs to have :code:`requires_grad=True` if
+        grads are needed for model inputs, otherwise the checkpointed part of the
+        model won't have gradients.
+
+    Args:
+        functions: A :class:`torch.nn.Sequential` or the list of modules or functions to run sequentially.
+        x: A Tensor that is input to :attr:`functions`
+        every: checkpoint every-n functions (default: 1)
+        flatten (bool): flatten nn.Sequential of nn.Sequentials
+        skip_last (bool): skip checkpointing the last function in the sequence if True
+        preserve_rng_state (bool, optional, default=True):  Omit stashing and restoring
+            the RNG state during each checkpoint.
+
+    Returns:
+        Output of running :attr:`functions` sequentially on :attr:`*inputs`
+
+    Example:
+        >>> model = nn.Sequential(...)
+        >>> input_var = checkpoint_seq(model, input_var, every=2)
+    """
+
+    def run_function(start, end, functions):
+
+        def forward(_x):
+            for j in range(start, end + 1):
+                _x = functions[j](_x)
+            return _x
+
+        return forward
+
+    if isinstance(functions, torch.nn.Sequential):
+        functions = functions.children()
+    if flatten:
+        functions = chain.from_iterable(functions)
+    if not isinstance(functions, (tuple, list)):
+        functions = tuple(functions)
+
+    num_checkpointed = len(functions)
+    if skip_last:
+        num_checkpointed -= 1
+    end = -1
+    for start in range(0, num_checkpointed, every):
+        end = min(start + every - 1, num_checkpointed - 1)
+        x = checkpoint(
+            run_function(start, end, functions),
+            x,
+            preserve_rng_state=preserve_rng_state,
+        )
+    if skip_last:
+        return run_function(end + 1, len(functions) - 1, functions)(x)
+    return x
 
 
 class AttrDict:
@@ -306,7 +785,7 @@ class MlpProjector(nn.Module):
         """
 
         Args:
-            x_or_tuple (Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:  
+            x_or_tuple (Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
             if it is a tuple of torch.Tensor,
             then it comes from the hybrid vision encoder, and x = high_res_x, low_res_x);
             otherwise it is the feature from the single vision encoder.
@@ -417,7 +896,6 @@ class SigLipAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
-        # self.fused_attn = use_fused_attn()
         self.fused_attn = True
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
@@ -425,8 +903,8 @@ class SigLipAttention(nn.Module):
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
-        self.proj_drop = (nn.Dropout(proj_drop)
-                          if proj_drop > 0.0 else nn.Identity())
+        self.proj_drop = nn.Dropout(
+            proj_drop) if proj_drop > 0.0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
@@ -501,8 +979,8 @@ class SigLipBlock(nn.Module):
         )
         self.ls1 = (LayerScale(dim, init_values=init_values)
                     if init_values else nn.Identity())
-        self.drop_path1 = (DropPath(drop_path)
-                           if drop_path > 0.0 else nn.Identity())
+        self.drop_path1 = DropPath(
+            drop_path) if drop_path > 0.0 else nn.Identity()
 
         self.norm2 = norm_layer(dim)
         self.mlp = mlp_layer(
@@ -513,8 +991,8 @@ class SigLipBlock(nn.Module):
         )
         self.ls2 = (LayerScale(dim, init_values=init_values)
                     if init_values else nn.Identity())
-        self.drop_path2 = (DropPath(drop_path)
-                           if drop_path > 0.0 else nn.Identity())
+        self.drop_path2 = DropPath(
+            drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
@@ -1551,7 +2029,7 @@ class CLIPVisionTower(nn.Module):
             vision_tower = create_sam_vit(**vision_tower_params)
             forward_kwargs = dict()
 
-        else:  
+        else:
             from vllm.model_executor.models.clip import CLIPVisionModel
 
             vision_tower = CLIPVisionModel.from_pretrained(
@@ -1571,8 +2049,7 @@ class CLIPVisionTower(nn.Module):
         if self.select_feature == "patch":
             # if the output has cls_token
             image_features = image_features[:, 1:]
-        elif (self.select_feature == "cls_patch"
-              or self.select_feature == "same"):
+        elif self.select_feature == "cls_patch" or self.select_feature == "same":
             image_features = image_features
         else:
             raise ValueError(
