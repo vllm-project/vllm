@@ -606,6 +606,10 @@ class LLMEngine:
         """
 
         now = time.time()
+        for _seq_group in scheduled_seq_groups:
+            for seq in _seq_group.seq_group.get_seqs(): 
+                if seq.status == SequenceStatus.PAUSED:
+                    seq.status = SequenceStatus.RUNNING 
 
         # Organize outputs by [sequence group][step] instead of
         # [step][sequence group].
@@ -619,6 +623,8 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
+
+
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, outputs)
                 continue

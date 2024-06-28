@@ -589,8 +589,10 @@ class AsyncLLMEngine:
                 
 
 
+            # print('before sched!!!!!!!!!!!!!!!')
             seq_group_metadata_list, scheduler_outputs = self.engine.scheduler[
                 virtual_engine].schedule()
+            # print('after sched!!!!!!!!!!!!!!!')
 
             if scheduler_outputs.has_no_output():
                 # print('-------------------------has no output')
@@ -656,9 +658,9 @@ class AsyncLLMEngine:
 
 
             # import pdb; pdb.set_trace()
-            for seq_group in scheduler_outputs.scheduled_seq_groups:
-                for seq in seq_group.seq_group.get_seqs():
-                    seq.status = SequenceStatus.RUNNING
+            # for seq_group in scheduler_outputs.scheduled_seq_groups:
+            #     for seq in seq_group.seq_group.get_seqs():
+            #         seq.status = SequenceStatus.RUNNING
             request_outputs = self.engine._process_model_outputs(
                 output, scheduler_outputs.scheduled_seq_groups,
                 scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)

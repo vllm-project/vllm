@@ -14,6 +14,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
+from threading import Lock
+from functools import wraps
 
 logger = init_logger(__name__)
 
@@ -23,6 +25,19 @@ ENABLE_ARTIFICIAL_PREEMPT = bool(
     os.getenv("VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT", False))  # noqa
 ARTIFICIAL_PREEMPTION_PROB = 0.5
 ARTIFICIAL_PREEMPTION_MAX_CNT = 500
+
+def synchronized(method):
+    """ Synchronization decorator at the instance level. """
+
+    @wraps(method)
+    def synced_method(self, *args, **kwargs):
+        if not hasattr(self, "_lock"):
+            self._lock = Lock()
+
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return synced_method
 
 
 class PreemptionMode(enum.Enum):
@@ -336,6 +351,7 @@ class Scheduler:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
 
+    @synchronized
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a sequence group with the given ID.
 
@@ -372,10 +388,12 @@ class Scheduler:
                     seq.status = SequenceStatus.FINISHED_ABORTED
                     self.free_seq(seq)
 
+    @synchronized
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
             self.swapped) != 0
 
+    @synchronized
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
@@ -441,6 +459,7 @@ class Scheduler:
             running_queue.popleft()
 
             while not self._can_append_slots(seq_group):
+                #continue
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
                 num_running_seqs = seq_group.get_max_num_running_seqs()
@@ -959,6 +978,7 @@ class Scheduler:
             num_lookahead_slots=self._get_num_lookahead_slots(is_prefill),
         )
 
+    @synchronized
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
 
         if self.num_running_batches > 0:
@@ -1061,16 +1081,20 @@ class Scheduler:
 
         return seq_group_metadata_list, scheduler_outputs
 
+    @synchronized
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         self.block_manager.fork(parent_seq, child_seq)
 
+    @synchronized
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
         self.block_manager.free(seq)
 
+    @synchronized
     def complete_mb(self) -> None:
         self.num_running_batches -= 1
 
+    @synchronized
     def free_finished_seq_groups(self) -> None:
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())
@@ -1230,6 +1254,9 @@ class Scheduler:
         Returns 0 if the new token cannot be computed due to token budget.
         """
         num_new_tokens = 0
+        # for seq in seq_group.get_seqs():
+        #     print('seq status', seq.status)
+        # print('-=--')
         seqs = seq_group.get_seqs(status=status)
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
