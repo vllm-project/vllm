@@ -30,8 +30,9 @@ class NaiveBlockAllocator(BlockAllocator):
         create_block: Block.Factory,
         num_blocks: int,
         block_size: int,
-        block_index_start: int,
+        block_index_start: Optional[int] = None,
     ):
+        block_index_start = block_index_start or 0
         block_index_end = block_index_start + num_blocks
         self.block_index_start = block_index_start
         self.block_index_end = block_index_end
