@@ -118,6 +118,7 @@ We also have an official fundraising venue through [OpenCollective](https://open
 
 ## Citation
 
+
 If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
 ```bibtex
 @inproceedings{kwon2023efficient,
