@@ -39,7 +39,7 @@ class NaiveBlockAllocator(BlockAllocator):
         self.block_index_end = block_index_end
         self.num_blocks = num_blocks
         self._free_block_indices = list(
-            range(block_index_start, block_index_end))
+            range(block_index_start, block_index_end))[::-1]
 
         self.refcounter = RefCounter(block_index_start=block_index_start,
                                      block_index_end=block_index_end)
