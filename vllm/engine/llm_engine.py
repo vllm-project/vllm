@@ -6,6 +6,7 @@ from typing import Set, Type, TypeVar, Union
 
 from transformers import PreTrainedTokenizer
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig,
@@ -47,6 +48,8 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
+
+USE_SPMD_WORKER = envs.VLLM_USE_SPMD_WORKER
 
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
@@ -414,6 +417,9 @@ class LLMEngine:
         elif distributed_executor_backend == "mp":
             from vllm.executor.multiproc_gpu_executor import (
                 MultiprocessingGPUExecutor)
+            assert not USE_SPMD_WORKER, (
+                "multiprocessing distributed executor backend does not "
+                "support VLLM_USE_SPMD_WORKER=1")
             executor_class = MultiprocessingGPUExecutor
         else:
             from vllm.executor.gpu_executor import GPUExecutor
@@ -426,6 +432,7 @@ class LLMEngine:
             usage_context=usage_context,
             stat_loggers=stat_loggers,
         )
+
         return engine
 
     def __reduce__(self):
