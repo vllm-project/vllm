@@ -37,7 +37,7 @@ For instance, vLLM's `OPT model <https://github.com/vllm-project/vllm/blob/main/
 2. Rewrite the :code:`forward` methods
 --------------------------------------
 
-Next, you need to rewrite the :code:`forward` methods of your model by following these steps:
+Next, you need to rewrite the :meth:`~torch.nn.Module.forward` method of your model by following these steps:
 
 1. Remove any unnecessary code, such as the code only used for training.
 2. Change the input parameters:
@@ -75,7 +75,7 @@ Next, you need to rewrite the :code:`forward` methods of your model by following
 
 If your model is too large to fit into a single GPU, you can use tensor parallelism to manage it.
 To do this, substitute your model's linear and embedding layers with their tensor-parallel versions.
-For the embedding layer, you can simply replace :code:`nn.Embedding` with :code:`VocabParallelEmbedding`. For the output LM head, you can use :code:`ParallelLMHead`.
+For the embedding layer, you can simply replace :class:`torch.nn.Embedding` with :code:`VocabParallelEmbedding`. For the output LM head, you can use :code:`ParallelLMHead`.
 When it comes to the linear layers, we provide the following options to parallelize them:
 
 * :code:`ReplicatedLinear`: Replicates the inputs and weights across multiple GPUs. No memory saving.

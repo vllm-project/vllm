@@ -1,70 +1,28 @@
-from typing import Dict, Tuple, Type, Union
+from functools import lru_cache
+from typing import Dict, Type, Union
 
 import torch
 from PIL import Image
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
+from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.sequence import SequenceData
-from vllm.transformers_utils.image_processor import cached_get_image_processor
+from vllm.transformers_utils.image_processor import get_image_processor
 
 from .base import MultiModalData, MultiModalPlugin
 
 logger = init_logger(__name__)
 
-
-def _get_dummy_seq_data(seq_len: int,
-                        vlm_config: VisionLanguageConfig) -> SequenceData:
-    # NOTE: We assume that <image> token is repeated `image_feature_size` times
-    # and then concatenated with the text prompt
-    # TODO: Enable other ways of inserting the image into the prompt
-
-    token_ids = [vlm_config.image_token_id] * vlm_config.image_feature_size
-    token_ids += [0] * (seq_len - vlm_config.image_feature_size)
-
-    return SequenceData(token_ids)
-
-
-def _get_dummy_values(vlm_config: VisionLanguageConfig) -> torch.Tensor:
-    if vlm_config.image_processor is None:
-        values_dtype = torch.float16
-    else:
-        values_dtype = torch.uint8
-
-    return torch.zeros(vlm_config.image_input_shape, dtype=values_dtype)
-
-
-def get_dummy_image_data(
-    seq_len: int,
-    model_config: ModelConfig,
-    vlm_config: VisionLanguageConfig,
-) -> Tuple[SequenceData, MultiModalData]:
-    """Standard dummy data factory for image data (to be used in
-    :meth:`vlm.multimodal.MultiModalRegistry.register_dummy_data`)."""
-    seq_data = _get_dummy_seq_data(seq_len, vlm_config)
-    values = _get_dummy_values(vlm_config)
-
-    config_input_type = vlm_config.image_input_type
-    ImageInputType = VisionLanguageConfig.ImageInputType
-
-    fake_mm_data: MultiModalData
-    if config_input_type == ImageInputType.PIXEL_VALUES:
-        fake_mm_data = ImagePixelData(values)
-    elif config_input_type == ImageInputType.IMAGE_FEATURES:
-        fake_mm_data = ImageFeatureData(values)
-    else:
-        raise NotImplementedError
-
-    return seq_data, fake_mm_data
+cached_get_image_processor = lru_cache(get_image_processor)
 
 
 class ImagePixelData(MultiModalData):
     """
     The pixel data of an image. Can be one of:
 
-    - :class:``PIL.Image``: An image object. Requires that a HuggingFace
+    - :class:`PIL.Image.Image`: An image object. Requires that a HuggingFace
       processor is available to the model.
-    - :class:``torch.Tensor``: The raw pixel data which is passed to the model
+    - :class:`torch.Tensor`: The raw pixel data which is passed to the model
       without additional pre-processing.
     """
 
@@ -89,8 +47,8 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
     def get_data_type(self) -> Type[ImagePixelData]:
         return ImagePixelData
 
-    def _get_hf_image_processor(self, model_config: ModelConfig,
-                                vlm_config: VisionLanguageConfig):
+    def _get_hf_image_processor(self, model_config: ModelConfig):
+        vlm_config = model_config.multimodal_config
         if vlm_config is None or vlm_config.image_processor is None:
             return None
 
@@ -100,14 +58,13 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
             revision=vlm_config.image_processor_revision,
         )
 
-    def _default_input_processor(
-            self, data: ImagePixelData, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+    def _default_input_mapper(self, ctx: InputContext,
+                              data: ImagePixelData) -> Dict[str, torch.Tensor]:
+        model_config = ctx.model_config
         image = data.image
 
         if isinstance(image, Image.Image):
-            image_processor = self._get_hf_image_processor(
-                model_config, vlm_config)
+            image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available"
                                    "to process the image object")
@@ -147,9 +104,10 @@ class ImageFeaturePlugin(MultiModalPlugin[ImageFeatureData]):
     def get_data_type(self) -> Type[ImageFeatureData]:
         return ImageFeatureData
 
-    def _default_input_processor(
-            self, data: ImageFeatureData, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+    def _default_input_mapper(
+            self, ctx: InputContext,
+            data: ImageFeatureData) -> Dict[str, torch.Tensor]:
+        model_config = ctx.model_config
         image_features = data.image_features.to(model_config.dtype)
 
         return {"image_features": image_features}

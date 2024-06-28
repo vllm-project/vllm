@@ -109,6 +109,7 @@ class ModelConfig:
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
+        multimodal_config: Optional["VisionLanguageConfig"] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -159,6 +160,8 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window())
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
+        self.multimodal_config = multimodal_config
+
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_embedding_mode()

@@ -15,6 +15,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed.parallel_state import graph_capture
+from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -25,7 +26,7 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.interfaces import supports_lora
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
@@ -191,15 +192,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.block_size,
         ) if num_attn_heads else None
 
-        # Create processor for multi-modal data
-        if self.vision_language_config is not None:
-            self.multi_modal_input_processor = MULTIMODAL_REGISTRY \
-                .create_input_processor(
-                    self.model_config,
-                    self.vision_language_config,
-                )
-        else:
-            self.multi_modal_input_processor = None
+        # Multi-modal data support
+        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
+            .create_input_mapper(self.model_config)
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -506,12 +501,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 mm_data = seq_group_metadata.multi_modal_data
                 if mm_data is not None:
                     # Process multi-modal data
-                    if self.multi_modal_input_processor is None:
-                        raise ValueError(
-                            "Multi-modal inputs are only supported by "
-                            "vision language models.")
-
-                    mm_kwargs = self.multi_modal_input_processor(mm_data)
+                    mm_kwargs = self.multi_modal_input_mapper(mm_data)
                     for k, v in mm_kwargs.items():
                         multi_modal_kwargs_list[k].append(v)
 
@@ -764,12 +754,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
 
-            if vlm_config is None:
-                seq_data = SequenceData([0] * seq_len)
-                dummy_multi_modal_data = None
-            else:
-                seq_data, dummy_multi_modal_data = MULTIMODAL_REGISTRY \
-                    .dummy_data_for_profiling(seq_len, model_config, vlm_config)
+            seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
+                .dummy_data_for_profiling(model_config, seq_len)
+            assert len(seq_data.prompt_token_ids) == seq_len
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
