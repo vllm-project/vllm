@@ -9,6 +9,8 @@ from vllm.multimodal.image import ImagePixelData
 
 
 def run_fuyu_pixel_values():
+    # Dynamic image input is currently partial supported and therefore
+    # for image larger than 1920x1080, we will auto resize it to a smaller size
     llm = LLM(
         model="adept/fuyu-8b",
         max_model_len=4096,

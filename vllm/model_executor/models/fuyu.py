@@ -19,6 +19,7 @@ import math
 from typing import Dict, Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
+import torch.nn as nn
 import torch.utils.checkpoint
 from PIL import Image
 from transformers import FuyuConfig
@@ -31,11 +32,12 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
-from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import ImagePixelData, get_dummy_image_data
 from vllm.sequence import SamplerOutput
+
+from .interfaces import SupportsVision
 
 logger = init_logger(__name__)
 
@@ -47,6 +49,23 @@ class FuyuImagePixelInputs(TypedDict):
     Shape: 
     (batch_size, num_patches, patch_size_x * patch_size_y * num_channels)
     """
+
+
+def calculate_num_image_tokens(image_size: Tuple[int, int]) -> Tuple[int, int]:
+    """
+    calculate number of image tokens needed for a given image size
+    The expected Fuyu image prompts is in format:
+        (image_token * ncols + newline_token) * nrows
+    args:
+        image_size: Tuple[int, int] - (width, height) of the image
+    returns:
+        ncols: int - number of image tokens in x direction
+        nrows: int - number of image tokens in y direction
+    """
+    W, H = image_size
+    ncol = math.ceil(W / 30)
+    nrow = math.ceil(H / 30)
+    return ncol, nrow
 
 
 def _image_processor(
@@ -92,18 +111,19 @@ def _image_processor(
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input(_image_processor)
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
-class FuyuForCausalLM(VisionLanguageModelBase):
+class FuyuForCausalLM(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: FuyuConfig,
-                 vision_language_config: VisionLanguageConfig,
+                 vlm_config: VisionLanguageConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
-        super().__init__(vision_language_config)
+        super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.image_token_id = self.vision_language_config.image_token_id
+        self.vlm_config = vlm_config
+        self.image_token_id = vlm_config.image_token_id
 
         self.vision_embed_tokens = RowParallelLinear(
             config.patch_size * config.patch_size * config.num_channels,
@@ -119,9 +139,8 @@ class FuyuForCausalLM(VisionLanguageModelBase):
         input_ids: torch.Tensor,
         inputs_embeds: torch.Tensor,
         vision_embeddings: torch.Tensor,
-        image_token_id: int,
     ) -> torch.Tensor:
-        mask = input_ids == image_token_id
+        mask = input_ids == self.image_token_id
         inputs_embeds[mask] = vision_embeddings.view(
             -1, vision_embeddings.shape[-1])
         return inputs_embeds
@@ -129,7 +148,7 @@ class FuyuForCausalLM(VisionLanguageModelBase):
     def _parse_and_validate_image_input(self, **kwargs: object):
         image_patches = kwargs.pop("image_patches", None)
 
-        expected_input_type = self.vision_language_config.image_input_type
+        expected_input_type = self.vlm_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
         if expected_input_type != ImageInputType.PIXEL_VALUES:
@@ -162,7 +181,6 @@ class FuyuForCausalLM(VisionLanguageModelBase):
                 input_ids,
                 inputs_embeds,
                 vision_embeddings,
-                image_token_id=self.image_token_id,
             )
 
         else:
