@@ -11,8 +11,7 @@ from vllm.core.block.common import RefCounter
 def test_incr(seed: int, num_incrs: int, num_blocks: int):
     random.seed(seed)
 
-    all_block_indices = list(range(num_blocks))
-    counter = RefCounter(all_block_indices=all_block_indices)
+    counter = RefCounter(block_index_start=0, block_index_end=num_blocks)
 
     block_id = random.randint(0, num_blocks - 1)
     for i in range(num_incrs):
@@ -26,8 +25,7 @@ def test_incr(seed: int, num_incrs: int, num_blocks: int):
 def test_incr_decr(seed: int, num_incrs: int, num_blocks: int):
     random.seed(seed)
 
-    all_block_indices = list(range(num_blocks))
-    counter = RefCounter(all_block_indices=all_block_indices)
+    counter = RefCounter(block_index_start=0, block_index_end=num_blocks)
 
     block_id = random.randint(0, num_blocks - 1)
     for i in range(num_incrs):
