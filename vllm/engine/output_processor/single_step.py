@@ -74,19 +74,24 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                                         outputs: SequenceGroupOutput) -> None:
         # Process samples
         samples = outputs.samples
-        parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        parent_seqs = seq_group.get_seqs(status=SequenceStatus.PAUSED)
         existing_finished_seqs = seq_group.get_finished_seqs()
         parent_child_dict: Dict[int, List[SequenceOutput]] = {
             parent_seq.seq_id: []
             for parent_seq in parent_seqs
         }
+        # print("parent_child_dict", parent_child_dict)
         for sample in samples:
-            parent_child_dict[sample.parent_seq_id].append(sample)
+            try:
+                parent_child_dict[sample.parent_seq_id].append(sample)
+            except KeyError:
+                pass
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 
         # Process the child samples for each parent sequence
         for parent in parent_seqs:
+            parent.status=SequenceStatus.RUNNING
             child_samples: List[SequenceOutput] = parent_child_dict[
                 parent.seq_id]
             if len(child_samples) == 0:

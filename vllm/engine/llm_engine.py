@@ -606,10 +606,13 @@ class LLMEngine:
         """
 
         now = time.time()
-        for _seq_group in scheduled_seq_groups:
-            for seq in _seq_group.seq_group.get_seqs(): 
-                if seq.status == SequenceStatus.PAUSED:
-                    seq.status = SequenceStatus.RUNNING 
+        for scheduled_seq_group in scheduled_seq_groups:
+            self.scheduler[0].block_manager.mark_blocks_as_computed(
+                scheduled_seq_group.seq_group)
+        # for _seq_group in scheduled_seq_groups:
+        #     for seq in _seq_group.seq_group.get_seqs(): 
+        #         if seq.status == SequenceStatus.PAUSED:
+        #             seq.status = SequenceStatus.RUNNING 
 
         # Organize outputs by [sequence group][step] instead of
         # [step][sequence group].

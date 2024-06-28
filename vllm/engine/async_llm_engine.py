@@ -20,7 +20,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceStatus, ExecuteModelRequest, MultiModalData, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
 from threading import Thread
-from threading import Event, Semaphore
+from threading import Event, Semaphore, Lock
 from queue import Queue
 from functools import wraps
 import traceback
@@ -367,6 +367,7 @@ class AsyncLLMEngine:
         self.sched_event = Event()
         self.sched_queue = Queue()
         self.mb_slot = Semaphore(2)
+        self.sched_lock = Lock()
 
     @classmethod
     def from_engine_args(

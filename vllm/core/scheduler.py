@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
-from threading import Lock
+from threading import RLock
 from functools import wraps
 
 logger = init_logger(__name__)
@@ -32,7 +32,7 @@ def synchronized(method):
     @wraps(method)
     def synced_method(self, *args, **kwargs):
         if not hasattr(self, "_lock"):
-            self._lock = Lock()
+            self._lock = RLock()
 
         with self._lock:
             return method(self, *args, **kwargs)
@@ -351,7 +351,6 @@ class Scheduler:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
 
-    @synchronized
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a sequence group with the given ID.
 
@@ -388,12 +387,10 @@ class Scheduler:
                     seq.status = SequenceStatus.FINISHED_ABORTED
                     self.free_seq(seq)
 
-    @synchronized
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
             self.swapped) != 0
 
-    @synchronized
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
@@ -470,9 +467,12 @@ class Scheduler:
 
                 if running_queue:
                     # Preempt the lowest-priority sequence groups.
+                    # print('before running q')
                     victim_seq_group = running_queue.pop()
+                    # print('after running q')
                     preempted_mode = self._preempt(victim_seq_group,
                                                    blocks_to_swap_out)
+                    # print('after running q2')
                     if preempted_mode == PreemptionMode.RECOMPUTE:
                         preempted.append(victim_seq_group)
                     else:
@@ -978,13 +978,12 @@ class Scheduler:
             num_lookahead_slots=self._get_num_lookahead_slots(is_prefill),
         )
 
-    @synchronized
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
 
-        if self.num_running_batches > 0:
-            print('scheduler num mb', self.num_running_batches)
+        # if self.num_running_batches > 0:
+        #     print('scheduler num mb', self.num_running_batches)
         if self.num_running_batches >= 3:
-            print('reutning due to mb')
+            # print('reutning due to mb')
             return [], SchedulerOutputs(
                 scheduled_seq_groups=[],
                 num_prefill_groups=0,
@@ -1074,27 +1073,23 @@ class Scheduler:
         # batch will have been computed before the next scheduling invocation.
         # This is because the engine assumes that a failure in model execution
         # will crash the vLLM instance / will not retry.
-        for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
-            self.block_manager.mark_blocks_as_computed(
-                scheduled_seq_group.seq_group)
+        # for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+        #     self.block_manager.mark_blocks_as_computed(
+        #         scheduled_seq_group.seq_group)
         # print('after _schedule 3')
 
         return seq_group_metadata_list, scheduler_outputs
 
-    @synchronized
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         self.block_manager.fork(parent_seq, child_seq)
 
-    @synchronized
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
         self.block_manager.free(seq)
 
-    @synchronized
     def complete_mb(self) -> None:
         self.num_running_batches -= 1
 
-    @synchronized
     def free_finished_seq_groups(self) -> None:
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())
@@ -1165,18 +1160,31 @@ class Scheduler:
             self._preempt_by_swap(seq_group, blocks_to_swap_out)
         else:
             raise AssertionError("Invalid preemption mode.")
+        # print('reutnring from pre')
         return preemption_mode
 
     def _preempt_by_recompute(
         self,
         seq_group: SequenceGroup,
     ) -> None:
+        # print('preempting by recompute')
         seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        # print('preempting by recompute2')
+        if len(seqs) < 1:
+            seqs = seq_group.get_seqs(status=SequenceStatus.PAUSED)
+            # print('preempting by recompute3')
         assert len(seqs) == 1
+        # print('preempting by recompute3.1')
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
+            # print('preempting by recompute3.2')
+            # import pdb; pdb.set_trace()
+            # print('seq id', seq.seq_id)
             self.free_seq(seq)
+            # print('preempting by recompute3.3')
             seq.reset_state_for_recompute()
+            # print('preempting by recompute3.4')
+        # print('preempting by recompute4')
 
     def _preempt_by_swap(
         self,
