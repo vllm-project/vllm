@@ -469,7 +469,7 @@ async def test_logits_bias(client: openai.AsyncOpenAI):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("max_queue_len", [1, 2, 3, 4])
 async def test_max_queue_length(model_name: str, max_queue_len: int):
-    
+
     print(f"Name of model: {model_name}")
     print(f"Maximum queue length: {max_queue_len}")
 
