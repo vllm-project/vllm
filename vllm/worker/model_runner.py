@@ -11,7 +11,7 @@ import torch.nn as nn
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         VisionLanguageConfig, WhisperConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import graph_capture
 from vllm.logger import init_logger
@@ -86,6 +86,7 @@ class ModelRunner:
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        whisper_config: Optional[WhisperConfig] = None,
         return_hidden_states: bool = False,
     ):
         self.model_config = model_config
@@ -97,6 +98,7 @@ class ModelRunner:
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.vision_language_config = vision_language_config
+        self.whisper_config = whisper_config
         self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
@@ -136,6 +138,12 @@ class ModelRunner:
                 .create_input_processor(
                     self.model_config,
                     self.vision_language_config,
+                )
+        elif self.whisper_config is not None:
+            self.multi_modal_input_processor = MULTIMODAL_REGISTRY \
+                .create_input_processor(
+                    self.model_config,
+                    self.whisper_config,
                 )
         else:
             self.multi_modal_input_processor = None
@@ -822,6 +830,7 @@ class ModelRunner:
         # of images processed.
         model_config = self.model_config
         vlm_config = self.vision_language_config
+        whisper_config = self.whisper_config
 
         if vlm_config:
             max_num_seqs = min(
@@ -830,13 +839,18 @@ class ModelRunner:
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
-
-            if vlm_config is None:
-                seq_data = SequenceData([0] * seq_len)
-                dummy_multi_modal_data = None
-            else:
+            
+            if vlm_config is not None:
                 seq_data, dummy_multi_modal_data = MULTIMODAL_REGISTRY \
                     .dummy_data_for_profiling(seq_len, model_config, vlm_config)
+            elif whisper_config is not None:
+                seq_data, dummy_multi_modal_data = MULTIMODAL_REGISTRY \
+                    .dummy_data_for_profiling(seq_len, model_config, whisper_config)
+            else:
+                seq_data = SequenceData([0] * seq_len)
+                dummy_multi_modal_data = None
+
+            print(group_id, seq_len, dummy_multi_modal_data)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),

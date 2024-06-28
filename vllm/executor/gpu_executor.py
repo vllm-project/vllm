@@ -44,6 +44,7 @@ class GPUExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
+            whisper_config=self.whisper_config,
             speculative_config=self.speculative_config,
             is_driver_worker=rank == 0,
         )

@@ -80,7 +80,7 @@ class WhisperAttention(nn.Module):
             bias = False,
             quant_config=quant_config,
         )
-        self.k_proj = RowParallelLinear(
+        self.v_proj = RowParallelLinear(
             input_size = embed_dim,
             output_size = embed_dim,
             bias = bias,
@@ -107,8 +107,8 @@ class WhisperAttention(nn.Module):
             quant_config=quant_config
         )
 
-    def _reshape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
         
     def forward(
         self,
@@ -119,8 +119,14 @@ class WhisperAttention(nn.Module):
         attn_metadata: AttentionMetadata = None,
     ):
         is_cross_attention = encoder_hidden_states is not None
-        bsz, tgt_len, _ = hidden_states.size()
-        q, _ = self.q_proj(hidden_states) * self.scaling
+        sizes = hidden_states.size()
+        if len(sizes) == 3:
+            bsz, tgt_len, _ = sizes
+        else:
+            tgt_len, _ = sizes
+        print(sizes)
+        q, _ = self.q_proj(hidden_states)
+        q = q * self.scaling
         
         past_key_value = None
         
@@ -139,7 +145,7 @@ class WhisperAttention(nn.Module):
 
                     past_key_value = (k, v)
             else:
-                k, _ = self.k_proj(key_value_states)
+                k, _ = self.k_proj(hidden_states)
                 v, _ = self.v_proj(hidden_states)
                 k = self._shape(k, -1, bsz)
                 v = self._shape(v, -1, bsz)
@@ -151,14 +157,14 @@ class WhisperAttention(nn.Module):
                 dropout_p=0.0,
                 is_causal=self.is_causal and tgt_len > 1,
             )
-            attn_output = attn_output.reshape(bsz, q_len, -1)
-            output = self.out_proj(attn_output)
+            attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
+            output, _ = self.out_proj(attn_output)
         else:
             k, _ = self.k_proj(hidden_states)
             v, _ = self.v_proj(hidden_states)
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
-            output, _ = self.o_proj(attn_output)
+            output, _ = self.out_proj(attn_output)
         return output, past_key_value
 
 class WhisperEncoderLayer(nn.Module):
@@ -196,10 +202,7 @@ class WhisperEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ):
-
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states, _ = self.self_attn(
@@ -208,8 +211,9 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states = self.activation_fn(self.fc1(hidden_states))
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc1(hidden_states)
+        hidden_states = self.activation_fn(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -287,8 +291,9 @@ class WhisperDecoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states = self.activation_fn(self.fc1(hidden_states))
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc1(hidden_states)
+        hidden_states = self.activation_fn(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
         hidden_states = residual + hidden_states
 
         return outputs, cross_attention_past_key_value
@@ -375,7 +380,6 @@ class WhisperDecoder(nn.Module):
                 encoder_hidden_states=encoder_hidden_states,
                 past_key_value=None if past_key_values is None else past_key_values[idx],
                 kv_cache=kv_caches[idx],
-                output_attentions=output_attentions,
                 attn_metadata=attn_metadata
             )
             cross_attention_past_key_values.append(cross_attention_past_key_value)
@@ -417,11 +421,6 @@ class WhisperModel(nn.Module):
             past_key_values=past_key_values
         )
         return decoder_outputs, cross_attention_past_key_values
-        
-class AudioInputs(TypedDict):
-    type: Literal["input_features"]
-    data: torch.Tensor
-    """Shape: (batch_size, num_channels, 3000)"""
 
 @MULTIMODAL_REGISTRY.register_audio_input()
 @MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_audio_data)
@@ -442,13 +441,10 @@ class WhisperForConditionalGeneration(nn.Module):
         )
 
     def _parse_and_validate_audio_input(
-            self, **kwargs: object) -> Optional[AudioInputs]:
+            self, **kwargs: object) -> torch.Tensor:
         input_features = kwargs.pop("input_features", None)
 
-        return AudioInputs(
-            type="pixel_values",
-            data=input_features
-        )
+        return input_features
 
     def forward(
         self,
@@ -461,6 +457,7 @@ class WhisperForConditionalGeneration(nn.Module):
     ) -> SamplerOutput:
 
         input_features = self._parse_and_validate_audio_input(**kwargs)
+        print(input_features, input_ids.shape, kv_caches)
 
         decoder_outputs, cross_attention_past_key_values = self.model(
             input_features=input_features,

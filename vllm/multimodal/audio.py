@@ -22,7 +22,7 @@ def _get_dummy_seq_data(seq_len: int,
 def _get_dummy_values(whisper_config: WhisperConfig) -> torch.Tensor:
     values_dtype = torch.float16
 
-    return torch.zeros((30 * whisper_config), dtype=values_dtype)
+    return torch.zeros((30 * whisper_config.sample_rate), dtype=values_dtype)
 
 
 def get_dummy_audio_data(
@@ -35,27 +35,11 @@ def get_dummy_audio_data(
     seq_data = _get_dummy_seq_data(seq_len, whisper_config)
     values = _get_dummy_values(whisper_config)
 
-
-    fake_mm_data: MultiModalData
-    if config_input_type == ImageInputType.PIXEL_VALUES:
-        fake_mm_data = ImagePixelData(values)
-    elif config_input_type == ImageInputType.IMAGE_FEATURES:
-        fake_mm_data = ImageFeatureData(values)
-    else:
-        raise NotImplementedError
-
+    fake_mm_data = AudioData(values)
     return seq_data, fake_mm_data
 
 
 class AudioData(MultiModalData):
-    """
-    The pixel data of an image. Can be one of:
-
-    - :class:``PIL.Image``: An image object. Requires that a HuggingFace
-      processor is available to the model.
-    - :class:``torch.Tensor``: The raw pixel data which is passed to the model
-      without additional pre-processing.
-    """
 
     def __init__(self, audio: Union[np.array, torch.Tensor]) -> None:
 
@@ -90,7 +74,7 @@ class AudioPlugin(MultiModalPlugin[AudioData]):
             raise RuntimeError("No HuggingFace processor is available"
                                 "to process the audio object")
         try:
-            return processor(image, return_tensors="pt").to(model_config.dtype)
+            return processor(audio, return_tensors="pt").to(model_config.dtype)
         except Exception:
-            logger.error("Failed to process audio (%s)", image)
+            logger.error("Failed to process audio (%s)", audio)
             raise
