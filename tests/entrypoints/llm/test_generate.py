@@ -5,7 +5,7 @@ import pytest
 
 from vllm import LLM, RequestOutput, SamplingParams
 
-from ..conftest import cleanup
+from ...conftest import cleanup
 
 MODEL_NAME = "facebook/opt-125m"
 
@@ -22,8 +22,6 @@ TOKEN_IDS = [
     [0, 2, 1],
     [0, 3, 1, 2],
 ]
-
-pytestmark = pytest.mark.llm
 
 
 @pytest.fixture(scope="module")
