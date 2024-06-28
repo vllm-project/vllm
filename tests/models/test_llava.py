@@ -1,4 +1,4 @@
-from typing import List, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import pytest
 from transformers import AutoTokenizer
@@ -65,7 +65,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     return hf_output_ids, hf_output_str
 
 
-def run_llava_test(
+def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
     image_assets: _ImageAssets,
@@ -74,6 +74,7 @@ def run_llava_test(
     dtype: str,
     max_tokens: int,
     tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
 ):
     """Inference result should be the same between hf and vllm.
 
@@ -101,6 +102,7 @@ def run_llava_test(
     with vllm_runner(model_id,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
@@ -122,7 +124,7 @@ def run_llava_test(
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
                 dtype: str, max_tokens: int) -> None:
-    run_llava_test(
+    run_test(
         hf_runner,
         vllm_runner,
         image_assets,
