@@ -52,6 +52,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._hashless_allocator = NaiveBlockAllocator(
             create_block=self._create_block,  # type: ignore
             num_blocks=num_blocks,
+            block_size=block_size,
             block_index_start=block_index_start,
         )
 
