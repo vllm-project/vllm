@@ -99,6 +99,12 @@ class OpenAIServingChat(OpenAIServing):
 
     @cached_property
     def image_token_str(self) -> str:
+        # TODO: Let user specify how to insert image tokens into prompt
+        # (similar to chat template)
+        if self.model_config.hf_config.model_type == "phi3_v":
+            # Workaround since this token is not defined in the tokenizer
+            return "<|image_1|>"
+
         vlm_config = self.model_config.multimodal_config
         if vlm_config is None:
             raise ValueError(
