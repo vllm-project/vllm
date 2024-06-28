@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -15,6 +16,8 @@ from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
 logger = init_logger(__name__)
+
+USE_SPMD_WORKER = envs.VLLM_USE_SPMD_WORKER
 
 
 class WorkerBase(ABC):
@@ -210,6 +213,24 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> Optional[List[SamplerOutput]]:
+        if USE_SPMD_WORKER:
+            assert execute_model_req is not None, (
+                "VLLM_USE_SPMD_WORKER=1 requires each worker to take in an "
+                "ExecuteModelRequest")
+            return self._execute_model_spmd(execute_model_req)
+
+        return self._execute_model_with_nccl_control_plane(execute_model_req)
+
+    def _execute_model_spmd(
+        self,
+        execute_model_req: ExecuteModelRequest = None
+    ) -> Optional[List[SamplerOutput]]:
+        pass
+
+    def _execute_model_with_nccl_control_plane(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         if self.is_driver_worker:
@@ -307,6 +328,11 @@ class WorkerWrapperBase:
 
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
+        if USE_SPMD_WORKER:
+            assert isinstance(worker_class, LocalOrDistributedWorkerBase), (
+                "VLLM_USE_SPMD_WORKER=1 is currently only supported with "
+                "workers that inherit from LocalOrDistributedWorkerBase")
+
         self.worker = worker_class(*args, **kwargs)
 
     def execute_method(self, method, *args, **kwargs):
