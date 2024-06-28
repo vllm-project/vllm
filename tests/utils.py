@@ -219,16 +219,3 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
                              f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
 
         time.sleep(5)
-
-
-@contextmanager
-def override_env(name: str, value: str):
-    prev_value = os.environ.get(name)
-    os.environ[name] = value
-
-    yield
-
-    if prev_value is None:
-        del os.environ[name]
-    else:
-        os.environ[name] = prev_value
