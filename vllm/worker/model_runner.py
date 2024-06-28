@@ -916,21 +916,24 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             torch.empty(FLASHINFER_WORKSPACE_BUFFER_SIZE,
                                                 dtype=torch.uint8,
                                               device=self.device)
+            indices_buffer = torch.empty(max_batch_size *
+                                         self.cache_config.num_gpu_blocks,
+                                         dtype=torch.int32,
+                                         device=self.device)
+            indptr_buffer = torch.empty(max_batch_size + 1,
+                                        dtype=torch.int32,
+                                        device=self.device)
+            last_page_len_buffer = torch.empty(max_batch_size,
+                                               dtype=torch.int32,
+                                               device=self.device)
+
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
                 if self.attn_backend.get_name() == "flashinfer":
-                    indptr_buffer = torch.empty(batch_size + 1,
-                                                dtype=torch.int32,
-                                                device=self.device)
-                    last_page_len_buffer = torch.empty(batch_size,
-                                                       dtype=torch.int32,
-                                                       device=self.device)
-                    indices_buffer = torch.empty(
-                        batch_size * self.cache_config.num_gpu_blocks,
-                        dtype=torch.int32,
-                        device=self.device)
+                    indptr_buffer = indptr_buffer[:batch_size + 1]
+                    last_page_len_buffer = last_page_len_buffer[:batch_size]
 
                     num_qo_heads = self.model_config.get_num_attention_heads(
                         self.parallel_config)
