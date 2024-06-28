@@ -9,6 +9,9 @@ from vllm.multimodal.image import ImagePixelData
 
 def run_phi3v():
     model_path = "microsoft/Phi-3-vision-128k-instruct"
+
+    # Note: The model has 128k context length by default which may cause OOM
+    # If that's the case, override `max_model_len` with a smaller value via args
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
@@ -16,7 +19,6 @@ def run_phi3v():
         image_token_id=32044,
         image_input_shape="1,3,1008,1344",
         image_feature_size=1921,
-        disable_image_processor=False,
     )
 
     image = Image.open("images/cherry_blossom.jpg")
