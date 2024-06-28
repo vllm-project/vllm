@@ -1,5 +1,6 @@
 steps:
   - label: "Annotate"
+    priority: 100
     agents:
       queue: A100
     plugins:
@@ -16,8 +17,6 @@ steps:
             volumeMounts:
             - name: devshm
               mountPath: /dev/shm
-            # - name: nvme-raid
-            #   mountPath: /mnt/fast-disks/nvme-raid
             env:
             - name: VLLM_USAGE_SOURCE
               value: ci-test
@@ -34,12 +33,9 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-          # - name: nvme-raid
-          #   hostpath:
-          #     path: /mnt/fast-disks/nvme-raid
-          #     type: Directory
   - wait
   - label: "A100 trt benchmark"
+    priority: 100
     agents:
       queue: A100
     plugins:
@@ -73,6 +69,7 @@ steps:
             emptyDir:
               medium: Memory
   - label: "A100 vllm benchmark"
+    priority: 100
     agents:
       queue: A100
     plugins:
@@ -106,6 +103,7 @@ steps:
             emptyDir:
               medium: Memory
   - label: "A100 tgi benchmark"
+    priority: 100
     agents:
       queue: A100
     plugins:
@@ -139,6 +137,7 @@ steps:
             emptyDir:
               medium: Memory
   - label: "A100 lmdeploy benchmark"
+    priority: 100
     agents:
       queue: A100
     plugins:
