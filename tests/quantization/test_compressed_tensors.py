@@ -52,8 +52,8 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
             # Make sure it is a channelwise buffer
             # After running process_weights_after_loading
             assert len(qkv_proj.weight_scale.shape) == 2
-            assert qkv_proj.weight_scale[0] == shape_0
-            assert qkv_proj.weight_scale[0] == 1
+            assert qkv_proj.weight_scale.shape[0] == shape_0
+            assert qkv_proj.weight_scale.shape[0] == 1
         assert qkv_proj.weight_scale.dtype is torch.float32
         assert qkv_proj.input_scale.dtype is torch.float32
 
