@@ -1,4 +1,4 @@
-from typing import FrozenSet, Iterable, List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
 from vllm.core.block.common import (CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
@@ -33,10 +33,11 @@ class NaiveBlockAllocator(BlockAllocator):
         block_index_start: int,
         block_index_end: int,
     ):
+        self.block_index_start = block_index_start
+        self.block_index_end = block_index_end
+        self.num_blocks = num_blocks
         self._free_block_indices = list(
             range(block_index_start, block_index_end))
-        self._all_block_indices = frozenset(block_ids)
-        assert len(self._all_block_indices) == num_blocks
 
         self._refcounter = RefCounter(block_index_start=block_index_start,
                                       block_index_end=block_index_end)
@@ -135,7 +136,7 @@ class NaiveBlockAllocator(BlockAllocator):
         return len(self._free_block_indices)
 
     def get_num_total_blocks(self) -> int:
-        return len(self._all_block_indices)
+        return self.num_blocks
 
     def _allocate_new_block_id(self) -> BlockId:
         if not self._free_block_indices:
@@ -161,15 +162,11 @@ class NaiveBlockAllocator(BlockAllocator):
         Returns:
             int: The zero-offset block id on certain device.
         """
-        return sorted(self._all_block_indices).index(absolute_id)
+        return absolute_id - self.block_index_start
 
     @property
     def refcounter(self):
         return self._refcounter
-
-    @property
-    def all_block_ids(self) -> FrozenSet[int]:
-        return self._all_block_indices
 
     def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
         """Performs a copy-on-write operation on the given block if it is not
