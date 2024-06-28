@@ -314,8 +314,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
+        batch_size = 0
         input_tokens: List[np.ndarray] = []
-        input_positions: List[int] = []
+        input_positions: List[np.ndarray] = []
         slot_mapping: List[int] = []
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
@@ -475,7 +476,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 query_len = sliding_seq_len - sliding_context_len
                 query_lens.append(query_len)
                 input_tokens.append(tokens)
-                input_positions.extend(list(range(context_len, seq_len)))
+                batch_size += len(tokens)
+                input_positions.append(np.arange(context_len, seq_len))
                 lora_id = seq_group_metadata.lora_int_id
 
                 if is_prompt:
@@ -552,8 +554,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     slot = block_number * self.block_size + block_offset
                     slot_mapping.append(slot)
 
-        input_tokens_array = np.concatenate(input_tokens)
-        batch_size = len(input_tokens_array)
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)
         max_decode_seq_len = max(decode_seq_lens, default=0)
@@ -568,14 +568,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
-            input_tokens_array = np.pad(
-                input_tokens_array,
-                (0, graph_batch_size - batch_size),
-                mode="constant",
-                constant_values=0,
-            )
+            zero_pad_array = np.zeros(graph_batch_size - batch_size,
+                                      dtype=np.int64)
+            input_tokens.append(zero_pad_array)
+            input_positions.append(zero_pad_array)
             for _ in range(graph_batch_size - batch_size):
-                input_positions.append(0)
                 slot_mapping.append(_PAD_SLOT_ID)
                 seq_lens.append(1)
                 block_tables.append([])
@@ -615,11 +612,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
+        input_tokens_array = np.concatenate(input_tokens)
         input_tokens_tensor = torch.from_numpy(input_tokens_array).to(
-            device=self.device)
-        input_positions_tensor = torch.tensor(input_positions,
-                                              dtype=torch.long,
-                                              device=self.device)
+            device=self.device, non_blocking=True)
+        input_positions_array = np.concatenate(input_positions)
+        input_positions_tensor = torch.from_numpy(input_positions_array).to(
+            device=self.device, non_blocking=True)
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,
                                            device=self.device)
