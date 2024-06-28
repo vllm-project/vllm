@@ -29,7 +29,7 @@ npm install jsonrepair
 
 2. Start the Server with a Rubra function calling model:
 ```
-python -m vllm.entrypoints.openai.api_server --model sanjay920/Phi-3-mini-128k-instruct-function-calling-alpha-v1  --dtype auto --api-key token-abc123 --max-model-len 8000 --gpu-memory-utilization 0.96 --enforce-eager
+python -m vllm.entrypoints.openai.api_server --model rubra-ai/Phi-3-mini-128k-instruct-function-calling-alpha-v1  --dtype auto --api-key token-abc123 --max-model-len 8000 --gpu-memory-utilization 0.96 --enforce-eager
 ```
 The model will get downloaded automatically from huggingface.
 
@@ -39,7 +39,7 @@ curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer token-abc123" \
   -d '{
-    "model": "sanjay920/Phi-3-mini-128k-instruct-function-calling-alpha-v1",
+    "model": "rubra-ai/Phi-3-mini-128k-instruct-function-calling-alpha-v1",
     "messages": [
       {
         "role": "system",
@@ -81,7 +81,7 @@ tools = [
 ]
 messages = [{"role": "user", "content": "What's the weather like in Boston today?"}]
 completion = client.chat.completions.create(
-  model="sanjay920/Phi-3-mini-128k-instruct-function-calling-alpha-v1",
+  model="rubra-ai/Phi-3-mini-128k-instruct-function-calling-alpha-v1",
   messages=messages,
   tools=tools,
   tool_choice="auto"
