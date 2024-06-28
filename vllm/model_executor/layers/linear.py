@@ -11,6 +11,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -74,6 +75,22 @@ class LinearMethodBase(QuantizeMethodBase):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
+    @abstractmethod
+    def create_weights_moe(self, layer: torch.nn.Module,
+                           num_total_experts: int, top_k: int,
+                           hidden_size: int, intermediate_size: int,
+                           params_dtype: torch.dtype,
+                           **extra_weight_attrs):
+        raise NotImplementedError
+    
+    @abstractmethod
+    def apply_moe(self,
+                  layer: torch.nn.Module,
+                  x: torch.Tensor,
+                  router_logits: torch.Tensor,
+                  top_k: int) -> torch.Tensor:
+        raise NotImplementedError
+
 
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization.
@@ -109,6 +126,45 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
         return F.linear(x, weight, bias)
+
+    def create_weights_moe(self, layer: torch.nn.Module,
+                           num_total_experts: int,
+                           hidden_size: int,
+                           intermediate_size: int,
+                           params_dtype: torch.dtype,
+                           **extra_weight_attrs):
+        
+        w13_weight = torch.nn.Parameter(
+            torch.empty(num_total_experts,
+                        2 * intermediate_size,
+                        hidden_size,
+                        dtype=params_dtype),
+            requires_grad=False)
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+        
+        w2_weight = torch.nn.Parameter(
+            torch.empty(num_total_experts,
+                        hidden_size,
+                        intermediate_size,
+                        dtype=params_dtype),
+            requires_grad=False)
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+    def apply_moe(self,
+                  layer: torch.nn.Module,
+                  x: torch.Tensor,
+                  router_logits: torch.Tensor,
+                  top_k: int) -> torch.Tensor:
+
+        return fused_moe(x, 
+                         layer.w13_weight,
+                         layer.w2_weight,
+                         router_logits,
+                         top_k,
+                         renormalize=True,
+                         inplace=True)
 
 
 class LinearBase(torch.nn.Module):
@@ -809,3 +865,72 @@ class RowParallelLinear(LinearBase):
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s
+
+
+class FusedMoELinear(torch.nn.Module):
+    def __init__(
+        self,
+        num_experts: int,
+        top_k: int,
+        hidden_size: int,
+        intermediate_size: int,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig]=None,
+    ):
+        super().__init__()
+
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+
+        tp_size = get_tensor_model_parallel_world_size()
+        self.top_k = top_k
+        self.intermediate_size_per_partition = intermediate_size // tp_size
+        
+        if quant_config is None:
+            self.quant_method: Optional[
+                QuantizeMethodBase] = UnquantizedLinearMethod()
+        else:
+            self.quant_method = quant_config.get_quant_method(self)
+
+        assert self.quant_method is not None
+        self.quant_method.create_weights_moe(
+            layer=self,
+            num_total_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size=self.intermediate_size_per_partition,
+            params_dtype=params_dtype,
+            weight_loader=self.weight_loader)
+
+    def weight_loader(self,
+                      param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor,
+                      weight_name: str,
+                      expert_id: int):
+        tp_rank = get_tensor_model_parallel_rank()
+        param_data = param.data
+        shard_size = self.intermediate_size_per_partition
+        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
+
+        # FIXME: This is going to be brittle.
+        if weight_name.endswith("w1.weight"):
+            param_data[expert_id, 0:shard_size, :] = loaded_weight[shard, :]
+        if weight_name.endswith("w3.weight"):
+            param_data[expert_id,
+                       shard_size:2 * shard_size, :] = loaded_weight[shard, :]
+        if weight_name.endswith("w2.weight"):
+            param_data[expert_id, :, :] = loaded_weight[:, shard]
+
+
+    def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
+        # Matrix multiply.
+        assert self.quant_method is not None
+        final_hidden_states = self.quant_method.apply_moe(self,
+                                                          x=hidden_states,
+                                                          router_logits=router_logits,
+                                                          top_k=self.top_k)
+    
+        if self.tp_size > 1:
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
+
+        return final_hidden_states
