@@ -56,6 +56,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block_size=block_size,
             block_index_start=block_index_start,
         )
+        self.num_blocks = self._hashless_allocator.num_blocks
+        self.block_index_start = self._hashless_allocator.block_index_start
+        self.block_index_end = self._hashless_allocator.block_index_end
 
         self._block_size = block_size
 
