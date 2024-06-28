@@ -464,8 +464,12 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = self._get_eos_token_id(lora_request)
 
-        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
-                       lora_request)
+        seq = Sequence(seq_id,
+                       processed_inputs,
+                       block_size,
+                       eos_token_id,
+                       lora_request,
+                       max_seq_len=self.model_config.max_model_len)
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):

@@ -156,9 +156,9 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
-        max_seq_len: int = 16 * 1024,
+        max_seq_len: Optional[int] = None,
     ) -> None:
-        self.max_seq_len = max_seq_len
+        self.max_seq_len = max_seq_len or 16 * 1024
         self.tokens = _SEQUENCE_DATA_POOL.alloc_array(max_seq_len)
         self.prompt_token_ids_list = prompt_token_ids
         self.num_prompt_tokens = len(prompt_token_ids)
@@ -270,6 +270,7 @@ class Sequence:
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
+        max_seq_len: Optional[int] = None,
     ) -> None:
         self.seq_id = seq_id
         self.inputs = inputs
@@ -277,7 +278,9 @@ class Sequence:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
 
-        self.data = SequenceData(self.inputs["prompt_token_ids"])
+        self.max_seq_len = max_seq_len
+        self.data = SequenceData(self.inputs["prompt_token_ids"],
+                                 max_seq_len=max_seq_len)
         self.prompt_token_ids: List[int] = self.inputs["prompt_token_ids"]
         self.prompt: Optional[str] = self.inputs.get("prompt")
         self.output_logprobs: SampleLogprobs = []
