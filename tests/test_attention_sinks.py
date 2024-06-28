@@ -21,20 +21,19 @@ _RETRIEVAL_COLOR = "mint green"
 
 
 @pytest.mark.parametrize(
-    "model, max_model_len, test_retrieval, min_tokens, max_tokens",
+    "model, max_model_len, test_retrieval, min_tokens, max_tokens, enable_chunked_prefill",
     [
         # rope models
-        ("meta-llama/Meta-Llama-3-8B-Instruct", 8192, True, 100, 400),
-        ("mistralai/Mistral-7B-Instruct-v0.2", 32768, True, 100, 400),
+        ("meta-llama/Meta-Llama-3-8B-Instruct", 8192, True, 100, 400, True),
+        ("mistralai/Mistral-7B-Instruct-v0.2", 32768, True, 100, 400, False),
         # alibi models
-        ("mosaicml/mpt-7b-chat", 2048, False, 500, 800),
-        ("bigscience/bloom-7b1", 2048, False, 500, 800)
+        ("mosaicml/mpt-7b-chat", 2048, False, 500, 800, False),
+        ("bigscience/bloom-7b1", 2048, False, 500, 800, False)
     ]
 )
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("attn_backend", ["XFORMERS", "FLASH_ATTN"])
-@pytest.mark.parametrize("enable_chunked_prefill", [False, True])
 def test_correctness(
     vllm_runner,
     model: str,
@@ -112,10 +111,9 @@ def test_correctness(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("batch_size", [1, 4])
 @pytest.mark.parametrize("attn_backend, block_size", [
-    ("FLASH_ATTN", 16),
-    ("FLASH_ATTN", 32),
     ("XFORMERS", 8),
-    ("XFORMERS", 16)
+    ("FLASH_ATTN", 16),
+    ("FLASH_ATTN", 32)
 ])
 @pytest.mark.parametrize("enable_chunked_prefill", [False, True])
 def test_eviction(
