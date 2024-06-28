@@ -222,3 +222,26 @@ class MarlinWorkspace:
         self.scratch = torch.zeros(max_workspace_size,
                                    dtype=torch.int,
                                    device="cuda")
+
+
+def pack_fp8_to_int32(fp8_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Repack FP8 weights to gptq format (packed int32 elements)
+    """
+    assert fp8_tensor.dtype == torch.float8_e4m3fn
+    assert fp8_tensor.shape[0] % 4 == 0
+
+    # Reshape to prepare for packing
+    reshaped = fp8_tensor.reshape(-1, 4, *fp8_tensor.shape[1:])
+
+    # Convert fp8 to uint8 (byte) representation
+    byte_tensor = reshaped.view(torch.uint8)
+
+    # Pack 4 uint8 values into one int32
+    packed = (byte_tensor[:, 0].to(torch.int32) |
+              (byte_tensor[:, 1].to(torch.int32) << 8) |
+              (byte_tensor[:, 2].to(torch.int32) << 16) |
+              (byte_tensor[:, 3].to(torch.int32) << 24))
+
+    return packed.view(fp8_tensor.shape[0] // 4,
+                       *fp8_tensor.shape[1:]).contiguous()
