@@ -10,6 +10,17 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+try:
+    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+except ImportError:
+    BatchDecodeWithPagedKVCacheWrapper = None
+    CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
+    BatchPrefillWithPagedKVCacheWrapper = None
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
+
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
@@ -226,6 +237,25 @@ class ModelInputForGPUBuilder(
             slot = block_number * self.block_size + block_offset
             self.slot_mapping.append(slot)
 
+    def _add_seq_group_for_flashinfer(self, seq_data, block_table):        
+        seq_len = seq_data.get_len()
+        # Get the number of valid blocks based on sequence length.
+        # If seq_len = 16, block_size = 16,
+        # block_table_bound is 1 with 1 valid block.
+        # If seq_len = 15, block_size = 16,
+        # block_table_bound is 0 + 1 with 1 valid block.
+        block_table_bound = seq_len // self.block_size + 1 \
+                            if seq_len % self.block_size != 0 \
+                            else seq_len // self.block_size
+
+        self.paged_kv_indices.extend(block_table[:block_table_bound])
+        self.paged_kv_indptr.append(self.paged_kv_indptr[-1] + block_table_bound)
+
+        last_page_len = seq_len % self.block_size
+        if last_page_len == 0:
+            last_page_len = self.block_size
+        self.paged_kv_last_page_len.append(last_page_len)
+
     def _add_prompt_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
                               seq_ids: List[int]):
         self.decode_only = False
@@ -290,9 +320,10 @@ class ModelInputForGPUBuilder(
         self.num_prefill_tokens += len(tokens)
         self.prefill_seq_lens.append(seq_len)
 
-        # Compute the slot mapping.
+        # Compute the block table for slot mapping and flashinfer.
         block_table = None
-        if not _is_block_tables_empty(seq_group_metadata.block_tables):
+        is_profile_run = _is_block_tables_empty(seq_group_metadata.block_tables)
+        if not is_profile_run:
             block_table = seq_group_metadata.block_tables[seq_id]
 
         start_idx = 0
@@ -307,6 +338,9 @@ class ModelInputForGPUBuilder(
 
         self._compute_slot_mapping(seq_len, context_len, start_idx,
                                    block_table)
+        if self.attn_backend.get_name() == "flashinfer":
+            self._add_seq_group_for_flashinfer(seq_data, block_table)
+
 
     def _add_decode_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
                               seq_ids: List[int]):
@@ -356,14 +390,6 @@ class ModelInputForGPUBuilder(
                 block_table = seq_group_metadata.block_tables[seq_id]
                 if curr_sliding_window_blocks is not None:
                     block_table = block_table[-curr_sliding_window_blocks:]
-                if self.attn_backend.get_name() == "flashinfer":
-                    self.paged_kv_indices.extend(block_table)
-                    self.paged_kv_indptr.append(self.paged_kv_indptr[-1] +
-                                                len(block_table))
-                    last_page_len = seq_data.get_len() % self.block_size
-                    if last_page_len == 0:
-                        last_page_len = self.block_size
-                    self.paged_kv_last_page_len.append(last_page_len)
             else:
                 # Only happens when memory profiling runs.
                 block_table = []
@@ -382,9 +408,12 @@ class ModelInputForGPUBuilder(
 
             # Compute the slot mapping.
             block_table = None
-            if not _is_block_tables_empty(seq_group_metadata.block_tables):
+            is_profile_run = _is_block_tables_empty(seq_group_metadata.block_tables)
+            if not is_profile_run:
                 block_table = seq_group_metadata.block_tables[seq_id]
             self._compute_slot_mapping(seq_len, context_len, 0, block_table)
+            if self.attn_backend.get_name() == "flashinfer":
+                self._add_seq_group_for_flashinfer(seq_data, block_table)
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -483,6 +512,11 @@ class ModelInputForGPUBuilder(
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
             block_tables = torch.tensor(input_block_tables, device=device)
+
+            if self.attn_backend.get_name() == "flashinfer":
+                last_paged_kv_indptr = self.paged_kv_indptr[-1]
+                self.paged_kv_indptr.extend([last_paged_kv_indptr] * cuda_graph_pad_size)
+                self.paged_kv_last_page_len.extend([0] * cuda_graph_pad_size)
         else:
             max_block_table_len = max(
                 len(block_table) for block_table in self.block_tables)
@@ -495,46 +529,59 @@ class ModelInputForGPUBuilder(
             )
         assert max_query_len > 0, ("query_lens: {}".format(self.query_lens))
 
+        context_lens_tensor = torch.tensor(self.context_lens,
+                                           dtype=torch.int,
+                                           device=self.device)
         seq_lens_tensor = torch.tensor(self.seq_lens,
                                        dtype=torch.int,
-                                       device=device)
+                                       device=self.device)
+        query_lens_tensor = torch.tensor(self.query_lens,
+                                         dtype=torch.long,
+                                         device=self.device)
+        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
+                                      dtype=torch.int32,
+                                      device=self.device)
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
-                                    device=device)
+                                    device=self.device)
         torch.cumsum(seq_lens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
+        torch.cumsum(query_lens_tensor,
+                     dim=0,
+                     dtype=query_start_loc.dtype,
+                     out=query_start_loc[1:])
 
         slot_mapping_tensor = torch.tensor(self.slot_mapping,
                                            dtype=torch.long,
                                            device=device)
 
         if self.attn_backend.get_name() == "flashinfer":
-            if not hasattr(self, "flashinfer_workspace_buffer"):
-                # Allocate 16MB workspace buffer
-                # Follow the example of flashinfer: https://docs.flashinfer.ai/api/python/decode.html
-                self.flashinfer_workspace_buffer = torch.empty(
-                    16 * 1024 * 1024, dtype=torch.uint8, device=device)
-            paged_kv_indptr_tensor = torch.tensor(self.paged_kv_indptr,
-                                                  dtype=torch.int,
-                                                  device=device)
-            paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
-                                                   dtype=torch.int,
-                                                   device=device)
-            paged_kv_last_page_len_tensor = torch.tensor(
-                self.paged_kv_last_page_len, dtype=torch.int, device=device)
+            if len(self.paged_kv_indptr) > 0:
+                paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
+                                                       device="cpu",
+                                                       dtype=torch.int)
+                paged_kv_indptr_tensor = torch.tensor(self.paged_kv_indptr,
+                                                      device="cpu",
+                                                      dtype=torch.int)
+                paged_kv_last_page_len_tensor = torch.tensor(
+                    self.paged_kv_last_page_len, device="cpu", dtype=torch.int)
+            else:
+                paged_kv_indices_tensor = None
+                paged_kv_indptr_tensor = None
+                paged_kv_last_page_len_tensor = None
+
             kv_cache_dtype = get_kv_cache_torch_dtype(kv_cache_dtype,
                                                       model_config.dtype)
+
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=self.num_prefills,
                 slot_mapping=slot_mapping_tensor,
                 num_prefill_tokens=self.num_prefill_tokens,
                 num_decode_tokens=num_decode_tokens,
-                use_cuda_graph=False,
                 max_prefill_seq_len=max_prefill_seq_len,
                 block_tables=block_tables,
-                workspace_buffer=self.flashinfer_workspace_buffer,
                 paged_kv_indptr=paged_kv_indptr_tensor,
                 paged_kv_indices=paged_kv_indices_tensor,
                 paged_kv_last_page_len=paged_kv_last_page_len_tensor,
@@ -542,25 +589,13 @@ class ModelInputForGPUBuilder(
                     parallel_config),
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_dim=model_config.get_head_size(),
-                page_size=16,
+                page_size=self.block_size,
                 seq_start_loc=seq_start_loc,
-                data_type=kv_cache_dtype)
+                query_start_loc=query_start_loc,
+                device=device,
+                data_type=kv_cache_dtype,
+                use_cuda_graph=use_captured_graph)
         else:
-            context_lens_tensor = torch.tensor(self.context_lens,
-                                               dtype=torch.int,
-                                               device=device)
-            query_lens_tensor = torch.tensor(self.query_lens,
-                                             dtype=torch.long,
-                                             device=device)
-            query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                          dtype=torch.int32,
-                                          device=device)
-
-            torch.cumsum(query_lens_tensor,
-                         dim=0,
-                         dtype=query_start_loc.dtype,
-                         out=query_start_loc[1:])
-
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=self.num_prefills,
                 slot_mapping=slot_mapping_tensor,
@@ -657,10 +692,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
-        # Set if the backend is flashinfer.
-        self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+
+        # FIXME
+        self.flashinfer_decode_workspace_buffer = None
+        self.flashinfer_decode_wrapper = None
+        self.flashinfer_prefill_workspace_buffer = None
+        self.flashinfer_prefill_wrapper = None
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -930,27 +969,97 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
+        if self.attn_backend.get_name() == "flashinfer":
+            # For flashinfer, different batch sizes will share the
+            # same workspace buffer.
+            decode_workspace_buffer = \
+            torch.empty(FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                                                dtype=torch.uint8,
+                                              device=self.device)
+            indices_buffer = torch.empty(max_batch_size *
+                                         self.cache_config.num_gpu_blocks,
+                                         dtype=torch.int32,
+                                         device=self.device)
+            indptr_buffer = torch.empty(max_batch_size + 1,
+                                        dtype=torch.int32,
+                                        device=self.device)
+            last_page_len_buffer = torch.empty(max_batch_size,
+                                               dtype=torch.int32,
+                                               device=self.device)
+
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
-                # Create dummy attn_metadata.
-                attn_metadata = self.attn_backend.make_metadata(
-                    num_prefills=0,
-                    num_prefill_tokens=0,
-                    num_decode_tokens=batch_size,
-                    slot_mapping=slot_mapping[:batch_size],
-                    seq_lens=None,
-                    seq_lens_tensor=seq_lens[:batch_size],
-                    max_query_len=None,
-                    max_prefill_seq_len=0,
-                    max_decode_seq_len=self.max_seq_len_to_capture,
-                    query_start_loc=None,
-                    seq_start_loc=None,
-                    context_lens_tensor=None,
-                    block_tables=block_tables[:batch_size],
-                    use_cuda_graph=True,
-                )
+                if self.attn_backend.get_name() == "flashinfer":
+                    indptr_buffer = indptr_buffer[:batch_size + 1]
+                    last_page_len_buffer = last_page_len_buffer[:batch_size]
+
+                    num_qo_heads = self.model_config.get_num_attention_heads(
+                        self.parallel_config)
+                    num_kv_heads = self.model_config.get_num_kv_heads(
+                        self.parallel_config)
+                    if num_qo_heads // num_kv_heads >= 4:
+                        use_tensor_cores = True
+                    else:
+                        use_tensor_cores = False
+                    decode_wrapper = \
+                        CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
+                        decode_workspace_buffer, indptr_buffer, indices_buffer,
+                        last_page_len_buffer, "NHD", use_tensor_cores)
+                    kv_cache_dtype = get_kv_cache_torch_dtype(
+                        self.kv_cache_dtype, self.model_config.dtype)
+
+                    paged_kv_indptr_tensor_host = torch.arange(
+                        0, batch_size + 1, dtype=torch.int32)
+                    paged_kv_indices_tensor_host = torch.arange(
+                        0, batch_size, dtype=torch.int32)
+                    paged_kv_last_page_len_tensor_host = torch.full(
+                        (batch_size, ), self.block_size, dtype=torch.int32)
+                    query_start_loc_host = torch.arange(0,
+                                                        batch_size + 1,
+                                                        dtype=torch.int32)
+
+                    attn_metadata = self.attn_backend.make_metadata(
+                        num_prefills=0,
+                        slot_mapping=slot_mapping[:batch_size],
+                        num_prefill_tokens=0,
+                        num_decode_tokens=batch_size,
+                        max_prefill_seq_len=0,
+                        block_tables=block_tables,
+                        paged_kv_indptr=paged_kv_indptr_tensor_host,
+                        paged_kv_indices=paged_kv_indices_tensor_host,
+                        paged_kv_last_page_len=
+                        paged_kv_last_page_len_tensor_host,
+                        num_qo_heads=num_qo_heads,
+                        num_kv_heads=num_kv_heads,
+                        head_dim=self.model_config.get_head_size(),
+                        page_size=self.block_size,
+                        seq_start_loc=None,
+                        query_start_loc=query_start_loc_host,
+                        device=self.device,
+                        data_type=kv_cache_dtype,
+                        use_cuda_graph=True,
+                        decode_wrapper=decode_wrapper,
+                        prefill_wrapper=None)
+                    attn_metadata.begin_forward()
+                else:
+                    attn_metadata = self.attn_backend.make_metadata(
+                        num_prefills=0,
+                        num_prefill_tokens=0,
+                        num_decode_tokens=batch_size,
+                        slot_mapping=slot_mapping[:batch_size],
+                        seq_lens=None,
+                        seq_lens_tensor=seq_lens[:batch_size],
+                        max_query_len=None,
+                        max_prefill_seq_len=0,
+                        max_decode_seq_len=self.max_seq_len_to_capture,
+                        query_start_loc=None,
+                        seq_start_loc=None,
+                        context_lens_tensor=None,
+                        block_tables=block_tables[:batch_size],
+                        use_cuda_graph=True,
+                    )
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(
@@ -959,8 +1068,20 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     )
                     self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model)
-                hidden_states = graph_runner.capture(
+                graph_runner = CUDAGraphRunner(self.model,
+                                               self.attn_backend.get_name())
+
+                if self.attn_backend.get_name() == "flashinfer":
+                    graph_runner.flashinfer_indptr_buffer = indptr_buffer
+                    graph_runner.flashinfer_indices_buffer = indices_buffer
+                    graph_runner.flashinfer_last_page_len_buffer = \
+                        last_page_len_buffer
+                    graph_runner.flashinfer_decode_workspace_buffer = \
+                            decode_workspace_buffer
+                    graph_runner.flashinfer_decode_wrapper = \
+                        decode_wrapper
+
+                graph_runner.capture(
                     input_tokens[:batch_size],
                     input_positions[:batch_size],
                     hidden_states[:batch_size]
@@ -992,11 +1113,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self,
         tensor_dict: Dict[str, Any],
     ) -> ModelInputForGPUWithSamplingMetadata:
-        return (
+        model_input = \
             ModelInputForGPUWithSamplingMetadata.from_broadcasted_tensor_dict(
                 tensor_dict,
                 attn_backend=self.attn_backend,
-            ))
+            )
+        return model_input
 
     def prepare_model_input(
         self,
@@ -1043,6 +1165,36 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             assert model_input.lora_mapping is not None
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
+
+        if self.attn_backend.get_name() == "flashinfer":
+            assert model_input.attn_metadata is not None
+            assert model_input.input_tokens is not None
+            if self.flashinfer_decode_workspace_buffer is None:
+                self.flashinfer_decode_workspace_buffer = torch.empty(
+                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                    dtype=torch.uint8,
+                    device=self.device)
+                self.flashinfer_decode_wrapper = \
+                    BatchDecodeWithPagedKVCacheWrapper(
+                    self.flashinfer_decode_workspace_buffer, "NHD")
+                self.flashinfer_prefill_workspace_buffer = torch.empty(
+                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                    dtype=torch.uint8,
+                    device=self.device)
+                self.flashinfer_prefill_wrapper = \
+                    BatchPrefillWithPagedKVCacheWrapper(
+                    self.flashinfer_prefill_workspace_buffer, "NHD")
+
+            model_input.attn_metadata.prefill_wrapper = \
+                self.flashinfer_prefill_wrapper
+            if model_input.attn_metadata.use_cuda_graph:
+                batch_size = model_input.input_tokens.shape[0]
+                model_input.attn_metadata.decode_wrapper = self.graph_runners[
+                    batch_size].flashinfer_decode_wrapper
+            else:
+                model_input.attn_metadata.decode_wrapper = \
+                    self.flashinfer_decode_wrapper
+            model_input.attn_metadata.begin_forward()
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
@@ -1094,12 +1246,21 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
 class CUDAGraphRunner:
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, backend_name: str):
         self.model = model
+        self.backend_name = backend_name
+
         self.input_buffers: Dict[str, torch.Tensor] = {}
         self.output_buffers: Dict[str, torch.Tensor] = {}
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
+
+        self.flashinfer_decode_workspace_buffer: Optional[torch.Tensor] = None
+        self.flashinfer_indptr_buffer: Optional[torch.Tensor] = None
+        self.flashinfer_indices_buffer: Optional[torch.Tensor] = None
+        self.flashinfer_last_page_len_buffer: Optional[torch.Tensor] = None
+        self.flashinfer_decode_wrapper: Optional[
+            CUDAGraphBatchDecodeWithPagedKVCacheWrapper] = None
 
     @property
     def graph(self):
@@ -1153,14 +1314,23 @@ class CUDAGraphRunner:
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
-        self.input_buffers = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "kv_caches": kv_caches,
-            "slot_mapping": attn_metadata.slot_mapping,
-            "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
-            "block_tables": attn_metadata.decode_metadata.block_tables,
-        }
+        if self.backend_name == "flashinfer":
+            self.input_buffers = {
+                "input_ids": input_ids,
+                "positions": positions,
+                "kv_caches": kv_caches,
+                "slot_mapping": attn_metadata.slot_mapping,
+            }
+        else:
+            self.input_buffers = {
+                "input_ids": input_ids,
+                "positions": positions,
+                "kv_caches": kv_caches,
+                "slot_mapping": attn_metadata.slot_mapping,
+                "seq_lens_tensor":
+                attn_metadata.decode_metadata.seq_lens_tensor,
+                "block_tables": attn_metadata.decode_metadata.block_tables,
+            }
         self.output_buffers = {"hidden_states": hidden_states}
         return hidden_states
 
@@ -1180,10 +1350,12 @@ class CUDAGraphRunner:
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
         self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
                                                  non_blocking=True)
-        self.input_buffers["seq_lens_tensor"].copy_(
-            attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
-        self.input_buffers["block_tables"].copy_(
-            attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        if self.backend_name != "flashinfer":
+            self.input_buffers["seq_lens_tensor"].copy_(
+                attn_metadata.decode_metadata.seq_lens_tensor,
+                non_blocking=True)
+            self.input_buffers["block_tables"].copy_(
+                attn_metadata.decode_metadata.block_tables, non_blocking=True)
         # Run the graph.
         self.graph.replay()
 
