@@ -160,9 +160,9 @@ class RayMetrics(Metrics):
     _base_library = ray_metrics
 
     def __init__(self, labelnames: List[str], max_model_len: int):
-        super().__init__(labelnames, max_model_len)
         if ray_metrics is None:
             raise ImportError("RayMetrics requires Ray to be installed.")
+        super().__init__(labelnames, max_model_len)
 
     def _unregister_vllm_metrics(self) -> None:
         pass
