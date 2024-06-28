@@ -131,6 +131,10 @@ class SequenceData:
         prompt_token_ids: The token IDs of the prompt.
         output_token_ids: The token IDs of the output. Set to an empty list if
             None.
+        max_seq_len: The maximum sequence length. A buffer of this size is
+            allocated for the tokens. By default, it is set to 16k for test
+            purposes. During inference, it should be set to the maximum
+            sequence length of the model.
 
     Attributes:
         prompt_token_ids: The token IDs of the prompt.
@@ -152,8 +156,9 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
-        max_seq_len: int = 1024,
+        max_seq_len: int = 16 * 1024,
     ) -> None:
+        self.max_seq_len = max_seq_len
         self.tokens = _SEQUENCE_DATA_POOL.alloc_array(max_seq_len)
         self.prompt_token_ids_list = prompt_token_ids
         self.num_prompt_tokens = len(prompt_token_ids)
