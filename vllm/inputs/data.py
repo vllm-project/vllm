@@ -101,8 +101,7 @@ class TextTokensPrompt(TypedDict):
     """The prompt text."""
 
     prompt_token_ids: List[int]
-    """The token IDs of the prompt. If None, we use the
-    tokenizer to convert the prompts to token IDs."""
+    """The token IDs of the prompt."""
 
     multi_modal_data: NotRequired["MultiModalData"]
     """
@@ -125,7 +124,20 @@ PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
 
 
 class LLMInputs(TypedDict):
-    """A structured class to construct :class:`Sequence` with. """
+    """
+    The inputs in :class:`~vllm.LLMEngine` before they are
+    passed to the model executor.
+    """
     prompt_token_ids: List[int]
+    """The token IDs of the prompt."""
+
     prompt: NotRequired[Optional[str]]
+    """
+    The original prompt text corresponding to the token IDs, if available.
+    """
+
     multi_modal_data: NotRequired[Optional[Dict[str, "EXTERNAL_MM_DATA_TYPE"]]]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """

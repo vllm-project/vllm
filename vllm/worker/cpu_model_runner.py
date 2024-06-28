@@ -110,15 +110,9 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             self.block_size,
         )
 
-        # Create processor for multi-modal data
-        if self.vision_language_config is not None:
-            self.multi_modal_input_processor = MULTIMODAL_REGISTRY \
-                .create_input_processor(
-                    self.model_config,
-                    self.vision_language_config,
-                )
-        else:
-            self.multi_modal_input_processor = None
+        # Multi-modal data support
+        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
+            .create_input_mapper(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
@@ -167,14 +161,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             input_positions.extend(list(range(computed_len, seq_len)))
 
             mm_data = seq_group_metadata.multi_modal_data
-            if mm_data:
-                # Process multi-modal data
-                if self.multi_modal_input_processor is None:
-                    raise ValueError(
-                        "Multi-modal inputs are only supported by "
-                        "vision language models.")
-
-                mm_kwargs = self.multi_modal_input_processor(mm_data)
+            if mm_data is not None:
+                mm_kwargs = self.multi_modal_input_mapper(mm_data)
                 for k, v in mm_kwargs.items():
                     multi_modal_kwargs_list[k].append(v)
 
@@ -355,6 +343,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             input_positions=input_positions,
             attn_metadata=attn_metadata,
             sampling_metadata=sampling_metadata,
+            multi_modal_kwargs=multi_modal_kwargs,
         )
 
     @torch.inference_mode()

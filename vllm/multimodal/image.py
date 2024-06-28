@@ -1,52 +1,24 @@
+from functools import lru_cache
 from typing import Dict, Tuple, Type
 
 import torch
 from PIL import Image
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
+from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.sequence import SequenceData
-from vllm.transformers_utils.image_processor import cached_get_image_processor
+from vllm.transformers_utils.image_processor import get_image_processor
 
 from .base import MultiModalData, MultiModalPlugin
 
 logger = init_logger(__name__)
 
-IMAGE_TOKEN_ID = 32000
-IMAGE_FEATURE_SIZE = 576
-IMAGE_SHAPE = (336, 336)
-
-
-# TODO: All the reference to `vlm_config` will be updated to `mm_config`.
-# TODO: This file should also be scoped to mm.
-def _get_dummy_seq_data(seq_len: int,
-                        vlm_config: VisionLanguageConfig) -> SequenceData:
-    assert seq_len >= IMAGE_FEATURE_SIZE, (
-        f"`seq_len` should be at least {IMAGE_FEATURE_SIZE}.")
-    token_ids = [IMAGE_TOKEN_ID] * IMAGE_FEATURE_SIZE
-    token_ids += [0] * (seq_len - IMAGE_FEATURE_SIZE)
-    return SequenceData(token_ids)
-
-
-def _get_dummy_image(vlm_config: VisionLanguageConfig) -> Image.Image:
-    return Image.new("RGB", IMAGE_SHAPE, color=(255, 255, 255))
-
-
-def get_dummy_image_data(
-    seq_len: int,
-    model_config: ModelConfig,
-    vlm_config: VisionLanguageConfig,
-) -> Tuple[SequenceData, MultiModalData]:
-    """Standard dummy data factory for image data (to be used in
-    :meth:`vlm.multimodal.MultiModalRegistry.register_dummy_data`)."""
-    seq_data = _get_dummy_seq_data(seq_len, vlm_config)
-    image = _get_dummy_image(vlm_config)
-
-    return seq_data, ImageData(image)
+cached_get_image_processor = lru_cache(get_image_processor)
 
 
 class ImageData(MultiModalData):
-    """An :class:``PIL.Image`` image. Requires that a HuggingFace
+    """
+    Contains a :class:`PIL.Image.Image` object. Requires that a HuggingFace
     processor is available to the model.
     """
 
@@ -72,9 +44,9 @@ class ImagePlugin(MultiModalPlugin[ImageData]):
             model_config.model,
             trust_remote_code=model_config.trust_remote_code)
 
-    def _default_input_processor(
-            self, data: ImageData, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+    def _default_input_mapper(self, ctx: InputContext,
+                              data: ImageData) -> Dict[str, torch.Tensor]:
+        model_config = ctx.model_config
         image = data.image
         if isinstance(image, Image.Image):
             image_processor = self._get_hf_image_processor(model_config)

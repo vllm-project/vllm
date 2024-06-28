@@ -14,8 +14,8 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_tpu, is_xpu,
-                        update_environment_variables)
+                        is_hip, is_neuron, is_openvino, is_tpu, is_xpu,
+                        print_warning_once, update_environment_variables)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -109,6 +109,7 @@ class ModelConfig:
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
+        multimodal_config: Optional["VisionLanguageConfig"] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -141,6 +142,17 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+
+        if (not self.disable_sliding_window
+                and self.hf_text_config.model_type == "gemma2"
+                and self.hf_text_config.sliding_window is not None):
+            print_warning_once(
+                "Gemma 2 uses sliding window attention for every odd layer, "
+                "which is currently not supported by vLLM. Disabling sliding "
+                "window and capping the max length to the sliding window size "
+                f"({self.hf_text_config.sliding_window}).")
+            self.disable_sliding_window = True
+
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
@@ -148,6 +160,8 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window())
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
+        self.multimodal_config = multimodal_config
+
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_embedding_mode()
@@ -257,8 +271,7 @@ class ModelConfig:
                 "BitAndBytes quantization with TP or PP is not supported yet.")
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
-        """Get the sliding window size, or None if disabled.
-        """
+        """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
         # addition to sliding window size. We check if that field is present
@@ -768,6 +781,8 @@ class DeviceConfig:
             # Automated device type detection
             if is_neuron():
                 self.device_type = "neuron"
+            elif is_openvino():
+                self.device_type = "openvino"
             elif is_tpu():
                 self.device_type = "tpu"
             elif is_cpu():
@@ -783,7 +798,7 @@ class DeviceConfig:
             self.device_type = device
 
         # Some device types require processing inputs on CPU
-        if self.device_type in ["neuron"]:
+        if self.device_type in ["neuron", "openvino"]:
             self.device = torch.device("cpu")
         elif self.device_type in ["tpu"]:
             self.device = None
@@ -920,15 +935,19 @@ class SpeculativeConfig:
                 max_logprobs=target_model_config.max_logprobs,
             )
 
-            if (draft_model_config.hf_config.model_type == "mlp_speculator"
+            draft_hf_config = draft_model_config.hf_config
+            if (draft_hf_config.model_type == "mlp_speculator"
                     and target_parallel_config.world_size != 1):
                 # MLPSpeculator TP support will be added very soon
                 raise ValueError(
                     "Speculative decoding with mlp_speculator models does not "
                     "yet support distributed inferencing (TP > 1).")
 
-            n_predict = getattr(draft_model_config.hf_config, "n_predict",
-                                None)
+            if (num_speculative_tokens is not None
+                    and hasattr(draft_hf_config, "num_lookahead_tokens")):
+                draft_hf_config.num_lookahead_tokens = num_speculative_tokens
+
+            n_predict = getattr(draft_hf_config, "n_predict", None)
             if n_predict is not None:
                 if num_speculative_tokens is None:
                     # Default to max value defined in draft model config.
@@ -1220,10 +1239,16 @@ def _get_and_verify_dtype(
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
-                # Following the common practice, we use float16 for float32
-                # models.
-                logger.info("Casting torch.float32 to torch.float16.")
-                torch_dtype = torch.float16
+                if config.model_type == "gemma2":
+                    logger.info(
+                        "For Gemma 2, we downcast float32 to bfloat16 instead "
+                        "of float16 by default. Please specify `dtype` if you "
+                        "want to use float16.")
+                    torch_dtype = torch.bfloat16
+                else:
+                    # Following the common practice, we use float16 for float32
+                    # models.
+                    torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
         else:
