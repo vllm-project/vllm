@@ -144,14 +144,14 @@ struct ScaledEpilogueBias
   using ScaleB = typename SUPER::ScaleB;
 
   using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::multiplies, ElementD, ElementD,
+      cutlass::multiplies, float, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
   using EVTCompute0 =
       cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
 
   using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::multiply_add, ElementD, ElementD,
+      cutlass::multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
   using BiasDescriptor =
