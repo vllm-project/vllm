@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
+from vllm.array_pool import alloc_array, del_array
 from vllm.inputs import LLMInputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -104,26 +105,6 @@ class RequestMetrics:
     finished_time: Optional[float] = None
 
 
-class SequenceDataPool:
-    """A pool of numpy array to hold sequence data.
-    """
-
-    def __init__(self) -> None:
-        self.pool: Dict[int, List[np.ndarray]] = defaultdict(list)
-
-    def alloc_array(self, max_tokens: int) -> np.ndarray:
-        if max_tokens in self.pool and self.pool[max_tokens]:
-            return self.pool[max_tokens].pop()
-        return np.zeros((max_tokens, ), dtype=np.int64)
-
-    def del_array(self, arr: np.ndarray) -> None:
-        self.pool[len(arr)].append(arr)
-
-
-# for 128k context size
-_SEQUENCE_DATA_POOL = SequenceDataPool()
-
-
 class SequenceData:
     """Data associated with a sequence.
 
@@ -159,7 +140,7 @@ class SequenceData:
         max_seq_len: Optional[int] = None,
     ) -> None:
         self.max_seq_len = max_seq_len or 16 * 1024
-        self.tokens = _SEQUENCE_DATA_POOL.alloc_array(self.max_seq_len)
+        self.tokens = alloc_array(self.max_seq_len)
         self.prompt_token_ids_list = prompt_token_ids
         self.num_prompt_tokens = len(prompt_token_ids)
         self.tokens[:self.num_prompt_tokens] = prompt_token_ids
@@ -173,8 +154,7 @@ class SequenceData:
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
-        self._finalizer = weakref.finalize(self, _SEQUENCE_DATA_POOL.del_array,
-                                           self.tokens)
+        self._finalizer = weakref.finalize(self, del_array, self.tokens)
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.tokens[self.num_prompt_tokens + self.num_output_tokens] = token_id
