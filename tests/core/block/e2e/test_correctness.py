@@ -8,7 +8,6 @@ from ....test_utils import xfail_if_rocm62
 from .conftest import get_token_ids_from_llm_generator
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -81,7 +80,6 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
     assert baseline_token_ids == test_token_ids
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -143,7 +141,6 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
     assert baseline_token_ids == test_token_ids
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{

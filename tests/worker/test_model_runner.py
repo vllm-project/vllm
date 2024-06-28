@@ -8,9 +8,6 @@ from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
-from ..test_utils import xfail_if_rocm62
-
-
 def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
@@ -140,7 +137,6 @@ def test_prepare_prompt(batch_size):
     torch.testing.assert_close(actual, expected)
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_decode_cuda_graph(batch_size):
     model_runner = _create_model_runner(

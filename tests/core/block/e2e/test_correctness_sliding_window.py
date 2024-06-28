@@ -13,7 +13,6 @@ MODEL = "bigcode/starcoder2-3b"
 BLOCK_SIZE = 16
 
 
-@xfail_if_rocm62
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
