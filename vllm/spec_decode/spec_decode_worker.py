@@ -10,11 +10,12 @@ from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SamplerOutput, SequenceGroupMetadata,
                            get_all_seq_ids)
-from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
+# from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
+from vllm.spec_decode.mqa_scorer import MQAScorer
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -187,10 +188,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
-        self.scorer = BatchExpansionTop1Scorer(
-            scorer_worker=self.scorer_worker,
-            device=self.device,
-            vocab_size=self._vocab_size)
+        # self.scorer = BatchExpansionTop1Scorer(
+        #     scorer_worker=self.scorer_worker,
+        #     device=self.device,
+        #     vocab_size=self._vocab_size)
+        self.scorer = MQAScorer(scorer_worker=self.scorer_worker,
+                                device=self.device,
+                                vocab_size=self._vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
 
@@ -306,8 +310,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
 
-        return self._run_speculative_decoding_step(execute_model_req,
-                                                   num_lookahead_slots)
+        output = self._run_speculative_decoding_step(execute_model_req,
+                                                     num_lookahead_slots)
+        print("return sampler output===", len(output))
+        return output
 
     @torch.inference_mode()
     def start_worker_execution_loop(self) -> None:

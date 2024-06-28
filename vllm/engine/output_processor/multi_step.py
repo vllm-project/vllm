@@ -87,12 +87,15 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         ]
         assert valid_samples
 
-        self._process_seq_outputs(seq, valid_samples,
-                                  sequence_group.sampling_params)
+        output_token_ids = self._process_seq_outputs(
+            seq, valid_samples, sequence_group.sampling_params)
+
+        # FIXME: -1 is incorrect, it's scheduled_seq_group.token_chunk_size
+        sequence_group.update_num_computed_tokens(len(output_token_ids) - 1)
 
     def _process_seq_outputs(self, seq: Sequence,
                              valid_samples: List[SequenceOutput],
-                             sampling_params: SamplingParams) -> None:
+                             sampling_params: SamplingParams) -> List[int]:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]
 
@@ -100,7 +103,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
                                                          len(output_token_ids))
         if remaining_tokens < 0:
-            valid_samples = valid_samples[:remaining_tokens]
             output_token_ids = output_token_ids[:remaining_tokens]
 
         # Truncate any tokens after EOS. This is required as spec decode
@@ -114,7 +116,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             for i in range(len(output_token_ids)):
                 if output_token_ids[i] == eos_token_id:
                     output_token_ids = output_token_ids[:i + 1]
-                    valid_samples = valid_samples[:i + 1]
                     break
 
         # Incrementally append tokens to the sequence, as if we had only one new
@@ -142,3 +143,5 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         if seq.is_finished():
             self.scheduler.free_seq(seq)
+
+        return output_token_ids
