@@ -98,13 +98,19 @@ class OpenAIServingChat(OpenAIServing):
                 "No chat template provided. Chat API will not work.")
 
     @cached_property
-    def image_token_str(self) -> str:
+    def image_token_str(self) -> Optional[str]:
         # TODO: Let user specify how to insert image tokens into prompt
         # (similar to chat template)
-        if self.model_config.hf_config.model_type == "phi3_v":
+        model_type = self.model_config.hf_config.model_type
+        if model_type == "phi3_v":
             # Workaround since this token is not defined in the tokenizer
             return "<|image_1|>"
+        if model_type in ("blip-2", "fuyu", "paligemma"):
+            # These models do not use image tokens in the prompt
+            return None
 
+        # The default behaviour assumes that the image token is
+        # available to the tokenizer. (Suitable for LLaVA)
         vlm_config = self.model_config.multimodal_config
         if vlm_config is None:
             raise ValueError(
@@ -140,6 +146,9 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                 image_token = self.image_token_str
+                if image_token is not None:
+                    texts.append(image_token)
+
                 image_url = cast(ChatCompletionContentPartImageParam,
                                  part)["image_url"]
 
@@ -148,7 +157,6 @@ class OpenAIServingChat(OpenAIServing):
                         "'image_url.detail' is currently not supported and "
                         "will be ignored.")
 
-                texts.append(image_token)
                 image_future = async_get_and_parse_image(image_url["url"])
                 image_futures.append(image_future)
             else:
