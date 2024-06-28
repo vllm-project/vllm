@@ -28,21 +28,13 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         return (num_kv_heads, num_blocks, block_size, head_size)
 
-    @torch.compile(backend="openxla")
     @staticmethod
     def swap_blocks(
-        src_kv_cache: Tuple[torch.Tensor, torch.Tensor],
-        dst_kv_cache: Tuple[torch.Tensor, torch.Tensor],
-        src_to_dst: Tuple[torch.Tensor, torch.Tensor],
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: torch.Tensor,
     ) -> None:
-        src_k_cache, src_v_cache = src_kv_cache
-        dst_k_cache, dst_v_cache = dst_kv_cache
-        src_indices, dst_indices = src_to_dst
-        device = dst_k_cache.device
-        torch.ops.xla.dynamo_set_buffer_donor_(dst_k_cache, True)
-        torch.ops.xla.dynamo_set_buffer_donor_(dst_v_cache, True)
-        dst_k_cache[:, dst_indices] = src_k_cache[:, src_indices].to(device)
-        dst_v_cache[:, dst_indices] = src_v_cache[:, src_indices].to(device)
+        raise RuntimeError("swap_blocks is not used for the TPU backend.")
 
     @torch.compile(backend="openxla")
     @staticmethod
