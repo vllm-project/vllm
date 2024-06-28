@@ -2,7 +2,7 @@
 
 from itertools import takewhile
 from os.path import commonprefix
-from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -310,11 +310,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Returns:
             int: The rzero-offset block id on certain device.
         """
-        return sorted(self.all_block_ids).index(absolute_id)
-
-    @property
-    def all_block_ids(self) -> FrozenSet[int]:
-        return self._hashless_allocator.all_block_ids
+        return self._hashless_allocator.get_physical_block_id(absolute_id)
 
     def is_block_cached(self, block: Block) -> bool:
         assert block.content_hash is not None

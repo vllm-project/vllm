@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
+from typing import Dict, List, Optional, Protocol, Tuple
 
 from vllm.utils import Device
 
@@ -91,6 +91,11 @@ class Block(ABC):
 
 class BlockAllocator(ABC):
 
+    num_blocks: int
+    block_size: int
+    block_index_start: int
+    block_index_end: int
+
     @abstractmethod
     def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
         pass
@@ -126,11 +131,6 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def swap_in(self, blocks: List[Block]) -> None:
-        pass
-
-    @property
-    @abstractmethod
-    def all_block_ids(self) -> FrozenSet[int]:
         pass
 
     @abstractmethod
@@ -197,11 +197,6 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def fork(self, last_block: Block) -> List[Block]:
-        pass
-
-    @property
-    @abstractmethod
-    def all_block_ids(self) -> FrozenSet[int]:
         pass
 
     @abstractmethod
