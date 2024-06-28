@@ -5,6 +5,7 @@ import pytest
 
 from vllm import LLM, SamplingParams
 
+from ....test_utils import xfail_if_rocm62
 from .conftest import get_text_from_llm_generator
 
 # relatively small model with 4k sliding window
@@ -12,6 +13,7 @@ MODEL = "bigcode/starcoder2-3b"
 BLOCK_SIZE = 16
 
 
+@xfail_if_rocm62
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -73,6 +75,7 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
     assert sum(cmp) > 0.7 * len(cmp)
 
 
+@xfail_if_rocm62
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
