@@ -26,6 +26,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
+from vllm.utils import is_hpu
 
 _VISION_MODEL_CLASSES = [
     LlavaForConditionalGeneration,
@@ -40,14 +41,15 @@ def _get_quantization_config(
     """Get the quantization config."""
     if model_config.quantization is not None:
         quant_config = get_quant_config(model_config, load_config)
-        capability = torch.cuda.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        if capability < quant_config.get_min_capability():
-            raise ValueError(
-                f"The quantization method {model_config.quantization} is not "
-                "supported for the current GPU. "
-                f"Minimum capability: {quant_config.get_min_capability()}. "
-                f"Current capability: {capability}.")
+        if not is_hpu():
+            capability = torch.cuda.get_device_capability()
+            capability = capability[0] * 10 + capability[1]
+            if capability < quant_config.get_min_capability():
+                raise ValueError(
+                    f"The quantization method {model_config.quantization} is not "
+                    "supported for the current GPU. "
+                    f"Minimum capability: {quant_config.get_min_capability()}. "
+                    f"Current capability: {capability}.")
         supported_dtypes = quant_config.get_supported_act_dtypes()
         if model_config.dtype not in supported_dtypes:
             raise ValueError(
@@ -218,9 +220,10 @@ class DefaultModelLoader(BaseModelLoader):
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
+            with torch.device(self.load_config.device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config)
+            logger.info("Loading weights on %s ...", self.load_config.device)
             model.load_weights(
                 self._get_weights_iterator(model_config.model,
                                            model_config.revision,

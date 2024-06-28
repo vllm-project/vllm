@@ -32,6 +32,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
     "float": torch.float,
     "fp8": torch.uint8,
+    "hf8": torch.float8_e4m3fn,
 }
 
 
@@ -507,12 +508,12 @@ class HabanaMemoryProfiler:
         # Return the device memory usage in bytes.
         free_hpu_memory, total_hpu_memory = torch.hpu.mem_get_info()
         return total_hpu_memory - free_hpu_memory
-    
+
     def current_free_device_memory() -> float:
         # Return the device memory usage in bytes.
         free_hpu_memory, _ = torch.hpu.mem_get_info()
         return free_hpu_memory
-    
+
     def total_device_memory() -> float:
         # Return the device memory usage in bytes.
         _, total_hpu_memory = torch.hpu.mem_get_info()
@@ -521,11 +522,11 @@ class HabanaMemoryProfiler:
     def current_host_memory_usage() -> float:
         # Return the host memory usage in bytes.
         return HabanaMemoryProfiler.total_host_memory() - HabanaMemoryProfiler.current_free_host_memory()
-    
+
     def current_free_host_memory() -> float:
         # Return the host memory usage in bytes.
         return psutil.virtual_memory().available
-    
+
     def total_host_memory() -> float:
         # Return the host memory usage in bytes.
         return psutil.virtual_memory().total
@@ -551,7 +552,6 @@ class HabanaMemoryProfiler:
         self.final_host_memory = HabanaMemoryProfiler.current_host_memory_usage()
         self.consumed_device_memory = self.final_device_memory - self.initial_device_memory
         self.consumed_host_memory = self.final_host_memory - self.initial_host_memory
-        
 
 
 # Adapted from https://stackoverflow.com/a/49361727

@@ -5,9 +5,11 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
+import os
 import torch
 import math
-import vllm.hpu.xops as xops
+from vllm.hpu import cache_ops, xops
+from vllm.hpu.utils import Matmul, Softmax, VLLMKVCache
 from vllm.hpu.attn_bias import (AttentionBias,
                                 LowerTriangularMaskWithTensorBias)
 
@@ -111,7 +113,7 @@ class HabanaAttentionMetadata(AttentionMetadataPerStage, HabanaPagedAttentionMet
         self.attn_bias: Optional[List[AttentionBias]] = None
 
 
-class HabanaAttentionImpl(AttentionImpl):
+class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
     |<--------------- num_prefill_tokens ----------------->|
@@ -137,8 +139,14 @@ class HabanaAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
+        super(AttentionImpl, self).__init__()
         self.num_heads = num_heads
         self.head_size = head_size
+        self.qk_matmul = Matmul()
+        self.softmax = Softmax()
+        self.kv_matmul = Matmul()
+        self.key_cache = VLLMKVCache()
+        self.value_cache = VLLMKVCache()
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
@@ -188,11 +196,9 @@ class HabanaAttentionImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            HabanaPagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                      value_cache,
-                                                      attn_metadata.slot_mapping,
-                                                      attn_metadata.kv_cache_dtype,
-                                                      attn_metadata.prefill_metadata is not None)
+            block_indices, block_offset = cache_ops.prepare_to_cache(key_cache, attn_metadata.slot_mapping)
+            key_cache = self.key_cache(key, key_cache, block_indices, block_offset)
+            value_cache = self.value_cache(value, value_cache, block_indices, block_offset)
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
@@ -208,6 +214,9 @@ class HabanaAttentionImpl(AttentionImpl):
                     attn_bias=prefill_meta.attn_bias,
                     p=0.0,
                     scale=self.scale,
+                    qk_matmul_op=self.qk_matmul,
+                    softmax_op=self.softmax,
+                    kv_matmul_op=self.kv_matmul,
                 )
                 output = out.reshape(batch_size, seq_len, hidden_size)
             else:
@@ -237,7 +246,12 @@ class HabanaAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                kv_scale
+                kv_scale,
+                self.qk_matmul,
+                self.softmax,
+                self.kv_matmul,
+                self.key_cache.fetch_from_cache,
+                self.value_cache.fetch_from_cache,
             )
 
         # Reshape the output tensor.

@@ -35,8 +35,8 @@ def fetch_from_cache(cache, blocks, permutations):
     return [cache.index_select(0, blocks[:, i]).permute(permutations) for i in range(blocks.size(1))]
 
 
-@hpu_utils.with_mark_steps
-def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block_tables, context_lens, block_size, alibi_slopes, kv_cache_dtype=None) -> None:
+def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block_tables, context_lens, block_size, alibi_slopes, kv_cache_dtype=None,
+                       qk_matmul_op=torch.matmul, softmax_op=torch.softmax, kv_matmul_op=torch.matmul, keys_fetch_func=fetch_from_cache, values_fetch_func=fetch_from_cache)  -> None:
     seq_len = block_tables.size(1)
     batch_size, query_heads, _ = query.shape
     _, _, kv_heads, _ = key_cache.shape
@@ -48,18 +48,16 @@ def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block
             .view(batch_size, 1, 1, -1))
     query.mul_(scale)
     query = query.unsqueeze(-2)
-    keys = fetch_from_cache(key_cache, block_tables, (0, 2, 3, 1))
+    keys = keys_fetch_func(key_cache, block_tables, (0, 2, 3, 1))
     if query_heads != kv_heads:
         query = query.unflatten(1, (kv_heads, -1))
         keys = [k.unflatten(1, (kv_heads, 1)) for k in keys]
         mask = mask.unsqueeze(2)
+    attn_weights = [qk_matmul_op(query, k) for k in keys]
+    attn_weights = softmax_op(torch.cat(attn_weights, dim=-1).masked_fill(mask, min_inf),
+                              dim=-1)
 
-    attn_weights = [torch.matmul(query, k) for k in keys]
-    attn_weights = (torch.cat(attn_weights, dim=-1)
-                    .masked_fill(mask, min_inf)
-                    .softmax(dim=-1))
-
-    values = fetch_from_cache(value_cache, block_tables, (0, 2, 1, 3))
+    values = values_fetch_func(value_cache, block_tables, (0, 2, 1, 3))
     if PA_SPLIT_VALUE:
         attn_weights = attn_weights.split(block_size, dim=-1)
     else:
@@ -67,7 +65,7 @@ def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block
         attn_weights = [attn_weights]
     if query_heads != kv_heads:
         values = [v.unflatten(1, (kv_heads, 1)) for v in values]
-    attn_weights = [torch.matmul(a, v) for a, v in zip(attn_weights, values)]
+    attn_weights = [kv_matmul_op(a, v) for a, v in zip(attn_weights, values)]
     if query_heads != kv_heads:
         attn_weights = [a.flatten(1, 2) for a in attn_weights]
     attn_weights = sum(attn_weights)

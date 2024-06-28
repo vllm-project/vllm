@@ -28,6 +28,7 @@ class EngineArgs:
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
     load_format: str = 'auto'
+    weights_load_device: Optional[str] = None
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
     quantization_param_path: Optional[str] = None
@@ -168,6 +169,11 @@ class EngineArgs:
             '* "tensorizer" will load the weights using tensorizer from '
             'CoreWeave which assumes tensorizer_uri is set to the location of '
             'the serialized weights.')
+        parser.add_argument("--weights-load-device",
+                            type=str,
+                            default=EngineArgs.weights_load_device,
+                            choices=["cuda", "neuron", "hpu", "cpu"],
+                            help='Device on which weights are loaded.')
         parser.add_argument(
             '--dtype',
             type=str,
@@ -186,12 +192,13 @@ class EngineArgs:
         parser.add_argument(
             '--kv-cache-dtype',
             type=str,
-            choices=['auto', 'fp8'],
+            choices=['auto', 'fp8', 'hf8'],
             default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. FP8_E5M2 (without scaling) is only supported on cuda '
             'version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
-            'supported for common inference criteria.')
+            'supported for common inference criteria. FP8_E4M3 is also supported '
+            'on hpu.')
         parser.add_argument(
             '--quantization-param-path',
             type=nullable_str,
@@ -574,9 +581,11 @@ class EngineArgs:
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
+        device = device_config.device_type if self.weights_load_device is None else self.weights_load_device
         load_config = LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
+            device=device,
             model_loader_extra_config=self.model_loader_extra_config,
         )
 

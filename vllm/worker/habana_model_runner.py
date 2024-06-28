@@ -145,8 +145,8 @@ class HpuModelAdapter():
     def forward(self, *args, **kwargs):
         kwargs = kwargs.copy()
         selected_token_indices = kwargs.pop('selected_token_indices')
-        if 'bypass_hpu_graphs' in kwargs:
-            kwargs.pop('bypass_hpu_graphs') # required for PT eager
+        if 'warmup_mode' in kwargs:
+            kwargs.pop('warmup_mode') # required for PT eager
         input_ids = kwargs['input_ids']
         kwargs['attn_metadata'] = self._set_attn_bias(kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1), input_ids.device, torch.bfloat16)
         hidden_states = self.model(*args, **kwargs)
@@ -287,11 +287,24 @@ class HabanaModelRunner:
                 )
             logger.info(f"Pre-loading model weights on {next(self.model.parameters()).device} took {m_getmodel.get_summary_string()}")
 
+            import habana_frameworks.torch.core as htcore
+            if self.model_config.quantization == 'hqt':
+                logger.info("Preparing model with HQT..")
+                with HabanaMemoryProfiler() as m_hqt:
+                    import habana_quantization_toolkit
+                    habana_quantization_toolkit.prep_model(self.model)
+                    htcore.hpu_initialize(self.model, mark_only_scales_as_const=True)
+                logger.info(f"Preparing model with HQT took {m_hqt.get_summary_string()}")
+            else:
+                self.model = self.model.to("hpu")
+                htcore.mark_step()
+            torch.hpu.synchronize()
+
             # FIXME: Running with disable_tensor_cache=True causes RuntimeErrors. This needs to be debugged
             with HabanaMemoryProfiler() as m_wrap:
                 self.model = _maybe_wrap_in_hpu_graph(self.model)
             logger.info(f"Wrapping in HPU Graph took {m_wrap.get_summary_string()}")
-            
+
         self.model_memory_usage = m.consumed_device_memory
         logger.info(f"Loading model weights took in total {m.get_summary_string()}")
 
@@ -814,11 +827,16 @@ class HabanaModelRunner:
                         {'prefill_metadata': prefill_metadata,
                          'decode_metadata': decode_metadata})
 
+    def finish_measurements(self):
+        import habana_quantization_toolkit
+        habana_quantization_toolkit.finish_measurements(self.model.model)
+
     @torch.inference_mode()
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
+        warmup_mode=False,
     ) -> Optional[SamplerOutput]:
         if self.is_driver_worker:
             event_start = self.profiler.get_timestamp_us()
@@ -852,14 +870,15 @@ class HabanaModelRunner:
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
-
+        if htorch.utils.internal.is_lazy():
+            execute_model_kwargs.update({"bypass_hpu_graphs":not use_graphs, "warmup_mode":warmup_mode})
         htorch.core.mark_step()
         if self.is_driver_worker:
             model_event_name = f"model_{'prompt' if is_prompt else 'decode'}_bs{batch_size}_seq{seq_len}_graphs{'T' if use_graphs else 'F'}"
         else:
             model_event_name = 'model_executable'
         with self.profiler.record_event('internal', model_event_name):
-            hidden_states = self.model.forward(**execute_model_kwargs, selected_token_indices=sampling_metadata.selected_token_indices, bypass_hpu_graphs=not use_graphs)
+            hidden_states = self.model.forward(**execute_model_kwargs, selected_token_indices=sampling_metadata.selected_token_indices)
 
         # Compute the logits.
         with self.profiler.record_event('internal', f'compute_logits_{"prompt" if is_prompt else "decode"}_bs{batch_size}_seq{seq_len}'):
@@ -935,7 +954,7 @@ class HabanaModelRunner:
         seqs = [self.create_dummy_seq_group_metadata(i, seq_len, is_prompt) for i in range(batch_size)]
         torch.hpu.synchronize()
         for _ in range(times):
-            self.execute_model(seqs, kv_caches)
+            self.execute_model(seqs, kv_caches, warmup_mode=True)
             torch.hpu.synchronize()
         self.profiler.end()
         gc.collect()
@@ -946,7 +965,6 @@ class HabanaModelRunner:
 
     def warmup_all_buckets(self, buckets, is_prompt, kv_caches):
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
-            mem_usage = 100.0 * HabanaMemoryProfiler.current_device_memory_usage() / HabanaMemoryProfiler.total_device_memory()
             self.log_warmup('Prompt' if is_prompt else 'Decode', i, len(buckets), batch_size, seq_len)
             self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
 
@@ -1010,6 +1028,19 @@ class HabanaModelRunner:
         elapsed_time = end_time - start_time
         logger.info(f"Warmup finished in {elapsed_time:.0f} secs, allocated {format_bytes(end_mem - start_mem)} of device memory")
         self.profiler.end()
+
+    def shutdown_hqt(self):
+        print('hqt shutdown')
+        if model_config := getattr(self, "model_config", None):
+            if getattr(model_config, "quantization", None) == 'hqt':
+                print('hqt shutdown start')
+                import habana_quantization_toolkit
+                if habana_quantization_toolkit is not None:
+                    habana_quantization_toolkit.finish_measurements(self.model.model)
+                print('hqt shutdown')
+
+    def __del__(self):
+        self.shutdown_hqt()
 
     @property
     def vocab_size(self) -> int:

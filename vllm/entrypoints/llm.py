@@ -134,6 +134,9 @@ class LLM:
     ) -> None:
         self.llm_engine.tokenizer.tokenizer = tokenizer
 
+    def finish_measurements(self):
+        self.llm_engine.finish_measurements()
+
     def generate(
         self,
         prompts: Optional[Union[str, List[str]]] = None,

@@ -86,6 +86,16 @@ class HabanaWorker(WorkerBase):
         self.cache_engine: CacheEngine
         self.hpu_cache: List[torch.Tensor]
 
+    def _set_env_vars(self):
+        local_rank = self.local_rank
+        if self.parallel_config.world_size == 1:
+            local_rank = -1
+        import os
+        os.environ["LOCAL_RANK"] = str(local_rank)
+        os.environ["ID"] = str(local_rank)
+        os.environ["WORLD_SIZE"] = str(self.parallel_config.world_size)
+        os.environ["RANK"] = str(self.rank)
+
     def init_device(self) -> None:
         if self.device_config.device.type == "hpu":
             self.device = torch.device("hpu")
@@ -94,6 +104,8 @@ class HabanaWorker(WorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
+        if self.model_config.quantization == 'hqt':
+            self._set_env_vars()
         init_worker_distributed_environment(self.parallel_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
@@ -101,6 +113,9 @@ class HabanaWorker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
+        if self.model_config.quantization == 'hqt':
+            import habana_frameworks.torch.core as htcore
+            htcore.hpu_set_env()
         self.model_runner.load_model()
 
     @torch.inference_mode()
@@ -184,6 +199,9 @@ class HabanaWorker(WorkerBase):
         if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
 
+    def finish_measurements(self):
+        self.model_runner.finish_measurements()
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -235,6 +253,12 @@ class HabanaWorker(WorkerBase):
 
     def list_loras(self) -> Set[int]:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
+
+    def shutdown_hqt(self):
+        self.model_runner.shutdown_hqt()
+
+    def __del__(self):
+        self.shutdown_hqt()
 
     @property
     def max_model_len(self) -> int:
