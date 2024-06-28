@@ -424,33 +424,57 @@ class ModelInputForGPUBuilder(
         if not self.input_tokens:
             return self._model_input_cls()
 
-        #### Attention metadata
         batch_size = len(self.input_tokens)
         max_query_len = max(self.query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.decode_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
-
-        # If cuda graph can be used, pad tensors accordingly.
-        # See `capture_model` API for more details.
-        # vLLM uses cuda graph only for decoding requests.
         use_captured_graph = (self.decode_only
                               and not model_config.enforce_eager
                               and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
                               and max_decode_seq_len <= max_seq_len_to_capture)
+
+        # If cuda graph can be used, pad tensors accordingly.
+        # See `capture_model` API for more details.
+        # vLLM uses cuda graph only for decoding requests.
+        cuda_graph_pad_size = 0
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
-            pad_size = graph_batch_size - batch_size
-            self.input_tokens.extend([0] * pad_size)
-            self.input_positions.extend([0] * pad_size)
-            self.slot_mapping.extend([_PAD_SLOT_ID] * pad_size)
-            self.seq_lens.extend([1] * pad_size)
-            self.block_tables.extend([] * pad_size)
-            self.lora_index_mapping.extend([0] * pad_size)
-
+            cuda_graph_pad_size = graph_batch_size - batch_size
             batch_size = graph_batch_size
             num_decode_tokens = batch_size
+
+        #### Tokens and positions.
+        self.input_tokens.extend([0] * cuda_graph_pad_size)
+        self.input_positions.extend([0] * cuda_graph_pad_size)
+        input_tokens_tensor = torch.tensor(self.input_tokens,
+                                           dtype=torch.long,
+                                           device=device)
+        input_positions_tensor = torch.tensor(self.input_positions,
+                                              dtype=torch.long,
+                                              device=device)
+
+        #### LoRA and multi-modal data.
+        if self.enable_lora:
+            self.lora_index_mapping.extend([0] * cuda_graph_pad_size)
+            lora_mapping = LoRAMapping(
+                self.lora_index_mapping,
+                self.lora_prompt_mapping,
+            )
+        else:
+            lora_mapping = None
+
+        multi_modal_kwargs = {
+            k: torch.cat(v, dim=0).to(device)
+            for k, v in self.multi_modal_kwargs_list.items()
+        }
+
+        #### Attention metadata. TODO: Move to attention metadata builder.
+        if use_captured_graph:
+            self.slot_mapping.extend([_PAD_SLOT_ID] * cuda_graph_pad_size)
+            self.seq_lens.extend([1] * cuda_graph_pad_size)
+            self.block_tables.extend([] * cuda_graph_pad_size)
 
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
@@ -477,18 +501,11 @@ class ModelInputForGPUBuilder(
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
-
         torch.cumsum(seq_lens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
-        input_tokens_tensor = torch.tensor(self.input_tokens,
-                                           dtype=torch.long,
-                                           device=device)
-        input_positions_tensor = torch.tensor(self.input_positions,
-                                              dtype=torch.long,
-                                              device=device)
         slot_mapping_tensor = torch.tensor(self.slot_mapping,
                                            dtype=torch.long,
                                            device=device)
@@ -560,20 +577,6 @@ class ModelInputForGPUBuilder(
                 block_tables=block_tables,
                 use_cuda_graph=use_captured_graph,
             )
-
-        # Others
-        if self.enable_lora:
-            lora_mapping = LoRAMapping(
-                self.lora_index_mapping,
-                self.lora_prompt_mapping,
-            )
-        else:
-            lora_mapping = None
-
-        multi_modal_kwargs = {
-            k: torch.cat(v, dim=0).to(device)
-            for k, v in self.multi_modal_kwargs_list.items()
-        }
 
         return self._model_input_cls(
             input_tokens=input_tokens_tensor,
