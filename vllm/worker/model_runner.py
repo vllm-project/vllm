@@ -237,7 +237,10 @@ class ModelInputForGPUBuilder(
             slot = block_number * self.block_size + block_offset
             self.slot_mapping.append(slot)
 
-    def _add_seq_group_for_flashinfer(self, seq_data, block_table):        
+    def _add_seq_group_for_flashinfer(self, seq_data, block_table):
+        if block_table is None:
+            return
+
         seq_len = seq_data.get_len()
         # Get the number of valid blocks based on sequence length.
         # If seq_len = 16, block_size = 16,
@@ -249,7 +252,8 @@ class ModelInputForGPUBuilder(
                             else seq_len // self.block_size
 
         self.paged_kv_indices.extend(block_table[:block_table_bound])
-        self.paged_kv_indptr.append(self.paged_kv_indptr[-1] + block_table_bound)
+        self.paged_kv_indptr.append(self.paged_kv_indptr[-1] +
+                                    block_table_bound)
 
         last_page_len = seq_len % self.block_size
         if last_page_len == 0:
@@ -322,7 +326,8 @@ class ModelInputForGPUBuilder(
 
         # Compute the block table for slot mapping and flashinfer.
         block_table = None
-        is_profile_run = _is_block_tables_empty(seq_group_metadata.block_tables)
+        is_profile_run = _is_block_tables_empty(
+            seq_group_metadata.block_tables)
         if not is_profile_run:
             block_table = seq_group_metadata.block_tables[seq_id]
 
@@ -340,7 +345,6 @@ class ModelInputForGPUBuilder(
                                    block_table)
         if self.attn_backend.get_name() == "flashinfer":
             self._add_seq_group_for_flashinfer(seq_data, block_table)
-
 
     def _add_decode_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
                               seq_ids: List[int]):
@@ -408,7 +412,8 @@ class ModelInputForGPUBuilder(
 
             # Compute the slot mapping.
             block_table = None
-            is_profile_run = _is_block_tables_empty(seq_group_metadata.block_tables)
+            is_profile_run = _is_block_tables_empty(
+                seq_group_metadata.block_tables)
             if not is_profile_run:
                 block_table = seq_group_metadata.block_tables[seq_id]
             self._compute_slot_mapping(seq_len, context_len, 0, block_table)
@@ -515,7 +520,8 @@ class ModelInputForGPUBuilder(
 
             if self.attn_backend.get_name() == "flashinfer":
                 last_paged_kv_indptr = self.paged_kv_indptr[-1]
-                self.paged_kv_indptr.extend([last_paged_kv_indptr] * cuda_graph_pad_size)
+                self.paged_kv_indptr.extend([last_paged_kv_indptr] *
+                                            cuda_graph_pad_size)
                 self.paged_kv_last_page_len.extend([0] * cuda_graph_pad_size)
         else:
             max_block_table_len = max(
@@ -531,19 +537,19 @@ class ModelInputForGPUBuilder(
 
         context_lens_tensor = torch.tensor(self.context_lens,
                                            dtype=torch.int,
-                                           device=self.device)
+                                           device=device)
         seq_lens_tensor = torch.tensor(self.seq_lens,
                                        dtype=torch.int,
-                                       device=self.device)
+                                       device=device)
         query_lens_tensor = torch.tensor(self.query_lens,
                                          dtype=torch.long,
-                                         device=self.device)
+                                         device=device)
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
-                                      device=self.device)
+                                      device=device)
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
-                                    device=self.device)
+                                    device=device)
         torch.cumsum(seq_lens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
