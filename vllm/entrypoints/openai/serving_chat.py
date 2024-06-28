@@ -509,7 +509,6 @@ class OpenAIServingChat(OpenAIServing):
         choices: List[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
-        print("========================output========================")
         for output in final_res.outputs:
             token_ids = output.token_ids
             out_logprobs = output.logprobs
@@ -524,8 +523,6 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
-            # TODO: use llama_tools to parse the output.text
-            print(output)
 
             finish_reason = output.finish_reason
             if request.tool_choice and type(
@@ -546,12 +543,16 @@ class OpenAIServingChat(OpenAIServing):
                 tool_calls = []
                 if function_output:
                     print(f"Parsed function output: {function_output}\n\n")
-                    for fc in function_output:
-                        function = FunctionCall(name=fc["function"]["name"], arguments=fc["function"]["arguments"])
-                        call = ToolCall(function=function)
-                        tool_calls.append(call)
-                    content = ""
-                    finish_reason = "tool_calls"
+                    try:
+                        for fc in function_output:
+                            function = FunctionCall(name=fc["function"]["name"], arguments=fc["function"]["arguments"])
+                            call = ToolCall(function=function)
+                            tool_calls.append(call)
+                        content = ""
+                        finish_reason = "tool_calls"
+                    except Exception as e:
+                        content = str(function_output)
+                        print(f"Error extract functions from output: {e}")
                 message = ChatMessage(role=role, content=content, tool_calls=tool_calls)
 
             choice_data = ChatCompletionResponseChoice(
