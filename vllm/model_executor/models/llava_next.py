@@ -83,7 +83,7 @@ def _get_llava_next_num_unpadded_features(
 
 
 # Based on: https://github.com/huggingface/text-generation-inference/blob/v2.0.4/server/text_generation_server/models/vlm_causal_lm.py#L111
-def _get_llava_next_image_feature_size(
+def get_llava_next_image_feature_size(
     hf_config: LlavaNextConfig,
     *,
     input_height: int,
@@ -125,9 +125,9 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(LlavaNextConfig)
     vision_config = hf_config.vision_config
 
-    # Result in the max possible feature size
+    # Result in the max possible feature size (2x2 grid of 336x336px tiles)
     dummy_height = dummy_width = 448
-    image_feature_size = _get_llava_next_image_feature_size(
+    image_feature_size = get_llava_next_image_feature_size(
         hf_config, input_height=dummy_height, input_width=dummy_width)
 
     if isinstance(vision_config, CLIPVisionConfig):
@@ -177,7 +177,7 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
         else:
             width, height = image.size
 
-        image_feature_size = _get_llava_next_image_feature_size(
+        image_feature_size = get_llava_next_image_feature_size(
             hf_config, input_height=height, input_width=width)
     else:
         image_features = multi_modal_data.image_features
