@@ -68,30 +68,55 @@ class MLPSpeculator(nn.Module):
 
         self.max_speculative_tokens = config.num_lookahead_tokens
 
-        self.tie_wts = config.tie_wts
+        self.tie_weights = config.tie_weights
         self.scale_input = config.scale_input
 
-        self.emb = nn.ModuleList([
-            VocabParallelEmbedding(config.vocab_size,
-                                   self.inner_dim,
-                                   org_num_embeddings=config.vocab_size)
-            for _ in range(self.max_speculative_tokens)
-        ])
+        if self.tie_weights:
+            assert (self.n_predict > 1), "You cannot tie weights between stages when only 1 exists"
+            embedding = VocabParallelEmbedding(config.vocab_size, self.inner_dim, org_num_embeddings=config.vocab_size)
+            self.emb = nn.ModuleList([
+                embedding
+                for _ in range(self.max_speculative_tokens)
+            ])
 
-        self.proj = nn.ModuleList([
-            nn.Linear((self.emb_dim if i == 0 else self.inner_dim),
-                      self.inner_dim,
-                      bias=False) for i in range(self.max_speculative_tokens)
-        ])
+            # the initial projection from the base model may have a different size, so that stays separate.
+            proj_first = nn.Linear(self.emb_dim, self.inner_dim, bias=False)
+            proj_tied = nn.Linear(self.inner_dim, self.inner_dim, bias=False)
+            self.proj = nn.ModuleList([proj_first] + [proj_tied for _ in range(self.max_speculative_tokens - 1)])
 
-        self.head = nn.ModuleList([
-            nn.Linear(self.inner_dim, self.vocab_size, bias=False)
-            for _ in range(self.max_speculative_tokens)
-        ])
-        self.ln = nn.ModuleList([
-            MLPSpeculatorLayerNorm(self.inner_dim, elementwise_shift=True, elementwise_scale=True)
-            for _ in range(self.max_speculative_tokens)
-        ])
+            head = nn.Linear(self.inner_dim, self.vocab_size, bias=False)
+            self.head = nn.ModuleList([
+                head
+                for _ in range(self.max_speculative_tokens)
+            ])
+
+            ln = MLPSpeculatorLayerNorm(self.inner_dim, elementwise_shift=True, elementwise_scale=True)
+            self.ln = nn.ModuleList([
+                ln
+                for _ in range(self.max_speculative_tokens)
+            ])
+        else:
+            self.emb = nn.ModuleList([
+                VocabParallelEmbedding(config.vocab_size,
+                                       self.inner_dim,
+                                       org_num_embeddings=config.vocab_size)
+                for _ in range(self.max_speculative_tokens)
+            ])
+
+            self.proj = nn.ModuleList([
+                nn.Linear((self.emb_dim if i == 0 else self.inner_dim),
+                          self.inner_dim,
+                          bias=False) for i in range(self.max_speculative_tokens)
+            ])
+
+            self.head = nn.ModuleList([
+                nn.Linear(self.inner_dim, self.vocab_size, bias=False)
+                for _ in range(self.max_speculative_tokens)
+            ])
+            self.ln = nn.ModuleList([
+                MLPSpeculatorLayerNorm(self.inner_dim, elementwise_shift=True, elementwise_scale=True)
+                for _ in range(self.max_speculative_tokens)
+            ])
         if self.scale_input:
             self.ln0 = MLPSpeculatorLayerNorm(self.emb_dim, elementwise_shift=False, elementwise_scale=False)
 
@@ -99,19 +124,6 @@ class MLPSpeculator(nn.Module):
         self.emb_weight = math.sqrt(
             (1 - self.state_weight**2) * (self.inner_dim / 2))
         self.activation = nn.GELU()
-
-
-        if self.tie_wts:
-            assert(self.n_predict > 1), "You cannot tie weights between stages when only 1 exists"
-            for emb in self.emb:
-                emb.weight = self.emb[0].weight
-            for head in self.head:
-                head.weight = self.head[0].weight
-            for ln in self.ln:
-                ln.weight = self.ln[0].weight
-                ln.bias = self.ln[0].bias
-            for i in range(2, self.n_predict):
-                self.proj[i].weight = self.proj[1].weight
 
         self.config = config
         self.logits_processor = LogitsProcessor(config.vocab_size,
