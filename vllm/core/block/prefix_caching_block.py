@@ -600,6 +600,10 @@ class PrefixCachingBlock(Block):
         return self._block.num_empty_slots
 
     @property
+    def num_tokens(self) -> int:
+        return self._block._num_tokens
+
+    @property
     def num_tokens_total(self) -> int:
         """return the total tokens so far.
 

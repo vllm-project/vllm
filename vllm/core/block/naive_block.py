@@ -373,6 +373,10 @@ class NaiveBlock(Block):
         return self._block_size - self._num_tokens
 
     @property
+    def num_tokens(self) -> int:
+        return self._num_tokens
+
+    @property
     def token_ids(self) -> np.ndarray:
         return self._token_ids
 

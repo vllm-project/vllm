@@ -348,6 +348,10 @@ class NullBlock(Block):
         return self._proxy.num_empty_slots
 
     @property
+    def num_tokens(self) -> BlockId:
+        return self._proxy.num_tokens
+
+    @property
     def is_full(self):
         return self._proxy.is_full
 

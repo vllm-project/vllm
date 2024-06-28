@@ -54,10 +54,14 @@ class BlockTable:
         self._max_block_sliding_window = max_block_sliding_window
         # Use helper method instead of directly calculating, as blocks
         # may not be allocated.
-        self._num_full_slots = len(self._get_all_token_ids())
+        _num_full_slots = 0
+        if self._is_allocated:
+            for block in self._blocks:
+                _num_full_slots += block.num_tokens
+        self._num_full_slots = _num_full_slots
 
     @staticmethod
-    def get_num_required_blocks(token_ids: List[int], block_size: int) -> int:
+    def get_num_required_blocks(token_ids: np.ndarray, block_size: int) -> int:
         """Calculates the minimum number of blocks required to store a given
         sequence of token IDs.
 
@@ -65,7 +69,7 @@ class BlockTable:
         allocation (e.g. ignoring prefix caching).
 
         Args:
-            token_ids (List[int]): The sequence of token IDs to be stored.
+            token_ids (np.ndarray): The sequence of token IDs to be stored.
             block_size (int): The maximum number of tokens that can be stored in
                 a single block.
 
@@ -113,7 +117,7 @@ class BlockTable:
         separate block.
 
         Args:
-            token_ids (List[int]): The sequence of token IDs to be appended.
+            token_ids (np.ndarray): The sequence of token IDs to be appended.
             num_computed_slots (Optional[int]): The number of KV cache slots
                 that are already filled (computed).
                 When sliding window is enabled, this is used to compute how many
@@ -241,11 +245,11 @@ class BlockTable:
         table, but are not yet appended to this block table.
 
         Args:
-            sequence_token_ids (List[int]): The list of token ids in the
+            sequence_token_ids (np.ndarray): The list of token ids in the
                 sequence.
 
         Returns:
-            List[int]: The postfix of sequence_token_ids that has not yet been
+            np.ndarray: The postfix of sequence_token_ids that has not yet been
                 appended to the block table.
         """
 
@@ -272,17 +276,15 @@ class BlockTable:
 
         return blocks
 
-    def _get_all_token_ids(self) -> List[int]:
-        # NOTE: This function is O(seq_len); use sparingly.
-        token_ids: List[int] = []
+    def _get_all_token_ids(self) -> np.ndarray:
+        # NOTE: This function is O(seq_len); use only for testing.
+        token_id_arrays: List[np.ndarray] = []
 
-        if not self._is_allocated:
-            return token_ids
+        if self._is_allocated:
+            for block in self._blocks:
+                token_id_arrays.append(block.token_ids)
 
-        for block in self._blocks:
-            token_ids.extend(block.token_ids)
-
-        return token_ids
+        return np.concatenate(token_id_arrays)
 
     @property
     def _is_allocated(self) -> bool:

@@ -37,6 +37,11 @@ class Block(ABC):
 
     @property
     @abstractmethod
+    def num_tokens(self) -> int:
+        pass
+
+    @property
+    @abstractmethod
     def is_full(self) -> bool:
         pass
 
