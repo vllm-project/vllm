@@ -2,12 +2,13 @@ import functools
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence,
                     Tuple, Type, TypeVar)
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig, VisionLanguageConfig, WhisperConfig
 from vllm.logger import init_logger
 
 from .base import MultiModalData, MultiModalPlugin
 from .image import (ImageFeatureData, ImageFeaturePlugin, ImagePixelData,
                     ImagePixelPlugin)
+from .audio import AudioData, AudioPlugin
 
 if TYPE_CHECKING:
     import torch
@@ -20,9 +21,9 @@ logger = init_logger(__name__)
 D = TypeVar("D", bound=MultiModalData)
 N = TypeVar("N", bound=Type["nn.Module"])
 
-MultiModalInputProcessor = Callable[[D, ModelConfig, VisionLanguageConfig],
+MultiModalInputProcessor = Callable[[D, ModelConfig, VisionLanguageConfig, WhisperConfig],
                                     Dict[str, "torch.Tensor"]]
-MultiModalDummyFactory = Callable[[int, ModelConfig, VisionLanguageConfig],
+MultiModalDummyFactory = Callable[[int, ModelConfig, VisionLanguageConfig, WhisperConfig],
                                   Tuple["SequenceData", MultiModalData]]
 
 
@@ -32,7 +33,7 @@ class MultiModalRegistry:
     according to its modality and the target model.
     """
 
-    DEFAULT_PLUGINS = (ImageFeaturePlugin(), ImagePixelPlugin())
+    DEFAULT_PLUGINS = (ImageFeaturePlugin(), ImagePixelPlugin(), AudioPlugin())
 
     def __init__(self,
                  *,
@@ -119,6 +120,17 @@ class MultiModalRegistry:
         """
         return self.register_input(ImagePixelData, processor)
 
+    def register_audio_input(
+            self,
+            processor: Optional[
+                MultiModalInputProcessor[AudioData]] = None):
+        """
+        Register an input processor for image pixel data to a model class.
+
+        See :meth:`MultiModalPlugin.register_input_processor` for more details.
+        """
+        return self.register_input(AudioData, processor)
+
     def register_image_feature_input(
         self,
         processor: Optional[
@@ -129,6 +141,7 @@ class MultiModalRegistry:
         See :meth:`MultiModalPlugin.register_input_processor` for more details.
         """
         return self.register_input(ImageFeatureData, processor)
+        
 
     def process_input(self, data: MultiModalData, model_config: ModelConfig,
                       vlm_config: VisionLanguageConfig):

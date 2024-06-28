@@ -9,7 +9,7 @@ from transformers import GenerationConfig, PreTrainedTokenizer
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, ObservabilityConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+                         VisionLanguageConfig, WhisperConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -154,6 +154,7 @@ class LLMEngine:
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
+        whisper_config: Optional[WhisperConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
@@ -206,6 +207,7 @@ class LLMEngine:
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.vision_language_config = vision_language_config
+        self.whisper_config = whisper_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -227,6 +229,8 @@ class LLMEngine:
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
+        print(executor_class)
+
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
@@ -235,6 +239,7 @@ class LLMEngine:
             device_config=device_config,
             lora_config=lora_config,
             vision_language_config=vision_language_config,
+            whisper_config=whisper_config,
             speculative_config=speculative_config,
             load_config=load_config,
         )

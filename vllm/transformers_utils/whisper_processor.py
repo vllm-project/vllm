@@ -14,8 +14,8 @@ def get_whisper_processor(
     trust_remote_code: bool = False,
     revision: Optional[str] = None,
     **kwargs,
-) -> BaseImageProcessor:
-    """Gets an image processor for the given model name via HuggingFace."""
+) -> WhisperProcessor:
+    """Gets an whisper processor for the given model name via HuggingFace."""
     try:
         processor: WhisperProcessor = WhisperProcessor.from_pretrained(
             processor_name,
@@ -41,4 +41,4 @@ def get_whisper_processor(
     return processor
 
 
-get_whisper_processor = lru_cache(get_whisper_processor)
+cached_get_whisper_processor = lru_cache(get_whisper_processor)

@@ -89,9 +89,10 @@ class EngineArgs:
     disable_image_processor: bool = False
 
     # Related to Whisper
-    whisper_input_type = 'input_features'
+    whisper_input_type: Optional[str] = 'input_features'
     whisper_processor: Optional[str] = None
     whisper_processor_revision: Optional[str] = None
+    sample_rate: Optional[int] = 16000
 
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
@@ -802,7 +803,17 @@ class EngineArgs:
         else:
             vision_language_config = None
         
-        if self.whisper_input_type
+        if self.whisper_input_type:
+            if self.whisper_processor is None:
+                self.whisper_processor = self.model
+            whisper_config = WhisperConfig(
+                self.whisper_input_type,
+                self.whisper_processor, 
+                self.whisper_processor_revision,
+                self.sample_rate,
+            )
+        else:
+            whisper_config = None
 
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
@@ -825,6 +836,7 @@ class EngineArgs:
             device_config=device_config,
             lora_config=lora_config,
             vision_language_config=vision_language_config,
+            whisper_config=whisper_config,
             speculative_config=speculative_config,
             load_config=load_config,
             decoding_config=decoding_config,

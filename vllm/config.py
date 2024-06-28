@@ -1220,8 +1220,10 @@ class VisionLanguageConfig:
 
 @dataclass
 class WhisperConfig:
-    whisper_processor: Optional[str]
-    whisper_processor_revision: Optional[str]
+    whisper_input_type: Optional[str] = 'input_features'
+    whisper_processor: Optional[str] = 'openai/whisper-large-v3'
+    whisper_processor_revision: Optional[str] = 'openai/whisper-large-v3'
+    sample_rate: Optional[int] = 16000
 
     def as_cli_args_dict(self) -> Dict[str, Any]:
         """Flatten vision language config to pure args.
@@ -1237,8 +1239,6 @@ class WhisperConfig:
                 result[f.name] = ",".join([str(item) for item in value])
             else:
                 result[f.name] = value
-
-        result["disable_image_processor"] = self.image_processor is None
 
         return result
 
@@ -1323,6 +1323,8 @@ def _get_and_verify_max_len(
         "max_sequence_length",
         "max_seq_length",
         "seq_len",
+        # Whisper
+        "max_length",
     ]
     # Choose the smallest "max_length" from the possible keys.
     max_len_key = None
@@ -1459,6 +1461,7 @@ class EngineConfig:
     load_config: LoadConfig
     lora_config: Optional[LoRAConfig]
     vision_language_config: Optional[VisionLanguageConfig]
+    whisper_config: Optional[WhisperConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
     observability_config: Optional[ObservabilityConfig]

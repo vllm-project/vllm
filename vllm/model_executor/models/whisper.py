@@ -1,4 +1,4 @@
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 from torch import nn
@@ -22,6 +22,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.audio import get_dummy_audio_data
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
 
@@ -221,7 +223,7 @@ class WhisperDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.embed_dim = config.d_model
-        self.self_attn, _ = WhisperAttention(
+        self.self_attn = WhisperAttention(
             embed_dim=self.embed_dim,
             num_heads=config.decoder_attention_heads,
             is_decoder=True,
@@ -289,7 +291,7 @@ class WhisperDecoderLayer(nn.Module):
         hidden_states = self.fc2(hidden_states)
         hidden_states = residual + hidden_states
 
-    return outputs, cross_attention_past_key_value
+        return outputs, cross_attention_past_key_value
 
 class WhisperEncoder(nn.Module):
     def __init__(
@@ -311,7 +313,7 @@ class WhisperEncoder(nn.Module):
         self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
 
         self.layers = nn.ModuleList([WhisperEncoderLayer(config, quant_config=quant_config, cache_config=cache_config)
-                                     for layer_idx in range(config.decoder_layers)])
+                                     for layer_idx in range(config.encoder_layers)])
         
         self.layer_norm = nn.LayerNorm(config.d_model)
     
@@ -347,6 +349,7 @@ class WhisperDecoder(nn.Module):
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model, self.padding_idx)
         self.embed_positions = WhisperPositionalEmbedding(self.max_target_positions, config.d_model)
+
         self.layers = nn.ModuleList([WhisperDecoderLayer(config, quant_config=quant_config, cache_config=cache_config)
                                      for layer_idx in range(config.decoder_layers)])
         self.layer_norm = nn.LayerNorm(config.d_model)
@@ -387,7 +390,7 @@ class WhisperModel(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
-        super().__init__(config)
+        super().__init__()
 
         self.encoder = WhisperEncoder(config, cache_config=cache_config, quant_config=quant_config)
         self.decoder = WhisperDecoder(config, cache_config=cache_config, quant_config=quant_config)
@@ -415,7 +418,13 @@ class WhisperModel(nn.Module):
         )
         return decoder_outputs, cross_attention_past_key_values
         
+class AudioInputs(TypedDict):
+    type: Literal["input_features"]
+    data: torch.Tensor
+    """Shape: (batch_size, num_channels, 3000)"""
 
+@MULTIMODAL_REGISTRY.register_audio_input()
+@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_audio_data)
 class WhisperForConditionalGeneration(nn.Module):
     def __init__(
         self, 
@@ -423,7 +432,7 @@ class WhisperForConditionalGeneration(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
-        super().__init__(config)
+        super().__init__()
         self.model = WhisperModel(config, cache_config=cache_config, quant_config=quant_config)
         self.proj_out = RowParallelLinear(
             input_size = config.d_model,
@@ -432,16 +441,28 @@ class WhisperForConditionalGeneration(nn.Module):
             quant_config=quant_config,
         )
 
+    def _parse_and_validate_audio_input(
+            self, **kwargs: object) -> Optional[AudioInputs]:
+        input_features = kwargs.pop("input_features", None)
+
+        return AudioInputs(
+            type="pixel_values",
+            data=input_features
+        )
+
     def forward(
         self,
-        input_features: torch.FloatTensor,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         past_key_values = None,
-    ):
-        outputs = self.model(
+        **kwargs: object,
+    ) -> SamplerOutput:
+
+        input_features = self._parse_and_validate_audio_input(**kwargs)
+
+        decoder_outputs, cross_attention_past_key_values = self.model(
             input_features=input_features,
             input_ids=input_ids,
             positions=positions,
@@ -449,3 +470,21 @@ class WhisperForConditionalGeneration(nn.Module):
             attn_metadata=attn_metadata,
             past_key_values=past_key_values,
         )
+        return decoder_outputs
+    
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.proj_out.weight, hidden_states,
+                                       sampling_metadata)
+        return logits
+    
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        pass

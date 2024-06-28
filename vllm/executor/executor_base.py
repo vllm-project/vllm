@@ -3,7 +3,7 @@ from typing import List, Optional, Set, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, VisionLanguageConfig)
+                         SpeculativeConfig, VisionLanguageConfig, WhisperConfig)
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 
@@ -26,6 +26,7 @@ class ExecutorBase(ABC):
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
+        whisper_config: Optional[WhisperConfig],
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         self.model_config = model_config
@@ -36,6 +37,7 @@ class ExecutorBase(ABC):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.vision_language_config = vision_language_config
+        self.whisper_config = whisper_config
         self.speculative_config = speculative_config
 
         self._init_executor()
