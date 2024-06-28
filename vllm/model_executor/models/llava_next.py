@@ -205,8 +205,6 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava_next)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
-    supports_vision = True
-
     def __init__(self,
                  config: LlavaNextConfig,
                  vlm_config: VisionLanguageConfig,

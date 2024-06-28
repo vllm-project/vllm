@@ -125,8 +125,6 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
 class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
-    supports_vision = True
-
     def __init__(self,
                  config: LlavaConfig,
                  vlm_config: VisionLanguageConfig,
