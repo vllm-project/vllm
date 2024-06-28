@@ -1,9 +1,9 @@
 import time
 from contextlib import contextmanager
+from http import HTTPStatus
 from typing import TYPE_CHECKING, ClassVar, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Type, TypeVar, Union
-from http import HTTPStatus
 
 from transformers import GenerationConfig, PreTrainedTokenizer
 

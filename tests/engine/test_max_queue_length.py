@@ -1,10 +1,11 @@
-import pytest
 import argparse
 from typing import List, Tuple
+
+import pytest
+
+from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.engine.llm_engine import QueueOverflowError
 from vllm.logger import init_logger
-
-from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 
 # initialize constants
 logger = init_logger(__name__)
@@ -52,7 +53,7 @@ def process_requests(engine: LLMEngine,
                 engine.add_request(str(request_id), prompt, sampling_params)
             except ValueError as e:
                 # Log error, cleanup, end test
-                logger.info(f"{e}")
+                logger.info(e)
                 for i in range(request_id):
                     engine.abort_request(str(i))
                 raise QueueOverflowError(

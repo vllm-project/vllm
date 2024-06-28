@@ -1,10 +1,7 @@
 # imports for guided decoding tests
+import asyncio
 import json
 import re
-import subprocess
-import sys
-import time
-import asyncio
 from typing import List
 
 import jsonschema
@@ -98,7 +95,7 @@ def server(ray_ctx):
         MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",  # use half precision for speed and memory savings in CI environment
+        "bfloat16",
         "--max-model-len",
         "8192",
         "--enforce-eager",
@@ -114,6 +111,7 @@ def server(ray_ctx):
         "--max-num-seqs",
         "128",
     ])
+
 
 @pytest.fixture(scope="module")
 def client(server):
@@ -466,17 +464,21 @@ async def test_logits_bias(client: openai.AsyncOpenAI):
     )
     assert first_response != completion.choices[0].text
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("max_queue_len", [1, 2, 3, 4])
-async def test_max_queue_length(model_name: str, max_queue_len: str):
+async def test_max_queue_length(model_name: str, max_queue_len: int):
+    
+    print(f"Name of model: {model_name}")
+    print(f"Maximum queue length: {max_queue_len}")
 
     server = RemoteOpenAIServer([
         "--model",
         MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",  # use half precision for speed and memory savings in CI environment
+        "bfloat16",
         "--max-model-len",
         "8192",
         "--enforce-eager",
@@ -514,9 +516,10 @@ async def test_max_queue_length(model_name: str, max_queue_len: str):
             assert response.__dict__["code"] == 503
             err_cnt += 1
 
-    # Ensure that # of err requests == (# of requests - max_queue_len - run_queue_len)
-    correctness_check = err_cnt == (len(sample_prompts) - max_queue_len -
-                                    1)
+    # Ensure that the number of err requests equals:
+    # number of requests - max queue len - run queue len
+    # where "-" is a minus sign
+    correctness_check = err_cnt == (len(sample_prompts) - max_queue_len - 1)
     print("Correct number of errors? ", correctness_check)
     assert correctness_check
 

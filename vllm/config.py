@@ -690,7 +690,8 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        max_queue_length: The maximum number of requests allowed in the waiting queue.
+        max_queue_length: The maximum number of requests 
+            allowed in the waiting queue.
         use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
         num_lookahead_slots: The number of slots to allocate per sequence per
             step, beyond the known token ids. This is used in speculative

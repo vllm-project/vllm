@@ -1,6 +1,5 @@
 import asyncio
 import time
-from http import HTTPStatus
 from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
                     Set, Tuple, Type, Union)
@@ -12,7 +11,7 @@ from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
-from vllm.engine.llm_engine import LLMEngine, QueueOverflowError
+from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
@@ -505,7 +504,7 @@ class AsyncLLMEngine:
                     await self.engine.add_request.remote(  # type: ignore
                         **new_request)
                 else:
-                    result = await self.engine.add_request_async(**new_request)
+                    await self.engine.add_request_async(**new_request)
             except ValueError as e:
                 # TODO: use a vLLM specific error for failed validation
                 self._request_tracker.process_exception(
