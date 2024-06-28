@@ -606,12 +606,9 @@ class LLMEngine:
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
         sampling_params = sampling_params.clone()
-        # Add the eos token id into the sampling_params to support min_tokens
-        # processing
-        if seq.eos_token_id is not None:
-            sampling_params.all_stop_token_ids.add(seq.eos_token_id)
+
         sampling_params.update_from_generation_config(
-            self.generation_config_fields)
+            self.generation_config_fields, seq.eos_token_id)
 
         # Create the sequence group.
         seq_group = SequenceGroup(
@@ -1013,6 +1010,8 @@ class LLMEngine:
         return self.model_executor.pin_lora(lora_id)
 
     def check_health(self) -> None:
+        if self.tokenizer:
+            self.tokenizer.check_health()
         self.model_executor.check_health()
 
     def is_tracing_enabled(self) -> bool:

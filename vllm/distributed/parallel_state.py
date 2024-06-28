@@ -45,14 +45,17 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 
 def _split_tensor_dict(
-    tensor_dict: Dict[Any, Union[torch.Tensor, Any]]
-) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
+        tensor_dict: Dict[str, Union[torch.Tensor, Any]],
+        prefix: str = "") -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
          by its metadata.
     2. A list of tensors.
+
+    If the Tensor is nested under `tensor_dict["key1"]["key2"]`, the key of its
+    metadata will be "key1%key2".
     """
-    metadata_list = []
+    metadata_list: List[Tuple[str, Any]] = []
     tensor_list = []
     for key, value in tensor_dict.items():
         if isinstance(value, torch.Tensor):
@@ -62,11 +65,29 @@ def _split_tensor_dict(
             # receiving side will set the device index.
             device = value.device.type
             metadata_list.append(
-                (key, TensorMetadata(device, value.dtype, value.size())))
+                (prefix + key, TensorMetadata(device, value.dtype,
+                                              value.size())))
             tensor_list.append(value)
+        elif isinstance(value, dict):
+            if len(value) == 0:
+                metadata_list.append((prefix + key, value))
+            inner_metadata_list, inner_tensor_list = _split_tensor_dict(
+                value, prefix + key + "%")
+            metadata_list.extend(inner_metadata_list)
+            tensor_list.extend(inner_tensor_list)
         else:
-            metadata_list.append((key, value))
+            metadata_list.append((prefix + key, value))
     return metadata_list, tensor_list
+
+
+def _update_nested_dict(nested_dict, flattened_key, value):
+    key_splits = flattened_key.split("%")
+    cur_dict = nested_dict
+    for k in key_splits[:-1]:
+        if k not in cur_dict:
+            cur_dict[k] = {}
+        cur_dict = cur_dict[k]
+    cur_dict[key_splits[-1]] = value
 
 
 class GroupCoordinator:
@@ -452,11 +473,11 @@ class GroupCoordinator:
 
     def broadcast_tensor_dict(
         self,
-        tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
+        tensor_dict: Optional[Dict[str, Union[torch.Tensor, Any]]] = None,
         src: int = 0,
         group: Optional[ProcessGroup] = None,
         metadata_group: Optional[ProcessGroup] = None
-    ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+    ) -> Optional[Dict[str, Union[torch.Tensor, Any]]]:
         """Broadcast the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -512,7 +533,7 @@ class GroupCoordinator:
                                          device=value.device)
                     if tensor.numel() == 0:
                         # Skip broadcasting empty tensors.
-                        tensor_dict[key] = tensor
+                        _update_nested_dict(tensor_dict, key, tensor)
                         continue
                     if tensor.is_cpu:
                         # use metadata_group for CPU tensors
@@ -528,18 +549,18 @@ class GroupCoordinator:
                                                              group=group,
                                                              async_op=True)
                     async_handles.append(handle)
-                    tensor_dict[key] = tensor
+                    _update_nested_dict(tensor_dict, key, tensor)
                 else:
-                    tensor_dict[key] = value
+                    _update_nested_dict(tensor_dict, key, value)
             for async_handle in async_handles:
                 async_handle.wait()
         return tensor_dict
 
     def send_tensor_dict(
         self,
-        tensor_dict: Dict[Any, Union[torch.Tensor, Any]],
+        tensor_dict: Dict[str, Union[torch.Tensor, Any]],
         dst: Optional[int] = None
-    ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+    ) -> Optional[Dict[str, Union[torch.Tensor, Any]]]:
         """Send the input tensor dictionary.
         NOTE: `dst` is the local rank of the source rank.
         """
@@ -578,7 +599,7 @@ class GroupCoordinator:
     def recv_tensor_dict(
         self,
         src: Optional[int] = None
-    ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+    ) -> Optional[Dict[str, Union[torch.Tensor, Any]]]:
         """Recv the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -594,7 +615,7 @@ class GroupCoordinator:
         assert src < self.world_size, f"Invalid src rank ({src})"
 
         recv_metadata_list = self.recv_object(src=src)
-        tensor_dict = {}
+        tensor_dict: Dict[str, Any] = {}
         for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
@@ -602,7 +623,7 @@ class GroupCoordinator:
                                      device=value.device)
                 if tensor.numel() == 0:
                     # Skip broadcasting empty tensors.
-                    tensor_dict[key] = tensor
+                    _update_nested_dict(tensor_dict, key, tensor)
                     continue
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
@@ -612,9 +633,9 @@ class GroupCoordinator:
                 else:
                     # use group for GPU tensors
                     torch.distributed.recv(tensor, src=src, group=group)
-                tensor_dict[key] = tensor
+                _update_nested_dict(tensor_dict, key, tensor)
             else:
-                tensor_dict[key] = value
+                _update_nested_dict(tensor_dict, key, value)
         return tensor_dict
 
     def barrier(self):
@@ -674,6 +695,28 @@ _WORLD: Optional[GroupCoordinator] = None
 def get_world_group() -> GroupCoordinator:
     assert _WORLD is not None, ("world group is not initialized")
     return _WORLD
+
+
+def init_world_group(ranks: List[int], local_rank: int,
+                     backend: str) -> GroupCoordinator:
+    return GroupCoordinator(
+        group_ranks=[ranks],
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        use_pynccl=False,
+        use_custom_allreduce=False,
+    )
+
+
+def init_model_parallel_group(group_ranks: List[List[int]], local_rank: int,
+                              backend: str) -> GroupCoordinator:
+    return GroupCoordinator(
+        group_ranks=group_ranks,
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        use_pynccl=True,
+        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
+    )
 
 
 _TP: Optional[GroupCoordinator] = None
@@ -764,13 +807,7 @@ def init_distributed_environment(
     global _WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = GroupCoordinator(
-            group_ranks=[ranks],
-            local_rank=local_rank,
-            torch_distributed_backend=backend,
-            use_pynccl=False,
-            use_custom_allreduce=False,
-        )
+        _WORLD = init_world_group(ranks, local_rank, backend)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
@@ -827,13 +864,8 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
-    _TP = GroupCoordinator(
-        group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank,
-        torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
-    )
+    _TP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank, backend)
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
@@ -845,13 +877,8 @@ def initialize_model_parallel(
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group_ranks.append(ranks)
-    _PP = GroupCoordinator(
-        group_ranks=group_ranks,
-        local_rank=get_world_group().local_rank,
-        torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=_ENABLE_CUSTOM_ALL_REDUCE,
-    )
+    _PP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank, backend)
 
 
 def ensure_model_parallel_initialized(
@@ -885,6 +912,34 @@ def ensure_model_parallel_initialized(
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
     return (_TP is not None and _PP is not None)
+
+
+_TP_STATE_PATCHED = False
+
+
+@contextmanager
+def patch_tensor_parallel_group(tp_group: GroupCoordinator):
+    """Patch the tp group temporarily until this function ends.
+
+    This method is for draft workers of speculative decoding to run draft model
+    with different tp degree from that of target model workers.
+
+    Args:
+        tp_group (GroupCoordinator): the tp group coordinator
+    """
+    global _TP_STATE_PATCHED
+    assert not _TP_STATE_PATCHED, "Should not call when it's already patched"
+
+    _TP_STATE_PATCHED = True
+    old_tp_group = get_tp_group()
+    global _TP
+    _TP = tp_group
+    try:
+        yield
+    finally:
+        # restore the original state
+        _TP_STATE_PATCHED = False
+        _TP = old_tp_group
 
 
 def get_tensor_model_parallel_world_size():
