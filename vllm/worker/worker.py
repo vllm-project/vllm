@@ -93,7 +93,7 @@ class Worker(WorkerBase):
         self.cache_engine: List[CacheEngine]
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: List[Optional[List[torch.tensor]]] = [
-            None for _ in range(parallel_config.pipeline_parallel_size)
+            None for _ in range(parallel_config.pipeline_parallel_size-1)
         ]
         self.execution_queue = Queue()
         self.output_queue = Queue()
@@ -209,11 +209,11 @@ class Worker(WorkerBase):
         self.cache_engine = [
             CacheEngine(self.cache_config, self.model_config,
                         self.parallel_config)
-            for _ in range(self.parallel_config.pipeline_parallel_size)
+            for _ in range(self.parallel_config.pipeline_parallel_size-1)
         ]
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
-            for ve in range(self.parallel_config.pipeline_parallel_size)
+            for ve in range(self.parallel_config.pipeline_parallel_size-1)
         ]
         self.driver_thread.start()
 

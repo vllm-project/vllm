@@ -28,6 +28,7 @@ ARTIFICIAL_PREEMPTION_MAX_CNT = 500
 
 def synchronized(method):
     """ Synchronization decorator at the instance level. """
+    return method
 
     @wraps(method)
     def synced_method(self, *args, **kwargs):
@@ -297,11 +298,11 @@ class Scheduler:
 
         num_gpu_blocks = cache_config.num_gpu_blocks
         if num_gpu_blocks:
-            num_gpu_blocks //= parallel_config.pipeline_parallel_size
+            num_gpu_blocks //= parallel_config.pipeline_parallel_size-1
 
         num_cpu_blocks = cache_config.num_cpu_blocks
         if num_cpu_blocks:
-            num_cpu_blocks //= parallel_config.pipeline_parallel_size
+            num_cpu_blocks //= parallel_config.pipeline_parallel_size-1
 
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
@@ -978,6 +979,7 @@ class Scheduler:
             num_lookahead_slots=self._get_num_lookahead_slots(is_prefill),
         )
 
+    @synchronized
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
 
         # if self.num_running_batches > 0:
@@ -1083,13 +1085,16 @@ class Scheduler:
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         self.block_manager.fork(parent_seq, child_seq)
 
+    @synchronized
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
         self.block_manager.free(seq)
 
+    @synchronized
     def complete_mb(self) -> None:
         self.num_running_batches -= 1
 
+    @synchronized
     def free_finished_seq_groups(self) -> None:
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())
