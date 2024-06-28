@@ -274,6 +274,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         forked_blocks: List[Block] = []
         prev_block = None
         for block in source_blocks:
+            assert block.block_id is not None
             refcount = self._refcounter.incr(block.block_id)
             assert refcount != 1, "can't fork free'd block"
 

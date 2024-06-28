@@ -451,7 +451,7 @@ class TestPrefixCachingBlockAllocator:
         random.seed(seed)
 
         all_blocks_list = [i for i in range(num_blocks)]
-        zero_ref = {i: 0 for i in range(num_blocks)}
+        zero_ref = [0] * num_blocks
         allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
                                                 block_size=block_size)
         token_ids = list(range(num_blocks * block_size))
