@@ -163,6 +163,35 @@ class LRUCache(Generic[T]):
         self.cache.clear()
 
 
+class MonitoredList(list):
+    """Used to monitor whether a list got updated via timestamping
+    """
+    start_timestamp = 0
+
+    def __init__(self, iterable):
+        super().__init__(iterable)
+        self._timestamp = 1
+
+    def __setitem__(self, index, item):
+        super().__setitem__(index, item)
+        self._timestamp += 1
+
+    def insert(self, index, item):
+        super().insert(index, item)
+        self._timestamp += 1
+
+    def append(self, item):
+        super().append(item)
+        self._timestamp += 1
+
+    def extend(self, other):
+        super().extend(other)
+        self._timestamp += 1
+
+    def get_timestamp(self):
+        return self._timestamp
+
+
 def is_hip() -> bool:
     return torch.version.hip is not None
 

@@ -11,6 +11,7 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.utils import MonitoredList
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
@@ -119,47 +120,68 @@ class SequenceData:
         if output_token_ids is None:
             output_token_ids = []
 
-        self._prompt_token_ids: List[int] = prompt_token_ids
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
 
-        self._output_token_ids: List[int] = output_token_ids
-        self._output_token_ids_tuple: Tuple[int, ...] = tuple(output_token_ids)
+        self._prompt_token_ids: MonitoredList = MonitoredList(prompt_token_ids)
+        self._output_token_ids: MonitoredList = MonitoredList(output_token_ids)
 
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
 
-        self._update_cached_all_tokens()
+        self._update_cached_all_tokens(force=True)
 
-    def _update_cached_all_tokens(self):
+    def _reset_timestamps(self):
+        self._ts_prompt_token_ids = MonitoredList.start_timestamp
+        self._ts_output_token_ids = MonitoredList.start_timestamp
+
+    def _update_cached_all_tokens(self, force):
+        if force:
+            self._reset_timestamps()
+
+        has_new_tokens = (self._ts_prompt_token_ids !=
+                          self._prompt_token_ids.get_timestamp()) or (
+                              self._ts_output_token_ids !=
+                              self._output_token_ids.get_timestamp())
+
+        if not has_new_tokens:
+            return
+
+        self._ts_prompt_token_ids = self._prompt_token_ids.get_timestamp()
+        self._ts_output_token_ids = self._output_token_ids.get_timestamp()
         self._cached_all_token_ids = (self._prompt_token_ids +
                                       self._output_token_ids)
 
     @property
-    def prompt_token_ids(self) -> Tuple[int, ...]:
-        return self._prompt_token_ids_tuple
+    def prompt_token_ids(self) -> List[int]:
+        return self._prompt_token_ids
 
     @prompt_token_ids.setter
     def prompt_token_ids(self, new_prompt_token_ids) -> None:
-        self._prompt_token_ids = new_prompt_token_ids
+        self._prompt_token_ids = MonitoredList(new_prompt_token_ids)
         self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
-        self._update_cached_all_tokens()
+        self._update_cached_all_tokens(force=True)
 
     @property
-    def output_token_ids(self) -> Tuple[int, ...]:
-        return self._output_token_ids_tuple
+    def output_token_ids(self) -> List[int]:
+        return self._output_token_ids
 
     @output_token_ids.setter
     def output_token_ids(self, new_output_token_ids) -> None:
-        self._output_token_ids = new_output_token_ids
-        self._output_token_ids_tuple = tuple(new_output_token_ids)
-        self._update_cached_all_tokens()
+        self._output_token_ids = MonitoredList(new_output_token_ids)
+        self._update_cached_all_tokens(force=True)
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
-        self._output_token_ids_tuple += (token_id, )
-        self._cached_all_token_ids.append(token_id)
+
+        # If it is an incremental update, then do it locally here
+        # (to avoid an expensive full update)
+        ts_new = self._output_token_ids.get_timestamp()
+        if self._ts_output_token_ids + 1 == ts_new:
+            self._ts_output_token_ids = ts_new
+            self._cached_all_token_ids.append(token_id)
+
         self.cumulative_logprob += logprob
 
     def get_len(self) -> int:
@@ -172,6 +194,7 @@ class SequenceData:
         return len(self.output_token_ids)
 
     def get_token_ids(self) -> List[int]:
+        self._update_cached_all_tokens(force=False)
         return self._cached_all_token_ids
 
     def get_prefix_token_ids(
@@ -218,10 +241,10 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
-    def get_prompt_token_ids(self) -> Tuple[int, ...]:
+    def get_prompt_token_ids(self) -> List[int]:
         return self.prompt_token_ids
 
-    def get_output_token_ids(self) -> Tuple[int, ...]:
+    def get_output_token_ids(self) -> List[int]:
         return self.output_token_ids
 
     @property
@@ -337,14 +360,14 @@ class Sequence:
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
 
-    def get_prompt_token_ids(self) -> Tuple[int, ...]:
+    def get_prompt_token_ids(self) -> List[int]:
         return self.data.get_prompt_token_ids()
 
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
 
-    def get_output_token_ids(self) -> Tuple[int, ...]:
-        return self.data.output_token_ids
+    def get_output_token_ids(self) -> List[int]:
+        return self.data.get_output_token_ids()
 
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
