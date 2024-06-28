@@ -1,7 +1,5 @@
 from typing import List, Optional, Protocol, Tuple
 
-import numpy as np
-
 from vllm.core.block.interfaces import Block, BlockAllocator
 
 BlockId = int
@@ -35,14 +33,13 @@ class RefCounter(RefCounterProtocol):
     def __init__(self, block_index_start, block_index_end):
         self.block_index_start = block_index_start
         self.block_index_end = block_index_end
-        self._refcounts = np.zeros((block_index_end - block_index_start),
-                                   dtype=np.int64)
+        self._refcounts = [0] * (block_index_end - block_index_start)
 
     def incr(self, block_id: BlockId) -> RefCount:
         assert self.block_index_start <= block_id < self.block_index_end
         idx = block_id - self.block_index_start
         self._refcounts[idx] += 1
-        answer = int(self._refcounts[idx])
+        answer = self._refcounts[idx]
         assert answer > 0
         return answer
 
@@ -50,14 +47,14 @@ class RefCounter(RefCounterProtocol):
         assert self.block_index_start <= block_id < self.block_index_end
         idx = block_id - self.block_index_start
         self._refcounts[idx] -= 1
-        answer = int(self._refcounts[idx])
+        answer = self._refcounts[idx]
         assert answer >= 0
         return answer
 
     def get(self, block_id: BlockId) -> RefCount:
         assert self.block_index_start <= block_id < self.block_index_end
         idx = block_id - self.block_index_start
-        answer = int(self._refcounts[idx])
+        answer = self._refcounts[idx]
         return answer
 
     def as_readonly(self) -> "ReadOnlyRefCounter":
