@@ -105,12 +105,14 @@ class OpenAIServingChat(OpenAIServing):
         if model_type == "phi3_v":
             # Workaround since this token is not defined in the tokenizer
             return "<|image_1|>"
-        if model_type in ("blip-2", "fuyu", "paligemma"):
+        if model_type in ("blip-2", "chatglm", "fuyu", "minicpmv",
+                          "paligemma"):
             # These models do not use image tokens in the prompt
             return None
 
         # The default behaviour assumes that the image token is
-        # available to the tokenizer. (Suitable for LLaVA)
+        # available to the tokenizer.
+        # (Suitable for LLaVA, Idefics2, DeepSeek-VL)
         vlm_config = self.model_config.multimodal_config
         if vlm_config is None:
             raise ValueError(
