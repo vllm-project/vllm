@@ -69,10 +69,14 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences."""
         raise NotImplementedError
+
+    def stop_remote_worker_execution_loop(self) -> None:
+        """Releases parallel workers from model loop."""
+        return
 
     @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -81,6 +85,10 @@ class ExecutorBase(ABC):
     @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
+
+    @abstractmethod
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError  # type: ignore
 
     @abstractmethod
     def list_loras(self) -> Set[int]:
@@ -108,6 +116,10 @@ class ExecutorAsyncBase(ExecutorBase):
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         """Executes one model step on the given sequences."""
         raise NotImplementedError
+
+    async def stop_remote_worker_execution_loop_async(self) -> None:
+        """Releases parallel workers from model loop."""
+        return
 
     async def check_health_async(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an

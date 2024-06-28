@@ -9,7 +9,6 @@ from torch.distributed import ProcessGroup, ReduceOp
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
     ncclRedOpTypeEnum, ncclUniqueId)
-from vllm.distributed.parallel_state import get_cpu_world_group, get_local_rank
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -19,8 +18,8 @@ class PyNcclCommunicator:
 
     def __init__(
         self,
-        group: Optional[ProcessGroup] = None,
-        device: Optional[Union[int, str, torch.device]] = None,
+        group: ProcessGroup,
+        device: Union[int, str, torch.device],
         library_path: Optional[str] = None,
     ):
         """
@@ -35,7 +34,6 @@ class PyNcclCommunicator:
         is bind to a unique device.
         """
         assert dist.is_initialized()
-        group = get_cpu_world_group() if group is None else group
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "PyNcclCommunicator should be attached to a non-NCCL group.")
         self.group = group
@@ -77,10 +75,7 @@ class PyNcclCommunicator:
         byte_list = tensor.tolist()
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
-        if device is None:
-            local_rank = get_local_rank()
-            device = torch.device(f"cuda:{local_rank}")
-        elif isinstance(device, int):
+        if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
             device = torch.device(device)
@@ -96,8 +91,10 @@ class PyNcclCommunicator:
             self.stream = torch.cuda.Stream()
 
             # A small all_reduce for warmup.
-            self.all_reduce(torch.zeros(1, device=device))
+            data = torch.zeros(1, device=device)
+            self.all_reduce(data)
             self.stream.synchronize()
+            del data
 
         # by default it is disabled, e.g. in profiling models and prefill phase.
         # to use it, use under `with obj.change_state(enable=True)`, usually
@@ -123,6 +120,30 @@ class PyNcclCommunicator:
                                 ncclDataTypeEnum.from_torch(tensor.dtype),
                                 ncclRedOpTypeEnum.from_torch(op), self.comm,
                                 cudaStream_t(stream.cuda_stream))
+
+    def send(self, tensor: torch.Tensor, dst: int, stream=None):
+        if self.disabled:
+            return
+        assert tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {tensor.device}")
+        if stream is None:
+            stream = self.stream
+        self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
+                           ncclDataTypeEnum.from_torch(tensor.dtype), dst,
+                           self.comm, cudaStream_t(stream.cuda_stream))
+
+    def recv(self, tensor: torch.Tensor, src: int, stream=None):
+        if self.disabled:
+            return
+        assert tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {tensor.device}")
+        if stream is None:
+            stream = self.stream
+        self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
+                           ncclDataTypeEnum.from_torch(tensor.dtype), src,
+                           self.comm, cudaStream_t(stream.cuda_stream))
 
     @contextmanager
     def change_state(self,

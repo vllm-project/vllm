@@ -78,7 +78,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Since there's only one sequence per sequence group, we can take the
         # first sample.
-        samples = [outputs[step].samples[0] for step in range(len(outputs))]
+        samples = [output.samples[0] for output in outputs]
 
         # -1 means the output token is not valid (eg. due to spec decode
         # rejecting tokens).
@@ -131,10 +131,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, sampling_params)
 
+            # TODO(sang): Support lora.
             self.stop_checker.maybe_stop_sequence(
                 seq,
                 new_char_count=new_char_count,
-                sampling_params=sampling_params)
+                sampling_params=sampling_params,
+            )
             if seq.is_finished():
                 break
 

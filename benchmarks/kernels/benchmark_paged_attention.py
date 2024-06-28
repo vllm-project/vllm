@@ -1,12 +1,12 @@
-import argparse
 import random
 import time
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
+                        create_kv_caches_with_random)
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512
@@ -54,14 +54,17 @@ def main(
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
-    block_tables = []
+    block_tables_lst: List[List[int]] = []
     for _ in range(num_seqs):
         block_table = [
             random.randint(0, NUM_BLOCKS - 1)
             for _ in range(max_num_blocks_per_seq)
         ]
-        block_tables.append(block_table)
-    block_tables = torch.tensor(block_tables, dtype=torch.int, device=device)
+        block_tables_lst.append(block_table)
+
+    block_tables = torch.tensor(block_tables_lst,
+                                dtype=torch.int,
+                                device=device)
 
     # Create the KV cache.
     key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,
@@ -158,19 +161,19 @@ def main(
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Benchmark the paged attention kernel.")
     parser.add_argument("--version",
                         type=str,
                         choices=["v1", "v2"],
                         default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--seq_len", type=int, default=4096)
+    parser.add_argument("--seq-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
     parser.add_argument("--head-size",
                         type=int,
-                        choices=[64, 80, 96, 112, 128, 256],
+                        choices=[64, 80, 96, 112, 128, 192, 256],
                         default=128)
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
     parser.add_argument("--use-alibi", action="store_true")
@@ -183,13 +186,11 @@ if __name__ == '__main__':
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=["auto", "fp8"],
+        choices=["auto", "fp8", "fp8_e5m2", "fp8_e4m3"],
         default="auto",
-        help=
-        'Data type for kv cache storage. If "auto", will use model data type. '
-        'FP8_E5M2 (without scaling) is only supported on cuda version greater '
-        'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
-        'common inference criteria.')
+        help="Data type for kv cache storage. If 'auto', will use model "
+        "data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. "
+        "ROCm (AMD GPU) supports fp8 (=fp8_e4m3)")
     args = parser.parse_args()
     print(args)
 

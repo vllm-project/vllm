@@ -10,8 +10,9 @@ from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
 from vllm.sampling_params import SamplingType
-from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
-                           SamplerOutput, SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
+                           PromptLogprobs, SampleLogprobs, SamplerOutput,
+                           SequenceOutput)
 
 # (num_token_ids, num_parent_ids) per sequence group.
 SampleResultType = List[Tuple[List[int], List[int]]]
@@ -173,7 +174,7 @@ def _apply_min_tokens_penalty(
         min_tokens = sampling_params.min_tokens
         token_ids_to_penalize = sampling_params.all_stop_token_ids
         if min_tokens > 0 and token_ids_to_penalize:
-            seqs_to_penalize = []
+            seqs_to_penalize: List[int] = []
             for j, seq_id in enumerate(seq_ids):
                 seq_data = seq_group.seq_data[seq_id]
                 if len(seq_data.output_token_ids) < min_tokens:
@@ -284,7 +285,7 @@ def _greedy_sample(
         same as the length of selected_seq_groups. If the corresponding
         seq_group has do_sample=False, tuple contains ([], [])
     """
-    samples = samples.tolist()
+    samples_lst = samples.tolist()
     sample_idx = 0
     results: SampleResultType = []
     for seq_group in selected_seq_groups:
@@ -297,7 +298,7 @@ def _greedy_sample(
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
-        next_token_ids = [samples[sample_idx]]
+        next_token_ids = [samples_lst[sample_idx]]
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     return results
@@ -393,7 +394,7 @@ def _beam_search_sample(
             next_token_ids = next_token_ids.tolist()
         else:
             # Generation phase.
-            cumulative_logprobs: List[int] = [
+            cumulative_logprobs: List[float] = [
                 seq_group.seq_data[seq_id].cumulative_logprob
                 for seq_id in seq_ids
             ]
@@ -465,8 +466,9 @@ def _sample_with_torch(
         categorized_seq_group_ids[sampling_type].append(i)
 
     sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
-    sample_metadata = {}
-    multinomial_samples = {}
+    sample_metadata: Dict[SamplingType,
+                          Tuple[List[int], List[SequenceGroupToSample]]] = {}
+    multinomial_samples: Dict[SamplingType, torch.Tensor] = {}
 
     # Create output tensor for sampled token ids.
     if include_gpu_probs_tensor:
@@ -493,7 +495,7 @@ def _sample_with_torch(
             greedy_samples = torch.argmax(logprobs[long_sample_indices],
                                           dim=-1)
 
-            if include_gpu_probs_tensor:
+            if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
                 sampled_token_ids_tensor[
                     long_sample_indices] = greedy_samples.unsqueeze(-1)
@@ -521,7 +523,7 @@ def _sample_with_torch(
                 probs[long_sample_indices], max_best_of_in_batch,
                 **seeded_args)
 
-            if include_gpu_probs_tensor:
+            if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
                 sampled_token_ids_tensor[
                     long_sample_indices] = multinomial_samples[sampling_type]
@@ -570,7 +572,9 @@ def _sample_with_triton_kernel(
         categorized_seq_group_ids[sampling_type].append(i)
 
     sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
-    sample_metadata = {}
+    sample_metadata: Dict[SamplingType,
+                          Tuple[List[int], List[SequenceGroupToSample],
+                                torch.Tensor, torch.Tensor]] = {}
     max_best_of_in_batch = 1
 
     # Counterintiutively, having two loops here is actually faster.
@@ -680,7 +684,9 @@ def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     """
     vals = x[torch.arange(0, len(x), device=x.device, dtype=indices.dtype),
              indices]
-    return (x > vals[:, None]).long().sum(1).add_(1)
+    result = (x > vals[:, None])
+    del vals
+    return result.sum(1).add_(1)
 
 
 def _get_logprobs(
@@ -1005,21 +1011,21 @@ def _build_sampler_output(
             speculative decoding rejection sampling.
     """
 
-    sampler_output = []
+    sampler_output: List[CompletionSequenceGroupOutput] = []
     for (seq_group, sample_result, group_prompt_logprobs,
          group_sample_logprobs) in zip(sampling_metadata.seq_groups,
                                        sample_results, prompt_logprobs,
                                        sample_logprobs):
         seq_ids = seq_group.seq_ids
         next_token_ids, parent_ids = sample_result
-        seq_outputs = []
+        seq_outputs: List[SequenceOutput] = []
         for parent_id, next_token_id, logprobs in zip(parent_ids,
                                                       next_token_ids,
                                                       group_sample_logprobs):
             seq_outputs.append(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
-            SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
+            CompletionSequenceGroupOutput(seq_outputs, group_prompt_logprobs))
 
     # If not specified, store None values in SamplerOutput.
     if on_device_tensors is not None:

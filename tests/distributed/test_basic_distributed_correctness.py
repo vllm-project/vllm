@@ -4,10 +4,12 @@ by one. The solution is to pass arguments (model name) by environment
 variables.
 Run:
 ```sh
+cd $VLLM_PATH/tests
+
 TEST_DIST_MODEL=facebook/opt-125m pytest \
-    test_basic_distributed_correctness.py
+    distributed/test_basic_distributed_correctness.py
 TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
-    test_basic_distributed_correctness.py
+    distributed/test_basic_distributed_correctness.py
 ```
 """
 import os
@@ -18,6 +20,7 @@ import torch
 MODELS = [
     os.environ["TEST_DIST_MODEL"],
 ]
+DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
 VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 
@@ -34,21 +37,21 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    enforce_eager = False
+    distributed_executor_backend = os.getenv(DISTRIBUTED_EXECUTOR_BACKEND)
+
     backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
-    if backend_by_env_var == "FLASHINFER":
-        enforce_eager = True
+    enforce_eager = backend_by_env_var == "FLASHINFER"
 
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-    del hf_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    vllm_model = vllm_runner(model,
-                             dtype=dtype,
-                             tensor_parallel_size=2,
-                             enforce_eager=enforce_eager)
-    vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    del vllm_model
+    with vllm_runner(model,
+                     dtype=dtype,
+                     tensor_parallel_size=2,
+                     enforce_eager=enforce_eager,
+                     distributed_executor_backend=distributed_executor_backend
+                     ) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]

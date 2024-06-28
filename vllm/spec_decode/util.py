@@ -1,25 +1,13 @@
 from contextlib import contextmanager
-from itertools import chain
 from typing import Dict, List, Tuple
 
 import torch
 
-from vllm.sequence import (Logprob, SamplerOutput, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
+                           SamplerOutput, SequenceGroupMetadata,
+                           SequenceOutput)
 
 SeqId = int
-
-
-def get_all_seq_ids(
-        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[SeqId]:
-    """Given a list of SequenceGroupMetadata, create a list of all
-    sequence ids.
-    """
-    return list(
-        chain.from_iterable([
-            seq_group_metadata.seq_data.keys()
-            for seq_group_metadata in seq_group_metadata_list
-        ]))
 
 
 def get_all_num_logprobs(
@@ -30,10 +18,10 @@ def get_all_num_logprobs(
     sequence.
     """
 
-    all_num_logprobs = []
+    all_num_logprobs: List[int] = []
     for seq_group_metadata in seq_group_metadata_list:
         num_logprobs = seq_group_metadata.sampling_params.logprobs
-        if seq_group_metadata.sampling_params.logprobs is None:
+        if num_logprobs is None:
             num_logprobs = 0
         all_num_logprobs.append(num_logprobs)
 
@@ -67,7 +55,7 @@ def create_sequence_group_output(
     seq_id: SeqId,
     topk_token_ids: List[int],
     topk_logprobs: List[float],
-) -> SequenceGroupOutput:
+) -> CompletionSequenceGroupOutput:
     """Create a SequenceGroupOutput given the sampling results.
 
     Args:
@@ -94,7 +82,7 @@ def create_sequence_group_output(
         for topk_logprob_index, _ in enumerate(topk_token_ids)
     })
 
-    return SequenceGroupOutput(
+    return CompletionSequenceGroupOutput(
         samples=[
             SequenceOutput(parent_seq_id=seq_id,
                            output_token=token_id,

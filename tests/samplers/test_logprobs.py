@@ -1,8 +1,11 @@
+from typing import List
+
 import pytest
 import torch
 
-from tests.conftest import VllmRunner
 from vllm import SamplingParams
+
+from ..conftest import VllmRunner
 
 MODELS = ["facebook/opt-125m"]
 
@@ -11,6 +14,7 @@ MODELS = ["facebook/opt-125m"]
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("num_top_logprobs", [6])  # 32000 == vocab_size
+@pytest.mark.parametrize("detokenize", [True, False])
 def test_get_prompt_logprobs(
     hf_runner,
     vllm_runner,
@@ -18,6 +22,7 @@ def test_get_prompt_logprobs(
     dtype,
     chunked_prefill_token_size: int,
     num_top_logprobs: int,
+    detokenize: bool,
     example_prompts,
 ):
     max_num_seqs = 256
@@ -29,27 +34,27 @@ def test_get_prompt_logprobs(
         max_num_batched_tokens = chunked_prefill_token_size
 
     max_tokens = 5
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_logprobs = hf_model.generate_greedy_logprobs(
-        example_prompts,
-        max_tokens=max_tokens,
-    )
-    del hf_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_logprobs = hf_model.generate_greedy_logprobs(
+            example_prompts,
+            max_tokens=max_tokens,
+        )
 
-    vllm_model = vllm_runner(
-        model,
-        dtype=dtype,
-        max_logprobs=num_top_logprobs,
-        enable_chunked_prefill=enable_chunked_prefill,
-        max_num_batched_tokens=max_num_batched_tokens,
-        max_num_seqs=max_num_seqs,
-    )
-    vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
-                                          logprobs=num_top_logprobs,
-                                          prompt_logprobs=num_top_logprobs,
-                                          temperature=0.0)
-    vllm_results = vllm_model.model.generate(
-        example_prompts, sampling_params=vllm_sampling_params)
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            max_logprobs=num_top_logprobs,
+            enable_chunked_prefill=enable_chunked_prefill,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+    ) as vllm_model:
+        vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
+                                              logprobs=num_top_logprobs,
+                                              prompt_logprobs=num_top_logprobs,
+                                              temperature=0.0,
+                                              detokenize=detokenize)
+        vllm_results = vllm_model.model.generate(
+            example_prompts, sampling_params=vllm_sampling_params)
 
     # Test whether logprobs are included in the results.
     for result in vllm_results:
@@ -59,16 +64,22 @@ def test_get_prompt_logprobs(
         for logprobs in result.outputs[0].logprobs:
             assert len(logprobs) == num_top_logprobs
         output_text = result.outputs[0].text
-        output_string_from_most_likely_tokens = []
+        output_string_from_most_likely_tokens_lst: List[str] = []
         for top_logprobs in result.outputs[0].logprobs:
             top_logprob = next(iter(top_logprobs.values()))
-            output_string_from_most_likely_tokens.append(
+            output_string_from_most_likely_tokens_lst.append(
                 top_logprob.decoded_token)
-        output_string_from_most_likely_tokens = "".join(
-            output_string_from_most_likely_tokens)
-        assert output_text == output_string_from_most_likely_tokens, (
-            "The output text from the top logprob for each token position "
-            "should be the same as the output text in the result.")
+
+        if detokenize:
+            output_string_from_most_likely_tokens = "".join(
+                output_string_from_most_likely_tokens_lst)
+            assert output_text == output_string_from_most_likely_tokens, (
+                "The output text from the top logprob for each token position "
+                "should be the same as the output text in the result.")
+        else:
+            assert output_text == ''
+            assert output_string_from_most_likely_tokens_lst == ([None] *
+                                                                 max_tokens)
 
         # The first prompt logprob is always None
         assert result.prompt_logprobs[0] is None
@@ -97,9 +108,10 @@ def test_get_prompt_logprobs(
                                            hf_logprob[i][-1][token_id].item(),
                                            atol=1e-2,
                                            rtol=1e-2)
-                assert isinstance(sample_logprob.decoded_token, str), (
-                    "The token should be decoded by the time it is returned "
-                    " to the user.")
+                if detokenize:
+                    assert isinstance(sample_logprob.decoded_token, str), (
+                        "The token should be decoded by the time it is returned"
+                        " to the user.")
 
     # Test if prompt logprobs are correctly set.
     for vllm_result in vllm_results:

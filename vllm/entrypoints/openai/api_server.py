@@ -15,24 +15,35 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 from starlette.routing import Mount
 
-import vllm
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
-                                              CompletionRequest, ErrorResponse)
+                                              CompletionRequest,
+                                              DetokenizeRequest,
+                                              DetokenizeResponse,
+                                              EmbeddingRequest, ErrorResponse,
+                                              TokenizeRequest,
+                                              TokenizeResponse)
+# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
+from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
-logger = init_logger(__name__)
+openai_serving_embedding: OpenAIServingEmbedding
+
+logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
 
@@ -81,6 +92,28 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
+@app.post("/tokenize")
+async def tokenize(request: TokenizeRequest):
+    generator = await openai_serving_completion.create_tokenize(request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        assert isinstance(generator, TokenizeResponse)
+        return JSONResponse(content=generator.model_dump())
+
+
+@app.post("/detokenize")
+async def detokenize(request: DetokenizeRequest):
+    generator = await openai_serving_completion.create_detokenize(request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        assert isinstance(generator, DetokenizeResponse)
+        return JSONResponse(content=generator.model_dump())
+
+
 @app.get("/v1/models")
 async def show_available_models():
     models = await openai_serving_chat.show_available_models()
@@ -89,7 +122,7 @@ async def show_available_models():
 
 @app.get("/version")
 async def show_version():
-    ver = {"version": vllm.__version__}
+    ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
 
 
@@ -123,6 +156,17 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
+@app.post("/v1/embeddings")
+async def create_embedding(request: EmbeddingRequest, raw_request: Request):
+    generator = await openai_serving_embedding.create_embedding(
+        request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        return JSONResponse(content=generator.model_dump())
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -139,6 +183,8 @@ if __name__ == "__main__":
         @app.middleware("http")
         async def authentication(request: Request, call_next):
             root_path = "" if args.root_path is None else args.root_path
+            if request.method == "OPTIONS":
+                return await call_next(request)
             if not request.url.path.startswith(f"{root_path}/v1"):
                 return await call_next(request)
             if request.headers.get("Authorization") != "Bearer " + token:
@@ -157,7 +203,7 @@ if __name__ == "__main__":
             raise ValueError(f"Invalid middleware {middleware}. "
                              f"Must be a function or a class.")
 
-    logger.info("vLLM API server version %s", vllm.__version__)
+    logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
     if args.served_model_name is not None:
@@ -166,6 +212,16 @@ if __name__ == "__main__":
         served_model_names = [args.model]
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
+
+    # Enforce pixel values as image input type for vision language models
+    # when serving with API server
+    if engine_args.image_input_type is not None and \
+        engine_args.image_input_type.upper() != "PIXEL_VALUES":
+        raise ValueError(
+            f"Invalid image_input_type: {engine_args.image_input_type}. "
+            "Only --image-input-type 'pixel_values' is supported for serving "
+            "vision language models with the vLLM API server.")
+
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
 
@@ -190,7 +246,8 @@ if __name__ == "__main__":
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
         engine, model_config, served_model_names, args.lora_modules)
-
+    openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
+                                                      served_model_names)
     app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,
