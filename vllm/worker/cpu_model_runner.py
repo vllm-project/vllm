@@ -204,11 +204,18 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
+        max_seqlen = max(seq_lens)
+        tmp = [0]
+        tmp.extend(seq_lens)
+        seqlen = torch.tensor(tmp)
+        seqlen_q = torch.cumsum(seqlen, dim=0).to("cpu")
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             seq_lens=seq_lens,
             seq_lens_tensor=None,
+            max_seqlen=max_seqlen,
+            seqlen_q=seqlen_q,
             max_decode_seq_len=None,
             num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,

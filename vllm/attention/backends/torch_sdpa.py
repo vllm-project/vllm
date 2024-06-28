@@ -13,9 +13,12 @@ from vllm.utils import is_cpu
 
 if is_cpu():
     try:
+        from vllm._ipex_ops import ipex_ops
         from vllm.attention.ops.ipex_attn import PagedAttention
+        use_ipex = True
     except ImportError:
         from vllm.attention.ops.paged_attn import PagedAttention
+        use_ipex = False
 else:
     from vllm.attention.ops.paged_attn import PagedAttention
 
@@ -69,6 +72,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     is_prompt: bool
     slot_mapping: torch.Tensor
     seq_lens: Optional[List[int]]
+    max_seqlen: Optional[int] = None
+    seqlen_q: Optional[torch.tensor] = None
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -179,42 +184,63 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
                     value = value.repeat_interleave(self.num_queries_per_kv,
                                                     dim=1)
+                if use_ipex:
+                    output = torch.empty(
+                        (num_tokens, self.num_heads, self.head_size),
+                        dtype=query.dtype,
+                        device=query.device)
+                    # ipex-cpu provide varlen_attention API
+                    # which could perform better than torch.sdpa
+                    ipex_ops.varlen_attention(query,
+                                              key,
+                                              value,
+                                              output,
+                                              attn_metadata.seqlen_q,
+                                              attn_metadata.seqlen_q,
+                                              attn_metadata.max_seqlen,
+                                              attn_metadata.max_seqlen,
+                                              pdropout=0.0,
+                                              softmax_scale=self.scale,
+                                              zero_tensors=False,
+                                              is_causal=True,
+                                              return_softmax=False,
+                                              gen_=None)
+                else:
+                    if attn_metadata.attn_bias is None:
+                        if self.alibi_slopes is not None:
+                            att_masks = _make_alibi_bias(
+                                self.alibi_slopes, query.dtype,
+                                attn_metadata.seq_lens)  # type: ignore
+                        elif self.sliding_window is not None:
+                            att_masks = _make_sliding_window_bias(
+                                attn_metadata.seq_lens, self.sliding_window,
+                                query.dtype)  # type: ignore
+                        else:
+                            att_masks = [None] * len(attn_metadata.seq_lens)
+                        attn_metadata.attn_bias = att_masks
 
-                if attn_metadata.attn_bias is None:
-                    if self.alibi_slopes is not None:
-                        att_masks = _make_alibi_bias(
-                            self.alibi_slopes, query.dtype,
-                            attn_metadata.seq_lens)  # type: ignore
-                    elif self.sliding_window is not None:
-                        att_masks = _make_sliding_window_bias(
-                            attn_metadata.seq_lens, self.sliding_window,
-                            query.dtype)  # type: ignore
-                    else:
-                        att_masks = [None] * len(attn_metadata.seq_lens)
-                    attn_metadata.attn_bias = att_masks
+                    query = query.movedim(0, query.dim() - 2)
+                    key = key.movedim(0, key.dim() - 2)
+                    value = value.movedim(0, value.dim() - 2)
 
-                query = query.movedim(0, query.dim() - 2)
-                key = key.movedim(0, key.dim() - 2)
-                value = value.movedim(0, value.dim() - 2)
-
-                start = 0
-                output = torch.empty(
-                    (num_tokens, self.num_heads, self.head_size),
-                    dtype=query.dtype)
-                for seq_len, mask in zip(attn_metadata.seq_lens,
-                                         attn_metadata.attn_bias):
-                    end = start + seq_len
-                    sub_out = scaled_dot_product_attention(
-                        query[None, :, start:end, :],
-                        key[None, :, start:end, :],
-                        value[None, :, start:end, :],
-                        attn_mask=mask,
-                        dropout_p=0.0,
-                        is_causal=not self.need_mask,
-                        scale=self.scale).squeeze(0).movedim(
-                            query.dim() - 2, 0)
-                    output[start:end, :, :] = sub_out
-                    start = end
+                    start = 0
+                    output = torch.empty(
+                        (num_tokens, self.num_heads, self.head_size),
+                        dtype=query.dtype)
+                    for seq_len, mask in zip(attn_metadata.seq_lens,
+                                             attn_metadata.attn_bias):
+                        end = start + seq_len
+                        sub_out = scaled_dot_product_attention(
+                            query[None, :, start:end, :],
+                            key[None, :, start:end, :],
+                            value[None, :, start:end, :],
+                            attn_mask=mask,
+                            dropout_p=0.0,
+                            is_causal=not self.need_mask,
+                            scale=self.scale).squeeze(0).movedim(
+                                query.dim() - 2, 0)
+                        output[start:end, :, :] = sub_out
+                        start = end
             else:
                 # prefix-enabled attention
                 raise RuntimeError(
