@@ -475,8 +475,6 @@ class MixtralModel(nn.Module):
 
 
 class MixtralForCausalLM(nn.Module, SupportsLoRA):
-    supports_lora = True
-
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
