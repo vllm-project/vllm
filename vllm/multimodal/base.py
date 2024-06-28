@@ -40,6 +40,7 @@ tensor; otherwise, this is a list of tensors with one element per batch.
 
 if sys.version_info < (3, 9):
     # UserDict cannot be subscripted
+    class _MultiModalInputsBase(UserDict):
         pass
 else:
 
