@@ -165,6 +165,7 @@ class RayMetrics(Metrics):
         super().__init__(labelnames, max_model_len)
 
     def _unregister_vllm_metrics(self) -> None:
+        # No-op on purpose
         pass
 
 
