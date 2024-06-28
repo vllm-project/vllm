@@ -1,5 +1,7 @@
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
+import numpy as np
+
 from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
@@ -131,15 +133,15 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].allocate_mutable(prev_block)
 
     def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int], device: Device) -> Block:
+                           token_ids: np.ndarray, device: Device) -> Block:
         """Allocates a new immutable block with the provided token IDs on the
         specified device.
 
         Args:
             prev_block (Optional[Block]): The previous block in the sequence.
                 Used for prefix hashing.
-            token_ids (List[int]): The list of token IDs to be stored in the new
-                block.
+            token_ids (np.ndarray): The list of token IDs to be stored in the
+                 new block.
             device (Device): The device on which to allocate the new block.
 
         Returns:
@@ -326,7 +328,7 @@ class NullBlock(Block):
         super().__init__()
         self._proxy = proxy
 
-    def append_token_ids(self, token_ids: List[BlockId]):
+    def append_token_ids(self, token_ids: np.ndarray):
         raise ValueError("null block should not be modified")
 
     @property
@@ -338,7 +340,7 @@ class NullBlock(Block):
         raise ValueError("null block should not be modified")
 
     @property
-    def token_ids(self) -> List[BlockId]:
+    def token_ids(self) -> np.ndarray:
         return self._proxy.token_ids
 
     @property

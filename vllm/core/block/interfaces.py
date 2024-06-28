@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
 
+import numpy as np
+
 from vllm.utils import Device
 
 BlockId = int
@@ -9,7 +11,7 @@ BlockId = int
 class Block(ABC):
 
     @abstractmethod
-    def append_token_ids(self, token_ids: List[int]) -> None:
+    def append_token_ids(self, token_ids: np.ndarray) -> None:
         pass
 
     @property
@@ -25,7 +27,7 @@ class Block(ABC):
 
     @property
     @abstractmethod
-    def token_ids(self) -> List[int]:
+    def token_ids(self) -> np.ndarray:
         pass
 
     @property
@@ -70,7 +72,7 @@ class Block(ABC):
         def __call__(
             self,
             prev_block: Optional["Block"],
-            token_ids: List[int],
+            token_ids: np.ndarray,
             block_size: int,
             allocator: "BlockAllocator",
             block_id: Optional[int] = None,
@@ -97,7 +99,7 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int]) -> Block:
+                           token_ids: np.ndarray) -> Block:
         pass
 
     @abstractmethod
@@ -180,7 +182,7 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int], device: Device) -> Block:
+                           token_ids: np.ndarray, device: Device) -> Block:
         pass
 
     @abstractmethod

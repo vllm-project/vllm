@@ -4,6 +4,8 @@ from itertools import takewhile
 from os.path import commonprefix
 from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 
+import numpy as np
+
 from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
@@ -76,7 +78,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def _create_block(
         self,
         prev_block: Optional[Block],
-        token_ids: List[int],
+        token_ids: np.ndarray,
         block_size: int,
         allocator: BlockAllocator,
         block_id: Optional[int] = None,
@@ -96,7 +98,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def allocate_immutable(self,
                            prev_block: Optional[Block],
-                           token_ids: List[int],
+                           token_ids: np.ndarray,
                            device: Optional[Device] = None) -> Block:
         """Allocates an immutable block with the given token IDs, reusing cached
         blocks if possible.
@@ -182,7 +184,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # its kvcache
             block = self._create_block(
                 prev_block=prev_block,
-                token_ids=[],
+                token_ids=np.zeros(0, dtype=np.int32),
                 block_size=self._block_size,
                 allocator=self,
                 block_id=block_id,
@@ -504,7 +506,7 @@ class PrefixCachingBlock(Block):
     Args:
         prev_block (Optional[PrefixCachingBlock]): The previous block in the
             sequence.
-        token_ids (List[int]): The initial token IDs to be stored in the block.
+        token_ids (np.ndarray): The initial token IDs to be stored in the block.
         block_size (int): The maximum number of token IDs that can be stored in
             the block.
         prefix_caching_allocator (BlockAllocator): The prefix
@@ -516,7 +518,7 @@ class PrefixCachingBlock(Block):
     def __init__(
         self,
         prev_block: Optional[Block],
-        token_ids: List[int],
+        token_ids: np.ndarray,
         block_size: int,
         prefix_caching_allocator: BlockAllocator,
         block_id: Optional[int] = None,
@@ -560,14 +562,14 @@ class PrefixCachingBlock(Block):
     def last_accessed(self, last_accessed_ts: float):
         self._last_accessed = last_accessed_ts
 
-    def append_token_ids(self, token_ids: List[int]) -> None:
+    def append_token_ids(self, token_ids: np.ndarray) -> None:
         """Appends the given token IDs to the block and registers the block as
         immutable if the block becomes full.
 
         Internally, the naive block handles CoW.
 
         Args:
-            token_ids (List[int]): The token IDs to be appended to the block.
+            token_ids (np.ndarray): The token IDs to be appended to the block.
         """
         assert token_ids
 
@@ -623,7 +625,7 @@ class PrefixCachingBlock(Block):
         return self._block.block_size
 
     @property
-    def token_ids(self) -> List[int]:
+    def token_ids(self) -> np.ndarray:
         return self._block.token_ids
 
     @property
@@ -666,7 +668,7 @@ class PrefixCachingBlock(Block):
 
     @staticmethod
     def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int],
-                          cur_block_token_ids: List[int]) -> int:
+                          cur_block_token_ids: np.ndarray) -> int:
         """Computes a hash value corresponding to the contents of a block and
         the contents of the preceding block(s). The hash value is used for
         prefix caching.
@@ -678,7 +680,7 @@ class PrefixCachingBlock(Block):
             the sequence.
         - prev_block_hash (Optional[int]): The hash of the previous block. None
             if this is the first block.
-        - cur_block_token_ids (List[int]): A list of token ids in the current
+        - cur_block_token_ids (np.ndarray): A list of token ids in the current
             block. The current block is assumed to be full.
 
         Returns:

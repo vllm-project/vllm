@@ -1,7 +1,9 @@
 from typing import List, Optional
 
+import numpy as np
+
 from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
-from vllm.utils import Device, cdiv, chunk_list
+from vllm.utils import Device, cdiv, chunk_array
 
 
 class BlockTable:
@@ -74,7 +76,7 @@ class BlockTable:
         return cdiv(len(token_ids), block_size)
 
     def allocate(self,
-                 token_ids: List[int],
+                 token_ids: np.ndarray,
                  device: Device = Device.GPU) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
@@ -82,19 +84,20 @@ class BlockTable:
         sequence of token IDs.
 
         Args:
-            token_ids (List[int]): The sequence of token IDs to be stored.
+            token_ids (np.ndarray): The sequence of token IDs to be stored.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
         """
         assert not self._is_allocated
-        assert token_ids
+        len_token_ids = len(token_ids)
+        assert len_token_ids > 0
         self._blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                            token_ids=token_ids,
                                                            device=device)
-        self._num_full_slots = len(token_ids)
+        self._num_full_slots = len_token_ids
 
     def append_token_ids(self,
-                         token_ids: List[int],
+                         token_ids: np.ndarray,
                          num_lookahead_slots: int = 0,
                          num_computed_slots: Optional[int] = None) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
@@ -230,7 +233,8 @@ class BlockTable:
         assert self._is_allocated
         return [block.block_id for block in self._blocks]
 
-    def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:
+    def get_unseen_token_ids(self,
+                             sequence_token_ids: np.ndarray) -> np.ndarray:
         """Get the number of "unseen" tokens in the sequence.
 
         Unseen tokens are tokens in the sequence corresponding to this block
@@ -250,10 +254,11 @@ class BlockTable:
         return sequence_token_ids[self.num_full_slots:]
 
     def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
-                                       token_ids: List[int],
+                                       token_ids: np.ndarray,
                                        device: Device) -> List[Block]:
         blocks: List[Block] = []
-        for block_token_ids in chunk_list(token_ids, self._block_size):
+        for i in range(0, len(token_ids), self._block_size):
+            block_token_ids = token_ids[i:i + self._block_size]
             if len(block_token_ids) == self._block_size:
                 # If the block is full, create an immutable block.
                 prev_block = self._allocator.allocate_immutable(
@@ -303,7 +308,7 @@ class BlockTable:
         return self._num_full_slots
 
     def get_num_blocks_touched_by_append_slots(
-            self, token_ids: List[int], num_lookahead_slots: int) -> int:
+            self, token_ids: np.ndarray, num_lookahead_slots: int) -> int:
         """Determine how many blocks will be "touched" by appending the token
         ids.
 
@@ -311,12 +316,14 @@ class BlockTable:
         continue generation, or if it must be preempted.
         """
 
-        all_token_ids = token_ids + [-1] * num_lookahead_slots
-        token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
-        return len(token_blocks)
+        size = len(token_ids) + num_lookahead_slots
+        first_chunk_size = self._block_size - (self._num_full_slots %
+                                               self._block_size)
+        n_blocks = 1 + len(range(first_chunk_size, size, self._block_size))
+        return n_blocks
 
     def _chunk_token_blocks_for_append(
-            self, token_ids: List[int]) -> List[List[int]]:
+            self, token_ids: np.ndarray) -> List[np.ndarray]:
         """Split the token ids into block-sized chunks so they can be easily
         appended to blocks. The first such "token block" may have less token ids
         than the block size, since the last allocated block may be partially
@@ -324,6 +331,6 @@ class BlockTable:
         """
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
-        token_blocks = [token_ids[:first_chunk_size]] + chunk_list(
+        token_blocks = [token_ids[:first_chunk_size]] + chunk_array(
             token_ids[first_chunk_size:], self._block_size)
         return token_blocks

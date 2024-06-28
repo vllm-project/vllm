@@ -1,5 +1,9 @@
+import weakref
 from typing import FrozenSet, Iterable, List, Optional, Set, Tuple
 
+import numpy as np
+
+from vllm.array_pool import alloc_array, del_array
 from vllm.core.block.common import (CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
@@ -51,7 +55,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_immutable(self,
                            prev_block: Optional[Block],
-                           token_ids: List[int],
+                           token_ids: np.ndarray,
                            device: Optional[Device] = None) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
@@ -87,7 +91,7 @@ class NaiveBlockAllocator(BlockAllocator):
         block_id = self._allocate_new_block_id()
         return self._create_block(
             prev_block=prev_block,
-            token_ids=[],
+            token_ids=np.zeros(0, dtype=np.int64),
             block_id=block_id,
             block_size=self._block_size,
             allocator=self,
@@ -286,7 +290,7 @@ class NaiveBlock(Block):
 
     Args:
         prev_block (Block): The previous block in the sequence.
-        token_ids (List[int]): The initial token IDs to be stored in the block.
+        token_ids (np.ndarray): The initial token IDs to be stored in the block.
         block_size (int): The maximum number of token IDs that can be stored in
             the block.
         allocator (BlockAllocator): The block allocator associated with this
@@ -300,12 +304,13 @@ class NaiveBlock(Block):
 
     def __init__(self,
                  prev_block: Optional[Block],
-                 token_ids: List[int],
+                 token_ids: np.ndarray,
                  block_size: int,
                  allocator: BlockAllocator,
                  block_id: Optional[int] = None,
                  _cow_target: Optional[Block] = None):
-        self._token_ids: List[int] = []
+        self._token_ids: np.ndarray = alloc_array(block_size)
+        self._num_tokens = 0
         self._block_size = block_size
         self._prev_block = prev_block
         self._block_id = block_id
@@ -313,8 +318,9 @@ class NaiveBlock(Block):
         self._cow_target = _cow_target if _cow_target is not None else self
 
         self._append_token_ids_no_cow(token_ids)
+        self._finalizer = weakref.finalize(self, del_array, self._token_ids)
 
-    def append_token_ids(self, token_ids: List[int]) -> None:
+    def append_token_ids(self, token_ids: np.ndarray) -> None:
         """Appends the given token IDs to the block, instructing the allocator
         to perform a copy-on-write if necessary.
 
@@ -327,9 +333,12 @@ class NaiveBlock(Block):
             self._block_id = (self._allocator.cow_block_if_not_appendable(
                 self._cow_target))
 
-    def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
-        assert self.num_empty_slots >= len(token_ids)
-        self._token_ids.extend(token_ids)
+    def _append_token_ids_no_cow(self, token_ids: np.ndarray) -> None:
+        len_new_tokens = len(token_ids)
+        new_len = self._num_tokens + len_new_tokens
+        assert new_len <= self._block_size
+        self._token_ids[self._num_tokens:new_len] = token_ids
+        self._num_tokens = new_len
 
     @property
     def computed(self) -> bool:
@@ -357,14 +366,14 @@ class NaiveBlock(Block):
 
     @property
     def is_full(self) -> bool:
-        return self.num_empty_slots == 0
+        return self._num_tokens == self._block_size
 
     @property
     def num_empty_slots(self) -> int:
-        return self._block_size - len(self._token_ids)
+        return self._block_size - self._num_tokens
 
     @property
-    def token_ids(self) -> List[int]:
+    def token_ids(self) -> np.ndarray:
         return self._token_ids
 
     @property

@@ -393,6 +393,11 @@ def chunk_list(lst: List[T], chunk_size: int) -> List[List[T]]:
     return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
 
 
+def chunk_array(lst: np.ndarray, chunk_size: int) -> List[np.ndarray]:
+    """Yield successive chunk_size chunks from lst."""
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)
