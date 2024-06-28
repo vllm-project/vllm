@@ -198,7 +198,8 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         weight: torch.Tensor = layer.weight
 
-        # @TODO: Add an option for low precision on a layer by later basis
+        # TODO(HaiShaw): Logic to derive optimal out_dtype (low precision in
+        # case better), use input dtype (half/bf16 as base model type) for now.
         out_dtype = x.dtype
 
         asf: torch.Tensor = layer.activation_scaling_factor * 2
@@ -216,6 +217,8 @@ class Fp8FnuzLinearMethod(LinearMethodBase):
         if is_hip() and solidx != 0:
             res = ops.fp8_mm(x_quant, weight.t(), out_dtype, asf, wsf, osf,
                              int(solidx))
+            # TODO(HaiShaw): Later, must not determine to apply output scaling
+            # only because osf presents, decision shall come from output type.
             if osf is not None:
                 res_upscaled = torch.empty_like(res, dtype=x.dtype)
                 ops.convert_fp8(res_upscaled, res, 1 / osf)
