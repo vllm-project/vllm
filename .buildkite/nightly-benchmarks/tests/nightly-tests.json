@@ -7,7 +7,7 @@
             "tp": 1,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 1000,
+            "num_prompts": 500,
             "port": 8000
         },
         "lmdeploy_server_parameters": {
@@ -45,7 +45,7 @@
             "tp": 2,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 1000,
+            "num_prompts": 500,
             "port": 8000
         },
         "lmdeploy_server_parameters": {
@@ -83,7 +83,7 @@
             "tp": 4,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 1000,
+            "num_prompts": 500,
             "port": 8000
         },
         "lmdeploy_server_parameters": {
