@@ -32,18 +32,27 @@ class MLPSpeculatorLayerNorm(nn.Module):
         self,
         normalized_shape,
         eps=1e-06,
+        elementwise_scale=True,
+        elementwise_shift=False,
     ):
         super(MLPSpeculatorLayerNorm, self).__init__()
-        self.weight = nn.Parameter(torch.empty(normalized_shape))
-        self.bias = nn.Parameter(torch.empty(normalized_shape))
+        self.elementwise_scale = elementwise_scale
+        self.elementwise_shift = elementwise_shift
+        if self.elementwise_scale:
+            self.weight = nn.Parameter(torch.empty(normalized_shape))
+        if self.elementwise_shift:
+            self.bias = nn.Parameter(torch.empty(normalized_shape))
         self.eps = eps
+
 
     def forward(self, x):
         xf = x
         xf = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
         x = xf.type_as(x)
-        x = self.weight * x
-        x = x + self.bias
+        if self.elementwise_scale:
+            x = self.weight * x
+        if self.elementwise_shift:
+            x = x + self.bias
         return x
 
 
@@ -58,6 +67,9 @@ class MLPSpeculator(nn.Module):
             else config.emb_dim
 
         self.max_speculative_tokens = config.num_lookahead_tokens
+
+        self.tie_wts = config.tie_wts
+        self.scale_input = config.scale_input
 
         self.emb = nn.ModuleList([
             VocabParallelEmbedding(config.vocab_size,
@@ -77,14 +89,30 @@ class MLPSpeculator(nn.Module):
             for _ in range(self.max_speculative_tokens)
         ])
         self.ln = nn.ModuleList([
-            MLPSpeculatorLayerNorm(self.inner_dim)
+            MLPSpeculatorLayerNorm(self.inner_dim, elementwise_shift=True, elementwise_scale=True)
             for _ in range(self.max_speculative_tokens)
         ])
+        if self.scale_input:
+            self.ln0 = MLPSpeculatorLayerNorm(self.emb_dim, elementwise_shift=False, elementwise_scale=False)
 
         self.state_weight = 0.5**(0.5 / config.n_predict)
         self.emb_weight = math.sqrt(
             (1 - self.state_weight**2) * (self.inner_dim / 2))
         self.activation = nn.GELU()
+
+
+        if self.tie_wts:
+            assert(self.n_predict > 1), "You cannot tie weights between stages when only 1 exists"
+            for emb in self.emb:
+                emb.weight = self.emb[0].weight
+            for head in self.head:
+                head.weight = self.head[0].weight
+            for ln in self.ln:
+                ln.weight = self.ln[0].weight
+                ln.bias = self.ln[0].bias
+            for i in range(2, self.n_predict):
+                self.proj[i].weight = self.proj[1].weight
+
         self.config = config
         self.logits_processor = LogitsProcessor(config.vocab_size,
                                                 config.vocab_size, 1.0)
@@ -104,6 +132,9 @@ class MLPSpeculator(nn.Module):
 
         # b x 1 x d
         previous_hidden_states = previous_hidden_states.unsqueeze(1)
+
+        if self.scale_input:
+            previous_hidden_states = self.ln0(previous_hidden_states) / (2**0.5)
 
         # b x 1
         last_tokens = input_ids.unsqueeze(1)
@@ -137,8 +168,10 @@ class MLPSpeculator(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            param = params_dict.get(name.replace("speculator.", ""))
-            if param is not None:
+            try:
+                param = params_dict[name.replace("speculator.", "")]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            except:
+                pass

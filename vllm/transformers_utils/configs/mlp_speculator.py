@@ -17,6 +17,8 @@ class MLPSpeculatorConfig(PretrainedConfig):
                  n_predict: int = 3,
                  top_k_tokens_per_head: Optional[List[int]] = None,
                  n_candidates: int = 5,
+                 tie_wts: bool = False,
+                 scale_input: bool = False,
                  **kwargs):
         """
         Initialize an MLPSpeculatorConfig
@@ -49,5 +51,7 @@ class MLPSpeculatorConfig(PretrainedConfig):
         self.top_k_tokens_per_head = top_k_tokens_per_head
         self.n_candidates = n_candidates
         self.num_lookahead_tokens = n_predict
+        self.tie_wts = tie_wts
+        self.scale_input = scale_input
 
         super().__init__(**kwargs)
