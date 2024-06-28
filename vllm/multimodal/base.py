@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import (TYPE_CHECKING, Callable, Dict, Generic, Optional, Tuple,
-                    Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Generic, Optional,
+                    Tuple, Type, TypedDict, TypeVar, Union)
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
@@ -18,6 +18,8 @@ class MultiModalData:
     """
     Base class that contains multi-modal data.
 
+    This is for internal use.
+
     To add a new modality, add a new file under ``multimodal`` directory.
 
     In this new file, subclass :class:`~MultiModalData` and
@@ -34,7 +36,14 @@ class MultiModalData:
 D = TypeVar("D", bound=MultiModalData)
 N = TypeVar("N", bound=Type["nn.Module"])
 
-EXTERNAL_MM_DATA_TYPE = Union["Image.Image", "torch.Tensor"]
+
+class ExternalMultiModalDataBuiltins(TypedDict, total=False):
+    image: Union["Image.Image", "torch.Tensor"]
+
+
+ExternalMultiModalDataDict = Union[ExternalMultiModalDataBuiltins, Dict[str,
+                                                                        Any]]
+
 MultiModalInputMapper = Callable[[InputContext, D], Dict[str, "torch.Tensor"]]
 """Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
@@ -65,8 +74,7 @@ class MultiModalPlugin(ABC, Generic[D]):
         raise NotImplementedError
 
     @abstractmethod
-    def get_external_data_type(
-            self) -> Tuple[str, Type[EXTERNAL_MM_DATA_TYPE]]:
+    def get_external_data_type(self) -> Tuple[str, Type[Any]]:
         """The data type that this plugin handles. 
         
         For `LLM.generate(multi_modal_data={"key": value})` will 

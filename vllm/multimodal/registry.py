@@ -1,12 +1,12 @@
 import functools
-from typing import Any, Dict, Optional, Sequence, Type, TypeVar, Union
+from typing import Any, Optional, Sequence, Type, TypeVar, Union
 
 from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 
-from .base import (EXTERNAL_MM_DATA_TYPE, MultiModalData,
+from .base import (ExternalMultiModalDataDict, MultiModalData,
                    MultiModalInputMapper, MultiModalPlugin)
 from .image import ImageData, ImagePlugin
 
@@ -113,8 +113,7 @@ class MultiModalRegistry:
         return self.register_input_mapper(ImageData, mapper)
 
     def map_input(self, model_config: ModelConfig,
-                  data: Union[MultiModalData, Dict[str,
-                                                   EXTERNAL_MM_DATA_TYPE]]):
+                  data: Union[MultiModalData, ExternalMultiModalDataDict]):
         """
         Apply an input mapper to a :class:`~MultiModalData` instance passed
         to the model.

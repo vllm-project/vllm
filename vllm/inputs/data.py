@@ -1,10 +1,10 @@
-from typing import (TYPE_CHECKING, Dict, List, Literal, Optional, Sequence,
+from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
                     TypedDict, Union, cast, overload)
 
 from typing_extensions import NotRequired
 
 if TYPE_CHECKING:
-    from vllm.multimodal import EXTERNAL_MM_DATA_TYPE, MultiModalData
+    from vllm.multimodal import ExternalMultiModalDataDict, MultiModalData
 
 
 class ParsedText(TypedDict):
@@ -136,7 +136,7 @@ class LLMInputs(TypedDict):
     The original prompt text corresponding to the token IDs, if available.
     """
 
-    multi_modal_data: NotRequired[Optional[Dict[str, "EXTERNAL_MM_DATA_TYPE"]]]
+    multi_modal_data: NotRequired[Optional["ExternalMultiModalDataDict"]]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.

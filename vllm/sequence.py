@@ -14,7 +14,7 @@ from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
-    from vllm.multimodal import EXTERNAL_MM_DATA_TYPE, MultiModalData
+    from vllm.multimodal import ExternalMultiModalDataDict, MultiModalData
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -258,7 +258,7 @@ class Sequence:
         return self.inputs["prompt_token_ids"]
 
     @property
-    def multi_modal_data(self) -> Dict[str, "EXTERNAL_MM_DATA_TYPE"]:
+    def multi_modal_data(self) -> "ExternalMultiModalDataDict":
         return self.inputs.get("multi_modal_data") or {}
 
     @property
@@ -617,7 +617,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
-        multi_modal_data: Optional[Dict[str, "EXTERNAL_MM_DATA_TYPE"]] = None,
+        multi_modal_data: Optional["ExternalMultiModalDataDict"] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
     ) -> None:
