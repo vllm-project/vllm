@@ -3,7 +3,7 @@ import re
 from typing import List, Optional, Tuple
 
 import pytest
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
 from vllm.model_executor.models.blip2 import (BLIP2_IMAGE_TOKEN,
@@ -97,22 +97,14 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     hf_image_inputs = [hf_image for hf_image, _, _ in image_inputs]
     vllm_image_inputs = [vllm_image for _, vllm_image, _ in image_inputs]
 
-    # Otherwise, vLLM fails to stop model generation
-    # This is how it is used in HF: https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L991
-    hf_config = AutoConfig.from_pretrained(model_id)
-    extra_stop_token_ids = [hf_config.text_config.eos_token_id]
-
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model_id,
                      dtype=dtype,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(
-            prompt_inputs,
-            max_tokens,
-            images=vllm_image_inputs,
-            stop_token_ids=extra_stop_token_ids,
-        )
+        vllm_outputs = vllm_model.generate_greedy(prompt_inputs,
+                                                  max_tokens,
+                                                  images=vllm_image_inputs)
 
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
         hf_outputs = hf_model.generate_greedy(prompt_inputs,
