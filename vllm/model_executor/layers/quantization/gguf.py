@@ -1,12 +1,11 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-import torch.nn.functional as F
 from gguf.constants import GGML_QUANT_SIZES
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase, QKVParallelLinear, MergedColumnParallelLinear
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
@@ -20,6 +19,14 @@ class GGUFConfig(QuantizationConfig):
 
     def __repr__(self) -> str:
         return ("GGUFConfig()")
+    
+    @property
+    def merge_weight(self) -> bool:
+        return False
+
+    @property
+    def is_neox_style(self) -> bool:
+        return False
 
     def get_name(self) -> str:
         return "gguf"
@@ -66,23 +73,12 @@ class GGUFLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
 
         qweight = UninitializedParameter(requires_grad=False)
-        set_weight_attrs(qweight, {"input_dim": 1, "output_dim": 0,
-                                   "tensor_shape": (output_size_per_partition, input_size_per_partition),
-                                   "is_gguf_weight": True, "shard_size": {},
-                                   "shard_id": []})
+        set_weight_attrs(qweight, {"input_dim": 1, "output_dim": 0})
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qweight", qweight)
 
-        if isinstance(layer, QKVParallelLinear):
-            qweight_type = Parameter(torch.empty(3, dtype=torch.uint8),
-                                    requires_grad=False)
-        elif isinstance(layer, MergedColumnParallelLinear):
-            qweight_type = Parameter(torch.empty(2, dtype=torch.uint8),
-                                    requires_grad=False)
-        else:
-            qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
-                                    requires_grad=False)
-        set_weight_attrs(qweight_type, {"is_gguf_weight_type": True, "shard_weight_type":{}, "ignore_warning": True})
+        qweight_type = Parameter(torch.empty(1, dtype=torch.uint8), requires_grad=False)
+        set_weight_attrs(qweight_type, {"ignore_warning": True})
         set_weight_attrs(qweight_type, extra_weight_attrs)
         layer.register_parameter("qweight_type", qweight_type)
 
@@ -90,35 +86,16 @@ class GGUFLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        shard_size = getattr(layer.qweight, "shard_size", None)
-        shard_id = getattr(layer.qweight, "shard_id", None)
-
-        if shard_id and shard_size:
-            out = []
-            offset = 0
-            # dequantize shard weights respectively
-            shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
-            for id in shard_id:
-                shard_weight = layer.qweight[offset:offset + shard_size[id][0], :shard_size[id][1]].contiguous()
-                qweight_type = layer.qweight_type.shard_weight_type[id]
-                out.append(self._fuse_mul_mat(x, shard_weight, qweight_type))
-                offset += shard_size[id][0]
-            out = torch.cat(out, axis=1)
-        else:
-            qweight = layer.qweight
-            qweight_type = layer.qweight_type.data.item()
-            out = self._fuse_mul_mat(x, qweight, qweight_type)
-        if bias:
-            out.add_(bias)
-        return out
-
-    def _fuse_mul_mat(self, x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) -> torch.Tensor:
+        qweight = layer.qweight
+        qweight_type = layer.qweight_type.data.item()
         # use dequantize mulmat for IQmatrix, mmq for k-quants
         if qweight_type >= 16:
             block_size, type_size = GGML_QUANT_SIZES[qweight_type]
             shape = (qweight.shape[0], qweight.shape[1]//type_size*block_size)
-            weight = ops.ggml_dequantize(qweight, qweight_type, *shape)
-            y = x @ weight.T
+            weight = ops.ggml_dequantize(qweight.contiguous(), qweight_type, *shape)
+            out = x @ weight.T
         else:
-            y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
-        return y
+            out = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
+        if bias:
+            out.add_(bias)
+        return out

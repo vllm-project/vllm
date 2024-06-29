@@ -365,26 +365,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
-        # initilize GGUF param after we know the quantize type
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
-            param.data[loaded_shard_id].copy_(loaded_weight)
-            param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
-            return
-
-        if isinstance(param, UninitializedParameter):
-            from gguf.constants import GGML_QUANT_SIZES
-
-            ori_shape = param.tensor_shape
-            weight_types = self.qweight_type.shard_weight_type.values()
-            row_size = []
-            for weight_type in weight_types:
-                block_size, type_size = GGML_QUANT_SIZES[weight_type]
-                row_size.append(ori_shape[1] // block_size * type_size)
-            q_shape = (ori_shape[0], max(row_size))
-            param.materialize(q_shape, dtype=loaded_weight.dtype)
-
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         # Special case for AQLM codebooks.
@@ -463,13 +443,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size = loaded_weight.shape[output_dim]
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
-
-            if is_gguf_weight:
-                shard_size = loaded_weight.shape[output_dim]
-                shard_offset = loaded_weight.shape[output_dim] * \
-                    loaded_shard_id
-                param.shard_id.append(loaded_shard_id)
-                param.shard_size[loaded_shard_id] = loaded_weight.shape
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
@@ -583,27 +556,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[str] = None):
-        # initilize GGUF param after we know the quantize type
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
-            idx_map = {"q":0, "k":1, "v":2}
-            param.data[idx_map[loaded_shard_id]].copy_(loaded_weight)
-            param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
-            return
-
-        if isinstance(param, UninitializedParameter):
-            from gguf.constants import GGML_QUANT_SIZES
-
-            ori_shape = param.tensor_shape
-            weight_types = self.qweight_type.shard_weight_type.values()
-            row_size = []
-            for weight_type in weight_types:
-                block_size, type_size = GGML_QUANT_SIZES[weight_type]
-                row_size.append(ori_shape[1] // block_size * type_size)
-            q_shape = (ori_shape[0], max(row_size))
-            param.materialize(q_shape, dtype=loaded_weight.dtype)
-
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         # Special case for AQLM codebooks.
@@ -706,13 +658,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 }
                 shard_size, shard_offset = adjust_bitsandbytes_shard(
                     param, orig_qkv_offsets, loaded_shard_id)
-
-            if is_gguf_weight:
-                param.shard_id.append(loaded_shard_id)
-                param.shard_size[loaded_shard_id] = loaded_weight.shape
-                input_dim = getattr(param, "input_dim", None)
-                input_size = loaded_weight.shape[input_dim]
-                param_data = param_data.narrow(input_dim, 0, input_size)
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)

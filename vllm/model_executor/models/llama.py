@@ -34,6 +34,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -77,11 +78,16 @@ class LlamaMLP(nn.Module):
         bias: bool = False,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            input_size=hidden_size,
-            output_sizes=[intermediate_size] * 2,
-            bias=bias,
-            quant_config=quant_config)
+        self.merge_weight = getattr(quant_config, "merge_weight", True)
+        if self.merge_weight:
+            self.gate_up_proj = MergedColumnParallelLinear(
+                input_size=hidden_size,
+                output_sizes=[intermediate_size] * 2,
+                bias=bias,
+                quant_config=quant_config)
+        else:
+            self.gate_proj = ColumnParallelLinear(hidden_size, intermediate_size, bias=bias, quant_config=quant_config)
+            self.up_proj = ColumnParallelLinear(hidden_size, intermediate_size, bias=bias, quant_config=quant_config)
         self.down_proj = RowParallelLinear(input_size=intermediate_size,
                                            output_size=hidden_size,
                                            bias=bias,
@@ -92,7 +98,12 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
+        if self.merge_weight:
+            gate_up, _ = self.gate_up_proj(x)
+        else:
+            up, _ = self.up_proj(x)
+            gate, _ = self.gate_proj(x)
+            gate_up = torch.cat([gate, up], dim=-1)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -135,14 +146,36 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size=hidden_size,
-            head_size=self.head_dim,
-            total_num_heads=self.total_num_heads,
-            total_num_kv_heads=self.total_num_kv_heads,
-            bias=bias,
-            quant_config=quant_config,
-        )
+        self.merge_weight = getattr(quant_config, "merge_weight", True)
+        if self.merge_weight:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size=hidden_size,
+                head_size=self.head_dim,
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_kv_heads,
+                bias=bias,
+                quant_config=quant_config,
+            )
+        else:
+            self.q_proj = ColumnParallelLinear(
+                hidden_size,
+                self.total_num_heads * self.head_dim,
+                bias=bias,
+                quant_config=quant_config,
+            )
+            self.k_proj = ColumnParallelLinear(
+                hidden_size,
+                self.total_num_kv_heads * self.head_dim,
+                bias=bias,
+                quant_config=quant_config,
+            )
+            self.v_proj = ColumnParallelLinear(
+                hidden_size,
+                self.total_num_kv_heads * self.head_dim,
+                bias=bias,
+                quant_config=quant_config,
+            )
+
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
@@ -150,12 +183,14 @@ class LlamaAttention(nn.Module):
             quant_config=quant_config,
         )
 
+        is_neox_style = getattr(quant_config, "is_neox_style", True)
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
+            is_neox_style=is_neox_style,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -171,8 +206,14 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.merge_weight:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
+                                dim=-1)
+        else:
+            q, _ = self.q_proj(hidden_states)
+            k, _ = self.k_proj(hidden_states)
+            v, _ = self.v_proj(hidden_states)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
@@ -360,6 +401,7 @@ class LlamaForCausalLM(nn.Module):
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        self.merge_weight = getattr(quant_config, "merge_weight", True)
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
@@ -410,7 +452,7 @@ class LlamaForCausalLM(nn.Module):
             (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
-        ]
+        ] if self.merge_weight else []
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
