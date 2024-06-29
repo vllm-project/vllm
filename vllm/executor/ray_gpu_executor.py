@@ -117,6 +117,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 worker_module_name=worker_module_name,
                 worker_class_name=worker_class_name,
                 trust_remote_code=self.model_config.trust_remote_code,
+                use_spmd_worker=USE_SPMD_WORKER,
             )
 
             if USE_SPMD_WORKER:
@@ -226,7 +227,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
         outputs = ray.get(self.forward_dag.execute(execute_model_req))
-        return outputs
+        return outputs[0]
 
     def _run_workers(
         self,
@@ -256,10 +257,14 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 "max_concurrent_workers is not supported yet.")
 
         count = len(self.workers)
+        # If using SPMD worker, all workers are the same, so we should execute
+        # the args on all workers. Otherwise, we skip the first worker's args
+        # because those args will go to the driver worker.
+        first_worker_args_index: int = 0 if USE_SPMD_WORKER else 1
         all_worker_args = repeat(args, count) if all_args is None \
-            else islice(all_args, 1, None)
+            else islice(all_args, first_worker_args_index, None)
         all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
-            else islice(all_kwargs, 1, None)
+            else islice(all_kwargs, first_worker_args_index, None)
 
         # Start the ray workers first.
         ray_worker_outputs = [
@@ -322,8 +327,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # a dummy value for now. It will be fixed soon.
         with InputNode() as input_data:
             forward_dag = MultiOutputNode([
-                worker.execute_model_compiled_dag_remote.
-                bind(  # type: ignore[attr-defined]
+                worker.execute_model_spmd.bind(  # type: ignore[attr-defined]
                     input_data) for worker in self.workers
             ])
         return forward_dag.experimental_compile(enable_asyncio=enable_asyncio)
@@ -345,7 +349,8 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=True)
 
         outputs = await self.forward_dag.execute_async(execute_model_req)
-        return await outputs
+        outputs = await outputs
+        return outputs[0]
 
     async def _driver_execute_model_async(
         self,
