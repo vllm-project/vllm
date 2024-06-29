@@ -77,7 +77,7 @@ def zephyr_lora_files():
 
 @pytest.fixture(scope="module")
 def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
+    ray.init()
     yield
     ray.shutdown()
 

@@ -4,6 +4,7 @@ import sys
 import time
 import warnings
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Dict, List
 
 import openai
@@ -41,7 +42,7 @@ else:
 
 
 # Path to root of repository so that utilities can be imported by ray workers
-VLLM_PATH = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir))
+VLLM_PATH = Path(__file__).parent.parent
 
 
 class RemoteOpenAIServer:
@@ -157,7 +158,7 @@ def multi_process_parallel(
 ) -> None:
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
+    ray.init()
 
     distributed_init_port = get_open_port()
     refs = []
