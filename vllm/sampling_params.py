@@ -59,7 +59,9 @@ class NoBadWordsLogitsProcessor:
             expected_prefix = bad_word_ids[:prefix_length]
             is_match = actual_prefix == expected_prefix
 
-            last_token_bias[last_token_id] += self._SMALLEST_LOGIT if is_match else self._NEUTRAL_LOGIT
+            last_token_bias[last_token_id] += (
+                self._SMALLEST_LOGIT if is_match else self._NEUTRAL_LOGIT
+            )
 
         logits = logits + self.word_bias + last_token_bias
 
@@ -74,7 +76,7 @@ class NoBadWordsLogitsProcessor:
         self._check_token_ids_bounds(vocab_size=vocab_size)
 
         self.word_bias = torch.zeros(
-            (vocab_size,), dtype=torch.float, device=logits.device
+            (vocab_size, ), dtype=torch.float, device=logits.device
         )
 
         for bad_word_ids in self.bad_words_ids:
@@ -249,7 +251,9 @@ class SamplingParams:
         self.logits_processors = logits_processors
 
         if bad_words_ids is not None:
-            no_bad_words_processor = NoBadWordsLogitsProcessor(bad_words_ids=bad_words_ids)
+            no_bad_words_processor = NoBadWordsLogitsProcessor(
+                bad_words_ids=bad_words_ids
+            )
 
             if self.logits_processors is not None:
                 self.logits_processors.append(no_bad_words_processor)
