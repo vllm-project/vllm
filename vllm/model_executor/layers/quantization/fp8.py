@@ -8,7 +8,7 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizeMethodBase, QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import print_warning_once
 
@@ -30,8 +30,7 @@ class Fp8Config(QuantizationConfig):
     def __init__(
         self,
         is_checkpoint_fp8_serialized: bool = False,
-        activation_scheme: str = "dynamic",
-        lm_head_quantized: bool = False,
+        activation_scheme: str = "dynamic"
     ) -> None:
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
@@ -41,7 +40,6 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(
                 f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
-        self.lm_head_quantized = lm_head_quantized
 
     @classmethod
     def get_name(cls) -> str:
@@ -64,11 +62,8 @@ class Fp8Config(QuantizationConfig):
         quant_method = cls.get_from_keys(config, ["quant_method"])
         is_checkpoint_fp8_serialized = ("fp8" in quant_method)
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
-        lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"],
-                                                       False)
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
-                   activation_scheme=activation_scheme,
-                   lm_head_quantized=lm_head_quantized)
+                   activation_scheme=activation_scheme)
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
@@ -101,7 +96,6 @@ class Fp8LinearMethod(LinearMethodBase):
     Args:
         quant_config: The quantization config.
     """
-    QUANTIZED = True
 
     def __init__(self, quant_config: Fp8Config):
         self.fused_module_in_checkpoint = False
