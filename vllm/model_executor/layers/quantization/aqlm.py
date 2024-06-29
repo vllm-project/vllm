@@ -180,7 +180,7 @@ class AQLMConfig(QuantizationConfig):
         return (f"AQLMConfig(in_group_size={self.in_group_size}, "
                 f"nbits_per_codebook={self.nbits_per_codebook}, "
                 f"num_codebooks={self.num_codebooks}, "
-                f"out_group_size={self.out_group_size}")
+                f"out_group_size={self.out_group_size})")
 
     @classmethod
     def get_name(cls) -> str:
