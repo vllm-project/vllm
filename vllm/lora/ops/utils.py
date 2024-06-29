@@ -8,11 +8,11 @@ import torch
 
 def _get_config_file_name(
     op_type: str,
-    batchs: int,
+    batches: int,
     hidden_size: int,
 ) -> str:
     device_name = torch.cuda.get_device_name().replace(" ", "_")
-    return (f"op_type={op_type},batchs={batchs},hidden_size={hidden_size} " +
+    return (f"op_type={op_type},batches={batches},hidden_size={hidden_size} " +
             f"device_name={device_name}.json")
 
 
@@ -29,7 +29,7 @@ def _get_op_configs(op_type: str, batch: int, hidden_size: int):
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             tuned_config = json.load(f).get(
-                f"batchs={batch},hidden_size={hidden_size}", None)
+                f"batches={batch},hidden_size={hidden_size}", None)
             return tuned_config
 
     # If no optimized configuration is available, return None

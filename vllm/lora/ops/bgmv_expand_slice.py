@@ -108,7 +108,7 @@ def bgmv_expand_slice(
             corresponding to each batch
         slice_offst (int): output_tensor's offst
         slice_size (int): current output_tensor's size
-        batchs (int): batch size
+        batches (int): batch size
         add_inputs (bool, optional): Defaults to False.
         override_config (Optional[Dict[str, int]], optional): Defaults to None.
             Triton grid config
@@ -149,16 +149,16 @@ def bgmv_expand_slice(
     ]:
         CAST_TYPE = True
 
-    batchs = lora_indices_tensor.size(0)
+    batches = lora_indices_tensor.size(0)
 
     if override_config:
         config = override_config
     else:
-        config = get_lora_op_configs("expand", batchs, N)
+        config = get_lora_op_configs("expand", batches, N)
 
     grid = lambda META: (
         META["SPLIT_N"],
-        batchs,
+        batches,
     )
     _bgmv_expand_slice_kernel[grid](
         inputs,

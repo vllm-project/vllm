@@ -62,7 +62,7 @@ HIDDEN_SIZES = [
     128256,
 ]
 
-BATCHS = [1, 2, 4] + [8 * i for i in range(1, 4)]
+batches = [1, 2, 4] + [8 * i for i in range(1, 4)]
 
 NUM_LORA = [1, 4, 8, 16, 32, 64, 128]
 DTYPES = [torch.float16, torch.bfloat16]
@@ -87,13 +87,13 @@ def _torch_groupgemm(
     lora_weights,
     lora_indices_tensor,
     seq_len_tensor,
-    batchs,
+    batches,
     scaling,
     op_type,
 ) -> torch.Tensor:
     out_list = []
     current_offset = 0
-    for lora_index, b_length in zip(range(batchs), seq_len_tensor):
+    for lora_index, b_length in zip(range(batches), seq_len_tensor):
         input_weight = inputs[current_offset:b_length + current_offset, :]
         current_offset += b_length
         lora_weight = lora_weights[lora_indices_tensor[lora_index]]
@@ -108,10 +108,10 @@ def _torch_groupgemm(
     return
 
 
-def _generate_data(batchs, hidden_size, lora_nums, max_rank, seq_length, dtype,
-                   op_type, device):
+def _generate_data(batches, hidden_size, lora_nums, max_rank, seq_length,
+                   dtype, op_type, device):
     seq_len_tensor = torch.randint(seq_length, seq_length + 1,
-                                   (batchs, )).to(device)
+                                   (batches, )).to(device)
     b_seq_start_loc = torch.cumsum(
         torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
         dim=0,
@@ -150,10 +150,10 @@ def _generate_data(batchs, hidden_size, lora_nums, max_rank, seq_length, dtype,
         our_out_tensor = ref_out_tensor.clone()
     lora_indices_tensor = torch.randint(0,
                                         lora_nums - 1 if lora_nums > 1 else 1,
-                                        (batchs, )).to(device)
+                                        (batches, )).to(device)
     indices = torch.zeros((total_tokens), dtype=torch.long).to(device)
     current_offset = 0
-    for b_id in range(batchs):
+    for b_id in range(batches):
         lora_index = lora_indices_tensor[b_id]
         indices[current_offset:current_offset +
                 seq_len_tensor[b_id]].copy_(lora_index)
@@ -170,11 +170,11 @@ def _generate_data(batchs, hidden_size, lora_nums, max_rank, seq_length, dtype,
     )
 
 
-def _generate_data_expand_nslices(batchs, hidden_size, lora_nums, max_rank,
+def _generate_data_expand_nslices(batches, hidden_size, lora_nums, max_rank,
                                   seq_length, dtype, nslices, device):
     try:
         seq_len_tensor = torch.randint(seq_length, seq_length + 1,
-                                       (batchs, )).to(device)
+                                       (batches, )).to(device)
         b_seq_start_loc = torch.cumsum(
             torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
             dim=0,
@@ -198,10 +198,10 @@ def _generate_data_expand_nslices(batchs, hidden_size, lora_nums, max_rank,
         # Ensure the same input.
         our_out_tensor = ref_out_tensor.clone()
         lora_indices_tensor = torch.randint(
-            0, lora_nums - 1 if lora_nums > 1 else 1, (batchs, ))
+            0, lora_nums - 1 if lora_nums > 1 else 1, (batches, ))
         indices = torch.zeros((total_tokens), dtype=torch.long).to(device)
         current_offset = 0
-        for b_id in range(batchs):
+        for b_id in range(batches):
             lora_index = lora_indices_tensor[b_id]
             indices[current_offset:current_offset +
                     seq_len_tensor[b_id]] = lora_index.item()
@@ -222,7 +222,7 @@ def _generate_data_expand_nslices(batchs, hidden_size, lora_nums, max_rank,
         raise error
 
 
-@pytest.mark.parametrize("batchs", BATCHS)
+@pytest.mark.parametrize("batches", batches)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
 @pytest.mark.parametrize("rank", MAX_RANKS)
 @pytest.mark.parametrize("scaling", SCALES)
@@ -231,7 +231,7 @@ def _generate_data_expand_nslices(batchs, hidden_size, lora_nums, max_rank,
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_punica_sgmv(
-    batchs: int,
+    batches: int,
     num_loras: int,
     rank: int,
     scaling: float,
@@ -260,8 +260,8 @@ def test_punica_sgmv(
         lora_indices_tensor,
         seq_len_tensor,
         indices,
-    ) = _generate_data(batchs, hidden_size, num_loras, rank, seq_length, dtype,
-                       op_type, device)
+    ) = _generate_data(batches, hidden_size, num_loras, rank, seq_length,
+                       dtype, op_type, device)
     max_seq_length = seq_len_tensor.max()
     if isinstance(max_seq_length, tuple):
         max_seq_length = max_seq_length[0].item()
@@ -275,7 +275,7 @@ def test_punica_sgmv(
             b_seq_start_loc,
             seq_len_tensor,
             lora_indices_tensor,
-            batchs,
+            batches,
             max_seq_length,
             scaling,
         )
@@ -287,7 +287,7 @@ def test_punica_sgmv(
             b_seq_start_loc,
             seq_len_tensor,
             lora_indices_tensor,
-            batchs,
+            batches,
             max_seq_length,
             add_inputs=True,
         )
@@ -297,7 +297,7 @@ def test_punica_sgmv(
         lora_weights,
         lora_indices_tensor,
         seq_len_tensor,
-        batchs,
+        batches,
         scaling if op_type == "shrink" else 1.0,
         op_type,
     )
@@ -306,7 +306,7 @@ def test_punica_sgmv(
     assert_close(our_out_tensor, ref_out_tensor)
 
 
-@pytest.mark.parametrize("batchs", BATCHS)
+@pytest.mark.parametrize("batches", batches)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
 @pytest.mark.parametrize("rank", MAX_RANKS)
 @pytest.mark.parametrize("scaling", SCALES)
@@ -315,7 +315,7 @@ def test_punica_sgmv(
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_punica_bgmv(
-    batchs: int,
+    batches: int,
     num_loras: int,
     rank: int,
     scaling: float,
@@ -344,8 +344,8 @@ def test_punica_bgmv(
         lora_indices_tensor,
         seq_len_tensor,
         indices,
-    ) = _generate_data(batchs, hidden_size, num_loras, rank, seq_length, dtype,
-                       op_type, device)
+    ) = _generate_data(batches, hidden_size, num_loras, rank, seq_length,
+                       dtype, op_type, device)
     if op_type == "shrink":
         bgmv_shrink(
             inputs_tensor,
@@ -368,7 +368,7 @@ def test_punica_bgmv(
         lora_weights,
         lora_indices_tensor,
         seq_len_tensor,
-        batchs,
+        batches,
         scaling if op_type == "shrink" else 1.0,
         op_type,
     )
@@ -377,7 +377,7 @@ def test_punica_bgmv(
     assert_close(our_out_tensor, ref_out_tensor)
 
 
-@pytest.mark.parametrize("batchs", BATCHS)
+@pytest.mark.parametrize("batches", batches)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
 @pytest.mark.parametrize("rank", MAX_RANKS)
 @pytest.mark.parametrize("nslices", [2, 3])
@@ -386,7 +386,7 @@ def test_punica_bgmv(
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_punica_expand_nslices(
-    batchs: int,
+    batches: int,
     num_loras: int,
     rank: int,
     nslices: int,
@@ -415,7 +415,7 @@ def test_punica_expand_nslices(
         seq_len_tensor,
         indices,
     ) = _generate_data_expand_nslices(
-        batchs,
+        batches,
         hidden_size,
         num_loras,
         rank,
@@ -440,7 +440,7 @@ def test_punica_expand_nslices(
                 b_seq_start_loc,
                 seq_len_tensor,
                 lora_indices_tensor,
-                batchs,
+                batches,
                 max_seq_length,
                 slice_offset,
                 hidden_size,
@@ -462,7 +462,7 @@ def test_punica_expand_nslices(
             lora_weights,
             lora_indices_tensor,
             seq_len_tensor,
-            batchs,
+            batches,
             1.0,
             op_type="expand",
         )

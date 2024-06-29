@@ -44,8 +44,8 @@ def reset_params_cache():
     cache explicitly
     """
     #TODO release gpu memory
-    torch.cuda.empty_cache()
     _PARAMS_CACHE.clear()
+    torch.cuda.empty_cache()
 
 
 def _get_prefilling_params(token_lora_tensor: torch.Tensor,

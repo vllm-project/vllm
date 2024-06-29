@@ -105,7 +105,7 @@ def sgmv_shrink(
     b_seq_start_loc: torch.Tensor,
     seq_len_tensor: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
-    batchs: int,
+    batches: int,
     max_seq_length: int,
     scaling: float,
 ):
@@ -123,7 +123,7 @@ def sgmv_shrink(
             length of the sequences  in the batch
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch
-        batchs (int): batch size
+        batches (int): batch size
         max_seq_length (int):  The max sequence lengths of the sequences
             in the batch
         scaling (float):  Scaling factor.
@@ -135,8 +135,8 @@ def sgmv_shrink(
         torch.bfloat16,
     ]
     assert inputs.size(1) == lora_a_weights.size(-1)
-    assert b_seq_start_loc.size(0) == batchs
-    assert lora_indices_tensor.size(0) == batchs
+    assert b_seq_start_loc.size(0) == batches
+    assert lora_indices_tensor.size(0) == batches
     assert inputs.is_contiguous()
 
     if lora_a_weights.ndim == 4:  # shape:(lora_num,1,rank, size)
@@ -156,7 +156,7 @@ def sgmv_shrink(
     grid = [
         triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         SPLIT_K,
-        batchs,
+        batches,
     ]
 
     _sgmv_shrink_kernel[grid](

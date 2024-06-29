@@ -94,7 +94,7 @@ def bgmv_shrink(
         output_tensor (torch.Tensor): output tensor
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch
-        batchs (int): batch size
+        batches (int): batch size
         scaling (float):  Scaling factor.
         override_config (Optional[Dict[str, int]], optional): Defaults to None. 
             Triton grid config
@@ -116,18 +116,18 @@ def bgmv_shrink(
     assert lora_a_weights.is_contiguous()
     assert output_tensor.is_contiguous()
     # TODO tuning this config
-    batchs = lora_indices_tensor.size(0)
+    batches = lora_indices_tensor.size(0)
     N, K = lora_a_weights.shape[-2:]  # K=hidden_size,N=rank
     BLOCK_N = triton.next_power_of_2(N)
     if override_config:
         config = override_config
     else:
         # First try to load optimal config from the file
-        config = get_lora_op_configs("shrink", batchs, K)
+        config = get_lora_op_configs("shrink", batches, K)
 
     grid = lambda META: (
         META["SPLIT_K"],
-        batchs,
+        batches,
     )
     _bgmv_shrink_kernel[grid](
         inputs,

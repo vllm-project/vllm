@@ -63,31 +63,6 @@ def _not_fully_sharded_can_replace(can_replace):
     return dec
 
 
-def _apply_expand(
-    x: torch.Tensor,
-    lora_b_stacked: torch.Tensor,
-    lora_index_tensor: torch.Tensor,
-    indices_info: List[int],
-    output: torch.Tensor,
-    add_input: bool = True,
-) -> torch.Tensor:
-    org_output = output
-    x = x.view(-1, x.shape[-1])
-    output = output.view(-1, output.shape[-1])
-    token_num = indices_info[0]
-    is_prefilling = bool(indices_info[5])
-    add_expand(
-        output,
-        x,
-        lora_b_stacked,
-        lora_index_tensor[:token_num],
-        0,
-        is_prefilling,
-        add_input,
-    )
-    return output.view_as(org_output)
-
-
 def _apply_lora(x: torch.Tensor,
                 lora_a_stacked: torch.Tensor,
                 lora_b_stacked: torch.Tensor,
@@ -118,9 +93,7 @@ def _apply_lora(x: torch.Tensor,
     org_output = output
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
-
     token_num = indices_info[0]
-
     is_prefilling = bool(indices_info[5])
     add_lora(output,
              x,
@@ -386,12 +359,18 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 full_lora_a_embeddings.shape[1],
                 -1,
             )
-        _apply_expand(
+        full_lora_a_embeddings = full_lora_a_embeddings.view(
+            -1, full_lora_a_embeddings.shape[-1])
+        full_output = full_output.view(-1, full_output.shape[-1])
+        token_num = self.indices_len[0]
+        is_prefilling = bool(self.indices_len[5])
+        add_expand(
+            full_output,
             full_lora_a_embeddings,
             self.lora_b_stacked,
-            self.indices,
-            self.indices_len,
-            full_output,
+            self.indices[:token_num],
+            0,
+            is_prefilling,
             add_input=True,
         )
         return full_output.view_as(full_output_org)

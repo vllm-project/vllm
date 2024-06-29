@@ -102,7 +102,7 @@ def bgmv_expand(
         output_tensor (torch.Tensor): output tensor
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch
-        batchs (int): batch size
+        batches (int): batch size
         add_inputs (bool, optional):  Defaults to False. adds the final lora 
             results to the output.
         override_config (Optional[Dict[str, int]], optional): Defaults to None. 
@@ -137,14 +137,14 @@ def bgmv_expand(
             torch.bfloat16,
     ]:
         CAST_TYPE = True
-    batchs = lora_indices_tensor.size(0)
+    batches = lora_indices_tensor.size(0)
     if override_config:
         config = override_config
     else:
-        config = get_lora_op_configs("expand", batchs, N)
+        config = get_lora_op_configs("expand", batches, N)
     grid = lambda META: (
         META["SPLIT_N"],
-        batchs,
+        batches,
     )
     _bgmv_expand_kernel[grid](
         inputs,

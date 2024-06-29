@@ -79,9 +79,9 @@ def convert_mapping(
                 requests to RoPE offsets and rot dims for long LoRAs.
                 None if long context lora doesn't exist.
             indices_len: List of lengths of the above tensors and prefilling 
-                flag.Used to index into each tensor. It contains  
-                (base_indices, sampler_indices, sampler_indices_padded,
-                embeddings_indices, long_lora_indices,prefilling  flag). 
+                flag. Used to index into each tensor. It contains 
+                (base_indices, sampler_indices, sampler_indices_padded, 
+                embeddings_indices, long_lora_indices, prefilling flag). 
     """
     index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
@@ -448,7 +448,6 @@ class LoRAModelManager:
         # Dict instead of a Set for compatibility with LRUCache.
         self._active_loras: Dict[int, None] = {}
         self._last_mapping: Optional[LoRAMapping] = None
-        self._convert_flag = True
         self._create_lora_modules()
 
     @property

@@ -108,7 +108,7 @@ def sgmv_expand_slice(
     b_seq_start_loc: torch.Tensor,
     seq_len_tensor: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
-    batchs: int,
+    batches: int,
     max_seq_length: int,
     slice_offset: int,
     slice_size: int,
@@ -128,7 +128,7 @@ def sgmv_expand_slice(
             length of the sequences  in the batch
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch
-        batchs (int): batch size
+        batches (int): batch size
         max_seq_length (int):  The max sequence lengths of the sequences
             in the batch
         slice_offst (int): output_tensor's offst
@@ -143,8 +143,8 @@ def sgmv_expand_slice(
         torch.bfloat16,
     ]
     assert inputs.size(1) == lora_b_weights.size(-1)
-    assert b_seq_start_loc.size(0) == batchs
-    assert lora_indices_tensor.size(0) == batchs
+    assert b_seq_start_loc.size(0) == batches
+    assert lora_indices_tensor.size(0) == batches
     assert slice_size == lora_b_weights.size(-2)
     assert inputs.is_contiguous()
     assert output_tensor.is_contiguous()
@@ -173,7 +173,7 @@ def sgmv_expand_slice(
         CAST_TYPE = True
     grid = [
         triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
-        batchs,
+        batches,
     ]
     _sgmv_expand_slice_kernel[grid](
         inputs,
