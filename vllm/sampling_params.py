@@ -67,7 +67,7 @@ class NoBadWordsLogitsProcessor:
         return logits
 
     def _init_word_bias(self, logits: torch.FloatTensor) -> None:
-        # Code based on NoBadWordsLogitsProcessor and SequenceBiasLogitsProcessor
+        # Code based on NoBadWordsLogitsProcessor and SequenceBiasLogitsProcessor  # noqa: E501
         # from https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py
 
         vocab_size = logits.shape[-1]
@@ -94,8 +94,10 @@ class NoBadWordsLogitsProcessor:
         if len(invalid_token_ids) > 0:
             raise ValueError(
                 f"The model vocabulary size is {vocab_size},"
-                f" but the following tokens were specified as bad: {invalid_token_ids}."
-                f" All token id values should be integers satisfying: 0 <= token_id < {vocab_size}."
+                f" but the following tokens"
+                f" were specified as bad: {invalid_token_ids}."
+                f" All token id values should be integers satisfying:"
+                f" 0 <= token_id < {vocab_size}."
             )
 
 
@@ -151,9 +153,10 @@ class SamplingParams:
         stop_token_ids: List of tokens that stop the generation when they are
             generated. The returned output will contain the stop tokens unless
             the stop tokens are special tokens.
-        bad_words_ids: List of lists of token ids that are not allowed to be generated.
-            More precisely, only the last token of a token sequence is not allowed
-            when the next generated token can complete the sequence.
+        bad_words_ids: List of lists of token ids that are not allowed
+            to be generated. More precisely, only the last token
+            of a token sequence is not allowed when the next generated token
+            can complete the sequence.
         include_stop_str_in_output: Whether to include the stop strings in
             output text. Defaults to False.
         ignore_eos: Whether to ignore the EOS token and continue generating
