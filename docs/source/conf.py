@@ -73,7 +73,7 @@ html_theme_options = {
 READTHEDOCS_VERSION_TYPE = os.environ.get('READTHEDOCS_VERSION_TYPE')
 if READTHEDOCS_VERSION_TYPE != "tag":
     # put a warning banner if it is not a release triggered by a tag
-    html_theme_options["navbar_center"] = ["warning_latest.html"]
+    html_theme_options["navbar_start"] = ["warning_latest.html"]
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
