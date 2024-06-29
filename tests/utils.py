@@ -41,8 +41,8 @@ else:
             nvmlShutdown()
 
 
-# Path to root of repository so that utilities can be imported by ray workers
 VLLM_PATH = Path(__file__).parent.parent
+"""Path to root of the vLLM repository."""
 
 
 class RemoteOpenAIServer:
