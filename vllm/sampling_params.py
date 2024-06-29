@@ -93,9 +93,9 @@ class NoBadWordsLogitsProcessor:
 
         if len(invalid_token_ids) > 0:
             raise ValueError(
-                f"The model vocabulary size is {vocabulary_size},"
-                f" but the following tokens were specified as bad: {invalid_biases}."
-                f" All token id values should be integers satisfying: 0 <= token_id < {vocabulary_size}."
+                f"The model vocabulary size is {vocab_size},"
+                f" but the following tokens were specified as bad: {invalid_token_ids}."
+                f" All token id values should be integers satisfying: 0 <= token_id < {vocab_size}."
             )
 
 
