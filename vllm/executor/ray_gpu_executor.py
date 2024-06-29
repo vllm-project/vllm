@@ -119,6 +119,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 worker_module_name=worker_module_name,
                 worker_class_name=worker_class_name,
                 trust_remote_code=self.model_config.trust_remote_code,
+                use_spmd_worker=USE_SPMD_WORKER,
             )
 
             if USE_SPMD_WORKER:
@@ -269,7 +270,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
         outputs = ray.get(self.forward_dag.execute(execute_model_req))
-        return outputs
+        return outputs[0]
 
     def _run_workers(
         self,
@@ -294,6 +295,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
         - all_args/all_kwargs: args/kwargs for each worker are specified
           individually
         """
+        if USE_SPMD_WORKER:
+            assert not async_run_tensor_parallel_workers_only, (
+                "async_run_tensor_parallel_workers_only is not supported for "
+                "spmd mode.")
 
         if max_concurrent_workers:
             raise NotImplementedError(
@@ -302,19 +307,23 @@ class RayGPUExecutor(DistributedGPUExecutor):
         count = len(self.workers) if not \
             async_run_tensor_parallel_workers_only \
             else len(self.non_driver_workers)
+        # If using SPMD worker, all workers are the same, so we should execute
+        # the args on all workers. Otherwise, we skip the first worker's args
+        # because those args will go to the driver worker.
+        first_worker_args_index: int = 0 if USE_SPMD_WORKER else 1
         all_worker_args = repeat(args, count) if all_args is None \
-            else islice(all_args, 1, None)
+            else islice(all_args, first_worker_args_index, None)
         all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
-            else islice(all_kwargs, 1, None)
+            else islice(all_kwargs, first_worker_args_index, None)
 
         # Start the ray workers first.
         ray_workers = self.workers
         if async_run_tensor_parallel_workers_only:
-                    ray_workers = self.non_driver_workers
+            ray_workers = self.non_driver_workers
         ray_worker_outputs = [
             worker.execute_method.remote(method, *worker_args, **worker_kwargs)
             for (worker, worker_args, worker_kwargs
-                 ) in zip(self.workers, all_worker_args, all_worker_kwargs)
+                 ) in zip(ray_workers, all_worker_args, all_worker_kwargs)
         ]
 
         if async_run_tensor_parallel_workers_only:
@@ -356,10 +365,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
     def _compiled_ray_dag(self, enable_asyncio: bool):
         import pkg_resources
+        from packaging import version
 
-        # TODO(swang): Upgrade version.
-        required_version = "2.9"
-        current_version = pkg_resources.get_distribution("ray").version
+        required_version = version.parse("2.32")
+        current_version = version.parse(
+            pkg_resources.get_distribution("ray").version)
         if current_version < required_version:
             raise ValueError(f"Ray version {required_version} or greater is "
                              f"required, but found {current_version}")
@@ -371,8 +381,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # a dummy value for now. It will be fixed soon.
         with InputNode() as input_data:
             forward_dag = MultiOutputNode([
-                worker.execute_model_compiled_dag_remote.
-                bind(  # type: ignore[attr-defined]
+                worker.execute_model_spmd.bind(  # type: ignore[attr-defined]
                     input_data) for worker in self.workers
             ])
         return forward_dag.experimental_compile(enable_asyncio=enable_asyncio)
@@ -382,7 +391,9 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.driver_exec_method = make_async(self.driver_worker.execute_method)
+        if not USE_SPMD_WORKER:
+            self.driver_exec_method = make_async(
+                self.driver_worker.execute_method)
 
     async def execute_model_async(
             self,
@@ -393,8 +404,9 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=True)
 
-        outputs = await self.forward_dag.execute_async(execute_model_req)
-        return await outputs
+        dag_future = await self.forward_dag.execute_async(execute_model_req)
+        outputs = await dag_future
+        return outputs[0]
 
     async def _driver_execute_model_async(
         self,
@@ -442,3 +454,10 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
             for worker in self.non_driver_workers
         ]
         return await asyncio.gather(*coros)
+
+    def __del__(self):
+        if self.forward_dag is not None:
+            self.forward_dag.teardown()
+            import ray
+            for worker in self.workers:
+                ray.kill(worker)

@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
-import vllm.envs as envs
 from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -18,14 +17,13 @@ from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
 logger = init_logger(__name__)
 
-USE_SPMD_WORKER = envs.VLLM_USE_SPMD_WORKER
-
 
 class WorkerBase(ABC):
     """Worker interface that allows vLLM to cleanly separate implementations for
     different hardware. Also abstracts control plane communication, e.g., to
     communicate request metadata to other workers.
     """
+    use_spmd_worker: bool
 
     @abstractmethod
     def init_device(self) -> None:
@@ -219,7 +217,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> Optional[List[SamplerOutput]]:
-        if USE_SPMD_WORKER:
+        """Executes at least one model step on the given sequences, unless no
+        sequences are provided."""
+        if self.use_spmd_worker:
             assert execute_model_req is not None, (
                 "VLLM_USE_SPMD_WORKER=1 requires each worker to take in an "
                 "ExecuteModelRequest")
@@ -227,18 +227,15 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         return self._execute_model_with_nccl_control_plane(execute_model_req)
 
-    def _execute_model_spmd(
-        self,
-        execute_model_req: ExecuteModelRequest = None
-    ) -> Optional[List[SamplerOutput]]:
-        pass
-
     def _execute_model_with_nccl_control_plane(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> Optional[List[SamplerOutput]]:
-        """Executes at least one model step on the given sequences, unless no
-        sequences are provided."""
+        """
+        Execute model with NCCL control plane. To execute model on all workers,
+        the driver worker first uses NCCL broadcasting primitive to broadcast
+        input data to all other workers.
+        """
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
@@ -302,6 +299,30 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         # list to conform to interface.
         return output
 
+    def _execute_model_spmd(
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[SamplerOutput]]:
+        """
+        Execute model in Single Program Multiple Data (SPMD) fashion.
+        All workers take the same request, prepare the input and
+        execute the model.
+        """
+        worker_input: WorkerInput = self.prepare_worker_input(
+            execute_model_req=execute_model_req)
+        model_input: ModelRunnerInputBase = (
+            self.model_runner.prepare_model_input(
+                execute_model_req.seq_group_metadata_list))
+
+        self.execute_worker(worker_input)
+
+        # If there is no input, we don't need to execute the model.
+        if worker_input.num_seq_groups == 0:
+            return []
+
+        return self.model_runner.execute_model(
+            model_input, self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None)
+
 
 class WorkerWrapperBase:
     """
@@ -314,10 +335,12 @@ class WorkerWrapperBase:
     def __init__(self,
                  worker_module_name: str,
                  worker_class_name: str,
-                 trust_remote_code: bool = False) -> None:
+                 trust_remote_code: bool = False,
+                 use_spmd_worker: bool = False) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
-        self.worker = None
+        self.use_spmd_worker = use_spmd_worker
+        self.worker: Optional[WorkerBase] = None
         if trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -344,12 +367,14 @@ class WorkerWrapperBase:
 
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
-        if USE_SPMD_WORKER:
-            assert isinstance(worker_class, LocalOrDistributedWorkerBase), (
-                "VLLM_USE_SPMD_WORKER=1 is currently only supported with "
-                "workers that inherit from LocalOrDistributedWorkerBase")
+        if self.use_spmd_worker:
+            assert issubclass(worker_class, LocalOrDistributedWorkerBase), (
+                f"VLLM_USE_SPMD_WORKER=1 requires worker class {worker_class}"
+                " to inherit from LocalOrDistributedWorkerBase")
 
         self.worker = worker_class(*args, **kwargs)
+        assert self.worker is not None
+        self.worker.use_spmd_worker = self.use_spmd_worker
 
     def execute_method(self, method, *args, **kwargs):
         try:
