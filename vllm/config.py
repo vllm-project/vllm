@@ -297,6 +297,12 @@ class ModelConfig:
         return self.hf_text_config.hidden_size
 
     def get_head_size(self) -> int:
+        # TODO remove hard code
+        if hasattr(self.hf_text_config, "model_type"
+                   ) and self.hf_text_config.model_type == 'deepseek_v2':
+            # FlashAttention supports only head_size 32, 64, 128, 256,
+            # we need to pad head_size 192 to 256
+            return 256
         if hasattr(self.hf_text_config, "head_dim"):
             return self.hf_text_config.head_dim
         # FIXME(woosuk): This may not be true for all models.
@@ -956,9 +962,9 @@ class SpeculativeConfig:
                     # Verify provided value doesn't exceed the maximum
                     # supported by the draft model.
                     raise ValueError(
-                        "Expected both speculative_model and "
-                        "num_speculative_tokens to be provided, but found "
-                        f"{speculative_model=} and {num_speculative_tokens=}.")
+                        "This speculative model supports a maximum of "
+                        f"num_speculative_tokens={n_predict}, but "
+                        f"{num_speculative_tokens=} was provided.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
