@@ -385,7 +385,7 @@ def gguf_quant_weights_iterator(
     for tensor in reader.tensors:
         name = tensor.name
         weight_type = tensor.tensor_type
-        if weight_type.name != "F32" and "blk" in name:
+        if weight_type.name != "F32" and ("blk" in name or "token_embd" in name):
             name = name.replace("weight", "qweight_type")
             param = torch.tensor(weight_type)
             yield name, param
@@ -396,7 +396,7 @@ def gguf_quant_weights_iterator(
         weight = tensor.data
         weight_type = tensor.tensor_type
         # for F32, no need to rename
-        if weight_type.name != "F32" and "blk" in name:
+        if weight_type.name != "F32" and ("blk" in name or "token_embd" in name):
             name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
             yield name, param
