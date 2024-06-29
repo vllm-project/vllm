@@ -30,7 +30,7 @@ class Fp8Config(QuantizationConfig):
     def __init__(
         self,
         is_checkpoint_fp8_serialized: bool = False,
-        activation_scheme: str = "dynamic"
+        activation_scheme: str = "dynamic",
     ) -> None:
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
