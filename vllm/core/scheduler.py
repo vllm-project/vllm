@@ -291,7 +291,7 @@ class Scheduler:
         # Contain decode requests that are swapped out.
         self.swapped: Deque[SequenceGroup] = deque()
         # Sequence groups finished requests ids since last step iteration.
-        # It lets the model know that any state associated with these requests 
+        # It lets the model know that any state associated with these requests
         # can and must be released after the current step.
         self.finished_requests_ids: List[str] = list()
         # Time at previous scheduling step
