@@ -438,7 +438,7 @@ class Qwen2MoeForCausalLM(nn.Module):
                     continue
                 # Skip loading extra bias for GPTQ models.
                 name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:(name, params_dict):
+                if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Skip experts that are not assigned to this worker.
                 if (("mlp.experts." in name or "mlp.shared_expert." in name)
@@ -453,7 +453,7 @@ class Qwen2MoeForCausalLM(nn.Module):
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:(name, params_dict):
+                if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Skip experts that are not assigned to this worker.
                 if (("mlp.experts." in name or "mlp.shared_expert." in name)

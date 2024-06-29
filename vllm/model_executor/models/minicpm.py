@@ -519,7 +519,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:(name, params_dict):
+                if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -539,7 +539,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:(name, params_dict):
+                    if name.endswith(".bias") and name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
