@@ -162,7 +162,9 @@ class TestTwoTokenBadWord:
 
             searched = True
 
-            if sequence[start:end] == subsequence:
+            assert len(current_subsequence) == len(subsequence)
+
+            if current_subsequence == subsequence:
                 return True
 
         assert searched, "All subsequences did not match in length..."
