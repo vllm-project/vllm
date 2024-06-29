@@ -123,7 +123,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         desc_act = cls.get_from_keys(config, ["desc_act"])
         is_sym = cls.get_from_keys(config, ["sym"])
         lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"],
-                                                       False)
+                                                       default=False)
         return cls(weight_bits, group_size, desc_act, is_sym, lm_head_quantized)
 
     @classmethod
