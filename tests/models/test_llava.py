@@ -1,11 +1,11 @@
-from typing import List, Tuple
+from typing import List, Optional, Tuple, Type
 
 import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
 
-from ..conftest import IMAGE_ASSETS
+from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 
 pytestmark = pytest.mark.vlm
 
@@ -65,12 +65,17 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
     return hf_output_ids, hf_output_str
 
 
-# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
-@pytest.mark.parametrize("model_and_config", model_and_vl_config)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
-def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
-                dtype: str, max_tokens: int) -> None:
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model_and_config: Tuple[str, VisionLanguageConfig],
+    *,
+    dtype: str,
+    max_tokens: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -96,6 +101,8 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
 
     with vllm_runner(model_id,
                      dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
@@ -110,3 +117,19 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+
+
+@pytest.mark.parametrize("model_and_config", model_and_vl_config)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
+                dtype: str, max_tokens: int) -> None:
+    run_test(
+        hf_runner,
+        vllm_runner,
+        image_assets,
+        model_and_config,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        tensor_parallel_size=1,
+    )
