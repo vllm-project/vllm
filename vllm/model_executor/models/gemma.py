@@ -15,25 +15,25 @@
 # limitations under the License.
 """Inference-only Gemma model compatible with HuggingFace weights."""
 from functools import lru_cache
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
 from transformers import GemmaConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import GemmaRotaryEmbedding
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelVocabEmbedding)
@@ -41,6 +41,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, skip_gptq_extra_param)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+
+from .interfaces import SupportsLoRA
 
 logger = init_logger(__name__)
 
@@ -108,6 +110,7 @@ class GemmaAttention(nn.Module):
                  head_dim: int,
                  max_position_embeddings: int = 8192,
                  rope_theta: float = 10000,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -146,17 +149,21 @@ class GemmaAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        self.rotary_emb = get_rope(
+        # TODO(woosuk): Use the `get_rope` interface.
+        self.rotary_emb = GemmaRotaryEmbedding(
             self.head_dim,
             rotary_dim=self.head_dim,
-            max_position=max_position_embeddings,
+            max_position_embeddings=max_position_embeddings,
             base=self.rope_theta,
             is_neox_style=True,
+            dtype=torch.get_default_dtype(),
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
-                              num_kv_heads=self.num_kv_heads)
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -178,6 +185,7 @@ class GemmaDecoderLayer(nn.Module):
     def __init__(
         self,
         config: GemmaConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -189,6 +197,7 @@ class GemmaDecoderLayer(nn.Module):
             head_dim=config.head_dim,
             max_position_embeddings=config.max_position_embeddings,
             rope_theta=config.rope_theta,
+            cache_config=cache_config,
             quant_config=quant_config,
         )
         self.mlp = GemmaMLP(
@@ -198,10 +207,10 @@ class GemmaDecoderLayer(nn.Module):
             hidden_activation=getattr(config, "hidden_activation", None),
             quant_config=quant_config,
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.input_layernorm = GemmaRMSNorm(config.hidden_size,
+                                            eps=config.rms_norm_eps)
+        self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size,
+                                                     eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -237,6 +246,7 @@ class GemmaModel(nn.Module):
     def __init__(
         self,
         config: GemmaConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -247,10 +257,10 @@ class GemmaModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            GemmaDecoderLayer(config, quant_config)
+            GemmaDecoderLayer(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # Normalize the embedding by sqrt(hidden_size)
         # The normalizer's data type should be downcasted to the model's
@@ -283,7 +293,7 @@ class GemmaModel(nn.Module):
         return hidden_states
 
 
-class GemmaForCausalLM(nn.Module):
+class GemmaForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -310,18 +320,20 @@ class GemmaForCausalLM(nn.Module):
     def __init__(
         self,
         config: GemmaConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        del lora_config  # Unused.
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.quant_config = quant_config
-        self.model = GemmaModel(config, quant_config)
+        self.model = GemmaModel(config, cache_config, quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
-    @torch.no_grad()
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -357,7 +369,7 @@ class GemmaForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params = set()
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, shard_name, shard_id) in stacked_params_mapping:
                 if shard_name not in name:
@@ -376,10 +388,6 @@ class GemmaForCausalLM(nn.Module):
                     continue
                 if skip_gptq_extra_param(name, params_dict):
                     continue
-                # GemmaRMSNorm is different from Llama's in that it multiplies
-                # (1 + weight) to the output, instead of just weight.
-                if "norm.weight" in name:
-                    loaded_weight += 1.0
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

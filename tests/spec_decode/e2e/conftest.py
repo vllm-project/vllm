@@ -1,20 +1,25 @@
 import asyncio
-from typing import List, Optional, Tuple, Union
+from itertools import cycle
+from typing import Dict, List, Optional, Tuple, Union
 
 import pytest
 import ray
+import torch
 
-from tests.conftest import cleanup
 from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.utils import set_random_seed
+from vllm.multimodal import MultiModalData
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import MultiModalData
+from vllm.sequence import Logprob
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, random_uuid
+
+from ...conftest import cleanup
+from ...utils import wait_for_gpu_memory_to_clear
 
 
 class AsyncLLM:
@@ -44,13 +49,13 @@ class AsyncLLM:
         gpu_memory_utilization: float = 0.9,
         swap_space: int = 4,
         enforce_eager: bool = False,
-        max_context_len_to_capture: int = 8192,
+        max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
-        self.engine_args = AsyncEngineArgs(
+        engine_args = AsyncEngineArgs(
             model=model,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
@@ -65,12 +70,18 @@ class AsyncLLM:
             gpu_memory_utilization=gpu_memory_utilization,
             swap_space=swap_space,
             enforce_eager=enforce_eager,
-            max_context_len_to_capture=max_context_len_to_capture,
+            max_seq_len_to_capture=max_seq_len_to_capture,
+            # For now use ray for the distributed back-end, since
+            # we rely on the use of engine_use_ray=True to avoid
+            # reinitializing CUDA in the same process (driver worker)
             engine_use_ray=True,
+            distributed_executor_backend="ray",
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
         self.request_counter = Counter()
+        self.llm_engine = AsyncLLMEngine.from_engine_args(
+            engine_args, usage_context=UsageContext.LLM_CLASS)
 
     def generate(
         self,
@@ -82,9 +93,6 @@ class AsyncLLM:
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
-
-        llm_engine = AsyncLLMEngine.from_engine_args(
-            self.engine_args, usage_context=UsageContext.LLM_CLASS)
 
         if prompts is None:
             raise ValueError("prompts must be provided.")
@@ -104,16 +112,17 @@ class AsyncLLM:
             raise ValueError("The lengths of prompts and "
                              "sampling_params must be the same.")
 
-        async def get_output(prompt, sampling_param) -> str:
+        async def get_output(prompt, sampling_param) -> RequestOutput:
             request_id = random_uuid()
-            results_generator = llm_engine.generate(prompt, sampling_param,
-                                                    request_id)
+            results_generator = self.llm_engine.generate(
+                prompt, sampling_param, request_id)
             final_output = None
             async for request_output in results_generator:
                 final_output = request_output
+            assert final_output is not None
             return final_output
 
-        outputs = []
+        outputs: List[RequestOutput] = []
         try:
             for i in range(num_requests):
                 prompt = prompts[i] if prompts is not None else None
@@ -152,12 +161,19 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
     test_name = request.node.name
 
     def generator_inner():
-        print(f'Creating {baseline_or_test=} LLM for {test_name=}. {kwargs=}')
+
+        wait_for_gpu_memory_to_clear(
+            devices=list(range(torch.cuda.device_count())),
+            threshold_bytes=2 * 2**30,
+            timeout_s=60,
+        )
 
         use_async = False
         if "use_async" in kwargs:
             use_async = kwargs.pop("use_async")
+        print(f'{use_async=}')
 
+        print(f'Creating {baseline_or_test=} LLM for {test_name=}. {kwargs=}')
         llm = AsyncLLM(**kwargs) if use_async else LLM(**kwargs)
         set_random_seed(seed)
 
@@ -173,15 +189,99 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
     return generator_outer
 
 
+def maybe_assert_ngram_worker(llm):
+    # Verify the proposer worker is ngram if ngram is specified.
+    if (not isinstance(llm, AsyncLLM)
+            and llm.llm_engine.speculative_config is not None
+            and llm.llm_engine.speculative_config.ngram_prompt_lookup_max > 0):
+        from vllm.spec_decode.ngram_worker import NGramWorker
+        assert isinstance(
+            llm.llm_engine.model_executor.driver_worker.proposer_worker,
+            NGramWorker)
+
+
 def get_output_from_llm_generator(
         llm_generator, prompts,
         sampling_params) -> Tuple[List[str], List[List[int]]]:
-    tokens = []
-    token_ids = []
+    tokens: List[str] = []
+    token_ids: List[List[int]] = []
     for llm in llm_generator():
+        maybe_assert_ngram_worker(llm)
+
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         token_ids = [output.outputs[0].token_ids for output in outputs]
         tokens = [output.outputs[0].text for output in outputs]
         del llm
 
     return tokens, token_ids
+
+
+def get_logprobs_from_llm_generator(
+        llm_generator, prompts,
+        sampling_params) -> List[List[Dict[int, Logprob]]]:
+    """Returns a dict of (token_id: Logprob) for each generated position, for
+    each sequence in the batch.
+    """
+    for llm in llm_generator():
+        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
+        logprobs = [output.outputs[0].logprobs[:] for output in outputs]
+        del llm
+
+    return logprobs
+
+
+def run_greedy_equality_correctness_test(baseline_llm_generator,
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len,
+                                         force_output_len: bool,
+                                         print_tokens: bool = False):
+    """Helper method that compares the outputs of both the baseline LLM and
+    the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
+    the same when temperature is zero.
+    """
+    temperature = 0.0
+
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+        "San Francisco is know for its",
+        "Facebook was created in 2004 by",
+        "Curious George is a",
+        "Python 3.11 brings improvements to its",
+    ]
+
+    prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
+
+    # If the test requires that we generated max_output_len tokens, then set the
+    # sampling params to ignore eos token.
+    ignore_eos = force_output_len
+
+    sampling_params = SamplingParams(
+        max_tokens=max_output_len,
+        ignore_eos=ignore_eos,
+        temperature=temperature,
+    )
+
+    spec_batch_tokens, spec_batch_token_ids = get_output_from_llm_generator(
+        test_llm_generator, prompts, sampling_params)
+
+    (baseline_batch_tokens,
+     baseline_batch_token_ids) = get_output_from_llm_generator(
+         baseline_llm_generator, prompts, sampling_params)
+
+    assert len(baseline_batch_token_ids) == len(prompts)
+    assert len(spec_batch_token_ids) == len(prompts)
+
+    for i, (baseline_token_ids, baseline_tokens, spec_token_ids,
+            spec_tokens) in enumerate(
+                zip(baseline_batch_token_ids, baseline_batch_tokens,
+                    spec_batch_token_ids, spec_batch_tokens)):
+        if print_tokens:
+            print(f'{i=} {baseline_tokens=}')
+            print(f'{i=}     {spec_tokens=}')
+        print(f'{i=} {baseline_token_ids=}')
+        print(f'{i=}     {spec_token_ids=}')
+        assert baseline_token_ids == spec_token_ids

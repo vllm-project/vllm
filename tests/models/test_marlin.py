@@ -13,15 +13,10 @@ Run `pytest tests/models/test_marlin.py`.
 from dataclasses import dataclass
 
 import pytest
-import torch
 
-from tests.models.utils import check_logprobs_close
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from tests.quantization.utils import is_quant_method_supported
 
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
-marlin_not_supported = (capability <
-                        QUANTIZATION_METHODS["marlin"].get_min_capability())
+from .utils import check_logprobs_close
 
 
 @dataclass
@@ -41,7 +36,7 @@ model_pairs = [
 
 
 @pytest.mark.flaky(reruns=2)
-@pytest.mark.skipif(marlin_not_supported,
+@pytest.mark.skipif(not is_quant_method_supported("marlin"),
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model_pair", model_pairs)
 @pytest.mark.parametrize("dtype", ["half"])
@@ -55,20 +50,16 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    marlin_model = vllm_runner(model_pair.model_marlin,
-                               dtype=dtype,
-                               quantization="marlin")
-    marlin_outputs = marlin_model.generate_greedy_logprobs(
-        example_prompts, max_tokens, num_logprobs)
-    del marlin_model
+    with vllm_runner(model_pair.model_marlin,
+                     dtype=dtype,
+                     quantization="marlin") as marlin_model:
+        marlin_outputs = marlin_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
-    gptq_model = vllm_runner(model_pair.model_gptq,
-                             dtype=dtype,
-                             quantization="gptq")
-    gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
-                                                       max_tokens,
-                                                       num_logprobs)
-    del gptq_model
+    with vllm_runner(model_pair.model_gptq, dtype=dtype,
+                     quantization="gptq") as gptq_model:
+        gptq_outputs = gptq_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=gptq_outputs,

@@ -8,11 +8,13 @@ from vllm.logger import init_logger
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA)
+    MergedQKVParallelLinearWithShardedLora, QKVParallelLinearWithShardedLora,
+    RowParallelLinearWithShardedLoRA)
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              LinearScalingRotaryEmbeddingWithLora,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
@@ -26,12 +28,19 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 logger = init_logger(__name__)
 
 _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
-    VocabParallelEmbeddingWithLoRA, ColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithLoRA, QKVParallelLinearWithLora,
-    MergedQKVParallelLinearWithLora, RowParallelLinearWithLoRA,
-    LogitsProcessorWithLoRA, ColumnParallelLinearWithShardedLoRA,
+    VocabParallelEmbeddingWithLoRA,
+    ColumnParallelLinearWithLoRA,
+    MergedColumnParallelLinearWithLoRA,
+    QKVParallelLinearWithLora,
+    MergedQKVParallelLinearWithLora,
+    RowParallelLinearWithLoRA,
+    LogitsProcessorWithLoRA,
+    ColumnParallelLinearWithShardedLoRA,
+    QKVParallelLinearWithShardedLora,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA
+    MergedQKVParallelLinearWithShardedLora,
+    RowParallelLinearWithShardedLoRA,
+    LinearScalingRotaryEmbeddingWithLora,
 }
 
 
@@ -60,7 +69,8 @@ def from_layer_logits_processor(
     model_config: Optional[PretrainedConfig] = None,
 ) -> LogitsProcessorWithLoRA:
     ret = LogitsProcessorWithLoRA(layer, lm_head.embedding_dim,
-                                  lm_head.weight.dtype, lm_head.weight.device)
+                                  lm_head.weight.dtype, lm_head.weight.device,
+                                  lm_head.get_sharded_to_full_mapping())
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret
 
@@ -86,13 +96,12 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool]:
             is_lora_a whether the tensor is lora_a or lora_b.
     """
     parts = name.split(".")
-    assert parts[0] == "base_model"
-    assert parts[1] == "model"
-    if parts[-1] == "weight":
-        assert parts[-2] == "lora_A" or parts[-2] == "lora_B"
-        return ".".join(parts[2:-2]), parts[-2] == "lora_A"
 
-    if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
-        return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A"
+    if len(parts) >= 2 and parts[0] == "base_model" and parts[1] == "model":
+        if parts[-1] == "weight":
+            if parts[-2] == "lora_A" or parts[-2] == "lora_B":
+                return ".".join(parts[2:-2]), parts[-2] == "lora_A"
+        elif parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
+            return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A"
 
-    raise ValueError(f"{name} is unsupported format")
+    raise ValueError(f"{name} is unsupported LoRA weight")

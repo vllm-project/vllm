@@ -42,9 +42,11 @@ def mock_causal_accepted_tensor(
 @pytest.mark.parametrize(
     "which_tokens_accepted",
     ["all_tokens_accepted", "no_tokens_accepted", "some_tokens_accepted"])
+@pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_correct_output_format(which_tokens_accepted: str, seed: int,
+def test_correct_output_format(which_tokens_accepted: str,
+                               disable_bonus_tokens: bool, seed: int,
                                device: str):
     """Verify the output has correct format given predetermined accepted matrix.
     """
@@ -82,7 +84,8 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
 
-    rejection_sampler = RejectionSampler()
+    rejection_sampler = RejectionSampler(
+        disable_bonus_tokens=disable_bonus_tokens)
     rejection_sampler.init_gpu_tensors(rank=0)
     output_token_ids = rejection_sampler._create_output(  # pylint: disable=protected-access
         accepted,
@@ -91,9 +94,11 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
         bonus_token_ids,
     )
 
-    # Bonus tokens are currently disabled. Verify they're set to -1.
+    expected_bonus_token_ids = bonus_token_ids.clone()
+    # If bonus tokens disabled. Verify they are set to -1.
     # See https://github.com/vllm-project/vllm/issues/4212
-    expected_bonus_token_ids = bonus_token_ids.clone() * 0 - 1
+    if disable_bonus_tokens:
+        expected_bonus_token_ids = expected_bonus_token_ids * 0 - 1
 
     if which_tokens_accepted == "all_tokens_accepted":
         # Expect all tokens to be equal to draft tokens.
@@ -241,8 +246,8 @@ def test_rejection_sampling_approximates_target_distribution(
         draft_and_target_probs_equal)
 
     sample_sizes = [10, 100, 1_000, 10_000, 100_000]
-    distance_wrt_reference = []
-    distance_wrt_target = []
+    distance_wrt_reference: List[float] = []
+    distance_wrt_target: List[float] = []
 
     for num_samples in sample_sizes:
         (reference_vs_rejsample_dist,

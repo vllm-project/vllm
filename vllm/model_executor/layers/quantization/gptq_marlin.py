@@ -2,81 +2,54 @@ import enum
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-import numpy
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
+logger = init_logger(__name__)
+
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
 GPTQ_MARLIN_MIN_THREAD_K = 128
 GPTQ_MARLIN_MAX_PARALLEL = 16
 
-GPTQ_MARLIN_SUPPORTED_NUM_BITS = [4]
+GPTQ_MARLIN_SUPPORTED_NUM_BITS = [4, 8]
 GPTQ_MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 GPTQ_MARLIN_SUPPORTED_SYM = [True]
 
 
-# Precompute permutations for Marlin weight and scale shuffling
-#
-# Marlin works on [16,64] tiles. The goal of the permutations
-# is to reorder the weight data so that it is compatible
-# with the tensor-core format that is described here:
-# https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#matrix-fragments-for-mma-m16n8k16-with-floating-point-type # noqa: E501
-#
-# As a result of this reordering, the vector loads inside the
-# kernel will get the data as it is needed for tensor-core
-# (without the need to use ldmatrix instructions)
-def _get_perms():
-    perm = []
-    for i in range(32):
-        perm1 = []
-        col = i // 4
-        for block in [0, 1]:
-            for row in [
-                    2 * (i % 4),
-                    2 * (i % 4) + 1,
-                    2 * (i % 4 + 4),
-                    2 * (i % 4 + 4) + 1,
-            ]:
-                perm1.append(16 * row + col + 8 * block)
-        for j in range(4):
-            perm.extend([p + 256 * j for p in perm1])
-
-    perm = numpy.array(perm)
-    interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
-    perm = perm.reshape((-1, 8))[:, interleave].ravel()  # type: ignore
-    perm = torch.from_numpy(perm)
-    scale_perm = []
+# Permutations for Marlin scale shuffling
+def get_scale_perms(num_bits: int):
+    scale_perm: List[int] = []
     for i in range(8):
         scale_perm.extend([i + 8 * j for j in range(8)])
-    scale_perm_single = []
+    scale_perm_single: List[int] = []
     for i in range(4):
         scale_perm_single.extend(
             [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
-    return perm, scale_perm, scale_perm_single
+    return scale_perm, scale_perm_single
 
 
-_perm, _scale_perm, _scale_perm_single = _get_perms()
-
-
-def get_pack_factor(num_bits):
-    assert num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS, (
-        f"Unsupported num_bits = {num_bits}")
+def get_pack_factor(num_bits: int):
+    assert (num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS
+            ), f"Unsupported num_bits = {num_bits}"
     return 32 // num_bits
 
 
-def marlin_permute_scales(s, size_k, size_n, group_size):
+def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
+                          group_size: int, num_bits: int):
+    scale_perm, scale_perm_single = get_scale_perms(num_bits)
     if group_size < size_k and group_size != -1:
-        s = s.reshape((-1, len(_scale_perm)))[:, _scale_perm]
+        s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
     else:
-        s = s.reshape((-1, len(_scale_perm_single)))[:, _scale_perm_single]
+        s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
     s = s.reshape((-1, size_n)).contiguous()
 
     return s
@@ -133,7 +106,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.half]
+        return [torch.half, torch.bfloat16]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -152,6 +125,26 @@ class GPTQMarlinConfig(QuantizationConfig):
         lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"],
                                                        False)
         return cls(weight_bits, group_size, desc_act, sym, lm_head_quantized)
+
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        can_convert = cls.is_marlin_compatible(hf_quant_cfg)
+
+        is_valid_user_quant = (user_quant is None or user_quant == "marlin")
+
+        if can_convert and is_valid_user_quant:
+            msg = ("The model is convertible to {} during runtime."
+                   " Using {} kernel.".format(cls.get_name(), cls.get_name()))
+            logger.info(msg)
+            return cls.get_name()
+
+        if can_convert and user_quant == "gptq":
+            logger.info("Detected that the model can run with gptq_marlin"
+                        ", however you specified quantization=gptq explicitly,"
+                        " so forcing gptq. Use quantization=gptq_marlin for"
+                        " faster inference")
+        return None
 
     def get_quant_method(
             self,
@@ -231,9 +224,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             group_size = input_size
 
         # Validate dtype
-        if params_dtype != torch.float16:
-            raise ValueError(
-                f"The params dtype must be float16, but got {params_dtype}")
+        if params_dtype not in [torch.float16, torch.bfloat16]:
+            raise ValueError(f"The params dtype must be float16 "
+                             f"or bfloat16, but got {params_dtype}")
 
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
@@ -293,13 +286,15 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         set_weight_attrs(
-            qweight, {
+            qweight,
+            {
                 **extra_weight_attrs,
                 "input_dim": 0,
                 "output_dim": 1,
                 "packed_dim": 0,
                 "pack_factor": self.quant_config.pack_factor,
-            })
+            },
+        )
 
         # Activation order
         g_idx = Parameter(
@@ -310,19 +305,18 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         # Ignore warning from fused linear layers such as QKVParallelLinear.
-        set_weight_attrs(g_idx, {
-            **extra_weight_attrs, "input_dim": 0,
-            "ignore_warning": True
-        })
-
-        g_idx_sort_indices = Parameter(
-            torch.empty(
-                g_idx.shape,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
+        set_weight_attrs(
+            g_idx,
+            {
+                **extra_weight_attrs, "input_dim": 0,
+                "ignore_warning": True
+            },
         )
-        set_weight_attrs(g_idx_sort_indices, extra_weight_attrs)
+
+        g_idx_sort_indices = torch.empty(
+            g_idx.shape,
+            dtype=torch.int32,
+        )
 
         # Scales
         scales = Parameter(
@@ -334,29 +328,34 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         set_weight_attrs(
-            scales, {
+            scales,
+            {
                 **extra_weight_attrs,
                 "input_dim": scales_and_zp_input_dim,
                 "output_dim": 1,
-            })
+            },
+        )
 
         # Quantized zero-points
         qzeros = Parameter(
-            torch.empty(scales_and_zp_size,
-                        output_size_per_partition //
-                        self.quant_config.pack_factor,
-                        dtype=torch.int32,
-                        device="meta"),
+            torch.empty(
+                scales_and_zp_size,
+                output_size_per_partition // self.quant_config.pack_factor,
+                dtype=torch.int32,
+                device="meta",
+            ),
             requires_grad=False,
         )
         set_weight_attrs(
-            qzeros, {
+            qzeros,
+            {
                 **extra_weight_attrs,
                 "input_dim": scales_and_zp_input_dim,
                 "output_dim": 1,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
-            })
+            },
+        )
 
         # Allocate marlin workspace
         max_workspace_size = (
@@ -368,9 +367,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("g_idx", g_idx)
-        layer.register_parameter("g_idx_sort_indices", g_idx_sort_indices)
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
+        layer.g_idx_sort_indices = g_idx_sort_indices
         layer.workspace = workspace
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
@@ -419,13 +418,14 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
             else:
                 # Reset g_idx related tensors
-                layer.g_idx = Parameter(torch.empty(0,
-                                                    dtype=torch.int,
-                                                    device=cur_device),
-                                        requires_grad=False)
-                layer.g_idx_sort_indices = Parameter(torch.empty(
-                    0, dtype=torch.int, device=cur_device),
-                                                     requires_grad=False)
+                layer.g_idx = Parameter(
+                    torch.empty(0, dtype=torch.int, device=cur_device),
+                    requires_grad=False,
+                )
+                layer.g_idx_sort_indices = Parameter(
+                    torch.empty(0, dtype=torch.int, device=cur_device),
+                    requires_grad=False,
+                )
 
             # Repack weights
             marlin_qweight = ops.gptq_marlin_repack(
@@ -433,6 +433,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 layer.g_idx_sort_indices,
                 part_size_k,
                 part_size_n,
+                self.quant_config.weight_bits,
             )
             replace_tensor("qweight", marlin_qweight)
 
@@ -442,15 +443,28 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             if self.quant_config.desc_act:
                 scales_size_k = full_size_k
 
-            marlin_scales = marlin_permute_scales(layer.scales, scales_size_k,
-                                                  scales_size_n,
-                                                  self.quant_config.group_size)
+            marlin_scales = marlin_permute_scales(
+                layer.scales,
+                scales_size_k,
+                scales_size_n,
+                self.quant_config.group_size,
+                self.quant_config.weight_bits,
+            )
             replace_tensor("scales", marlin_scales)
 
-        output = ops.gptq_marlin_gemm(reshaped_x, layer.qweight, layer.scales,
-                                      layer.g_idx, layer.g_idx_sort_indices,
-                                      layer.workspace, size_m, part_size_n,
-                                      part_size_k, layer.is_k_full)
+        output = ops.gptq_marlin_gemm(
+            reshaped_x,
+            layer.qweight,
+            layer.scales,
+            layer.g_idx,
+            layer.g_idx_sort_indices,
+            layer.workspace,
+            self.quant_config.weight_bits,
+            size_m,
+            part_size_n,
+            part_size_k,
+            layer.is_k_full,
+        )
 
         if bias is not None:
             output.add_(bias)  # In-place add

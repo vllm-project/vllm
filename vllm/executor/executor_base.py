@@ -1,11 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, VisionLanguageConfig)
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 
 
 class ExecutorBase(ABC):
@@ -68,14 +68,15 @@ class ExecutorBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def execute_model(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
-                      blocks_to_swap_in: Dict[int, int],
-                      blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]],
-                      num_lookahead_slots: int) -> List[SamplerOutput]:
+    def execute_model(
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences."""
         raise NotImplementedError
+
+    def stop_remote_worker_execution_loop(self) -> None:
+        """Releases parallel workers from model loop."""
+        return
 
     @abstractmethod
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -84,6 +85,10 @@ class ExecutorBase(ABC):
     @abstractmethod
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
+
+    @abstractmethod
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError  # type: ignore
 
     @abstractmethod
     def list_loras(self) -> Set[int]:
@@ -107,15 +112,14 @@ class ExecutorAsyncBase(ExecutorBase):
 
     @abstractmethod
     async def execute_model_async(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-        num_lookahead_slots: int,
-    ) -> List[SamplerOutput]:
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         """Executes one model step on the given sequences."""
         raise NotImplementedError
+
+    async def stop_remote_worker_execution_loop_async(self) -> None:
+        """Releases parallel workers from model loop."""
+        return
 
     async def check_health_async(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an

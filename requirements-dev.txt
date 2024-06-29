@@ -1,33 +1,5 @@
-# formatting
-yapf==0.32.0
-toml==0.10.2
-tomli==2.0.1
-ruff==0.1.5
-codespell==2.2.6
-isort==5.13.2
+-r requirements-lint.txt
+-r requirements-test.txt
 
-# type checking
-mypy==1.9.0
-types-PyYAML
-types-requests
-types-setuptools
-
-# testing
-pytest
-tensorizer==2.9.0a0
-pytest-forked
-pytest-asyncio
-pytest-rerunfailures
-pytest-shard
-httpx
-einops # required for MPT
-requests
-ray
-peft
-awscli
-
-# Benchmarking
-aiohttp
-
-# Multimodal
-pillow
+# Avoid adding requirements directly to this file.
+# Instead, modify the two files referenced above.

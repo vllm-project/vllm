@@ -1,6 +1,6 @@
 import time
 from collections import deque
-from typing import List
+from typing import Deque, List, Set, Tuple
 from unittest.mock import MagicMock
 
 import pytest  # noqa
@@ -65,7 +65,7 @@ def test_scheduler_abort_seq_group():
 
     # Add multiple seq groups to scheduler.
     num_seq_group = 4
-    request_ids = set()
+    request_ids: Set[str] = set()
     for i in range(num_seq_group):
         _, seq_group = create_dummy_prompt(str(i), block_size)
         scheduler.add_seq_group(seq_group)
@@ -180,6 +180,7 @@ def test_scheduler_schedule_preempt_abort():
             and not out.blocks_to_swap_out)
     assert len(seq_group_meta) == 1
     assert scheduler.get_num_unfinished_seq_groups() == 2
+    assert out.preempted == 1
 
     # Abort seq group a. Re-schedule seq group b prompt with recomputation.
     scheduler.abort_seq_group("1")
@@ -293,8 +294,8 @@ def test_swapped_out_prioritized():
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 2
     assert out.num_batched_tokens == 2
-    assert out.blocks_to_swap_out != {}
-    assert out.blocks_to_swap_in == {}
+    assert out.blocks_to_swap_out != []
+    assert out.blocks_to_swap_in == []
     append_new_token(out, 1)
 
     # Add 1 more task. Swap should be prioritized over prefill.
@@ -305,8 +306,8 @@ def test_swapped_out_prioritized():
     assert len(out.scheduled_seq_groups) == 3
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 3
-    assert out.blocks_to_swap_in != {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in != []
+    assert out.blocks_to_swap_out == []
 
 
 def initialize_scheduler(*,
@@ -346,7 +347,7 @@ def test_prefill_schedule_max_prompt_len():
     Test prompt longer than max_prompt_len is aborted.
     """
     scheduler = initialize_scheduler(max_model_len=30)
-    _, seq_group = create_dummy_prompt(0, prompt_length=60)
+    _, seq_group = create_dummy_prompt("0", prompt_length=60)
     waiting = deque([seq_group])
     budget = create_token_budget()
     remaining_waiting, output = scheduler._schedule_prefills(
@@ -363,7 +364,7 @@ def test_prefill_schedule_token_budget():
     Test token budget respected.
     """
     scheduler = initialize_scheduler()
-    waiting = deque()
+    waiting: Deque[SequenceGroup] = deque()
     budget = create_token_budget(token_budget=0)
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
@@ -418,7 +419,7 @@ def test_prefill_schedule_max_seqs():
     Test max seq respected.
     """
     scheduler = initialize_scheduler()
-    waiting = deque()
+    waiting: Deque[SequenceGroup] = deque()
     budget = create_token_budget(max_num_seqs=2)
     for i in range(3):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
@@ -452,9 +453,9 @@ def test_prefill_schedule_max_lora():
     """
     lora_config = LoRAConfig(max_lora_rank=8, max_loras=1)
     scheduler = initialize_scheduler(lora_config=lora_config)
-    waiting = deque()
+    waiting: Deque[SequenceGroup] = deque()
     budget = create_token_budget(token_budget=120)
-    curr_loras = set()
+    curr_loras: Set[int] = set()
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
@@ -498,7 +499,7 @@ def test_prefill_schedule_no_block_manager_capacity():
     Test sequence cannot be scheduled due to block manager has no capacity.
     """
     scheduler = initialize_scheduler()
-    waiting = deque()
+    waiting: Deque[SequenceGroup] = deque()
     budget = create_token_budget()
     for i in range(3):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
@@ -535,7 +536,7 @@ def test_decode_schedule_preempted():
     Test decodes cannot be scheduled and preempted.
     """
     scheduler = initialize_scheduler()
-    running = deque()
+    running: Deque[SequenceGroup] = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
     for i in range(3):
@@ -566,9 +567,9 @@ def test_decode_schedule_preempted():
     # NOTE: When enable_chunk is False, num_seqs budget is not updated.
     # assert budget.num_curr_seqs == 1
     # Both should be preempted, not swapped.
-    assert output.blocks_to_swap_out == {}
+    assert output.blocks_to_swap_out == []
     # Nothing is copied.
-    assert output.blocks_to_copy == {}
+    assert output.blocks_to_copy == []
 
 
 def test_decode_swap_beam_search():
@@ -576,7 +577,7 @@ def test_decode_swap_beam_search():
     Test best_of > 1 swap out blocks
     """
     scheduler = initialize_scheduler()
-    running = deque()
+    running: Deque[SequenceGroup] = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
     budget = create_token_budget()
@@ -599,7 +600,7 @@ def test_decode_swap_beam_search():
     scheduler.block_manager.can_append_slots.side_effect = (
         cannot_append_second_group)
     scheduler.block_manager.swap_out = MagicMock()
-    expected_swap_mapping = {"5": "7"}
+    expected_swap_mapping = [("5", "7")]
     scheduler.block_manager.swap_out.return_value = expected_swap_mapping
 
     remainig_running, output = scheduler._schedule_running(
@@ -618,7 +619,7 @@ def test_decode_swap_beam_search():
     # Both should be preempted, not swapped.
     assert output.blocks_to_swap_out == expected_swap_mapping
     # Nothing is copied.
-    assert output.blocks_to_copy == {}
+    assert output.blocks_to_copy == []
 
 
 def test_schedule_decode_blocks_to_copy_update():
@@ -627,7 +628,7 @@ def test_schedule_decode_blocks_to_copy_update():
     """
     scheduler = initialize_scheduler()
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
-    running = deque()
+    running: Deque[SequenceGroup] = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
     scheduler._allocate_and_set_running(seq_group)
@@ -636,7 +637,7 @@ def test_schedule_decode_blocks_to_copy_update():
 
     # The last request should be swapped out.
     scheduler.block_manager.append_slots = MagicMock()
-    scheduler.block_manager.append_slots.return_value = {2: [3]}
+    scheduler.block_manager.append_slots.return_value = [(2, 3)]
 
     budget = create_token_budget()
     remaining_running, output = scheduler._schedule_running(
@@ -647,18 +648,18 @@ def test_schedule_decode_blocks_to_copy_update():
     assert len(output.preempted) == 0
     assert len(output.swapped_out) == 0
     # Nothing is preempted.
-    assert output.blocks_to_swap_out == {}
+    assert output.blocks_to_swap_out == []
     # Since append_slot returns the source -> dist mapping, it should
     # applied.
-    assert output.blocks_to_copy == {2: [3]}
+    assert output.blocks_to_copy == [(2, 3)]
 
 
 def test_schedule_swapped_simple():
     scheduler = initialize_scheduler()
-    swapped = deque()
+    swapped: Deque[SequenceGroup] = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
-    blocks_to_swap_out = {}
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
@@ -674,18 +675,18 @@ def test_schedule_swapped_simple():
     assert len(output.decode_seq_groups) == 1
     assert len(output.prefill_seq_groups) == 0
     # swap in is the reverse of swap out
-    blocks_to_swap_in_reverse = {}
-    for swapin, swapout in output.blocks_to_swap_in.items():
-        blocks_to_swap_in_reverse[swapout] = swapin
+    blocks_to_swap_in_reverse = []
+    for swapin, swapout in output.blocks_to_swap_in:
+        blocks_to_swap_in_reverse.append((swapout, swapin))
     assert blocks_to_swap_out == blocks_to_swap_in_reverse
 
 
 def test_schedule_swapped_max_token_budget():
     scheduler = initialize_scheduler()
-    swapped = deque()
+    swapped: Deque[SequenceGroup] = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
-    blocks_to_swap_out = {}
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group)
@@ -716,10 +717,10 @@ def test_schedule_swapped_max_token_budget():
 
 def test_schedule_swapped_max_seqs():
     scheduler = initialize_scheduler()
-    swapped = deque()
+    swapped: Deque[SequenceGroup] = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
-    blocks_to_swap_out = {}
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     for i in range(4):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
         scheduler._allocate_and_set_running(seq_group)
@@ -749,10 +750,10 @@ def test_schedule_swapped_max_seqs():
 def test_schedule_swapped_max_loras():
     lora_config = LoRAConfig(max_lora_rank=8, max_loras=1)
     scheduler = initialize_scheduler(lora_config=lora_config)
-    swapped = deque()
+    swapped: Deque[SequenceGroup] = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
-    curr_loras = set()
-    blocks_to_swap_out = {}
+    curr_loras: Set[int] = set()
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
@@ -778,10 +779,10 @@ def test_schedule_swapped_max_loras():
 
 def test_schedule_swapped_cannot_swap_in():
     scheduler = initialize_scheduler()
-    swapped = deque()
+    swapped: Deque[SequenceGroup] = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
-    blocks_to_swap_out = {}
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group)
@@ -791,7 +792,7 @@ def test_schedule_swapped_cannot_swap_in():
 
     # The last request should be swapped out.
     scheduler.block_manager.can_swap_in = MagicMock()
-    scheduler.block_manager.can_swap_in.return_value = False
+    scheduler.block_manager.can_swap_in.return_value = AllocStatus.LATER
     # Since we cannot swap in, none of the requests are swapped in.
     budget = create_token_budget()
     remaining_swapped, output = scheduler._schedule_swapped(
@@ -803,21 +804,49 @@ def test_schedule_swapped_cannot_swap_in():
     assert len(output.prefill_seq_groups) == 0
 
 
+def test_infeasible_swap():
+    scheduler = initialize_scheduler()
+    swapped: Deque[SequenceGroup] = deque()
+    policy = PolicyFactory.get_policy(policy_name="fcfs")
+    curr_loras = None
+    blocks_to_swap_out: List[Tuple[int, int]] = []
+    for _ in range(2):
+        _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+        scheduler._allocate_and_set_running(seq_group)
+        append_new_token_seq_group(60, seq_group, 1)
+        scheduler._swap_out(seq_group, blocks_to_swap_out)
+        swapped.append(seq_group)
+
+    # The last request should be swapped out.
+    scheduler.block_manager.can_swap_in = MagicMock()
+    scheduler.block_manager.can_swap_in.return_value = AllocStatus.NEVER
+    # Since we cannot swap in, none of the requests are swapped in.
+    budget = create_token_budget()
+    remaining_swapped, output = scheduler._schedule_swapped(
+        swapped, budget, curr_loras, policy)
+    assert len(remaining_swapped) == 0
+    assert len(output.infeasible_seq_groups) == 2
+    assert budget.num_batched_tokens == 0
+    assert budget.num_curr_seqs == 0
+    assert len(output.decode_seq_groups) == 0
+    assert len(output.prefill_seq_groups) == 0
+
+
 def test_schedule_swapped_blocks_to_copy():
     scheduler = initialize_scheduler()
-    swapped = deque()
+    swapped: Deque[SequenceGroup] = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
-    blocks_to_swap_out = {}
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     scheduler._swap_out(seq_group, blocks_to_swap_out)
     swapped.append(seq_group)
 
     # The last request should be swapped out.
     scheduler.block_manager.append_slots = MagicMock()
-    scheduler.block_manager.append_slots.return_value = {2: [3]}
+    scheduler.block_manager.append_slots.return_value = [(2, 3)]
 
     budget = create_token_budget()
     remaining_swapped, output = scheduler._schedule_swapped(
@@ -825,7 +854,7 @@ def test_schedule_swapped_blocks_to_copy():
     assert len(remaining_swapped) == 0
     assert len(output.decode_seq_groups) == 1
     assert len(output.prefill_seq_groups) == 0
-    assert output.blocks_to_copy == {2: [3]}
+    assert output.blocks_to_copy == [(2, 3)]
 
 
 def test_scheduling_budget():

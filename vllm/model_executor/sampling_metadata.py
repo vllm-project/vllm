@@ -16,17 +16,26 @@ _SEED_0_REPLACEMENT = 3403598558
 
 @dataclass
 class SequenceGroupToSample:
+    # |---------- N-1 iteration --------|
+    # |---------------- N iteration ---------------------|
+    # |- tokenA -|......................|-- newTokens ---|
+    # |---------- context_len ----------|
+    # |-------------------- seq_len ----------------------|
+    #                                   |-- query_len ---|
+
     # Sequence ids for the sequence group in a previous step.
     seq_ids: List[int]
     sampling_params: SamplingParams
     # seq_id -> sequence data.
     seq_data: Dict[int, SequenceData]
-    # The length of the prompt of the sequence group. None if it is in a decode
+    # The length of the sequence (all tokens seen in the past + new token to
+    # compute attention) of the sequence group. None if it is in a decode
     # stage.
-    prompt_len: Optional[int]
-    # The length of the query tokens to compute in the current step. None if it
-    # is in a decode stage. The length of subquery_len <= prompt_len.
-    subquery_len: Optional[int]
+    seq_len: Optional[int]
+    # The length of new query tokens to compute in the current step. None if it
+    # is in a decode stage. The length of query_len <= seq_len if chunked
+    # prefill is enabled.
+    query_len: Optional[int]
     # A random number generator for sampling.
     generator: Optional[torch.Generator]
     # True if the sequence group is in prefill stage. False if it is in a
@@ -46,8 +55,8 @@ class SequenceGroupToSample:
         if len(self.prompt_logprob_indices) > 0:
             assert self.sampling_params.prompt_logprobs is not None
         if self.is_prompt:
-            assert self.prompt_len is not None
-            assert self.subquery_len is not None
+            assert self.seq_len is not None
+            assert self.query_len is not None
 
 
 class SamplingMetadata:
@@ -94,8 +103,8 @@ class SamplingMetadata:
     @staticmethod
     def prepare(
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        prompt_lens: List[int],
-        subquery_lens: Optional[List[int]],
+        seq_lens: List[int],
+        query_lens: Optional[List[int]],
         device: str,
         pin_memory: bool,
     ) -> "SamplingMetadata":
@@ -104,8 +113,8 @@ class SamplingMetadata:
             selected_token_indices,
             categorized_sample_indices,
             num_prompts,
-        ) = _prepare_seq_groups(seq_group_metadata_list, prompt_lens,
-                                subquery_lens, device)
+        ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
+                                device)
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,
@@ -137,8 +146,8 @@ class SamplingMetadata:
 
 def _prepare_seq_groups(
     seq_group_metadata_list: List[SequenceGroupMetadata],
-    prompt_lens: List[int],
-    subquery_lens: Optional[List[int]],
+    seq_lens: List[int],
+    query_lens: Optional[List[int]],
     device: str,
 ) -> Tuple[List[SequenceGroupToSample], List[int], Dict[
         SamplingType, List[Tuple[int, int]]], int]:
@@ -146,9 +155,9 @@ def _prepare_seq_groups(
 
     Args:
         seq_group_metadata_list: A list of sequence group to batch.
-        prompt_lens: A list of prompt lens per sequence group.
+        seq_lens: A list of sequence lens per sequence group.
             Index of prompt len should match with seq_group_metadata_list.
-        subquery_lens: A list of query lengths. Prompt lens include the length
+        query_lens: A list of query lengths. Prompt lens include the length
             of entire prompt tokens, and it could be shorter.
         device: A device to use for random number generator,
             `SequenceGroupToSample.generator`.
@@ -189,8 +198,8 @@ def _prepare_seq_groups(
         is_prompt = seq_group_metadata.is_prompt
         generator: Optional[torch.Generator] = None
         # If the current seq group is in decode stage, it is None.
-        prompt_len: Optional[int] = None
-        subquery_len: Optional[int] = None
+        seq_len: Optional[int] = None
+        query_len: Optional[int] = None
         prompt_logprob_indices: List[int] = []
         sample_indices: List[int] = []
         do_sample = seq_group_metadata.do_sample
@@ -203,12 +212,12 @@ def _prepare_seq_groups(
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
             assert num_prefill_sample == 1
-            assert subquery_lens is not None and prompt_lens is not None
-            subquery_len, prompt_len = subquery_lens[i], prompt_lens[i]
+            assert query_lens is not None and seq_lens is not None
+            query_len, seq_len = query_lens[i], seq_lens[i]
             # If we need sampling, exclude num_prefill_sample tokens from
             # prompt logprob.
-            prompt_logprob_len = (subquery_len - num_prefill_sample
-                                  if do_sample else subquery_len)
+            prompt_logprob_len = (query_len - num_prefill_sample
+                                  if do_sample else query_len)
             sample_len = num_prefill_sample if do_sample else 0
         else:
             # Decode
@@ -224,7 +233,7 @@ def _prepare_seq_groups(
         logits = hidden_states[selected_token_indices]
         """
 
-        if sampling_params.prompt_logprobs:
+        if sampling_params.prompt_logprobs is not None:
             selected_token_indices.extend(
                 range(model_output_idx, model_output_idx + prompt_logprob_len))
         model_output_idx += prompt_logprob_len
@@ -267,8 +276,8 @@ def _prepare_seq_groups(
                 seq_ids=seq_ids,
                 sampling_params=sampling_params,
                 seq_data=seq_group_metadata.seq_data,
-                prompt_len=prompt_len,
-                subquery_len=subquery_len,
+                seq_len=seq_len,
+                query_len=query_len,
                 generator=generator,
                 is_prompt=is_prompt,
                 prompt_logprob_indices=list(prompt_logprob_indices),
@@ -367,8 +376,8 @@ class SamplingTensors:
                     and sampling_params.prompt_logprobs is not None):
                 # For tokens in the prompt that we only need to get
                 # their logprobs
-                subquery_len = seq_group.subquery_len
-                assert subquery_len is not None
+                query_len = seq_group.query_len
+                assert query_len is not None
                 prefill_len = len(seq_group.prompt_logprob_indices)
                 temperatures += [temperature] * prefill_len
                 top_ps += [top_p] * prefill_len
@@ -377,16 +386,10 @@ class SamplingTensors:
                 presence_penalties += [0] * prefill_len
                 frequency_penalties += [0] * prefill_len
                 repetition_penalties += [1] * prefill_len
-                prompt_tokens.extend([] for _ in range(prefill_len))
-                output_tokens.extend([] for _ in range(prefill_len))
 
             if seq_group.do_sample:
                 sample_lens = len(seq_group.sample_indices)
                 assert sample_lens == len(seq_ids)
-                for seq_id in seq_ids:
-                    seq_data = seq_group.seq_data[seq_id]
-                    prompt_tokens.append(seq_data.prompt_token_ids)
-                    output_tokens.append(seq_data.output_token_ids)
                 temperatures += [temperature] * len(seq_ids)
                 top_ps += [top_p] * len(seq_ids)
                 top_ks += [top_k] * len(seq_ids)
@@ -397,8 +400,8 @@ class SamplingTensors:
 
             if is_prompt:
                 prompt_best_of.append(sampling_params.best_of)
-                subquery_len = seq_group.subquery_len
-                assert subquery_len is not None
+                query_len = seq_group.query_len
+                assert query_len is not None
 
             for seq_id in seq_ids:
                 seq_data = seq_group.seq_data[seq_id]
@@ -412,6 +415,20 @@ class SamplingTensors:
                     is_greedy=is_greedy)
                 sampling_seeds.append(seq_seeds)
             sample_indices.extend(seq_group.sample_indices)
+
+        if do_penalties:
+            for seq_group in sampling_metadata.seq_groups:
+                seq_ids = seq_group.seq_ids
+                if (seq_group.is_prompt
+                        and sampling_params.prompt_logprobs is not None):
+                    prefill_len = len(seq_group.prompt_logprob_indices)
+                    prompt_tokens.extend([] for _ in range(prefill_len))
+                    output_tokens.extend([] for _ in range(prefill_len))
+                if seq_group.do_sample:
+                    for seq_id in seq_ids:
+                        seq_data = seq_group.seq_data[seq_id]
+                        prompt_tokens.append(seq_data.prompt_token_ids)
+                        output_tokens.append(seq_data.output_token_ids)
 
         sampling_tensors = SamplingTensors.from_lists(
             temperatures, top_ps, top_ks, min_ps, presence_penalties,
@@ -434,18 +451,22 @@ class SamplingTensors:
         # Note that the performance will be very bad without
         # pinned memory.
         pin_memory = is_pin_memory_available()
-        prompt_max_len = max([len(tokens) for tokens in prompt_tokens],
-                             default=0)
-        prompt_padded_tokens = [
-            tokens + [vocab_size] * (prompt_max_len - len(tokens))
-            for tokens in prompt_tokens
-        ]
-        output_max_len = max([len(tokens) for tokens in output_tokens],
-                             default=0)
-        output_padded_tokens = [
-            tokens + [vocab_size] * (output_max_len - len(tokens))
-            for tokens in output_tokens
-        ]
+
+        do_penalties = prompt_tokens or output_tokens
+
+        if do_penalties:
+            prompt_max_len = max([len(tokens) for tokens in prompt_tokens],
+                                 default=0)
+            prompt_padded_tokens = [
+                tokens + [vocab_size] * (prompt_max_len - len(tokens))
+                for tokens in prompt_tokens
+            ]
+            output_max_len = max([len(tokens) for tokens in output_tokens],
+                                 default=0)
+            output_padded_tokens = [
+                tokens + [vocab_size] * (output_max_len - len(tokens))
+                for tokens in output_tokens
+            ]
 
         temperatures_t = torch.tensor(
             temperatures,
@@ -495,18 +516,22 @@ class SamplingTensors:
             dtype=torch.long,
             pin_memory=pin_memory,
         )
-        prompt_tensor = torch.tensor(
-            prompt_padded_tokens,
-            device="cpu",
-            dtype=torch.long,
-            pin_memory=pin_memory,
-        )
-        output_tensor = torch.tensor(
-            output_padded_tokens,
-            device="cpu",
-            dtype=torch.long,
-            pin_memory=pin_memory,
-        )
+        if do_penalties:
+            prompt_tensor = torch.tensor(
+                prompt_padded_tokens,
+                device="cpu",
+                dtype=torch.long,
+                pin_memory=pin_memory,
+            )
+            output_tensor = torch.tensor(
+                output_padded_tokens,
+                device="cpu",
+                dtype=torch.long,
+                pin_memory=pin_memory,
+            )
+        else:
+            prompt_tensor = None
+            output_tensor = None
         # need to transpose and make contiguous to
         # copy the tensor correctly.
         # [batch_size, n_seeds] -> [n_seeds, batch_size]
@@ -529,6 +554,16 @@ class SamplingTensors:
             extra_seeds_gpu = None
         sampling_seeds_gpu = sampling_seeds_gpu[:num_base_seeds]
 
+        if do_penalties:
+            prompt_tokens_gpu = prompt_tensor.to(device=device,
+                                                 non_blocking=True)
+            output_tokens_gpu = output_tensor.to(device=device,
+                                                 non_blocking=True)
+        else:
+            empty_tensor = torch.empty(0, device=device, dtype=torch.long)
+            prompt_tokens_gpu = empty_tensor
+            output_tokens_gpu = empty_tensor
+
         return cls(
             temperatures=temperatures_t.to(device=device, non_blocking=True),
             top_ps=top_ps_t.to(device=device, non_blocking=True),
@@ -540,8 +575,8 @@ class SamplingTensors:
                                                          non_blocking=True),
             repetition_penalties=repetition_penalties_t.to(device=device,
                                                            non_blocking=True),
-            prompt_tokens=prompt_tensor.to(device=device, non_blocking=True),
-            output_tokens=output_tensor.to(device=device, non_blocking=True),
+            prompt_tokens=prompt_tokens_gpu,
+            output_tokens=output_tokens_gpu,
             sampling_seeds=sampling_seeds_gpu,
             sample_indices=sample_indices_t.to(device=device,
                                                non_blocking=True),

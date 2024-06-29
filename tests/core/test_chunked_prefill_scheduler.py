@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 import pytest  # noqa
 
 from vllm.config import CacheConfig, SchedulerConfig
+from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import Logprob, SequenceGroup
 
@@ -148,7 +149,7 @@ def test_complex():
     # Only the first seq group has a new token appended.
     append_new_token(running[0], 1)
 
-    # Add 2 more requsets.
+    # Add 2 more requests.
     for i in range(2, 4):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
         scheduler.add_seq_group(seq_group)
@@ -354,8 +355,8 @@ def test_swap():
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 0
     assert out.num_batched_tokens == 0
-    assert out.blocks_to_swap_out != {}
-    assert out.blocks_to_swap_in == {}
+    assert out.blocks_to_swap_out != []
+    assert out.blocks_to_swap_in == []
 
     # Add 1 more task. Swap should be prioritized over new prefill.
     _, seq_group = create_dummy_prompt("2", prompt_length=60)
@@ -364,8 +365,8 @@ def test_swap():
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in != {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in != []
+    assert out.blocks_to_swap_out == []
 
 
 def test_running_prefill_prioritized_over_swap():
@@ -405,12 +406,12 @@ def test_running_prefill_prioritized_over_swap():
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 0
     assert out.num_batched_tokens == 0
-    assert out.blocks_to_swap_out != {}
-    assert out.blocks_to_swap_in == {}
+    assert out.blocks_to_swap_out != []
+    assert out.blocks_to_swap_in == []
 
     # Add 1 more task. Swap is not possible, so prefill is running.
     scheduler.block_manager.can_swap_in = MagicMock()
-    scheduler.block_manager.can_swap_in.return_value = False
+    scheduler.block_manager.can_swap_in.return_value = AllocStatus.LATER
 
     _, seq_group2 = create_dummy_prompt("2", prompt_length=60)
     scheduler.add_seq_group(seq_group2)
@@ -418,18 +419,18 @@ def test_running_prefill_prioritized_over_swap():
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in == {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in == []
+    assert out.blocks_to_swap_out == []
     assert out.scheduled_seq_groups[0].seq_group == seq_group2
 
     # Now although swap is possible, running prefill is prioritized.
-    scheduler.block_manager.can_swap_in.return_value = True
+    scheduler.block_manager.can_swap_in.return_value = AllocStatus.OK
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in == {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in == []
+    assert out.blocks_to_swap_out == []
     assert not seq_group2.is_prefill()
     assert out.scheduled_seq_groups[0].seq_group == seq_group2
     append_new_token(seq_group2, 1)
@@ -439,8 +440,8 @@ def test_running_prefill_prioritized_over_swap():
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 1
-    assert out.blocks_to_swap_in == {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in == []
+    assert out.blocks_to_swap_out == []
     assert not seq_group2.is_prefill()
     assert out.scheduled_seq_groups[0].seq_group == seq_group2
     append_new_token(seq_group2, 1)
@@ -450,8 +451,8 @@ def test_running_prefill_prioritized_over_swap():
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in != {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in != []
+    assert out.blocks_to_swap_out == []
 
 
 def test_chunked_prefill_preempt():
@@ -482,18 +483,18 @@ def test_chunked_prefill_preempt():
     # The request should be preempted.
     scheduler.block_manager.can_append_slots = MagicMock()
 
-    def cannot_append_second_group(seq_group, num_lookahead_slots):
+    def cannot_append_second_group1(seq_group, num_lookahead_slots):
         return seq_group.request_id != "1"
 
     scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group)
+        cannot_append_second_group1)
 
     # The running prefill is now preempted.
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 0
     assert out.num_batched_tokens == 0
-    assert out.blocks_to_swap_out == {}
-    assert out.blocks_to_swap_in == {}
+    assert out.blocks_to_swap_out == []
+    assert out.blocks_to_swap_in == []
 
     # Make sure we can reschedule preempted request.
     _, out = schedule_and_update_computed_tokens(scheduler)
@@ -504,11 +505,11 @@ def test_chunked_prefill_preempt():
     assert seq_group.get_num_uncomputed_tokens() == 30
 
     # We should be able to run prefill twice as it is chunked.
-    def cannot_append_second_group(seq_group, num_lookahead_slots):
+    def cannot_append_second_group2(seq_group, num_lookahead_slots):
         return True
 
     scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group)
+        cannot_append_second_group2)
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     assert out.num_prefill_groups == 1
@@ -529,7 +530,7 @@ def test_chunked_prefill_max_seqs():
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
     scheduler = Scheduler(scheduler_config, cache_config, None)
-    running = []
+    running: List[SequenceGroup] = []
 
     _, seq_group = create_dummy_prompt("1", prompt_length=65)
     scheduler.add_seq_group(seq_group)

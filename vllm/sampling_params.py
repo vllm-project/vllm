@@ -18,10 +18,14 @@ class SamplingType(IntEnum):
     BEAM = 3
 
 
-LogitsProcessor = Callable[[List[int], torch.Tensor], torch.Tensor]
-"""LogitsProcessor is a function that takes a list of previously generated
-tokens and a tensor of the logits for the next token, and returns a modified
-tensor of logits to sample from."""
+LogitsProcessor = Union[Callable[[List[int], torch.Tensor], torch.Tensor],
+                        Callable[[List[int], List[int], torch.Tensor],
+                                 torch.Tensor]]
+"""LogitsProcessor is a function that takes a list
+of previously generated tokens, the logits tensor
+for the next token and, optionally, prompt tokens as a
+first argument, and returns a modified tensor of logits
+to sample from."""
 
 
 class SamplingParams:
@@ -95,7 +99,8 @@ class SamplingParams:
         spaces_between_special_tokens: Whether to add spaces between special
             tokens in the output.  Defaults to True.
         logits_processors: List of functions that modify logits based on
-            previously generated tokens.
+            previously generated tokens, and optionally prompt tokens as
+            a first argument.
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
@@ -139,7 +144,10 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
-        self.seed = seed
+        if seed == -1:
+            self.seed = None
+        else:
+            self.seed = seed
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
@@ -272,16 +280,30 @@ class SamplingParams:
                              f"Got {self.best_of}.")
 
     def update_from_generation_config(
-            self, generation_config: Dict[str, Any]) -> None:
+            self,
+            generation_config: Dict[str, Any],
+            model_eos_token_id: Optional[int] = None) -> None:
         """Update if there are non-default values from generation_config"""
+
+        if model_eos_token_id is not None:
+            # Add the eos token id into the sampling_params to support
+            # min_tokens processing.
+            self.all_stop_token_ids.add(model_eos_token_id)
+
         # Update eos_token_id for generation
-        if eos_ids := generation_config.get("eos_token_id"):
+        if (eos_ids := generation_config.get("eos_token_id")) is not None:
             # it can be either int or list of int
-            if isinstance(eos_ids, int):
-                eos_ids = [eos_ids]
-            original_stop_token_ids = set(self.stop_token_ids)
-            original_stop_token_ids.update(eos_ids)
-            self.stop_token_ids = list(original_stop_token_ids)
+            eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
+            if model_eos_token_id is not None:
+                # We don't need to include the primary eos_token_id in
+                # stop_token_ids since it's handled separately for stopping
+                # purposes.
+                eos_ids.discard(model_eos_token_id)
+            if eos_ids:
+                self.all_stop_token_ids.update(eos_ids)
+                if not self.ignore_eos:
+                    eos_ids.update(self.stop_token_ids)
+                    self.stop_token_ids = list(eos_ids)
 
     @cached_property
     def sampling_type(self) -> SamplingType:

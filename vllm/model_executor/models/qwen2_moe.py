@@ -30,6 +30,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -188,6 +189,7 @@ class Qwen2MoeAttention(nn.Module):
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -239,7 +241,9 @@ class Qwen2MoeAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
-                              num_kv_heads=self.num_kv_heads)
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -262,6 +266,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         layer_idx: int,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -277,10 +282,12 @@ class Qwen2MoeDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
+            cache_config=cache_config,
             quant_config=quant_config,
         )
-        if (config.num_experts is not None
-                and (layer_idx + 1) % config.decoder_sparse_step == 0):
+        if (layer_idx not in config.mlp_only_layers) and (
+                config.num_experts > 0 and
+            (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = Qwen2MoeSparseMoeBlock(config=config,
                                               quant_config=quant_config)
         else:
@@ -329,6 +336,7 @@ class Qwen2MoeModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -340,7 +348,10 @@ class Qwen2MoeModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            Qwen2MoeDecoderLayer(config, layer_idx, quant_config=quant_config)
+            Qwen2MoeDecoderLayer(config,
+                                 layer_idx,
+                                 cache_config,
+                                 quant_config=quant_config)
             for layer_idx in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -370,12 +381,13 @@ class Qwen2MoeForCausalLM(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = Qwen2MoeModel(config, quant_config)
+        self.model = Qwen2MoeModel(config, cache_config, quant_config)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
@@ -431,6 +443,9 @@ class Qwen2MoeForCausalLM(nn.Module):
                 if (("mlp.experts." in name or "mlp.shared_expert." in name)
                         and name not in params_dict):
                     continue
+                if name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -442,6 +457,9 @@ class Qwen2MoeForCausalLM(nn.Module):
                 if (("mlp.experts." in name or "mlp.shared_expert." in name)
                         and name not in params_dict):
                     continue
+                if name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

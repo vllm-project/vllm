@@ -19,9 +19,8 @@ MAX_TOKENS = 1024
 
 @pytest.fixture
 def vllm_model(vllm_runner):
-    vllm_model = vllm_runner(MODEL)
-    yield vllm_model
-    del vllm_model
+    with vllm_runner(MODEL) as vllm_model:
+        yield vllm_model
 
 
 def test_stop_reason(vllm_model, example_prompts):
@@ -32,6 +31,7 @@ def test_stop_reason(vllm_model, example_prompts):
     # test stop token
     outputs = llm.generate(example_prompts,
                            sampling_params=SamplingParams(
+                               ignore_eos=True,
                                seed=SEED,
                                max_tokens=MAX_TOKENS,
                                stop_token_ids=[stop_token_id]))
@@ -43,7 +43,10 @@ def test_stop_reason(vllm_model, example_prompts):
     # test stop string
     outputs = llm.generate(example_prompts,
                            sampling_params=SamplingParams(
-                               seed=SEED, max_tokens=MAX_TOKENS, stop="."))
+                               ignore_eos=True,
+                               seed=SEED,
+                               max_tokens=MAX_TOKENS,
+                               stop="."))
     for output in outputs:
         output = output.outputs[0]
         assert output.finish_reason == "stop"

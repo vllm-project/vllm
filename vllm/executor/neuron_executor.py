@@ -1,9 +1,9 @@
-from typing import Dict, List, Set, Tuple
+from typing import List, Set, Tuple
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
@@ -45,20 +45,17 @@ class NeuronExecutor(ExecutorBase):
         """
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
-    def execute_model(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
-                      blocks_to_swap_in: Dict[int, int],
-                      blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]],
-                      num_lookahead_slots: int) -> List[SamplerOutput]:
-        assert (blocks_to_swap_in == {} and blocks_to_swap_out == {}
-                and blocks_to_copy == {}), (
+    def execute_model(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        assert (not execute_model_req.blocks_to_swap_in
+                and not execute_model_req.blocks_to_swap_out
+                and not execute_model_req.blocks_to_copy), (
                     "Cache operations are not supported for Neuron backend.")
-        assert num_lookahead_slots == 0, (
+        assert execute_model_req.num_lookahead_slots == 0, (
             "lookahead not supported for Neuron backend.")
 
-        output = self.driver_worker.execute_model(
-            seq_group_metadata_list=seq_group_metadata_list)
+        output = self.driver_worker.execute_model(execute_model_req)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -66,6 +63,9 @@ class NeuronExecutor(ExecutorBase):
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.driver_worker.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.driver_worker.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
@@ -80,14 +80,11 @@ class NeuronExecutorAsync(NeuronExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-        num_lookahead_slots: int,
+        execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
-        output = await make_async(self.driver_worker.execute_model)(
-            seq_group_metadata_list=seq_group_metadata_list, )
+        output = await make_async(
+            self.driver_worker.execute_model
+        )(seq_group_metadata_list=execute_model_req.seq_group_metadata_list, )
         return output
 
     async def check_health_async(self) -> None:

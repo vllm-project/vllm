@@ -15,20 +15,23 @@ import psutil
 import requests
 import torch
 
-_config_home = os.getenv("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+import vllm.envs as envs
+from vllm.version import __version__ as VLLM_VERSION
+
+_config_home = envs.VLLM_CONFIG_ROOT
 _USAGE_STATS_JSON_PATH = os.path.join(_config_home, "vllm/usage_stats.json")
 _USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home,
                                               "vllm/do_not_track")
 _USAGE_STATS_ENABLED = None
-_USAGE_STATS_SERVER = os.environ.get("VLLM_USAGE_STATS_SERVER",
-                                     "https://stats.vllm.ai")
+_USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
 
 
 def is_usage_stats_enabled():
     """Determine whether or not we can send usage stats to the server.
     The logic is as follows:
     - By default, it should be enabled.
-    - Two environment variables can disable it:
+    - Three environment variables can disable it:
+        - VLLM_DO_NOT_TRACK=1
         - DO_NOT_TRACK=1
         - VLLM_NO_USAGE_STATS=1
     - A file in the home directory can disable it if it exists:
@@ -36,8 +39,8 @@ def is_usage_stats_enabled():
     """
     global _USAGE_STATS_ENABLED
     if _USAGE_STATS_ENABLED is None:
-        do_not_track = os.environ.get("DO_NOT_TRACK", "0") == "1"
-        no_usage_stats = os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1"
+        do_not_track = envs.VLLM_DO_NOT_TRACK
+        no_usage_stats = envs.VLLM_NO_USAGE_STATS
         do_not_track_file = os.path.exists(_USAGE_STATS_DO_NOT_TRACK_PATH)
 
         _USAGE_STATS_ENABLED = not (do_not_track or no_usage_stats
@@ -88,6 +91,7 @@ class UsageContext(str, Enum):
     LLM_CLASS = "LLM_CLASS"
     API_SERVER = "API_SERVER"
     OPENAI_API_SERVER = "OPENAI_API_SERVER"
+    OPENAI_BATCH_RUNNER = "OPENAI_BATCH_RUNNER"
     ENGINE_CONTEXT = "ENGINE_CONTEXT"
 
 
@@ -160,14 +164,13 @@ class UsageMessage:
         ])
 
         # vLLM information
-        import vllm  # delayed import to prevent circular import
         self.context = usage_context.value
-        self.vllm_version = vllm.__version__
+        self.vllm_version = VLLM_VERSION
         self.model_architecture = model_architecture
 
         # Metadata
         self.log_time = _get_current_timestamp_ns()
-        self.source = os.environ.get("VLLM_USAGE_SOURCE", "production")
+        self.source = envs.VLLM_USAGE_SOURCE
 
         data = vars(self)
         if extra_kvs:
