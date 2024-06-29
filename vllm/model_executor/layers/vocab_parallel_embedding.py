@@ -212,14 +212,16 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_added_embeddings_per_partition = (
             self.shard_indices.added_vocab_end_index -
             self.shard_indices.added_vocab_start_index)
-        self.weight = Parameter(
-            torch.empty(self.num_embeddings_per_partition,
-                        self.embedding_dim,
-                        dtype=params_dtype))
-        set_weight_attrs(self.weight, {
-            "parallel_dim": 0,
-            "weight_loader": self.weight_loader
-        })
+        
+        self.linear_method.create_weights(
+            self,
+            self.embedding_dim,
+            [self.num_embeddings_per_partition],
+            self.embedding_dim,
+            self.num_embeddings_padded,
+            params_dtype=params_dtype,
+            weigth_loader=self.weight_loader
+        )
 
     @classmethod
     def _get_indices(cls, vocab_size_padded: int, org_vocab_size_padded: int,

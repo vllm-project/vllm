@@ -277,14 +277,14 @@ class GPTJForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
-                if skip_gptq_extra_param(name, params_dict):
+                if name.endswith(".bias") and name not in params_dict:(name, params_dict):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if skip_gptq_extra_param(name, params_dict):
+                if name.endswith(".bias") and name not in params_dict:(name, params_dict):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",

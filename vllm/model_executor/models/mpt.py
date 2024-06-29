@@ -296,7 +296,7 @@ class MPTForCausalLM(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
-            if skip_gptq_extra_param(name, params_dict):
+            if name.endswith(".bias") and name not in params_dict:(name, params_dict):
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",

@@ -393,7 +393,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
                 continue
             if "word_embeddings" in name:
                 name = name.replace(".word_embeddings", "")
-            if skip_gptq_extra_param(name, params_dict):
+            if name.endswith(".bias") and name not in params_dict:(name, params_dict):
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
