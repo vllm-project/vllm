@@ -270,7 +270,7 @@ class RayTPUExecutor(TPUExecutor):
         self._wait_for_tasks_completion(parallel_worker_tasks)
 
 
-class RayGPUExecutorAsync(RayTPUExecutor, ExecutorAsyncBase):
+class RayTPUExecutorAsync(RayTPUExecutor, ExecutorAsyncBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
