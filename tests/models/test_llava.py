@@ -125,7 +125,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     # There may be numeric differences for multiscale images due to
     # our implementation of CLIPVisionModel
     best_max_tokens_exc_list: List[Tuple[int, Optional[AssertionError]]] = []
-    for i in range(len(HF_IMAGE_PROMPTS)):
+    for i in range(len(image_inputs)):
         try:
             hf_output_ids, hf_output_str = hf_outputs[i]
             vllm_output_ids, vllm_output_str = vllm_to_hf_output(

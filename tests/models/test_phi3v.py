@@ -145,7 +145,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     # Since we use _attn_implementation="eager", there is numeric
     # difference for longer context (max_tokens=128) and test can't pass
     best_max_tokens_exc_list: List[Tuple[int, Optional[AssertionError]]] = []
-    for i in range(len(HF_IMAGE_PROMPTS)):
+    for i in range(len(image_inputs)):
         image_feature_size = get_phi3v_image_feature_size(
             hf_config,
             input_height=hf_image_inputs[i].height,
