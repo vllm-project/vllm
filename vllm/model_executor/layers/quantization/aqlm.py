@@ -166,13 +166,11 @@ class AQLMConfig(QuantizationConfig):
         nbits_per_codebook: int,
         num_codebooks: int,
         out_group_size: int,
-        lm_head_quantized: bool,
     ) -> None:
         self.in_group_size = in_group_size
         self.nbits_per_codebook = nbits_per_codebook
         self.num_codebooks = num_codebooks
         self.out_group_size = out_group_size
-        self.lm_head_quantized = lm_head_quantized
 
         # out_group_size > 1 is untested, and probably won't work as-is.
         assert (self.out_group_size == 1)
@@ -182,8 +180,7 @@ class AQLMConfig(QuantizationConfig):
         return (f"AQLMConfig(in_group_size={self.in_group_size}, "
                 f"nbits_per_codebook={self.nbits_per_codebook}, "
                 f"num_codebooks={self.num_codebooks}, "
-                f"out_group_size={self.out_group_size} "
-                f"lm_head_quantized={self.lm_head_quantized}")
+                f"out_group_size={self.out_group_size}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -207,10 +204,8 @@ class AQLMConfig(QuantizationConfig):
         nbits_per_codebook = cls.get_from_keys(config, ["nbits_per_codebook"])
         num_code_books = cls.get_from_keys(config, ["num_codebooks"])
         out_group_size = cls.get_from_keys(config, ["out_group_size"])
-        lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"],
-                                                       False)
         return cls(in_group_size, nbits_per_codebook, num_code_books,
-                   out_group_size, lm_head_quantized)
+                   out_group_size)
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["AQLMLinearMethod"]:
@@ -228,7 +223,6 @@ class AQLMLinearMethod(LinearMethodBase):
     Args:
         quant_config: The AQLM quantization config.
     """
-    QUANTIZED = True
 
     def __init__(self, quant_config: AQLMConfig):
         self.quant_config = quant_config
