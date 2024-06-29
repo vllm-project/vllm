@@ -838,7 +838,7 @@ class LLMEngine:
         # Tracing
         self.do_tracing(scheduler_outputs)
 
-        if not request_outputs:
+        if not self.has_unfinished_requests():
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
             # torch.distributed ops which may otherwise timeout, and unblocks
