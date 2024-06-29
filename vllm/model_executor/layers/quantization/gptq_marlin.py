@@ -183,7 +183,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         # Otherwise, can convert if model satisfies marlin constraints.
         return (num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS
                 and group_size in GPTQ_MARLIN_SUPPORTED_GROUP_SIZES
-                and is_sym in GPTQ_MARLIN_SUPPORTED_SYM)
+                and sym in GPTQ_MARLIN_SUPPORTED_SYM)
 
 
 class GPTQMarlinState(Enum):
