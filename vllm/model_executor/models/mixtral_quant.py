@@ -392,6 +392,7 @@ class MixtralForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:(name, params_dict):
                     continue
                 param = params_dict[name]
@@ -399,6 +400,7 @@ class MixtralForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:(name, params_dict):
                     continue
                 # Skip experts that are not assigned to this worker.

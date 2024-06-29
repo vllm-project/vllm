@@ -375,6 +375,7 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA):
                 if shard_name not in name:
                     continue
                 name = name.replace(shard_name, param_name)
+                # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:(name, params_dict):
                     continue
                 param = params_dict[name]
@@ -386,6 +387,7 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA):
                 # To prevent errors, skip loading lm_head.weight.
                 if "lm_head.weight" in name:
                     continue
+                # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:(name, params_dict):
                     continue
                 param = params_dict[name]

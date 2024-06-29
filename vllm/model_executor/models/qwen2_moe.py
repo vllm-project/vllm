@@ -436,6 +436,7 @@ class Qwen2MoeForCausalLM(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
+                # Skip loading extra bias for GPTQ models.
                 name = name.replace(weight_name, param_name)
                 if name.endswith(".bias") and name not in params_dict:(name, params_dict):
                     continue
@@ -451,6 +452,7 @@ class Qwen2MoeForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:(name, params_dict):
                     continue
                 # Skip experts that are not assigned to this worker.
