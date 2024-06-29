@@ -21,12 +21,10 @@ class AWQConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         zero_point: bool,
-        lm_head_quantized: bool,
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.zero_point = zero_point
-        self.lm_head_quantized = lm_head_quantized
 
         if self.weight_bits != 4:
             raise ValueError(
@@ -37,8 +35,7 @@ class AWQConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"AWQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"zero_point={self.zero_point}, "
-                f"lm_head_quantized={self.lm_head_quantized}")
+                f"zero_point={self.zero_point})")
 
     def get_name(self) -> str:
         return "awq"
@@ -63,9 +60,7 @@ class AWQConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
-        lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"],
-                                                       False)
-        return cls(weight_bits, group_size, zero_point, lm_head_quantized)
+        return cls(weight_bits, group_size, zero_point)
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["AWQLinearMethod"]:
@@ -83,7 +78,6 @@ class AWQLinearMethod(LinearMethodBase):
     Args:
         quant_config: The AWQ quantization config.
     """
-    QUANTIZED = True
 
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
