@@ -405,6 +405,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
 class Phi3VForCausalLM(nn.Module, SupportsVision):
 
     def __init__(self,
