@@ -139,9 +139,10 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
             best_max_tokens_exc_list.append((max_tokens, None))
 
     best_max_tokens = min(pair[0] for pair in best_max_tokens_exc_list)
+    exc_list = [pair[1] for pair in best_max_tokens_exc_list]
+    if best_max_tokens < 1:
+        raise next(exc for exc in exc_list if exc is not None)
     if best_max_tokens < max_tokens:
-        exc_list = [pair[1] for pair in best_max_tokens_exc_list]
-
         pytest.xfail(
             f"Test only fully passes when max_tokens={best_max_tokens} "
             f"(instead of {max_tokens}). Errors encountered per item: "
