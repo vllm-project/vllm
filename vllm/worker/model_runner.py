@@ -752,8 +752,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
             seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
                 .dummy_data_for_profiling(model_config, seq_len)
-            assert len(seq_data.prompt_token_ids) == seq_len, (
-                f"Wrong number of tokens generated. Expected: {seq_len} "
+
+            # Having more tokens is over-conservative but otherwise fine
+            assert len(seq_data.prompt_token_ids) >= seq_len, (
+                f"Expected at least {seq_len} dummy tokens for profiling, "
                 f"but got: {len(seq_data.prompt_token_ids)}")
 
             seq = SequenceGroupMetadata(

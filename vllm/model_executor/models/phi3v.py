@@ -266,41 +266,7 @@ class Phi3VImagePixelInputs(TypedDict):
     """
 
 
-def _get_phi3v_image_feature_size(
-    *,
-    input_height: int,
-    input_width: int,
-) -> int:
-    h, w = input_height, input_width
-
-    # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L178
-    return (h // 336 * w // 336 + 1) * 144 + 1 + (h // 336 + 1) * 12
-
-
-def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
-    # TODO: How to get the max possible feature size?
-    dummy_height, dummy_width = 1344, 1008
-    image_feature_size = _get_phi3v_image_feature_size(
-        input_height=dummy_height,
-        input_width=dummy_width,
-    )
-
-    seq_data = dummy_seq_data_for_clip(
-        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-        seq_len,
-        image_token_id=32044,
-        image_feature_size_override=image_feature_size,
-    )
-    mm_data = dummy_pixel_data_for_clip(
-        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-        image_width_override=dummy_width,
-        image_height_override=dummy_height,
-    )
-
-    return seq_data, mm_data
-
-
-# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
+# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
 def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
     target_height = int(np.ceil(height / padding_unit) * padding_unit)
     top_padding = int((target_height - height) / 2)
@@ -310,7 +276,7 @@ def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
     return padded_width, padded_height
 
 
-# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py
+# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L90
 def _calc_hd_transform_size(*, width: int, height: int, hd_num: int = 16):
     transposed = False
     if width < height:
@@ -335,6 +301,46 @@ def _calc_hd_transform_size(*, width: int, height: int, hd_num: int = 16):
     return padded_width, padded_height
 
 
+# Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L181
+def get_phi3v_image_feature_size(
+    hf_config: PretrainedConfig,
+    *,
+    input_height: int,
+    input_width: int,
+) -> int:
+    num_crops = getattr(hf_config, "num_crops", 16)
+    new_width, new_height = _calc_hd_transform_size(width=input_width,
+                                                    height=input_height,
+                                                    hd_num=num_crops)
+
+    return (new_height // 336 * new_width // 336 + 1) * 144 + 1 \
+        + (new_height // 336 + 1) * 12
+
+
+def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
+    # Result in the max possible feature size (h:w = 16:1)
+    dummy_height, dummy_width = 8000, 50
+    image_feature_size = get_phi3v_image_feature_size(
+        ctx.get_hf_config(PretrainedConfig),
+        input_height=dummy_height,
+        input_width=dummy_width,
+    )
+
+    seq_data = dummy_seq_data_for_clip(
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        seq_len,
+        image_token_id=32044,
+        image_feature_size_override=image_feature_size,
+    )
+    mm_data = dummy_pixel_data_for_clip(
+        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        image_width_override=dummy_width,
+        image_height_override=dummy_height,
+    )
+
+    return seq_data, mm_data
+
+
 def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or not isinstance(
@@ -343,6 +349,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
     model_config = ctx.model_config
     multimodal_config = ctx.get_multimodal_config()
+    hf_config = ctx.get_hf_config(PretrainedConfig)
 
     if isinstance(multi_modal_data, ImagePixelData):
         image = multi_modal_data.image
@@ -353,8 +360,9 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
         w, h = _calc_hd_transform_size(width=w, height=h)
 
-        image_feature_size = _get_phi3v_image_feature_size(input_width=w,
-                                                           input_height=h)
+        image_feature_size = get_phi3v_image_feature_size(hf_config,
+                                                          input_width=w,
+                                                          input_height=h)
     else:
         image_features = multi_modal_data.image_features
         image_feature_size = image_features.shape[-2]
@@ -397,6 +405,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
 @MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
 class Phi3VForCausalLM(nn.Module, SupportsVision):
 
     def __init__(self,
