@@ -59,7 +59,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     """Config class for GPTQ Marlin"""
 
     def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
-                 sym: bool, lm_head_quantized: bool) -> None:
+                 is_sym: bool, lm_head_quantized: bool) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
@@ -68,7 +68,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
-        self.sym = sym
+        self.is_sym = is_sym
         self.lm_head_quantized = lm_head_quantized
 
         # Verify
@@ -82,10 +82,10 @@ class GPTQMarlinConfig(QuantizationConfig):
                 f"Marlin does not support group_size = {self.group_size}. "
                 f"Only group_sizes = {GPTQ_MARLIN_SUPPORTED_GROUP_SIZES} "
                 "are supported.")
-        if self.sym not in GPTQ_MARLIN_SUPPORTED_SYM:
+        if self.is_sym not in GPTQ_MARLIN_SUPPORTED_SYM:
             raise ValueError(
-                f"Marlin does not support is_sym = {self.sym}. "
-                f"Only sym = {GPTQ_MARLIN_SUPPORTED_SYM} are supported.")
+                f"Marlin does not support is_sym = {self.is_sym}. "
+                f"Only is_sym = {GPTQ_MARLIN_SUPPORTED_SYM} are supported.")
 
         # Init
         self.pack_factor = get_pack_factor(weight_bits)
@@ -121,10 +121,10 @@ class GPTQMarlinConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
-        sym = cls.get_from_keys(config, ["sym"])
+        is_sym = cls.get_from_keys(config, ["sym"])
         lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"],
                                                        False)
-        return cls(weight_bits, group_size, desc_act, sym, lm_head_quantized)
+        return cls(weight_bits, group_size, desc_act, is_sym, lm_head_quantized)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -166,11 +166,11 @@ class GPTQMarlinConfig(QuantizationConfig):
         # Extract data from quant config.
         num_bits = quant_config.get("bits", None)
         group_size = quant_config.get("group_size", None)
-        sym = quant_config.get("sym", None)
+        is_sym = quant_config.get("sym", None)
         desc_act = quant_config.get("desc_act", None)
 
         # If we cannot find the info needed in the config, cannot convert.
-        if (num_bits is None or group_size is None or sym is None
+        if (num_bits is None or group_size is None or is_sym is None
                 or desc_act is None):
             return False
 
@@ -183,7 +183,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         # Otherwise, can convert if model satisfies marlin constraints.
         return (num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS
                 and group_size in GPTQ_MARLIN_SUPPORTED_GROUP_SIZES
-                and sym in GPTQ_MARLIN_SUPPORTED_SYM)
+                and is_sym in GPTQ_MARLIN_SUPPORTED_SYM)
 
 
 class GPTQMarlinState(Enum):
