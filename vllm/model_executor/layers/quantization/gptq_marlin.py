@@ -197,7 +197,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
     Args:
         quant_config: The GPTQ Marlin quantization config.
     """
-    QUANTIZED = True
 
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
         self.quant_config = quant_config
