@@ -290,7 +290,9 @@ class Scheduler:
         # Sequence groups in the SWAPPED state.
         # Contain decode requests that are swapped out.
         self.swapped: Deque[SequenceGroup] = deque()
-        # Sequence groups finished since last step iter.
+        # Sequence groups finished requests ids since last step iteration.
+        # It lets the model know that any state associated with these requests 
+        # can and must be released after the current step.
         self.finished_requests_ids: List[str] = list()
         # Time at previous scheduling step
         self.prev_time = 0.0
@@ -368,7 +370,7 @@ class Scheduler:
     def flush_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""
         finished_requests_ids = self.finished_requests_ids
-        self.finished_requests_ids = []
+        self.finished_requests_ids = list()
         return finished_requests_ids
 
     def _schedule_running(
