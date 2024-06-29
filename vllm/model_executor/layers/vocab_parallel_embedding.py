@@ -10,7 +10,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
@@ -194,9 +194,10 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.embedding_dim = embedding_dim
 
         if quant_config is not None:
-            self.linear_method = quant_config.get_quant_method(self)
-        else:
-            self.linear_method = UnquantizedLinearMethod()
+            linear_method = quant_config.get_quant_method(self)
+        if linear_method is None:
+            linear_method = UnquantizedLinearMethod()
+        self.linear_method: QuantizeMethodBase = linear_method
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -212,16 +213,14 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_added_embeddings_per_partition = (
             self.shard_indices.added_vocab_end_index -
             self.shard_indices.added_vocab_start_index)
-        
-        self.linear_method.create_weights(
-            self,
-            self.embedding_dim,
-            [self.num_embeddings_per_partition],
-            self.embedding_dim,
-            self.num_embeddings_padded,
-            params_dtype=params_dtype,
-            weigth_loader=self.weight_loader
-        )
+
+        self.linear_method.create_weights(self,
+                                          self.embedding_dim,
+                                          [self.num_embeddings_per_partition],
+                                          self.embedding_dim,
+                                          self.num_embeddings_padded,
+                                          params_dtype=params_dtype,
+                                          weigth_loader=self.weight_loader)
 
     @classmethod
     def _get_indices(cls, vocab_size_padded: int, org_vocab_size_padded: int,

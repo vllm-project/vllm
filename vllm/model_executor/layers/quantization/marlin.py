@@ -102,11 +102,8 @@ class MarlinConfig(QuantizationConfig):
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["MarlinLinearMethod"]:
-        if isinstance(layer, LinearBase):
-            return MarlinLinearMethod(self)
-
-        # lm_head can be optionally quantized
-        elif isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
+        if (isinstance(layer, LinearBase) or
+            (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return MarlinLinearMethod(self)
         return None
 

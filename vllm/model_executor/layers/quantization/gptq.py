@@ -71,11 +71,8 @@ class GPTQConfig(QuantizationConfig):
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["GPTQLinearMethod"]:
-        if isinstance(layer, LinearBase):
-            return GPTQLinearMethod(self)
-
-        # lm_head can be optionally quantized
-        elif isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
+        if (isinstance(layer, LinearBase) or
+            (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return GPTQLinearMethod(self)
 
         return None

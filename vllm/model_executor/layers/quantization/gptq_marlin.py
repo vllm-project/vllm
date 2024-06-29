@@ -124,7 +124,8 @@ class GPTQMarlinConfig(QuantizationConfig):
         is_sym = cls.get_from_keys(config, ["sym"])
         lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"],
                                                        default=False)
-        return cls(weight_bits, group_size, desc_act, is_sym, lm_head_quantized)
+        return cls(weight_bits, group_size, desc_act, is_sym,
+                   lm_head_quantized)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -149,11 +150,8 @@ class GPTQMarlinConfig(QuantizationConfig):
     def get_quant_method(
             self,
             layer: torch.nn.Module) -> Optional["GPTQMarlinLinearMethod"]:
-        if isinstance(layer, LinearBase):
-            return GPTQMarlinLinearMethod(self)
-
-        # lm_head can be optionally quantized
-        elif isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
+        if (isinstance(layer, LinearBase) or
+            (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return GPTQMarlinLinearMethod(self)
 
         return None
