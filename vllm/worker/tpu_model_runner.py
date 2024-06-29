@@ -19,7 +19,7 @@ from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
 
-_PAD_SLOT_ID = 0  # FIXME(woosuk)
+_PAD_SLOT_ID = -1  # NOTE(woosuk): In PyTorch XLA, index -1 is ignored.
 # FIXME(woosuk): Temporarily disabled top-p sampling since it's too slow.
 _ENABLE_TOP_P = False
 # FIXME(woosuk): A temporary hack to support `n > 1`.
