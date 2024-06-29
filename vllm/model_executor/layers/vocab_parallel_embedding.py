@@ -342,7 +342,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         return s
 
 
-class ParallelLMHead(ParallelVocabEmbedding):
+class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
 
     Output logits weight matrices used in the Sampler. The weight and bias
