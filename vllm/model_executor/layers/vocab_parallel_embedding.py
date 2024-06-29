@@ -160,17 +160,16 @@ class VocabParallelEmbedding(torch.nn.Module):
         params_dtype: type of the parameters.
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
+        quant_config: quant config for the layer
     """  # noqa: E501
 
-    def __init__(
-        self,
-        num_embeddings: int,
-        embedding_dim: int,
-        params_dtype: Optional[torch.dtype] = None,
-        org_num_embeddings: Optional[int] = None,
-        padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_dim: int,
+                 params_dtype: Optional[torch.dtype] = None,
+                 org_num_embeddings: Optional[int] = None,
+                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
         # Keep the input dimensions.
@@ -194,13 +193,8 @@ class VocabParallelEmbedding(torch.nn.Module):
                                                self.tp_size)
         self.embedding_dim = embedding_dim
 
-        quant_method = None
         if quant_config is not None:
-            quant_method = quant_config.get_quant_method(self)
-
-        # lm_head may be quantized
-        if quant_method is not None:
-            self.linear_method = quant_method
+            self.linear_method = quant_config.get_quant_method(self)
         else:
             self.linear_method = UnquantizedLinearMethod()
 
@@ -357,16 +351,14 @@ class ParallelLMHead(VocabParallelEmbedding):
         padding_size: padding size for the vocabulary.
     """
 
-    def __init__(
-        self,
-        num_embeddings: int,
-        embedding_dim: int,
-        bias: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        org_num_embeddings: Optional[int] = None,
-        padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_dim: int,
+                 bias: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 org_num_embeddings: Optional[int] = None,
+                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
                          org_num_embeddings, padding_size, quant_config)
         if bias:
