@@ -457,8 +457,3 @@ def initialize_dummy_weights(
                 param.data.copy_(tmp_param)
             else:
                 param.uniform_(low, high)
-
-
-# Skip loading extra modules for GPTQ models.
-def skip_gptq_extra_param(param_name: str, params: dict):
-    return param_name.endswith(".bias") and param_name not in params
