@@ -13,7 +13,8 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import StatLogger, Stats
+from vllm.engine.metrics import (LoggingStatLogger, PrometheusStatLogger,
+                                 StatLoggerBase, Stats)
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -160,6 +161,7 @@ class LLMEngine:
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -292,11 +294,21 @@ class LLMEngine:
 
         # Metric Logging.
         if self.log_stats:
-            self.stat_logger = StatLogger(
-                local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                labels=dict(model_name=model_config.served_model_name),
-                max_model_len=self.model_config.max_model_len)
-            self.stat_logger.info("cache_config", self.cache_config)
+            if stat_loggers is not None:
+                self.stat_loggers = stat_loggers
+            else:
+                self.stat_loggers = {
+                    "logging":
+                    LoggingStatLogger(
+                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC),
+                    "prometheus":
+                    PrometheusStatLogger(
+                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+                        labels=dict(model_name=model_config.served_model_name),
+                        max_model_len=self.model_config.max_model_len),
+                }
+                self.stat_loggers["prometheus"].info("cache_config",
+                                                     self.cache_config)
 
         self.tracer = None
         if self.observability_config.otlp_traces_endpoint:
@@ -833,14 +845,24 @@ class LLMEngine:
 
         return request_outputs
 
+    def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
+        if logger_name in self.stat_loggers:
+            raise KeyError(f"Logger with name {logger_name} already exists.")
+        self.stat_loggers[logger_name] = logger
+
+    def remove_logger(self, logger_name: str) -> None:
+        if logger_name not in self.stat_loggers:
+            raise KeyError(f"Logger with name {logger_name} does not exist.")
+        del self.stat_loggers[logger_name]
+
     def do_log_stats(
             self,
             scheduler_outputs: Optional[SchedulerOutputs] = None,
             model_output: Optional[List[SamplerOutput]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
-            self.stat_logger.log(
-                self._get_stats(scheduler_outputs, model_output))
+            for logger in self.stat_loggers.values():
+                logger.log(self._get_stats(scheduler_outputs, model_output))
 
     def _get_stats(
             self,
