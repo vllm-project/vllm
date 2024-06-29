@@ -5,6 +5,7 @@ import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
+import torch
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
@@ -70,7 +71,7 @@ class EngineArgs:
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
-    lora_dtype: str = 'auto'
+    lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
