@@ -110,15 +110,9 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             self.block_size,
         )
 
-        # Create processor for multi-modal data
-        if self.vision_language_config is not None:
-            self.multi_modal_input_processor = MULTIMODAL_REGISTRY \
-                .create_input_processor(
-                    self.model_config,
-                    self.vision_language_config,
-                )
-        else:
-            self.multi_modal_input_processor = None
+        # Multi-modal data support
+        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
+            .create_input_mapper(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
@@ -168,13 +162,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data is not None:
-                # Process multi-modal data
-                if self.multi_modal_input_processor is None:
-                    raise ValueError(
-                        "Multi-modal inputs are only supported by "
-                        "vision language models.")
-
-                mm_kwargs = self.multi_modal_input_processor(mm_data)
+                mm_kwargs = self.multi_modal_input_mapper(mm_data)
                 for k, v in mm_kwargs.items():
                     multi_modal_kwargs_list[k].append(v)
 
@@ -356,6 +344,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             input_positions=input_positions,
             attn_metadata=attn_metadata,
             sampling_metadata=sampling_metadata,
+            multi_modal_kwargs=multi_modal_kwargs,
         )
 
     @torch.inference_mode()
@@ -363,7 +352,12 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         self,
         model_input: CPUModelInput,
         kv_caches: List[torch.Tensor],
-    ) -> Optional[SamplerOutput]:
+        num_steps: int = 1,
+    ) -> Optional[List[SamplerOutput]]:
+        if num_steps > 1:
+            raise ValueError(
+                "CPU worker does not support multi-step execution.")
+
         model_executable = self.model
         execute_model_kwargs = {
             "input_ids": model_input.input_tokens,
@@ -383,11 +377,11 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
-            return None
+            return []
 
         # Sample the next token.
         output = self.model.sample(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        return output
+        return [output]
