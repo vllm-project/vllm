@@ -3,11 +3,8 @@
 Run `pytest tests/samplers/test_no_bad_words.py`.
 
 """
-import gc
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
-import pytest
-import torch
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
