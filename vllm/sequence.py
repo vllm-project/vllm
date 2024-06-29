@@ -116,10 +116,10 @@ class SequenceData:
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
     ) -> None:
-        self._prompt_token_ids: List[int] = prompt_token_ids
+        self._prompt_token_ids: List[int] = list(prompt_token_ids)
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self._output_token_ids: List[int] = (
-            output_token_ids if output_token_ids is not None else [])
+            list(output_token_ids) if output_token_ids is not None else [])
 
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -138,7 +138,7 @@ class SequenceData:
 
     @prompt_token_ids.setter
     def prompt_token_ids(self, new_prompt_token_ids) -> None:
-        self._prompt_token_ids = new_prompt_token_ids
+        self._prompt_token_ids = list(new_prompt_token_ids)
         self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
         self._update_cached_all_tokens()
 
@@ -148,7 +148,7 @@ class SequenceData:
 
     @output_token_ids.setter
     def output_token_ids(self, new_output_token_ids) -> None:
-        self._output_token_ids = new_output_token_ids
+        self._output_token_ids = list(new_output_token_ids)
         self._update_cached_all_tokens()
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
