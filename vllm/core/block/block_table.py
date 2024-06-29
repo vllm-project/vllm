@@ -310,7 +310,7 @@ class BlockTable:
 
         res = 0
         for block in self.blocks:
-            res += block.num_token_ids
+            res += len(block.token_ids)
 
         return res
 

@@ -111,7 +111,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def _create_block(
         self,
         prev_block: Optional[Block],
-        token_ids: Optional[List[int]],
+        token_ids: List[int],
         block_size: int,
         allocator: BlockAllocator,
         block_id: Optional[int] = None,
@@ -131,7 +131,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
-                                 token_ids: Optional[List[int]],
+                                 token_ids: List[int],
                                  device: Optional[Device] = None) -> Block:
         """Allocates an immutable block with the given token IDs, reusing cached
         blocks if possible.
@@ -196,7 +196,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         block_id = self._allocate_block_id()
         block = self._block_pool.init_block(prev_block=prev_block,
-                                            token_ids=None,
+                                            token_ids=[],
                                             block_size=self._block_size,
                                             physical_block_id=block_id)
         assert not block.computed
@@ -640,7 +640,7 @@ class PrefixCachingBlock(Block):
     def __init__(
         self,
         prev_block: Optional[Block],
-        token_ids: Optional[List[int]],
+        token_ids: List[int],
         block_size: int,
         allocator: BlockAllocator,
         block_id: Optional[int] = None,
@@ -688,7 +688,7 @@ class PrefixCachingBlock(Block):
             res += self._prev_block.num_tokens_total
 
         # Add current block
-        res += self.num_token_ids
+        res += len(self.token_ids)
 
         self._cached_num_tokens_total = res
 
@@ -708,7 +708,7 @@ class PrefixCachingBlock(Block):
     def last_accessed(self, last_accessed_ts: float):
         self._last_accessed = last_accessed_ts
 
-    def append_token_ids(self, token_ids: Optional[List[int]]) -> None:
+    def append_token_ids(self, token_ids: List[int]) -> None:
         """Appends the given token IDs to the block and registers the block as
         immutable if the block becomes full.
 
@@ -718,9 +718,6 @@ class PrefixCachingBlock(Block):
         # Ensure this is mutable block (not promoted)
         assert self.content_hash is None
         assert not self.computed
-
-        if token_ids is None:
-            return
 
         if len(token_ids) == 0:
             return
@@ -759,15 +756,11 @@ class PrefixCachingBlock(Block):
         return self._cached_num_tokens_total
 
     @property
-    def num_token_ids(self) -> int:
-        return self._block.num_token_ids
-
-    @property
     def block_size(self) -> int:
         return self._block.block_size
 
     @property
-    def token_ids(self) -> Optional[List[int]]:
+    def token_ids(self) -> List[int]:
         return self._block.token_ids
 
     @property
@@ -801,7 +794,7 @@ class PrefixCachingBlock(Block):
         if prev_block_hash is None and not is_first_block:
             return None
 
-        assert self.token_ids is not None
+        assert len(self.token_ids) > 0
         self._cached_content_hash = PrefixCachingBlock.hash_block_tokens(
             is_first_block,
             prev_block_hash,

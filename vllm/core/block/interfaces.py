@@ -9,7 +9,7 @@ BlockId = int
 class Block(ABC):
 
     @abstractmethod
-    def append_token_ids(self, token_ids: Optional[List[int]]) -> None:
+    def append_token_ids(self, token_ids: List[int]) -> None:
         pass
 
     @property
@@ -25,14 +25,7 @@ class Block(ABC):
 
     @property
     @abstractmethod
-    def token_ids(self) -> Optional[List[int]]:
-        pass
-
-    @property
-    @abstractmethod
-    def num_token_ids(self) -> int:
-        """The number of tokens in the current block
-        """
+    def token_ids(self) -> List[int]:
         pass
 
     @property
@@ -84,7 +77,7 @@ class Block(ABC):
         def __call__(
             self,
             prev_block: Optional["Block"],
-            token_ids: Optional[List[int]],
+            token_ids: List[int],
             block_size: int,
             allocator: "BlockAllocator",
             block_id: Optional[int] = None,
@@ -111,7 +104,7 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: Optional[List[int]]) -> Block:
+                                 token_ids: List[int]) -> Block:
         pass
 
     @abstractmethod

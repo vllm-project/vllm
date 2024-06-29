@@ -63,7 +63,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
-                                 token_ids: Optional[List[int]],
+                                 token_ids: List[int],
                                  device: Optional[Device] = None) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
@@ -121,7 +121,7 @@ class NaiveBlockAllocator(BlockAllocator):
         assert device is None
         block_id = self._allocate_block_id()
         block = self._block_pool.init_block(prev_block=prev_block,
-                                            token_ids=None,
+                                            token_ids=[],
                                             block_size=self._block_size,
                                             physical_block_id=block_id)
         return block
@@ -366,12 +366,12 @@ class NaiveBlock(Block):
 
     def __init__(self,
                  prev_block: Optional[Block],
-                 token_ids: Optional[List[int]],
+                 token_ids: List[int],
                  block_size: int,
                  allocator: BlockAllocator,
                  block_id: Optional[int] = None,
                  _cow_target: Optional[Block] = None):
-        self._token_ids: Optional[List[int]] = None
+        self._token_ids: List[int] = []
         self._block_size = block_size
         self._prev_block = prev_block
         self._block_id = block_id
@@ -380,7 +380,7 @@ class NaiveBlock(Block):
 
         self._append_token_ids_no_cow(token_ids)
 
-    def append_token_ids(self, token_ids: Optional[List[int]]) -> None:
+    def append_token_ids(self, token_ids: List[int]) -> None:
         """Appends the given token IDs to the block and performs a 
         copy-on-write if necessary.
 
@@ -394,27 +394,18 @@ class NaiveBlock(Block):
             self._block_id = (self._allocator.cow_block_if_not_appendable(
                 self._cow_target))
 
-    def _append_token_ids_no_cow(self, token_ids: Optional[List[int]]) -> None:
+    def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
         """Appends the given token IDs to the block
 
         Args:
-            token_ids (Optional[List[int]]): The token IDs to be appended
-                to the block.
+            token_ids (List[int]): The token IDs to be appended to the block.
         """
-        if token_ids is None:
-            return
-
         if len(token_ids) == 0:
             return
 
         assert len(token_ids) <= self.num_empty_slots
 
-        if self._token_ids is None:
-            # Most of the time, full block token ids are assigned and
-            # simple assignment is faster than extend()
-            self._token_ids = token_ids
-        else:
-            self._token_ids.extend(token_ids)
+        self._token_ids.extend(token_ids)
 
     @property
     def computed(self) -> bool:
@@ -446,18 +437,11 @@ class NaiveBlock(Block):
 
     @property
     def num_empty_slots(self) -> int:
-        return self._block_size - self.num_token_ids
+        return self._block_size - len(self.token_ids)
 
     @property
-    def token_ids(self) -> Optional[List[int]]:
+    def token_ids(self) -> List[int]:
         return self._token_ids
-
-    @property
-    def num_token_ids(self) -> int:
-        if self._token_ids:
-            return len(self._token_ids)
-        else:
-            return 0
 
     @property
     def num_tokens_total(self) -> int:

@@ -172,7 +172,7 @@ class BlockPool:
         for i in range(self._pool_size):
             self._pool.append(
                 self._create_block(prev_block=None,
-                                   token_ids=None,
+                                   token_ids=[],
                                    block_size=self._block_size,
                                    allocator=self._allocator,
                                    block_id=None))
@@ -187,14 +187,13 @@ class BlockPool:
         for i in range(cur_pool_size, new_pool_size):
             self._pool.append(
                 self._create_block(prev_block=None,
-                                   token_ids=None,
+                                   token_ids=[],
                                    block_size=self._block_size,
                                    allocator=self._allocator,
                                    block_id=None))
 
-    def init_block(self, prev_block: Optional[Block],
-                   token_ids: Optional[List[int]], block_size: int,
-                   physical_block_id: Optional[int]) -> Block:
+    def init_block(self, prev_block: Optional[Block], token_ids: List[int],
+                   block_size: int, physical_block_id: Optional[int]) -> Block:
         if len(self._free_ids) == 0:
             self.increase_pool()
             assert len(self._free_ids) > 0

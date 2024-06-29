@@ -356,7 +356,7 @@ class NullBlock(Block):
         super().__init__()
         self._proxy = proxy
 
-    def append_token_ids(self, token_ids: Optional[List[BlockId]]):
+    def append_token_ids(self, token_ids: List[BlockId]):
         raise ValueError("null block should not be modified")
 
     @property
@@ -368,15 +368,8 @@ class NullBlock(Block):
         raise ValueError("null block should not be modified")
 
     @property
-    def token_ids(self) -> Optional[List[BlockId]]:
+    def token_ids(self) -> List[BlockId]:
         return self._proxy.token_ids
-
-    @property
-    def num_token_ids(self) -> int:
-        if self._proxy.token_ids:
-            return len(self._proxy.token_ids)
-        else:
-            return 0
 
     @property
     def num_tokens_total(self) -> int:
