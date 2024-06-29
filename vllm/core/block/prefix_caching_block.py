@@ -230,6 +230,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         if refcount > 0:
             block.block_id = None
             return
+        else:
+            assert refcount == 0
 
         # No longer used
         assert block.content_hash in self._cached_blocks

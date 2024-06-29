@@ -443,12 +443,15 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                                                          src_device=Device.GPU,
                                                          dst_device=Device.CPU)
 
+            # Refresh the block ids of the table (post-swap)
+            self.block_tables[seq.seq_id].update(blocks)
+
             seq_physical_block_id_mapping = {
                 self.block_allocator.get_physical_block_id(
-                    Device.GPU, cpu_block_id):
+                    Device.GPU, gpu_block_id):
                 self.block_allocator.get_physical_block_id(
-                    Device.CPU, gpu_block_id)
-                for cpu_block_id, gpu_block_id in seq_swap_mapping.items()
+                    Device.CPU, cpu_block_id)
+                for gpu_block_id, cpu_block_id in seq_swap_mapping.items()
             }
 
             physical_block_id_mapping.extend(

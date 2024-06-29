@@ -9,8 +9,7 @@ BlockId = int
 class Block(ABC):
 
     @abstractmethod
-    def append_token_ids(self,
-                         token_ids: Optional[List[int]]) -> Optional["Block"]:
+    def append_token_ids(self, token_ids: Optional[List[int]]) -> None:
         pass
 
     @property
