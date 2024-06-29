@@ -118,7 +118,7 @@ class TestTwoTokenBadWord:
             output_token_ids = self._generate(
                 llm,
                 bad_words_ids=[[self.target_token_id1, self.target_token_id2],
-                               [self.target_token_id1, self.neighbour_token_id2]])
+                               [self.target_token_id1, self.neighbour_token_id2]])  # noqa: E501
             assert output_token_ids[0] == self.target_token_id1
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
