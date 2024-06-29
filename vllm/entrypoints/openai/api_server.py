@@ -94,7 +94,7 @@ async def health() -> Response:
 
 @app.post("/tokenize")
 async def tokenize(request: TokenizeRequest):
-    generator = await openai_serving_completion.create_tokenize(request)
+    generator = await openai_serving_chat.create_tokenize(request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -105,7 +105,7 @@ async def tokenize(request: TokenizeRequest):
 
 @app.post("/detokenize")
 async def detokenize(request: DetokenizeRequest):
-    generator = await openai_serving_completion.create_detokenize(request)
+    generator = await openai_serving_chat.create_detokenize(request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)

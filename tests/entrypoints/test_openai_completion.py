@@ -615,13 +615,14 @@ async def test_tokenize(client: openai.AsyncOpenAI, model_name: str):
         prompt = "This is a test prompt."
         tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
 
-        response = requests.post(base_url + "/tokenize",
+        response = requests.post(base_url + "tokenize",
                                  json={
                                      "add_special_tokens": add_special,
                                      "model": model_name,
                                      "prompt": prompt
                                  })
         response.raise_for_status()
+
         assert response.json() == {
             "tokens": tokens,
             "count": len(tokens),
@@ -647,4 +648,5 @@ async def test_detokenize(client: openai.AsyncOpenAI, model_name: str):
                                  "tokens": tokens
                              })
     response.raise_for_status()
+
     assert response.json() == {"prompt": prompt}
