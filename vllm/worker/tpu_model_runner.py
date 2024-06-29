@@ -20,7 +20,7 @@ from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
 
-_PAD_SLOT_ID = 0  # FIXME(woosuk)
+_PAD_SLOT_ID = -1  # NOTE(woosuk): In PyTorch XLA, index -1 is ignored.
 # FIXME(woosuk): Temporarily disabled top-p sampling since it's too slow.
 _ENABLE_TOP_P = False
 # FIXME(woosuk): A temporary hack to support `n > 1`.
@@ -447,10 +447,13 @@ class TPUModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-    ) -> SamplerOutput:
+        num_steps: int = 1,
+    ) -> List[SamplerOutput]:
+        if num_steps > 1:
+            raise ValueError(
+                "TPUModelRunner does not support multi-step execution.")
+
         if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            assert len(seq_group_metadata_list) > 0
             metadata_dict = {
                 "seq_group_metadata_list": seq_group_metadata_list
             }
@@ -460,6 +463,8 @@ class TPUModelRunner:
             seq_group_metadata_list = metadata_dict.pop(
                 "seq_group_metadata_list")
 
+        assert seq_group_metadata_list is not None
+        assert len(seq_group_metadata_list) > 0
         if seq_group_metadata_list[0].is_prompt:
             # NOTE(woosuk): To reduce the compilation time, we only compile the
             # prefill inputs with batch size 1. Because the scheduler is not
@@ -475,7 +480,7 @@ class TPUModelRunner:
         else:
             sampler_outputs = self._execute_model(seq_group_metadata_list,
                                                   kv_caches)
-        return SamplerOutput(sampler_outputs)
+        return [SamplerOutput(sampler_outputs)]
 
 
 class ModelWrapper(nn.Module):
