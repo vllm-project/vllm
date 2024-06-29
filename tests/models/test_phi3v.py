@@ -3,8 +3,10 @@ import re
 from typing import List, Optional, Tuple
 
 import pytest
+from transformers import AutoConfig, AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+from vllm.model_executor.models.phi3v import get_phi3v_image_feature_size
 from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
@@ -46,29 +48,23 @@ model_and_vl_config = [
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
-                      vlm_config: VisionLanguageConfig, model_id: str):
+                      vlm_config: VisionLanguageConfig, model_id: str,
+                      image_feature_size: int):
     """Sanitize vllm output to be comparable with hf output.
     The function reduces `input_ids` from 1, 32000, 32000, ..., 32000,
     x1, x2, x3 ... to 1, 32000, x1, x2, x3 ...
     It also reduces `output_str` from "<image><image>bla" to "bla".
     """
     output_ids, output_str = vllm_output
-    image_token_id = vlm_config.image_token_id
+    output_str_without_image = re.sub(r"(<\|image_\d+\|>)+", " ", output_str)
 
-    hf_output_ids: List[int] = []
-    for idx, token_id in enumerate(output_ids):
-        if token_id != image_token_id:
-            hf_output_ids.append(token_id)
-        else:
-            hf_output_ids.append(0)
-
-            if output_ids[idx + 1] != image_token_id:
-                hf_output_ids.extend([1, 29871])
-
-    hf_output_str = output_str.replace("<|user|>", "") \
+    hf_output_str = output_str_without_image.replace("<|user|>", "") \
         .replace("<|end|>\n<|assistant|>", " ")
-    hf_output_str = re.sub(r"(<\|image\|>)+", " ", hf_output_str)
-    hf_output_str = re.sub(r"(<\|image_\d+\|>)+", " ", hf_output_str)
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    hf_output_ids = tokenizer.encode(output_str_without_image)
+    hf_output_ids = hf_output_ids[:4] + [0] * image_feature_size \
+        + [1] + hf_output_ids[4:]
 
     return hf_output_ids, hf_output_str
 
@@ -94,6 +90,8 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     The text output is sanitized to be able to compare with hf.
     """
     model_id, vlm_config = model_and_config
+    hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+
     hf_images = [asset.for_hf() for asset in image_assets]
     vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
@@ -111,7 +109,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model_id,
-                     max_model_len=2048,
+                     max_model_len=4096,
                      dtype=dtype,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
@@ -140,10 +138,16 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     # difference for longer context (max_tokens=128) and test can't pass
     best_max_tokens_exc_list: List[Tuple[int, Optional[AssertionError]]] = []
     for i in range(len(HF_IMAGE_PROMPTS)):
+        image_feature_size = get_phi3v_image_feature_size(
+            hf_config,
+            input_height=hf_image_inputs[i].height,
+            input_width=hf_image_inputs[i].width,
+        )
+
         try:
             hf_output_ids, hf_output_str = hf_outputs[i]
             vllm_output_ids, vllm_output_str = vllm_to_hf_output(
-                vllm_outputs[i], vlm_config, model_id)
+                vllm_outputs[i], vlm_config, model_id, image_feature_size)
             assert hf_output_str == vllm_output_str, (
                 f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
             assert hf_output_ids == vllm_output_ids, (
