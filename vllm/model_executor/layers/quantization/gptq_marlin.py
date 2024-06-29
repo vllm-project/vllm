@@ -85,7 +85,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         if self.is_sym not in GPTQ_MARLIN_SUPPORTED_SYM:
             raise ValueError(
                 f"Marlin does not support is_sym = {self.is_sym}. "
-                f"Only is_sym = {GPTQ_MARLIN_SUPPORTED_SYM} are supported.")
+                f"Only sym = {GPTQ_MARLIN_SUPPORTED_SYM} are supported.")
 
         # Init
         self.pack_factor = get_pack_factor(weight_bits)
@@ -166,11 +166,11 @@ class GPTQMarlinConfig(QuantizationConfig):
         # Extract data from quant config.
         num_bits = quant_config.get("bits", None)
         group_size = quant_config.get("group_size", None)
-        is_sym = quant_config.get("sym", None)
+        sym = quant_config.get("sym", None)
         desc_act = quant_config.get("desc_act", None)
 
         # If we cannot find the info needed in the config, cannot convert.
-        if (num_bits is None or group_size is None or is_sym is None
+        if (num_bits is None or group_size is None or sym is None
                 or desc_act is None):
             return False
 
