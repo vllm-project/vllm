@@ -19,11 +19,17 @@ def main():
 
     r = requests.get('https://github.com/mesolitica/malaya-speech/raw/master/speech/singlish/singlish0.wav')
     y = audio.decode_example(audio.encode_example(r.content))['array']
-    prompt = '<|startoftranscript|><|en|><|transcribe|>'
-    outputs = llm.generate({
-        "prompt": prompt,
+
+    output_lang = llm.generate({
+        "prompt_token_ids": [50258],
         "multi_modal_data": AudioData(y),
-    })
+    }, sampling_params = SamplingParams(max_tokens = 1, temperature = 0))
+
+    outputs = llm.generate({
+        "prompt_token_ids": [50258, output_lang[0].outputs[0].token_ids[0], 50360],
+        "multi_modal_data": AudioData(y),
+    }, sampling_params = SamplingParams(max_tokens = 10, temperature = 0))
+
     print(outputs[0].outputs[0].text)
 
 
