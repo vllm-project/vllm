@@ -14,8 +14,9 @@ logger = init_logger(__name__)
 
 def _get_dummy_seq_data(seq_len: int,
                         whisper_config: WhisperConfig) -> SequenceData:
-    token_ids = [0, 0, 0]
-
+                        
+    # '<|startoftranscript|><|en|><|transcribe|>'
+    token_ids = [50258, 50259, 50360]
     return SequenceData(token_ids)
 
 

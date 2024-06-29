@@ -45,7 +45,7 @@ class WhisperPositionalEmbedding(nn.Embedding):
     def __init__(self, num_positions: int, embedding_dim: int, padding_idx: Optional[int] = None):
         super().__init__(num_positions, embedding_dim)
 
-    def forward(self, input_ids, position_ids=None):
+    def forward(self, position_ids):
         return self.weight[position_ids]
 
 class WhisperAttention(nn.Module):
@@ -286,7 +286,6 @@ class WhisperDecoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             kv_cache=kv_cache,
@@ -294,11 +293,14 @@ class WhisperDecoderLayer(nn.Module):
         )
         hidden_states = residual + hidden_states
 
-        hidden_states, cross_attention_past_key_value = self.self_attn(
+        residual = hidden_states
+        hidden_states = self.encoder_attn_layer_norm(hidden_states)
+        hidden_states, cross_attention_past_key_value = self.encoder_attn(
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
             past_key_value=past_key_value,
-            attn_metadata=attn_metadata,
+            kv_cache=None,
+            attn_metadata=None,
             is_cross_attention=True,
         )
         hidden_states = residual + hidden_states
@@ -387,7 +389,7 @@ class WhisperDecoder(nn.Module):
         past_key_values = None,
     ):
         inputs_embeds = self.embed_tokens(input_ids)
-        positions = self.embed_positions(input_ids, positions)
+        positions = self.embed_positions(positions)
         hidden_states = inputs_embeds + positions
 
         cross_attention_past_key_values = []
@@ -482,7 +484,7 @@ class WhisperForConditionalGeneration(nn.Module):
     ) -> SamplerOutput:
 
         input_features = self._parse_and_validate_audio_input(**kwargs)
-
+        
         decoder_outputs, cross_attention_past_key_values = self.model(
             input_features=input_features,
             input_ids=input_ids,
