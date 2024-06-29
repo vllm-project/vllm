@@ -20,7 +20,7 @@ class GGUFConfig(QuantizationConfig):
 
     def __repr__(self) -> str:
         return ("GGUFConfig()")
-    
+
     @property
     def merge_weight(self) -> bool:
         return False
@@ -79,7 +79,8 @@ class GGUFLinearMethod(LinearMethodBase):
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qweight", qweight)
 
-        qweight_type = Parameter(torch.empty(1, dtype=torch.uint8), requires_grad=False)
+        qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
+                                 requires_grad=False)
         set_weight_attrs(qweight_type, {"ignore_warning": True})
         set_weight_attrs(qweight_type, extra_weight_attrs)
         layer.register_parameter("qweight_type", qweight_type)
@@ -93,11 +94,14 @@ class GGUFLinearMethod(LinearMethodBase):
         # use dequantize mulmat for IQmatrix, mmq for k-quants
         if qweight_type >= 16:
             block_size, type_size = GGML_QUANT_SIZES[qweight_type]
-            shape = (qweight.shape[0], qweight.shape[1]//type_size*block_size)
-            weight = ops.ggml_dequantize(qweight.contiguous(), qweight_type, *shape)
+            shape = (qweight.shape[0],
+                     qweight.shape[1] // type_size * block_size)
+            weight = ops.ggml_dequantize(qweight.contiguous(), qweight_type,
+                                         *shape)
             out = x @ weight.T
         else:
-            out = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
+            out = ops.ggml_mul_mat_a8(qweight, x, qweight_type,
+                                      qweight.shape[0])
         if bias:
             out.add_(bias)
         return out
@@ -124,19 +128,21 @@ class GGUFEmbeddingMethod(QuantizeMethodBase):
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qweight", qweight)
 
-        qweight_type = Parameter(torch.empty(1, dtype=torch.uint8), requires_grad=False)
-        set_weight_attrs(qweight_type, {"is_gguf_weight_type": True, "ignore_warning": True})
+        qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
+                                 requires_grad=False)
+        set_weight_attrs(qweight_type, {
+            "is_gguf_weight_type": True,
+            "ignore_warning": True
+        })
         set_weight_attrs(qweight_type, extra_weight_attrs)
         layer.register_parameter("qweight_type", qweight_type)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor) -> torch.Tensor:
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
         qweight = layer.qweight
         qweight_type = layer.qweight_type.data.item()
 
         block_size, type_size = GGML_QUANT_SIZES[qweight_type]
-        hidden_size = qweight.shape[1]//type_size*block_size
+        hidden_size = qweight.shape[1] // type_size * block_size
         if qweight_type < 2:
             return torch.embedding(qweight, x)
         x_flat = x.flatten()
@@ -144,3 +150,11 @@ class GGUFEmbeddingMethod(QuantizeMethodBase):
         dequant = ops.ggml_dequantize(quant, qweight_type, hidden_size,
                                       x_flat.shape[0])
         return dequant.view(*x.shape, hidden_size)
+
+    def get_weight(self, layer: torch.nn.Module):
+        qweight = layer.qweight
+        qweight_type = layer.qweight_type.data.item()
+        block_size, type_size = GGML_QUANT_SIZES[qweight_type]
+        shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
+        dequant = ops.ggml_dequantize(qweight, qweight_type, *shape)
+        return dequant

@@ -291,7 +291,7 @@ class ColumnParallelLinear(LinearBase):
             param_data, loaded_weight = fp8_scales_shard_indexer(param_data,
                                                                  loaded_weight,
                                                                  shard_id=0)
-        
+
         if fp8_scales_shard_indexer is None and len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 

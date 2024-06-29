@@ -205,11 +205,15 @@ class VocabParallelEmbedding(torch.nn.Module):
             self.shard_indices.added_vocab_end_index -
             self.shard_indices.added_vocab_start_index)
         self.quant_config = quant_config
-        self.quant_method = quant_config.get_quant_method(self) if quant_config else None
+        self.quant_method = quant_config.get_quant_method(
+            self) if quant_config else None
         if self.quant_method is not None:
-            self.quant_method.create_weights(self,
+            self.quant_method.create_weights(
+                self,
                 self.embedding_dim, [self.num_embeddings_per_partition],
-                self.embedding_dim, self.num_embeddings_padded, params_dtype,
+                self.embedding_dim,
+                self.num_embeddings_padded,
+                params_dtype,
                 weight_loader=self.weight_loader)
         else:
             self.weight = Parameter(
@@ -325,7 +329,8 @@ class VocabParallelEmbedding(torch.nn.Module):
             masked_input = input_
             # Get the embeddings.
         if self.quant_method is not None:
-            output_parallel = self.quant_method.apply(self, masked_input.long())
+            output_parallel = self.quant_method.apply(self,
+                                                      masked_input.long())
         else:
             output_parallel = F.embedding(masked_input.long(), self.weight)
         # Mask the output embedding.
@@ -366,9 +371,10 @@ class ParallelLMHead(VocabParallelEmbedding):
                  bias: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  org_num_embeddings: Optional[int] = None,
-                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE):
+                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
-                         org_num_embeddings, padding_size)
+                         org_num_embeddings, padding_size, quant_config)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition,
@@ -383,3 +389,9 @@ class ParallelLMHead(VocabParallelEmbedding):
     def forward(self, input_):
         del input_
         raise RuntimeError("LMHead's weights should be used in the sampler.")
+
+    def get_weight(self):
+        if self.quant_method is not None:
+            return self.quant_method.get_weight(self)
+        else:
+            return self.weight

@@ -62,7 +62,8 @@ _GGUF_KEYS_MAPPING = {
     "attn_v": "self_attn.v_proj",
     "attn_k": "self_attn.k_proj",
     "attn_output": "self_attn.o_proj",
-    "output.weight": "lm_head.weight",
+    "output.qweight": "lm_head.qweight",
+    "output.qweight_type": "lm_head.qweight_type",
     "output_norm": "model.norm",
 }
 
@@ -86,8 +87,14 @@ class LlamaMLP(nn.Module):
                 bias=bias,
                 quant_config=quant_config)
         else:
-            self.gate_proj = ColumnParallelLinear(hidden_size, intermediate_size, bias=bias, quant_config=quant_config)
-            self.up_proj = ColumnParallelLinear(hidden_size, intermediate_size, bias=bias, quant_config=quant_config)
+            self.gate_proj = ColumnParallelLinear(hidden_size,
+                                                  intermediate_size,
+                                                  bias=bias,
+                                                  quant_config=quant_config)
+            self.up_proj = ColumnParallelLinear(hidden_size,
+                                                intermediate_size,
+                                                bias=bias,
+                                                quant_config=quant_config)
         self.down_proj = RowParallelLinear(input_size=intermediate_size,
                                            output_size=hidden_size,
                                            bias=bias,
@@ -411,7 +418,7 @@ class LlamaForCausalLM(nn.Module):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
-        )
+            quant_config=quant_config)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
@@ -433,7 +440,8 @@ class LlamaForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        lm_head_weight = self.lm_head.get_weight()
+        logits = self.logits_processor(lm_head_weight, hidden_states,
                                        sampling_metadata)
         return logits
 
