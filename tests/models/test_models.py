@@ -17,6 +17,7 @@ MODELS = [
     "stabilityai/stablelm-3b-4e1t",
     # "allenai/OLMo-1B",  # Broken
     "bigcode/starcoder2-3b",
+    "google/gemma-1.1-2b-it",
 ]
 
 
