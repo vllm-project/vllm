@@ -97,8 +97,7 @@ class NoBadWordsLogitsProcessor:
                 f" but the following tokens"
                 f" were specified as bad: {invalid_token_ids}."
                 f" All token id values should be integers satisfying:"
-                f" 0 <= token_id < {vocab_size}."
-            )
+                f" 0 <= token_id < {vocab_size}.")
 
 
 class SamplingParams:
