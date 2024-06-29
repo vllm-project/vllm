@@ -34,7 +34,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         return [torch.float16, torch.bfloat16]
 
     # Need to figure it out
-    def get_min_capability(self) -> int:
+    @classmethod
+    def get_min_capability(cls) -> int:
         return 60
 
     def get_name(self) -> str:
