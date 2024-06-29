@@ -111,7 +111,7 @@ class TestTwoTokenBadWord:
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
             ]
-            assert not _contains(
+            assert not self._contains(
                 output_token_ids,
                 [self.target_token_id1, self.target_token_id2])
             assert output_token_ids[:2] == [
@@ -126,13 +126,13 @@ class TestTwoTokenBadWord:
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
             ]
+            assert not self._contains(
+                output_token_ids,
+                [self.target_token_id1, self.target_token_id2])
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.neighbour_token_id2
             ]
-            assert not _contains(
-                output_token_ids,
-                [self.target_token_id1, self.target_token_id2])
-            assert not _contains(
+            assert not self._contains(
                 output_token_ids,
                 [self.target_token_id1, self.neighbour_token_id2])
             assert ((self.target_token_id2 in output_token_ids)
@@ -149,7 +149,8 @@ class TestTwoTokenBadWord:
             bad_words_ids=bad_words_ids,
         )
 
-    def _contains(self, sequence: List[int], subsequence: List[int]) -> bool:
+    @staticmethod
+    def _contains(sequence: List[int], subsequence: List[int]) -> bool:
         searched = False
 
         for start in range(len(sequence)):
@@ -164,6 +165,6 @@ class TestTwoTokenBadWord:
             if sequence[start:end] == subsequence:
                 return True
 
-        assert searched, "All subsequence did not match in length"
+        assert searched, "All subsequences did not match in length..."
 
         return False
