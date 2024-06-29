@@ -8,7 +8,7 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizableMethodBase)
+    QuantizableMethodBase, QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import print_warning_once
 
@@ -82,9 +82,6 @@ class Fp8Config(QuantizationConfig):
 
     def get_scaled_act_names(self) -> List[str]:
         return []
-
-    def is_lm_head_quantized(self) -> bool:
-        return self.lm_head_quantized
 
 
 class Fp8LinearMethod(LinearMethodBase):

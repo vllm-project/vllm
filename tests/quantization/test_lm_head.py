@@ -2,7 +2,7 @@
 
 Run `pytest tests/quantization/test_quant_lm_head_true.py --forked`.
 """
-from typing import Optional
+from typing import Optional, Tuple
 
 import pytest
 import torch
@@ -37,7 +37,7 @@ MAX_TOKENS = 20
 @pytest.mark.parametrize("model_quant_type", MODELS_QUANT_TYPE)
 def test_lm_head(
     vllm_runner,
-    model_quant_type: str,
+    model_quant_type: Tuple[str, str],
 ) -> None:
     model, expected_output = model_quant_type
     vllm_model = vllm_runner(model,

@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm.distributed import tensor_model_parallel_gather
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelVocabEmbedding)
+    VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 
@@ -42,7 +42,7 @@ class LogitsProcessor(nn.Module):
 
     def forward(
         self,
-        lm_head: ParallelVocabEmbedding,
+        lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
@@ -70,7 +70,7 @@ class LogitsProcessor(nn.Module):
         return logits
 
     def _get_logits(self, hidden_states: torch.Tensor,
-                    lm_head: ParallelVocabEmbedding,
+                    lm_head: VocabParallelEmbedding,
                     embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
         # Get the logits for the next tokens.
         logits = lm_head.linear_method.apply(lm_head,

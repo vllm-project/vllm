@@ -76,9 +76,6 @@ class AWQConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
 
-    def is_lm_head_quantized(self) -> bool:
-        return self.lm_head_quantized
-
 
 class AWQLinearMethod(LinearMethodBase):
     """Linear method for AWQ.

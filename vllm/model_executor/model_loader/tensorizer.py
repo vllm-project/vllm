@@ -294,7 +294,7 @@ class TensorizerAgent:
         """Modify LoRA embedding layers to use bigger tensors
         to allow for adapter added tokens."""
         for child in self.model.modules():
-            if (isinstance(child, ParallelVocabEmbedding)
+            if (isinstance(child, VocabParallelEmbedding)
                     and child.weight.shape[0] <
                     child.num_embeddings_per_partition):
                 new_weight = torch.empty(child.num_embeddings_per_partition,

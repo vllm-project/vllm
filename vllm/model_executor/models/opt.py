@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, ParallelVocabEmbedding)
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, skip_gptq_extra_param)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -197,7 +197,7 @@ class OPTDecoder(nn.Module):
         self.max_target_positions = config.max_position_embeddings
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = ParallelVocabEmbedding(
+        self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.word_embed_proj_dim,
         )
@@ -356,9 +356,3 @@ class OPTForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-
-        # memory optimization: if lm_head quantization is not enabled lm_head
-        # is same as embed_tokens. keep only one copy
-        if (self.quant_config is None
-                or not self.quant_config.is_lm_head_quantized()):
-            self.lm_head = self.model.decoder.embed_tokens

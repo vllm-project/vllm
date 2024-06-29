@@ -116,8 +116,3 @@ class QuantizationConfig(ABC):
         For now, this is only used by AWQ.
         """
         raise NotImplementedError
-
-    @abstractmethod
-    def is_lm_head_quantized(self) -> bool:
-        """Returns if lm_head layer is quantized."""
-        raise NotImplementedError

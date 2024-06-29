@@ -191,7 +191,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size) -> None:
                              lora_dtype=torch.float16)
 
     def create_random_embedding_layer():
-        embedding = ParallelVocabEmbedding(vocab_size, 256)
+        embedding = VocabParallelEmbedding(vocab_size, 256)
         embedding.weight.data = torch.rand_like(embedding.weight.data)
         embedding.weight.data[vocab_size:, :] = 0
         lora_embedding = VocabParallelEmbeddingWithLoRA(embedding)
@@ -288,11 +288,11 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
                              lora_dtype=torch.float16)
 
     def create_random_embedding_layer():
-        embedding = ParallelVocabEmbedding(vocab_size, 256)
+        embedding = VocabParallelEmbedding(vocab_size, 256)
         embedding_data = torch.rand_like(embedding.weight.data)
         embedding.weight.data = embedding_data
         embedding.weight.data[vocab_size:, :] = 0
-        expanded_embedding = ParallelVocabEmbedding(
+        expanded_embedding = VocabParallelEmbedding(
             vocab_size + lora_config.lora_extra_vocab_size * max_loras,
             256,
             org_num_embeddings=vocab_size)

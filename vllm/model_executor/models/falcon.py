@@ -341,7 +341,7 @@ class FalconModel(nn.Module):
         self.use_alibi = config.alibi
 
         # Embedding + LN Embedding
-        self.word_embeddings = ParallelVocabEmbedding(
+        self.word_embeddings = VocabParallelEmbedding(
             config.vocab_size,
             self.embed_dim,
         )
@@ -447,7 +447,7 @@ class FalconForCausalLM(nn.Module):
             if name == "lm_head.weight" and self.tie_word_embeddings:
                 # Falcon uses tied embeddings except Falcon-11b.
                 continue
-            if skip_gptq_extra_param(name, params_dict):
+            if name.endswith(".bias") and name not in params_dict:
                 continue
             param = params_dict[name]
             if "query_key_value" in name:
