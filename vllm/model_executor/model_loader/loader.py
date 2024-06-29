@@ -51,8 +51,8 @@ def _get_quantization_config(
         capability = capability[0] * 10 + capability[1]
         if capability < quant_config.get_min_capability():
             raise ValueError(
-                f"The quantization method {model_config.quantization} "
-                f"is not supported for the current GPU. "
+                f"The quantization method {model_config.quantization} is not "
+                "supported for the current GPU. "
                 f"Minimum capability: {quant_config.get_min_capability()}. "
                 f"Current capability: {capability}.")
         supported_dtypes = quant_config.get_supported_act_dtypes()
