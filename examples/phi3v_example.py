@@ -10,7 +10,7 @@ from vllm.multimodal.image import ImagePixelData
 def run_phi3v():
     model_path = "microsoft/Phi-3-vision-128k-instruct"
 
-    # Note: The defualt setting of max_num_seqs (256) and 
+    # Note: The default setting of max_num_seqs (256) and 
     # max_model_len (128k) for this model may cause OOM.
     # In this example, we override max_num_seqs to 5 while
     # keeping the original context length of 128k.
