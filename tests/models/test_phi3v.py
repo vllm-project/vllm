@@ -75,11 +75,18 @@ if is_cpu():
 
 
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
+@pytest.mark.parametrize("size_factors", [
+    # Single-scale
+    [1.0],
+    # Single-scale, batched
+    [1.0, 1.0, 1.0],
+    # Multi-scale
+    [0.25, 0.5, 1.0],
+])
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("is_multiscale", [True, False])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
-                dtype: str, max_tokens: int, is_multiscale: bool) -> None:
+                size_factors, dtype: str, max_tokens: int) -> None:
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -95,7 +102,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     hf_images = [asset.for_hf() for asset in image_assets]
     vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
-    size_factors = (0.25, 0.5, 1.0) if is_multiscale else (1, )
     image_inputs = [
         (rescale_image_size(hf_image, factor),
          ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
