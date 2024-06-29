@@ -460,6 +460,11 @@ class NaiveBlock(Block):
             return 0
 
     @property
+    def num_tokens_total(self) -> int:
+        raise NotImplementedError(
+            "num_tokens_total is not used for naive block")
+
+    @property
     def block_size(self) -> int:
         return self._block_size
 

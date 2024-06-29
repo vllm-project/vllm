@@ -379,6 +379,11 @@ class NullBlock(Block):
             return 0
 
     @property
+    def num_tokens_total(self) -> int:
+        raise NotImplementedError(
+            "num_tokens_total is not used for null block")
+
+    @property
     def num_empty_slots(self) -> BlockId:
         return self._proxy.num_empty_slots
 

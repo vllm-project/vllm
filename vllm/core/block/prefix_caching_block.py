@@ -238,7 +238,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # Add the cached block to the evictor
         # (This keeps the cached block around so it can be reused)
-        self.evictor.add(block_id, block.content_hash, block.num_token_ids,
+        self.evictor.add(block_id, block.content_hash, block.num_tokens_total,
                          self._block_tracker[block_id].last_accessed)
 
         # Stop tracking the block
@@ -654,7 +654,7 @@ class PrefixCachingBlock(Block):
 
         self._prev_block = prev_block
         self._cached_content_hash: Optional[int] = None
-        self._cached_num_token_ids: int = 0
+        self._cached_num_tokens_total: int = 0
         self._allocator = allocator
         self._last_accessed: float = _DEFAULT_LAST_ACCESSED_TIME
         self._computed = computed
@@ -675,20 +675,22 @@ class PrefixCachingBlock(Block):
                                      block_id=block_id,
                                      allocator=self._allocator)
 
-        self._update_num_token_ids()
+        self._update_num_tokens_total()
 
-    def _update_num_token_ids(self):
+    def _update_num_tokens_total(self):
         """Incrementally computes the number of tokens that there is
         till the current block (included)
         """
         res = 0
+
+        # Add all previous blocks
         if self._prev_block is not None:
-            res += self._prev_block.num_token_ids
+            res += self._prev_block.num_tokens_total
 
-        if self._block.token_ids is not None:
-            res += self._block.num_token_ids
+        # Add current block
+        res += self.num_token_ids
 
-        self._cached_num_token_ids = res
+        self._cached_num_tokens_total = res
 
     @property
     def computed(self) -> bool:
@@ -728,7 +730,7 @@ class PrefixCachingBlock(Block):
 
         # Naive block handles CoW.
         self._block.append_token_ids(token_ids)
-        self._update_num_token_ids()
+        self._update_num_tokens_total()
 
         # If the content hash is present, then the block can be made immutable.
         # Register ourselves with the allocator, potentially replacing the
@@ -753,8 +755,12 @@ class PrefixCachingBlock(Block):
         return self._block.num_empty_slots
 
     @property
+    def num_tokens_total(self) -> int:
+        return self._cached_num_tokens_total
+
+    @property
     def num_token_ids(self) -> int:
-        return self._cached_num_token_ids
+        return self._block.num_token_ids
 
     @property
     def block_size(self) -> int:

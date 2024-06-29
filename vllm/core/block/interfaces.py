@@ -31,6 +31,15 @@ class Block(ABC):
     @property
     @abstractmethod
     def num_token_ids(self) -> int:
+        """The number of tokens in the current block
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def num_tokens_total(self) -> int:
+        """The number of tokens till the current block (inclusive)
+        """
         pass
 
     @property
