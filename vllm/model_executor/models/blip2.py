@@ -2,8 +2,7 @@ from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
-# TODO: Port over Blip2VisionModel to vLLM
-from transformers import (Blip2Config, Blip2QFormerConfig, Blip2VisionModel,
+from transformers import (Blip2Config, Blip2QFormerConfig,
                           apply_chunking_to_forward)
 
 from vllm.attention import AttentionMetadata
@@ -20,7 +19,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SamplerOutput, SequenceData
 
-from .clip import dummy_feature_data_for_clip, dummy_pixel_data_for_clip
+from .blip import (BlipVisionModel, dummy_feature_data_for_blip,
+                   dummy_pixel_data_for_blip)
 from .interfaces import SupportsVision
 from .utils import merge_vision_embeddings
 
@@ -415,9 +415,9 @@ def dummy_data_for_blip2(ctx: InputContext, seq_len: int):
     ImageInputType = VisionLanguageConfig.ImageInputType
     mm_data: MultiModalData
     if image_input_type == ImageInputType.PIXEL_VALUES:
-        mm_data = dummy_pixel_data_for_clip(vision_config)
+        mm_data = dummy_pixel_data_for_blip(vision_config)
     elif image_input_type == ImageInputType.IMAGE_FEATURES:
-        mm_data = dummy_feature_data_for_clip(vision_config)
+        mm_data = dummy_feature_data_for_blip(vision_config)
 
     return seq_data, mm_data
 
@@ -464,7 +464,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
         if self.vlm_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_model = Blip2VisionModel(config.vision_config)
+            self.vision_model = BlipVisionModel(config.vision_config)
         else:
             self.vision_model = None
 
@@ -548,13 +548,12 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
         return None
 
-    def _image_pixels_to_features(self, vision_model: Blip2VisionModel,
+    def _image_pixels_to_features(self, vision_model: BlipVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
 
-        # TODO: we skip the step to select the vision feature layer since
+        # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        vision_outputs = vision_model(pixel_values.to(vision_model.device))
-        image_features = vision_outputs[0]
+        image_features = vision_model(pixel_values, vision_feature_layer=-1)
 
         return image_features
 
@@ -684,9 +683,6 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
                 continue
             if "rotary_emb.inv_freq" in name:
                 continue
-            # TODO: post_layernorm is not needed in CLIPVisionModel
-            # if "vision_model.post_layernorm" in name:
-            #     continue
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
