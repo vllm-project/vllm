@@ -31,8 +31,7 @@ from transformers import LlamaConfig
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, skip_gptq_extra_param)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaForCausalLM
 
 
