@@ -6,7 +6,7 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizableMethodBase, QuantizationConfig)
+    QuantizeMethodBase, QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_hip
 
@@ -56,7 +56,7 @@ class SqueezeLLMConfig(QuantizationConfig):
         return cls(weight_bits, lm_head_quantized)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional[QuantizableMethodBase]:
+            self, layer: torch.nn.Module) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, LinearBase):
             return SqueezeLLMLinearMethod(self)
         return None
@@ -65,7 +65,7 @@ class SqueezeLLMConfig(QuantizationConfig):
         return []
 
 
-class SqueezeLLMLinearMethod(QuantizableMethodBase):
+class SqueezeLLMLinearMethod(QuantizeMethodBase):
     """Linear method for SqueezeLLM.
 
     Args:

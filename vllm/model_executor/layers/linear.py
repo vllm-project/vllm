@@ -12,7 +12,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizableMethodBase, QuantizationConfig)
+    QuantizeMethodBase, QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -41,7 +41,7 @@ def adjust_bitsandbytes_shard(param: Parameter,
     return quantized_size, quantized_offset
 
 
-class LinearMethodBase(QuantizableMethodBase):
+class LinearMethodBase(QuantizeMethodBase):
     """Base class for different (maybe quantized) linear methods."""
 
     @abstractmethod
@@ -142,7 +142,7 @@ class LinearBase(torch.nn.Module):
         self.params_dtype = params_dtype
         if quant_config is None:
             self.quant_method: Optional[
-                QuantizableMethodBase] = UnquantizedLinearMethod()
+                QuantizeMethodBase] = UnquantizedLinearMethod()
         else:
             self.quant_method = quant_config.get_quant_method(self)
 

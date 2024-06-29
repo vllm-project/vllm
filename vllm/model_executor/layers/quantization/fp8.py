@@ -8,7 +8,7 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizableMethodBase, QuantizationConfig)
+    QuantizeMethodBase, QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import print_warning_once
 
@@ -71,7 +71,7 @@ class Fp8Config(QuantizationConfig):
                    lm_head_quantized=lm_head_quantized)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["QuantizableMethodBase"]:
+            self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
         if isinstance(layer, LinearBase):
@@ -289,7 +289,7 @@ class Fp8LinearMethod(LinearMethodBase):
         return torch.narrow(output, 0, 0, x.shape[0])
 
 
-class Fp8KVCacheMethod(QuantizableMethodBase):
+class Fp8KVCacheMethod(QuantizeMethodBase):
     """Supports loading kv-cache scaling factors from FP8 checkpoints.
     """
 
@@ -300,7 +300,7 @@ class Fp8KVCacheMethod(QuantizableMethodBase):
         """Create "weight" (aka kv_scale) for an attention layer.
 
         Args:
-            layer: The layer that is using the QuantizableMethodBase factory.
+            layer: The layer that is using the QuantizeMethodBase factory.
         """
         # Initialize the KV cache scale to 1.0 as the default value.
         # If the kv_scale appears in the checkpoint, it will be
