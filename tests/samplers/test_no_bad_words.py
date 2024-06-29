@@ -111,8 +111,9 @@ class TestTwoTokenBadWord:
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
             ]
-            assert not _contains(output_token_ids,
-                                 [self.target_token_id1, self.target_token_id2])
+            assert not _contains(
+                output_token_ids,
+                [self.target_token_id1, self.target_token_id2])
             assert output_token_ids[:2] == [
                 self.target_token_id1, self.neighbour_token_id2
             ]
@@ -128,10 +129,12 @@ class TestTwoTokenBadWord:
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.neighbour_token_id2
             ]
-            assert not _contains(output_token_ids,
-                                 [self.target_token_id1, self.target_token_id2])
-            assert not _contains(output_token_ids,
-                                 [self.target_token_id1, self.neighbour_token_id2])
+            assert not _contains(
+                output_token_ids,
+                [self.target_token_id1, self.target_token_id2])
+            assert not _contains(
+                output_token_ids,
+                [self.target_token_id1, self.neighbour_token_id2])
             assert ((self.target_token_id2 in output_token_ids)
                     or (self.neighbour_token_id2 in output_token_ids))
 
