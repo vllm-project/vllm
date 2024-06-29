@@ -268,6 +268,7 @@ class ShmRingBufferIO:
         else:
             return self.dequeue()
 
+    @staticmethod
     def create_from_process_group(pg: ProcessGroup,
                                   max_chunk_bytes,
                                   max_chunks,
