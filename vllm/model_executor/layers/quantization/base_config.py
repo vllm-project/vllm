@@ -6,8 +6,8 @@ from torch import nn
 
 
 class QuantizeMethodBase(ABC):
-    """Base class for different methods that may be quantized."""
-    
+    """Base class for different quantized methods."""
+
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, *weight_args,
                        **extra_weight_attrs):
