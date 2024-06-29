@@ -157,7 +157,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
         select = False
 
-        target_device = self.img_projection[0].bias.device
         target_dtype = self.img_projection[0].bias.dtype
 
         if len(positions.tolist()) > 0:
@@ -231,7 +230,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             img_set_tensor = []
             for _output_img in output_imgs:
                 img_feature_proj = self.img_projection(
-                    _output_img.to(target_device, target_dtype))
+                    _output_img.to(target_dtype))
                 img_set_tensor.append(img_feature_proj)
             select = True
 
@@ -245,7 +244,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
                 hidden_states[positions[idx, 0],
                               positions[idx, 1]:positions[idx, 1] +
                               cnt] = (img_set_tensor[i].to(
-                                  hidden_states.device, hidden_states.dtype))
+                                  hidden_states.dtype))
                 idx += cnt
 
         return hidden_states.squeeze(0)
