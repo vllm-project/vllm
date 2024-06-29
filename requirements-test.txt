@@ -7,7 +7,7 @@ pytest-rerunfailures
 pytest-shard
 
 # testing utils
-# awscli
+awscli
 einops # required for MPT
 httpx
 peft
