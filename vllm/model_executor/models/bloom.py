@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelVocabEmbedding)
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -227,7 +227,7 @@ class BloomModel(nn.Module):
         self.embed_dim = config.hidden_size
 
         # Embedding + LN Embedding
-        self.word_embeddings = ParallelVocabEmbedding(
+        self.word_embeddings = VocabParallelEmbedding(
             config.vocab_size,
             self.embed_dim,
         )

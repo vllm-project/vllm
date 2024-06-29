@@ -54,7 +54,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, ParallelVocabEmbedding)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, skip_gptq_extra_param)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -201,7 +201,7 @@ class PhiModel(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.embed_tokens = ParallelVocabEmbedding(config.vocab_size,
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.layers = nn.ModuleList([
             PhiLayer(config, cache_config, quant_config)
