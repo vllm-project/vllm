@@ -175,7 +175,7 @@ class SequenceData:
         prompt_length = self.get_prompt_len()
         if num_tokens > prompt_length:
             return (self._prompt_token_ids_tuple,
-                    tuple(self.output_token_ids[:num_tokens - prompt_length]))
+                    tuple(self._output_token_ids[:num_tokens - prompt_length]))
         else:
             return (self._prompt_token_ids_tuple[:num_tokens], None)
 
