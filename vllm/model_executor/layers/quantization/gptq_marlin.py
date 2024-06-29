@@ -153,7 +153,7 @@ class GPTQMarlinConfig(QuantizationConfig):
             return GPTQMarlinLinearMethod(self)
 
         # lm_head can be optionally quantized
-        if isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
+        elif isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
             return GPTQMarlinLinearMethod(self)
 
         return None

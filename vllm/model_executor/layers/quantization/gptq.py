@@ -75,7 +75,7 @@ class GPTQConfig(QuantizationConfig):
             return GPTQLinearMethod(self)
 
         # lm_head can be optionally quantized
-        if isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
+        elif isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
             return GPTQLinearMethod(self)
 
         return None

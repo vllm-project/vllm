@@ -106,7 +106,7 @@ class MarlinConfig(QuantizationConfig):
             return MarlinLinearMethod(self)
 
         # lm_head can be optionally quantized
-        if isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
+        elif isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
             return MarlinLinearMethod(self)
         return None
 
@@ -120,7 +120,6 @@ class MarlinLinearMethod(LinearMethodBase):
     Args:
         quant_config: The Marlin quantization config.
     """
-    QUANTIZED = True
 
     def __init__(self, quant_config: MarlinConfig):
         self.quant_config = quant_config
