@@ -5,7 +5,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import openai
 import ray
@@ -154,11 +154,13 @@ def init_test_distributed_environment(
 def multi_process_parallel(
     tp_size: int,
     pp_size: int,
-    test_target,
+    test_target: Any,
 ) -> None:
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
-    ray.init()
+    # NOTE: We need to set working_dir for distributed tests,
+    # otherwise we may get import errors on ray workers
+    ray.init(runtime_env={"working_dir": VLLM_PATH})
 
     distributed_init_port = get_open_port()
     refs = []
