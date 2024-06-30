@@ -29,6 +29,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             raise ValueError(
                 "group_size must be given when using strategy group")
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
                        input_size_per_partition: int,
