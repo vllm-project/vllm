@@ -21,6 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
+import os.path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -44,15 +45,13 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader)
+    default_weight_loader, kv_cache_scales_loader,
+    safetensors_weights_iterator)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
-from vllm.model_executor.model_loader.weight_utils import (
-    safetensors_weights_iterator)
 from vllm.utils import is_hip, print_warning_once
 
 from .interfaces import SupportsLoRA
-import os.path
 
 
 class LlamaMLP(nn.Module):
