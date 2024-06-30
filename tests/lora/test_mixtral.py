@@ -40,14 +40,14 @@ def test_mixtral_lora(mixtral_lora_files, tp_size):
                    enable_lora=True,
                    max_num_seqs=16,
                    max_loras=4,
+                   distributed_executor_backend="ray",
                    tensor_parallel_size=tp_size)
 
     expected_lora_output = [
         "give_opinion(name[SpellForce 3], release_year[2017], developer[Grimlore Games], rating[poor])",  # noqa: E501
-        "give_opinion(name[SpellForce 3], release_year[2017], developer[Grimlore Games], rating[poor])",  # noqa: E501
+        "give_opinion(name[SpellForce 3], developer[Grimlore Games], release_year[2017], rating[poor])",  # noqa: E501
         "inform(name[BioShock], release_year[2007], rating[good], genres[action-adventure, role-playing, shooter], platforms[PlayStation, Xbox, PC], available_on_steam[yes], has_linux_release[no], has_mac_release[yes])",  # noqa: E501
     ]
-
     assert do_sample(llm, mixtral_lora_files,
                      lora_id=1) == expected_lora_output
     assert do_sample(llm, mixtral_lora_files,
