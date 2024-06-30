@@ -89,8 +89,8 @@ steps:
   mirror_hardwares: [amd]
 
   commands:
-  - pytest -v -s entrypoints -m llm
-  - pytest -v -s entrypoints -m openai
+  - pytest -v -s entrypoints/llm
+  - pytest -v -s entrypoints/openai
 
 - label: Examples Test
   working_dir: "/vllm-workspace/examples"

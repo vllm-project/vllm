@@ -7,7 +7,7 @@ from huggingface_hub import snapshot_download
 from vllm import LLM
 from vllm.lora.request import LoRARequest
 
-from ..conftest import cleanup
+from ...conftest import cleanup
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
@@ -19,8 +19,6 @@ PROMPTS = [
 ]
 
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
-
-pytestmark = pytest.mark.llm
 
 
 @pytest.fixture(scope="module")
