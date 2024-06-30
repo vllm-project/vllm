@@ -156,6 +156,8 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
+        # TODO: Check whether using original CLIPVisionModel can improve
+        # consistency against HF
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
