@@ -69,8 +69,8 @@ class ImageAsset:
     def for_vllm(self, vision_config: VisionLanguageConfig) -> MultiModalData:
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
-        from vllm.multimodal.image import (ImageFeatureData,  # noqa: F401
-                                           ImagePixelData)
+        from vllm.multimodal.image import ImageFeatureData  # noqa: F401
+        from vllm.multimodal.image import ImagePixelData
         image_input_type = vision_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
