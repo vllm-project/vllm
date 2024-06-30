@@ -100,7 +100,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.block_tables: Dict[SeqId, BlockTable] = {}
         self.cross_block_tables: Dict[EncoderSeqId, BlockTable] = {}
 
-        self._cached_computed_seq_blocks: Dict[SeqId, List[int]] = {}
+        self._cached_computed_seq_blocks: Dict[SeqId, Tuple[List[int],
+                                                            bool]] = {}
         self._seq_last_access: Dict[SeqId, float] = {}
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
@@ -292,6 +293,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         subsequent times, it only traverses the new blocks that were added 
         and updates the already recorded prefix of blocks with the newly 
         computed blocks.
+
+        To avoid redundant traversals, the algorithm also detects when there
+        is a "gap" in the computed prefix. For example, if we have blocks =
+        [1,2,3,4,5], and we have detected [1,2,3] as the computed prefix, then
+        we won't try to add more computed blocks to [1,2,3] in this sequence
+        iteration, and will add more computed blocks only after the sequence is
+        freed and reused again.
         """
         ret = []
         for seq in seqs:
@@ -312,18 +320,34 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 # First time init for seq_id => Detect fully
                 computed_block_ids = self.block_allocator.get_computed_block_ids(  # noqa: E501
                     [], block_ids)
-                self._cached_computed_seq_blocks[seq_id] = computed_block_ids
+                # Detect if there is "gap"
+                has_gap = len(computed_block_ids) < len(block_ids)
+
+                # Record
+                self._cached_computed_seq_blocks[seq_id] = (computed_block_ids,
+                                                            has_gap)
             else:
-                computed_block_ids = self._cached_computed_seq_blocks[seq_id]
-                if len(computed_block_ids) < len(block_ids):
-                    # Incremental init for seq_id => Look only at the new blocks
-                    computed_block_ids = self.block_allocator.get_computed_block_ids(  # noqa: E501
-                        computed_block_ids, block_ids)
-                    self._cached_computed_seq_blocks[
-                        seq_id] = computed_block_ids
-                else:
-                    # Cache HIT
-                    assert len(computed_block_ids) == len(block_ids)
+                # Get cached
+                (computed_block_ids,
+                 has_gap) = self._cached_computed_seq_blocks[seq_id]
+
+                # Try to add more computed blocks only if there is no gap
+                # (look at the example above)
+                if not has_gap:
+                    if len(computed_block_ids) < len(block_ids):
+                        # Incremental init for seq_id => Look only at the new
+                        # blocks
+                        computed_block_ids = self.block_allocator.get_computed_block_ids(  # noqa: E501
+                            computed_block_ids, block_ids)
+                        # Detect if there is "gap"
+                        has_gap = len(computed_block_ids) < len(block_ids)
+
+                        # Record
+                        self._cached_computed_seq_blocks[seq_id] = (
+                            computed_block_ids, has_gap)
+                    else:
+                        # Cache HIT
+                        assert len(computed_block_ids) == len(block_ids)
 
             ret.append(computed_block_ids)
 
