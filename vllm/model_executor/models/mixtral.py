@@ -31,12 +31,10 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    FusedMoELinear,
-    QKVParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import (FusedMoELinear,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -414,7 +412,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)

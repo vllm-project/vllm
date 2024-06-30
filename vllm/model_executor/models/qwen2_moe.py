@@ -31,8 +31,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
+from vllm.distributed import (get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -438,7 +437,8 @@ class Qwen2MoeForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)

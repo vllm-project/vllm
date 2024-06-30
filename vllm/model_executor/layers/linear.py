@@ -893,9 +893,8 @@ class FusedMoELinear(torch.nn.Module):
                 UnquantizedLinearMethod())
         else:
             self.quant_method = quant_config.get_quant_method(self)
+        assert self.quant_method is not None
 
-        if self.quant_method is None:
-            raise ValueError("Found quant_method of None")
         self.quant_method.create_weights_moe(
             layer=self,
             num_total_experts=num_experts,
@@ -944,6 +943,8 @@ class FusedMoELinear(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
+        assert self.quant_method is not None
+
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply_moe(
             self,

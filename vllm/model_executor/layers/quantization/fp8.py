@@ -7,7 +7,8 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase, FusedMoELinear
+from vllm.model_executor.layers.linear import (FusedMoELinear, LinearBase,
+                                               LinearMethodBase)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -70,7 +71,7 @@ class Fp8Config(QuantizationConfig):
             self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
-        if isinstance(layer, LinearBase) or isinstance(layer, FusedMoELinear):
+        if isinstance(layer, (LinearBase, FusedMoELinear)):
             return Fp8LinearMethod(self)
         if isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -281,8 +282,8 @@ class Fp8LinearMethod(LinearMethodBase):
                     layer.a2_scale = torch.nn.Parameter(layer.a2_scale.max(),
                                                         requires_grad=False)
 
-                # Fp8 moe kernels require a single weight scale for w13 per expert.
-                # We take the max then dequantize and requantize each expert.
+                # Fp8 moe kernel needs single weight scale for w13 per expert.
+                # We take the max then dequant and requant each expert.
                 assert layer.w13_scale is not None
                 shard_size = layer.intermediate_size_per_partition
                 max_w13_scales = layer.w13_scale.max(dim=1).values
@@ -304,7 +305,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # Dense case:
         else:
-            # If checkpoint is fp16/bf16 (not serialized fp8), quantize the weights.
+            # If checkpoint is fp/bf16 (not serialized fp8), quantize weights.
             if not self.quant_config.is_checkpoint_fp8_serialized:
                 qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                              scale=None)
