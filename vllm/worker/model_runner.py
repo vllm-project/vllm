@@ -1275,23 +1275,13 @@ class CUDAGraphRunner:
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
-<<<<<<< HEAD
-        self.input_buffers = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "kv_caches": kv_caches,
-            "slot_mapping": attn_metadata.slot_mapping,
-            "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
-            "block_tables": attn_metadata.decode_metadata.block_tables,
-            **kwargs,
-        }
-=======
         if self.backend_name == "flashinfer":
             self.input_buffers = {
                 "input_ids": input_ids,
                 "positions": positions,
                 "kv_caches": kv_caches,
                 "slot_mapping": attn_metadata.slot_mapping,
+                **kwargs,
             }
         else:
             self.input_buffers = {
@@ -1302,8 +1292,8 @@ class CUDAGraphRunner:
                 "seq_lens_tensor":
                 attn_metadata.decode_metadata.seq_lens_tensor,
                 "block_tables": attn_metadata.decode_metadata.block_tables,
+                **kwargs,
             }
->>>>>>> gh-main
         self.output_buffers = {"hidden_states": hidden_states}
         return hidden_states
 
