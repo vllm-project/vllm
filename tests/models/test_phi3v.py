@@ -98,23 +98,50 @@ def run_test(
     """
     model_id, vlm_config = model_and_config
 
-    hf_images = [asset.for_hf() for asset in image_assets]
-    vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
+    # NOTE: take care of the order. run vLLM first, and then run HF.
+    # vLLM needs a fresh new process without cuda initialization.
+    # if we run HF first, the cuda initialization will be done and it
+    # will hurt multiprocessing backend with fork method (the default method).
 
-    image_inputs_per_size_factors = [[(
-        prompt,
-        rescale_image_size(hf_image, factor),
-        ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
-    ) for hf_image, vllm_image, prompt in zip(
-        hf_images, vllm_images, HF_IMAGE_PROMPTS)] for factor in size_factors]
-    hf_inputs_per_size_factors = [(
-        [prompt for prompt, hf_image, vllm_image in image_inputs],
-        [hf_image for prompt, hf_image, vllm_image in image_inputs],
-    ) for image_inputs in image_inputs_per_size_factors]
-    vllm_inputs_per_size_factors = [(
-        [prompt for prompt, hf_image, vllm_image in image_inputs],
-        [vllm_image for prompt, hf_image, vllm_image in image_inputs],
-    ) for image_inputs in image_inputs_per_size_factors]
+    with vllm_runner(model_id,
+                     max_model_len=2048,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     enforce_eager=True,
+                     distributed_executor_backend=distributed_executor_backend,
+                     **vlm_config.as_cli_args_dict()) as vllm_model:
+
+        hf_images = [asset.for_hf() for asset in image_assets]
+        # NOTE: `asset.for_vllm` will call `torch.cuda.device_count()`
+        # we must put it inside the vllm_runner context manager
+        # i.e. after creating vLLM instance.
+        vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
+
+        vllm_image_prompts = [
+            p.replace("<|image_1|>",
+                      "<|image|>" * vlm_config.image_feature_size + "<s>")
+            for p in HF_IMAGE_PROMPTS
+        ]
+
+        image_inputs_per_size_factors = [[(
+            prompt,
+            rescale_image_size(hf_image, factor),
+            ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
+        ) for hf_image, vllm_image, prompt in zip(hf_images, vllm_images,
+                                                  HF_IMAGE_PROMPTS)]
+                                         for factor in size_factors]
+        hf_inputs_per_size_factors = [(
+            [prompt for prompt, hf_image, vllm_image in image_inputs],
+            [hf_image for prompt, hf_image, vllm_image in image_inputs],
+        ) for image_inputs in image_inputs_per_size_factors]
+        vllm_inputs_per_size_factors = [(
+            [prompt for prompt, hf_image, vllm_image in image_inputs],
+            [vllm_image for prompt, hf_image, vllm_image in image_inputs],
+        ) for image_inputs in image_inputs_per_size_factors]
+
+        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+                                                  max_tokens,
+                                                  images=vllm_images)
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model_id,
