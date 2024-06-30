@@ -313,6 +313,7 @@ class GroupCoordinator:
 
         # For TPUs, use xm.all_gather.
         if self.is_tpu:
+            assert dim == -1, "TPUs only support dim=-1 for all-gather."
             return xm.all_gather(input_, dim)
 
         if dim < 0:
