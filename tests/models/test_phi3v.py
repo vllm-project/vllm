@@ -12,6 +12,7 @@ from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from .utils import check_outputs_equal
 
 pytestmark = pytest.mark.vlm
 

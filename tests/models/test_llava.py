@@ -9,6 +9,7 @@ from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import rescale_image_size
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from .utils import check_outputs_equal
 
 pytestmark = pytest.mark.vlm
 
