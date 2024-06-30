@@ -6,15 +6,13 @@ import ray
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 
-from ..utils import RemoteOpenAIServer
+from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # technically this needs Mistral-7B-v0.1 as base, but we're not testing
 # generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
-
-pytestmark = pytest.mark.openai
 
 
 @pytest.fixture(scope="module")

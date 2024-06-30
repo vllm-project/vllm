@@ -4,7 +4,8 @@ import sys
 import time
 import warnings
 from contextlib import contextmanager
-from typing import Dict, List
+from pathlib import Path
+from typing import Any, Dict, List
 
 import openai
 import ray
@@ -40,8 +41,8 @@ else:
             nvmlShutdown()
 
 
-# Path to root of repository so that utilities can be imported by ray workers
-VLLM_PATH = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir))
+VLLM_PATH = Path(__file__).parent.parent
+"""Path to root of the vLLM repository."""
 
 
 class RemoteOpenAIServer:
@@ -153,10 +154,12 @@ def init_test_distributed_environment(
 def multi_process_parallel(
     tp_size: int,
     pp_size: int,
-    test_target,
+    test_target: Any,
 ) -> None:
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
+    # NOTE: We need to set working_dir for distributed tests,
+    # otherwise we may get import errors on ray workers
     ray.init(runtime_env={"working_dir": VLLM_PATH})
 
     distributed_init_port = get_open_port()
