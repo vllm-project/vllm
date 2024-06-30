@@ -304,6 +304,25 @@ def _greedy_sample(
     return results
 
 
+def _forced_sample(
+    selected_seq_groups: List[SequenceGroupToSample],
+    samples: torch.Tensor,
+) -> List[Tuple[List[int], List[int]]]:
+    samples = samples.tolist()
+    sample_idx = 0
+    results = []
+    for seq_group in selected_seq_groups:
+        seq_ids = seq_group.seq_ids
+        num_parent_seqs = len(seq_ids)
+        assert num_parent_seqs == 1, (
+            "Deterministic sampling should have only one seq.")
+        parent_ids = list(range(num_parent_seqs))
+        next_token_ids = [samples[sample_idx]]
+        results.append((next_token_ids, parent_ids))
+        sample_idx += num_parent_seqs
+    return results
+
+
 def _random_sample(
     selected_seq_groups: List[SequenceGroupToSample],
     random_samples: torch.Tensor,
@@ -486,12 +505,21 @@ def _sample_with_torch(
         num_tokens = len(sample_indices)
         if num_tokens == 0:
             continue
-
         seq_group_id = categorized_seq_group_ids[sampling_type]
         seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_id]
-        sample_metadata[sampling_type] = (seq_group_id, seq_groups)
+        is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_id]
+        sample_metadata[sampling_type] = (seq_group_id, seq_groups, is_prompts,
+                                          sample_indices)
         long_sample_indices = sample_indices.long()
-        if sampling_type == SamplingType.GREEDY:
+        if sampling_type == SamplingType.FORCED:
+            #pdb.set_trace()
+            forced_samples = torch.tensor([
+                seq_groups[0].sampling_params.future_context[0][len(
+                    sampling_metadata.seq_groups[0].seq_data[
+                        sampling_params.cntr].output_token_ids)]
+            ],
+                                          device='cuda:0')  #
+        elif sampling_type == SamplingType.GREEDY:
             greedy_samples = torch.argmax(logprobs[long_sample_indices],
                                           dim=-1)
 
@@ -538,8 +566,11 @@ def _sample_with_torch(
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
             continue
-        (seq_group_id, seq_groups) = sample_metadata[sampling_type]
-        if sampling_type == SamplingType.GREEDY:
+        seq_group_id, seq_groups, is_prompts, sample_indices = sample_metadata[
+            sampling_type]
+        if sampling_type == SamplingType.FORCED:
+            sample_results = _forced_sample(seq_groups, forced_samples)
+        elif sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups,

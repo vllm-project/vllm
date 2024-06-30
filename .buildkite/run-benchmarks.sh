@@ -15,6 +15,10 @@ bench_latency_exit_code=$?
 python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --output-json throughput_results.json 2>&1 | tee benchmark_throughput.txt
 bench_throughput_exit_code=$?
 
+# run python-based benchmark minimal measure perplexity on Llama-2-7B model
+python3 examples/measure_ppl2_llama2_MC.py --model=meta-llama/Llama-2-7b-hf --data=tests/prompts/wiki.test.raw --context-size=1024 --sample-size=512 --patch-size=1 2>&1 | tee benchmark_measure_pplv2.txt
+bench_ppl_exit_code=$?
+
 # run server-based benchmarks and upload the result to buildkite
 python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-chat-hf &
 server_pid=$!
@@ -53,6 +57,10 @@ echo '```' >> benchmark_results.md
 tail -n 24 benchmark_serving.txt >> benchmark_results.md # last 24 lines
 echo '```' >> benchmark_results.md
 
+echo "### Perplexity Measurement " >> benchmark_results.md
+sed -n '$p' benchmark_measure_pplv2.txt >> benchmark_results.md # last line
+echo '```' >> benchmark_results.md
+
 # if the agent binary is not found, skip uploading the results, exit 0
 if [ ! -f /usr/bin/buildkite-agent ]; then
     exit 0
@@ -68,6 +76,10 @@ fi
 
 if [ $bench_throughput_exit_code -ne 0 ]; then
     exit $bench_throughput_exit_code
+fi
+
+if [ $bench_ppl_exit_code -ne 0 ]; then
+    exit $bench_ppl_exit_code
 fi
 
 if [ $bench_serving_exit_code -ne 0 ]; then
