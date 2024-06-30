@@ -13,40 +13,40 @@ from tests.models.utils import check_logprobs_close
 MAX_MODEL_LEN = 1024
 
 MODELS = [
-    # # arctic - skip: size in automation
-    # "baichuan-inc/Baichuan2-7B-Chat",
-    # "bigscience/bloom-560m",
-    # # "THUDM/chatglm3-6b", skip: hf implementation broken
-    # # commandr - skip: size in automation size
-    # # dbrx - skip: size in automation
-    # "Deci/DeciLM-7B-instruct",
-    # # deepseek_v2 - skip: size in automation
-    # "deepseek-ai/deepseek-coder-1.3b-instruct",
-    # "tiiuae/falcon-rw-1b",
-    # "google/gemma-1.1-2b-it",
-    # # "google/gemma-2-9b-it", skip: not supported in transformers yet
-    # "bigcode/tiny_starcoder_py",
-    # "EleutherAI/gpt-j-6b",
-    # "EleutherAI/pythia-410m",
-    # "gpt2",
-    # "internlm/internlm2-chat-7b",
-    # # jais - skip: size in automation
-    # "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    # "openbmb/MiniCPM-2B-128k",
-    # # mixtral - skip: size in automation
-    # "mosaicml/mpt-7b-instruct",
-    # # "allenai/OLMo-1B", # skip: broken in transformers
+    # arctic - skip: size in automation
+    "baichuan-inc/Baichuan2-7B-Chat",
+    "bigscience/bloom-560m",
+    # "THUDM/chatglm3-6b", skip: hf implementation broken
+    # commandr - skip: size in automation size
+    # dbrx - skip: size in automation
+    "Deci/DeciLM-7B-instruct",
+    # deepseek_v2 - skip: size in automation
+    "deepseek-ai/deepseek-coder-1.3b-instruct",
+    "tiiuae/falcon-rw-1b",
+    "google/gemma-1.1-2b-it",
+    # "google/gemma-2-9b-it", skip: not supported in transformers yet
+    "bigcode/tiny_starcoder_py",
+    "EleutherAI/gpt-j-6b",
+    "EleutherAI/pythia-410m",
+    "gpt2",
+    "internlm/internlm2-chat-7b",
+    # jais - skip: size in automation
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "openbmb/MiniCPM-2B-128k",
+    # mixtral - skip: size in automation
+    "mosaicml/mpt-7b-instruct",
+    # "allenai/OLMo-1B", # skip: need hf_olmo installed
     "facebook/opt-125m",
     # orion - skip: size in automation
     "microsoft/phi-2",
-    "microsoft/Phi-3-small-8k-instruct",
-    "Qwen/Qwen-1_8B",
+    # "microsoft/Phi-3-small-8k-instruct", # skip: need flash attention installed
+    # "Qwen/Qwen-1_8B", # skip: need transformers_stream_generator installed
     "Qwen/Qwen1.5-1.8B",
-    "Qwen/Qwen2-0.5B-Instruct"
+    "Qwen/Qwen2-1.5B-Instruct",
     # qwen2 moe - skip: size in automation
     "stabilityai/stablelm-2-1_6b-chat",
     "bigcode/starcoder2-3b",
-    "xverse/XVERSE-7B",
+    # "xverse/XVERSE-7B", # skip: need sentencepiece installed
 ]
 
 
