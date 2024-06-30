@@ -12,9 +12,9 @@ def main():
     llm = LLM(
         model="openai/whisper-large-v3",
         max_num_seqs = 1,
-        max_seq_len_to_capture = 448,
         max_model_len = 448,
-        gpu_memory_utilization = 0.4
+        gpu_memory_utilization = 0.4,
+        dtype = 'bfloat16',
     )
 
     r = requests.get('https://github.com/mesolitica/malaya-speech/raw/master/speech/7021-79759-0004.wav')
@@ -28,9 +28,11 @@ def main():
     outputs = llm.generate({
         "prompt_token_ids": [50258, output_lang[0].outputs[0].token_ids[0], 50360],
         "multi_modal_data": AudioData(y),
-    }, sampling_params = SamplingParams(max_tokens = 10, temperature = 0))
+    }, sampling_params = SamplingParams(min_tokens = 20, max_tokens = 20, temperature = 0))
 
+    # ' without going to any such extreme as this we can easily see on reflection how vast an influence on the'
     print(outputs[0].outputs[0].text)
+
 
 
 if __name__ == "__main__":

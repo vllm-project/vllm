@@ -57,28 +57,13 @@ class WhisperModelRunner(ModelRunner):
                          vision_language_config=vision_language_config,
                          whisper_config=whisper_config)
 
-        self._check_whisper_unsupported_scenarios()
-
-    def _check_whisper_unsupported_scenarios(self):
-        if self.scheduler_config.chunked_prefill_enabled:
-            # Fail if chunked prefill is enabled
-            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL)
-        
-        if self.cache_config.enable_prefix_caching:
-            # Fail if prefix caching is enabled
-            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE)
-
-        if self.sliding_window is not None:
-            # Fail if sliding window is enabled
-            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_SWA)
-
     @torch.inference_mode()
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (whisper_input, input_tokens, input_positions, attn_metadata, sampling_metadata,
+        (whisper_data, input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_kwargs
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
@@ -94,8 +79,10 @@ class WhisperModelRunner(ModelRunner):
         else:
             model_executable = self.model
 
+        model_executable = self.model
+
         hidden_states = model_executable(
-            input_features=whisper_input,
+            whisper_data=whisper_data,
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
@@ -134,14 +121,20 @@ class WhisperModelRunner(ModelRunner):
                     # Process multi-modal data
                     if self.whisper_processor is None:
                         raise ValueError("Whisper Processor not initialized")
-
-                    whisper_data = self.whisper_processor(whisper_data, return_tensors = 'pt')
-                    whisper_data = whisper_data.to(self.model_config.dtype).input_features[0]
+                    
+                    if len(whisper_data.shape) == 1:
+                        whisper_data = self.whisper_processor(
+                            whisper_data, 
+                            sampling_rate = self.whisper_config.sample_rate,
+                            return_tensors = 'pt',
+                        )
+                        whisper_data = whisper_data.to(self.model_config.dtype).input_features[0]
+            
                     whisper_data_list.append(whisper_data)
         
-        whisper_input = torch.cat(whisper_data_list, dim = 1).cuda()
+        whisper_data = torch.cat(whisper_data_list, dim = 1).cuda()
 
-        return whisper_input
+        return whisper_data
 
     def prepare_input_tensors(
         self,
@@ -165,13 +158,13 @@ class WhisperModelRunner(ModelRunner):
                 num_decode_tokens,
                 num_prefills,
             ) = self._prepare_model_input(seq_group_metadata_list)
-            whisper_input = self._prepare_encoder_model_input(seq_group_metadata_list, attn_metadata)
+            whisper_data = self._prepare_encoder_model_input(seq_group_metadata_list, attn_metadata)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
 
             metadata_dict = {
-                'whisper_input': whisper_input,
+                'whisper_data': whisper_data,
                 "input_tokens": input_tokens,
                 "input_positions": input_positions,
                 "lora_requests": lora_requests,
@@ -187,7 +180,7 @@ class WhisperModelRunner(ModelRunner):
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
-            whisper_input = metadata_dict.pop("whisper_input")
+            whisper_data = metadata_dict.pop("whisper_data")
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
             lora_mapping = metadata_dict.pop("lora_mapping")
@@ -205,7 +198,7 @@ class WhisperModelRunner(ModelRunner):
                 num_prompts=0,
             )
 
-        return (whisper_input, input_tokens, input_positions, attn_metadata,
+        return (whisper_data, input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
                 multi_modal_kwargs)
 
@@ -331,8 +324,12 @@ class WhisperModelRunner(ModelRunner):
         whisper_data = torch.zeros(
                         (30 * self.whisper_config.sample_rate), 
                         dtype=torch.float16)
-        whisper_input = self.whisper_processor(whisper_data, return_tensors = 'pt')
-        whisper_input = whisper_input.to(self.model_config.dtype).input_features[0].cuda()
+        whisper_data = self.whisper_processor(
+            whisper_data, 
+            sampling_rate = self.whisper_config.sample_rate,
+            return_tensors = 'pt',
+        )
+        whisper_data = whisper_data.to(self.model_config.dtype).input_features[0].cuda()
 
         # Prepare buffer for outputs. These will be reused for all batch sizes.
         # It will be filled after the first graph capture.
@@ -375,7 +372,7 @@ class WhisperModelRunner(ModelRunner):
 
                 graph_runner = CUDAGraphRunner(self.model)
                 hidden_states = graph_runner.capture(
-                    whisper_input,
+                    whisper_data,
                     input_tokens[:batch_size],
                     input_positions[:batch_size],
                     hidden_states[:batch_size]
@@ -409,7 +406,7 @@ class CUDAGraphRunner:
 
     def capture(
         self,
-        whisper_input: torch.Tensor,
+        whisper_data: torch.Tensor,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: Optional[torch.Tensor],
@@ -426,7 +423,7 @@ class CUDAGraphRunner:
         # Note one iteration is not enough for torch.jit.script
         for _ in range(_NUM_WARMUP_ITERS):
             self.model(
-                whisper_input,
+                whisper_data,
                 input_ids,
                 positions,
                 kv_caches,
@@ -439,7 +436,7 @@ class CUDAGraphRunner:
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             output_hidden_states = self.model(
-                whisper_input,
+                whisper_data,
                 input_ids,
                 positions,
                 kv_caches,
@@ -458,7 +455,7 @@ class CUDAGraphRunner:
 
         # Save the input and output buffers.
         self.input_buffers = {
-            "whisper_input": whisper_input,
+            "whisper_data": whisper_data,
             "input_ids": input_ids,
             "positions": positions,
             "kv_caches": kv_caches,
@@ -471,7 +468,7 @@ class CUDAGraphRunner:
 
     def forward(
         self,
-        whisper_input: torch.Tensor,
+        whisper_data: torch.Tensor,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
@@ -482,7 +479,7 @@ class CUDAGraphRunner:
         del kv_caches
 
         # Copy the input tensors to the input buffers.
-        self.input_buffers["whisper_input"].copy_(whisper_input, non_blocking=True)
+        self.input_buffers["whisper_data"].copy_(whisper_data, non_blocking=True)
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
         self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,

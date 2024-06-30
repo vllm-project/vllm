@@ -36,6 +36,7 @@ from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
+from vllm.transformers_utils.whisper_processor import cached_get_whisper_processor
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
@@ -224,6 +225,13 @@ class LLMEngine:
         else:
             self.tokenizer = None
             self.detokenizer = None
+
+        if self.whisper_config is not None:
+            self.whisper_processor = cached_get_whisper_processor(
+                self.whisper_config.whisper_processor
+            )
+        else:
+            self.whisper_processor = None
 
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
@@ -504,9 +512,19 @@ class LLMEngine:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
 
-        if 'whisper_input' in inputs:
+        if 'whisper_data' in inputs:
             if self.whisper_config is None:
                 raise ValueError(f"Whisper config is None, must initialize a Whisper model.")
+            if self.whisper_processor is None:
+                raise ValueError(f"Whisper Processor is not initialized.")
+            whisper_data = self.whisper_processor(
+                inputs['whisper_data'], 
+                sampling_rate = self.whisper_config.sample_rate,
+                return_tensors = 'pt',
+            )
+            whisper_data = whisper_data.to(self.model_config.dtype).input_features[0]
+        else:
+            whisper_data = None
 
         if "prompt_token_ids" not in inputs:
             tokenizer = self.get_tokenizer_group("prompts must be None if "
@@ -517,11 +535,12 @@ class LLMEngine:
                                                 lora_request=lora_request)
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
+            
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=inputs.get("prompt"),
                          multi_modal_data=inputs.get("multi_modal_data"),
-                         whisper_data=inputs.get('whisper_data'))
+                         whisper_data=whisper_data)
 
     def add_request(
         self,

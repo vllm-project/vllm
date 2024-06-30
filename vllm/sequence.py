@@ -261,6 +261,10 @@ class Sequence:
         return self.inputs.get("multi_modal_data")
 
     @property
+    def whisper_data(self) -> Optional["WhisperData"]:
+        return self.inputs.get("whisper_data")
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 

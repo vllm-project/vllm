@@ -533,7 +533,7 @@ class WhisperForConditionalGeneration(nn.Module):
 
     def forward(
         self,
-        input_features: torch.Tensor,
+        whisper_data: torch.Tensor,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
@@ -541,7 +541,7 @@ class WhisperForConditionalGeneration(nn.Module):
     ) -> SamplerOutput:
         
         decoder_outputs = self.model(
-            input_features=input_features,
+            input_features=whisper_data,
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
