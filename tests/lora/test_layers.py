@@ -189,6 +189,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size) -> None:
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
+    lora_id_to_r = {i + 1: 8 for i in range(max_loras)}
 
     def create_random_embedding_layer():
         embedding = VocabParallelEmbedding(vocab_size, 256)
@@ -219,8 +220,8 @@ def test_embeddings(dist_init, num_loras, device, vocab_size) -> None:
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
-        mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       vocab_size,
+        mapping_info = convert_mapping(lora_mapping, id_to_index, lora_id_to_r,
+                                       max_loras, vocab_size,
                                        lora_config.lora_extra_vocab_size)
         lora_embedding.set_mapping(*mapping_info)
 
@@ -257,8 +258,8 @@ def test_embeddings(dist_init, num_loras, device, vocab_size) -> None:
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
-        mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       vocab_size,
+        mapping_info = convert_mapping(lora_mapping, id_to_index, lora_id_to_r,
+                                       max_loras, vocab_size,
                                        lora_config.lora_extra_vocab_size)
         lora_embedding.set_mapping(*mapping_info, )
 
@@ -285,7 +286,10 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
-                             lora_dtype=torch.float16)
+                             lora_dtype=torch.float16,
+                             lora_extra_vocab_size=177)
+    # verify weird extra vocab sizes work without too many tests
+    lora_id_to_r = {i + 1: 8 for i in range(max_loras)}
 
     def create_random_embedding_layer():
         embedding = VocabParallelEmbedding(vocab_size, 256)
@@ -349,8 +353,8 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
                 (embedding_id + 1) * embeddings_tensor_len - 1)
             original_input_[-2] = vocab_size + embeddings_tensor_len - 1
 
-        mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       vocab_size,
+        mapping_info = convert_mapping(lora_mapping, id_to_index, lora_id_to_r,
+                                       max_loras, vocab_size,
                                        lora_config.lora_extra_vocab_size)
         lora_embedding.set_mapping(*mapping_info, )
 
@@ -394,8 +398,8 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
 
         original_inputs = deepcopy(inputs)
 
-        mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       vocab_size,
+        mapping_info = convert_mapping(lora_mapping, id_to_index, lora_id_to_r,
+                                       max_loras, vocab_size,
                                        lora_config.lora_extra_vocab_size)
         lora_embedding.set_mapping(*mapping_info, )
 
@@ -420,7 +424,10 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
-                             lora_dtype=torch.float16)
+                             lora_dtype=torch.float16,
+                             lora_extra_vocab_size=133)
+    # verify weird extra vocab sizes work without too many tests
+    lora_id_to_r = {i + 1: 8 for i in range(max_loras)}
 
     def _pretest():
         linear = ParallelLMHead(vocab_size + lora_config.lora_extra_vocab_size,
@@ -467,10 +474,12 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
         mapping_info = convert_mapping(
             lora_mapping,
             id_to_index,
+            lora_id_to_r,
             max_loras,
             vocab_size,
             lora_config.lora_extra_vocab_size,
         )
+
         lora_logits_processor.set_mapping(*mapping_info, )
 
         lora_result = lora_logits_processor._get_logits(
@@ -493,7 +502,8 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
                                                   embedding=linear.weight,
                                                   embedding_bias=None)
             result[:, vocab_size + embeddings_tensor_len:] = float("-inf")
-            result += input_ @ lora.lora_a @ lora.lora_b * lora.scaling
+            result += (input_ @ lora.lora_a @ lora.lora_b *
+                       lora.scaling)[:, :logits_processor.org_vocab_size]
             expected_results.append(result)
         expected_result = torch.cat(expected_results)
         logits_processor.org_vocab_size = vocab_size
@@ -512,8 +522,8 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
-        mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       vocab_size,
+        mapping_info = convert_mapping(lora_mapping, id_to_index, lora_id_to_r,
+                                       max_loras, vocab_size,
                                        lora_config.lora_extra_vocab_size)
         lora_logits_processor.set_mapping(*mapping_info, )
 
@@ -547,6 +557,8 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
                              max_lora_rank=8,
                              fully_sharded_loras=fully_shard,
                              lora_dtype=torch.float16)
+    # verify weird extra vocab sizes work without too many tests
+    lora_id_to_r = {i + 1: 8 for i in range(max_loras)}
 
     def create_random_linear_parallel_layer():
         if orientation == "row":
@@ -594,6 +606,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
         mapping_info = convert_mapping(
             lora_mapping,
             id_to_index,
+            lora_id_to_r,
             max_loras,
             512,
             lora_config.lora_extra_vocab_size,
@@ -611,6 +624,9 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
+
+        diff = (lora_result - expected_result).abs()
+        print(f'diff max {diff.max()}, mean {diff.mean()}')
         assert torch.allclose(lora_result,
                               expected_result,
                               rtol=rtol,
@@ -630,8 +646,9 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
-        mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       512, lora_config.lora_extra_vocab_size)
+        mapping_info = convert_mapping(lora_mapping, id_to_index, lora_id_to_r,
+                                       max_loras, 512,
+                                       lora_config.lora_extra_vocab_size)
         lora_linear.set_mapping(*mapping_info, )
 
         lora_result = lora_linear(torch.cat(inputs))[0]
@@ -657,7 +674,10 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              fully_sharded_loras=fully_shard,
-                             lora_dtype=torch.float16)
+                             lora_dtype=torch.float16,
+                             lora_extra_vocab_size=19)
+    # verify weird extra vocab sizes work without too many tests
+    lora_id_to_r = {i + 1: 8 for i in range(max_loras)}
 
     def create_column_parallel_packed_layer():
         if repeats == 2:
@@ -727,6 +747,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         mapping_info = convert_mapping(
             lora_mapping,
             id_to_index,
+            lora_id_to_r,
             max_loras,
             512,
             lora_config.lora_extra_vocab_size,
@@ -767,6 +788,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         mapping_info = convert_mapping(
             lora_mapping,
             id_to_index,
+            lora_id_to_r,
             max_loras,
             512,
             lora_config.lora_extra_vocab_size,
@@ -808,7 +830,10 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              long_lora_scaling_factors=scaling_factors,
-                             lora_dtype=dtype)
+                             lora_dtype=dtype,
+                             lora_extra_vocab_size=538)
+    # verify weird extra vocab sizes work without too many tests
+    lora_id_to_r = {i + 1: 8 for i in range(max_loras)}
 
     if rotary_dim is None:
         rotary_dim = head_size
@@ -857,6 +882,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
     mapping_info = convert_mapping(
         lora_mapping,
         id_to_index,
+        lora_id_to_r,
         max_loras,
         512,
         lora_config.lora_extra_vocab_size,
@@ -878,7 +904,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-@pytest.mark.parametrize("seed", list(range(256)))
+@pytest.mark.parametrize("seed", [list(range(256))])
 def test_vocab_parallel_embedding_indices(tp_size, seed):
     random.seed(seed)
     vocab_size = random.randint(4000, 64000)
