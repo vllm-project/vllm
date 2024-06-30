@@ -109,7 +109,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             quant_config=quant_config)
 
         self.gate = ReplicatedLinear(config.hidden_size,
-                                     self.n_routed_experts,
+                                     config.num_experts,
                                      bias=False,
                                      quant_config=None)
         if config.shared_expert_intermediate_size > 0:
