@@ -66,6 +66,7 @@ html_theme_options = {
     'path_to_docs': 'docs/source',
     'repository_url': 'https://github.com/vllm-project/vllm',
     'use_repository_button': True,
+    'use_edit_page_button': True,
 }
 
 # Add any paths that contain custom static files (such as style sheets) here,
@@ -92,6 +93,7 @@ autodoc_mock_imports = [
     "vllm._C",
     "PIL",
     "numpy",
+    'triton',
     "tqdm",
     "tensorizer",
 ]

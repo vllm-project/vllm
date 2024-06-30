@@ -1,12 +1,13 @@
 from collections import OrderedDict
 
+import pytest
 from torch import nn
 
 from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
 from vllm.utils import LRUCache
 
 
-def test_parse_fine_tuned_lora_name():
+def test_parse_fine_tuned_lora_name_valid():
     fixture = {
         ("base_model.model.lm_head.lora_A.weight", "lm_head", True),
         ("base_model.model.lm_head.lora_B.weight", "lm_head", False),
@@ -33,6 +34,17 @@ def test_parse_fine_tuned_lora_name():
     }
     for name, module_name, is_lora_a in fixture:
         assert (module_name, is_lora_a) == parse_fine_tuned_lora_name(name)
+
+
+def test_parse_fine_tuned_lora_name_invalid():
+    fixture = {
+        "weight",
+        "base_model.weight",
+        "base_model.model.weight",
+    }
+    for name in fixture:
+        with pytest.raises(ValueError, match="unsupported LoRA weight"):
+            parse_fine_tuned_lora_name(name)
 
 
 def test_replace_submodule():

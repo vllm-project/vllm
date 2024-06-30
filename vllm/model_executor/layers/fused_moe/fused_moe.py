@@ -8,7 +8,6 @@ import torch
 import triton
 import triton.language as tl
 
-import vllm._moe_C as moe_kernels
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 
@@ -308,6 +307,30 @@ def get_moe_configs(E: int, N: int,
     return None
 
 
+def get_default_config(
+    M: int,
+    E: int,
+    N: int,
+    K: int,
+    topk: int,
+    dtype: Optional[str],
+) -> Dict[str, int]:
+    config = {
+        'BLOCK_SIZE_M': 64,
+        'BLOCK_SIZE_N': 64,
+        'BLOCK_SIZE_K': 32,
+        'GROUP_SIZE_M': 8
+    }
+    if M <= E:
+        config = {
+            'BLOCK_SIZE_M': 16,
+            'BLOCK_SIZE_N': 32,
+            'BLOCK_SIZE_K': 64,
+            'GROUP_SIZE_M': 1
+        }
+    return config
+
+
 def fused_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -331,13 +354,44 @@ def fused_topk(
                                         topk,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
-    moe_kernels.topk_softmax(
+    ops.topk_softmax(
         topk_weights,
         topk_ids,
         token_expert_indicies,
         gating_output.float(),  # TODO(woosuk): Optimize this.
     )
     del token_expert_indicies  # Not used. Will be used in the future.
+
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    return topk_weights, topk_ids
+
+
+# This is used by the Deepseek-V2 model
+def grouped_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int = 0,
+    topk_group: int = 0,
+):
+    scores = torch.softmax(gating_output, dim=-1)
+    num_token = scores.shape[0]
+    group_scores = scores.view(num_token, num_expert_group,
+                               -1).max(dim=-1).values  # [n, n_group]
+    group_idx = torch.topk(group_scores, k=topk_group, dim=-1,
+                           sorted=False)[1]  # [n, top_k_group]
+    group_mask = torch.zeros_like(group_scores)  # [n, n_group]
+    group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
+    score_mask = group_mask.unsqueeze(-1).expand(
+        num_token, num_expert_group,
+        scores.shape[-1] // num_expert_group).reshape(num_token, -1)  # [n, e]
+    tmp_scores = scores.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
+    topk_weights, topk_ids = torch.topk(tmp_scores,
+                                        k=topk,
+                                        dim=-1,
+                                        sorted=False)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
@@ -369,6 +423,11 @@ def fused_experts(hidden_states: torch.Tensor,
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
 
+    if M > 65536:
+        # https://github.com/vllm-project/vllm/issues/5938
+        raise ValueError("MoE kernel does not support more than 65536 tokens, "
+                         f"but got {M}")
+
     if override_config:
         config = override_config
     else:
@@ -382,20 +441,9 @@ def fused_experts(hidden_states: torch.Tensor,
             config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
         else:
             # Else use the default config
-            config = {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32,
-                'GROUP_SIZE_M': 8
-            }
-
-            if M <= E:
-                config = {
-                    'BLOCK_SIZE_M': 16,
-                    'BLOCK_SIZE_N': 32,
-                    'BLOCK_SIZE_K': 64,
-                    'GROUP_SIZE_M': 1
-                }
+            config = get_default_config(M, E, N, w1.shape[2],
+                                        topk_ids.shape[1],
+                                        "float8" if use_fp8 else None)
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,

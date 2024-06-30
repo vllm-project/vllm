@@ -1,13 +1,22 @@
-import gc
-from dataclasses import fields
-from enum import Enum
-from typing import Any, Dict, List, Tuple
+from typing import List, Optional, Tuple, Type
 
 import pytest
-import torch
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+
+from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from .utils import check_outputs_equal
+
+pytestmark = pytest.mark.vlm
+
+# The image token is placed before "user" on purpose so that the test can pass
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    "stop_sign":
+    "<image>\nUSER: What's the content of the image?\nASSISTANT:",
+    "cherry_blossom":
+    "<image>\nUSER: What is the season?\nASSISTANT:",
+})
 
 
 def iter_llava_configs(model_name: str):
@@ -31,58 +40,43 @@ def iter_llava_configs(model_name: str):
 
 model_and_vl_config = [
     *iter_llava_configs("llava-hf/llava-1.5-7b-hf"),
-    # Not enough memory
-    # *iter_llava_configs("llava-hf/llava-1.5-13b-hf"),
 ]
 
 
-def as_dict(vlm_config: VisionLanguageConfig) -> Dict[str, Any]:
-    """Flatten vision language config to pure args.
-
-    Compatible with what llm entrypoint expects.
-    """
-    result = {}
-    for field in fields(vlm_config):
-        value = getattr(vlm_config, field.name)
-        if isinstance(value, Enum):
-            result[field.name] = value.name.lower()
-        elif isinstance(value, tuple):
-            result[field.name] = ",".join([str(item) for item in value])
-        else:
-            result[field.name] = value
-
-    result["disable_image_processor"] = vlm_config.image_processor is None
-
-    return result
-
-
-def sanitize_vllm_output(vllm_output: Tuple[List[int], str],
-                         vision_language_config: VisionLanguageConfig,
-                         model_id: str):
+def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
+                      vlm_config: VisionLanguageConfig, model_id: str):
     """Sanitize vllm output to be comparable with hf output.
     The function reduces `input_ids` from 1, 32000, 32000, ..., 32000,
     x1, x2, x3 ... to 1, 32000, x1, x2, x3 ...
     It also reduces `output_str` from "<image><image>bla" to "bla".
     """
+    output_ids, output_str = vllm_output
+    image_token_id = vlm_config.image_token_id
+
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    image_token_str = tokenizer.decode(vision_language_config.image_token_id)
-    image_token_str_len = len(image_token_str)
-    input_ids, output_str = vllm_output
-    sanitized_input_ids = input_ids[0:2] + input_ids[2 + vision_language_config
-                                                     .image_feature_size - 1:]
-    sanitzied_output_str = output_str[vision_language_config.
-                                      image_feature_size *
-                                      image_token_str_len:]
-    return sanitized_input_ids, sanitzied_output_str
+    image_token_str = tokenizer.decode(image_token_id)
+
+    hf_output_ids = [
+        token_id for idx, token_id in enumerate(output_ids)
+        if token_id != image_token_id or output_ids[idx - 1] != image_token_id
+    ]
+    hf_output_str = output_str \
+        .replace(image_token_str * vlm_config.image_feature_size, "")
+
+    return hf_output_ids, hf_output_str
 
 
-@pytest.mark.parametrize("worker_use_ray", [False])
-@pytest.mark.parametrize("model_and_config", model_and_vl_config)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
-def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
-                vllm_image_prompts, vllm_images, model_and_config, dtype: str,
-                max_tokens: int, worker_use_ray: bool) -> None:
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model_and_config: Tuple[str, VisionLanguageConfig],
+    *,
+    dtype: str,
+    max_tokens: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -92,36 +86,62 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    model_id, vision_language_config = model_and_config
+    model_id, vlm_config = model_and_config
+    hf_images = [asset.for_hf() for asset in image_assets]
 
-    hf_model = hf_runner(model_id, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(hf_image_prompts,
-                                          max_tokens,
-                                          images=hf_images)
-    del hf_model
+    # NOTE: take care of the order. run vLLM first, and then run HF.
+    # vLLM needs a fresh new process without cuda initialization.
+    # if we run HF first, the cuda initialization will be done and it
+    # will hurt multiprocessing backend with fork method (the default method).
 
-    vllm_model = vllm_runner(model_id,
-                             dtype=dtype,
-                             worker_use_ray=worker_use_ray,
-                             enforce_eager=True,
-                             **as_dict(vision_language_config))
-    vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+    with vllm_runner(model_id,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True,
+                     **vlm_config.as_cli_args_dict()) as vllm_model:
+
+        # NOTE: `asset.for_vllm` will call `torch.cuda.device_count()`
+        # we must put it inside the vllm_runner context manager
+        # i.e. after creating vLLM instance.
+        vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
+
+        vllm_image_prompts = [
+            p.replace("<image>", "<image>" * vlm_config.image_feature_size)
+            for p in HF_IMAGE_PROMPTS
+        ]
+
+        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+                                                  max_tokens,
+                                                  images=vllm_images)
+
+    with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
+        hf_outputs = hf_model.generate_greedy(HF_IMAGE_PROMPTS,
                                               max_tokens,
-                                              images=vllm_images)
-    del vllm_model
+                                              images=hf_images)
 
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    for i in range(len(hf_image_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = sanitize_vllm_output(
-            vllm_outputs[i], vision_language_config, model_id)
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    check_outputs_equal(
+        hf_outputs,
+        [
+            vllm_to_hf_output(vllm_output, vlm_config, model_id)
+            for vllm_output in vllm_outputs
+        ],
+        name_0="hf",
+        name_1="vllm",
+    )
 
 
-# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
-# (Requires multiple GPUs)
+@pytest.mark.parametrize("model_and_config", model_and_vl_config)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
+                dtype: str, max_tokens: int) -> None:
+    run_test(
+        hf_runner,
+        vllm_runner,
+        image_assets,
+        model_and_config,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        tensor_parallel_size=1,
+    )

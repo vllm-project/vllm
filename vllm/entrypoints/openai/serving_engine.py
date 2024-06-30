@@ -10,9 +10,10 @@ from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
+                                              DetokenizeRequest,
                                               EmbeddingRequest, ErrorResponse,
                                               ModelCard, ModelList,
-                                              ModelPermission)
+                                              ModelPermission, TokenizeRequest)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob
@@ -99,8 +100,9 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(
-        self, request: Union[CompletionRequest, ChatCompletionRequest,
-                             EmbeddingRequest]
+        self, request: Union[ChatCompletionRequest, CompletionRequest,
+                             DetokenizeRequest, EmbeddingRequest,
+                             TokenizeRequest]
     ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
@@ -126,12 +128,14 @@ class OpenAIServing:
     def _validate_prompt_and_tokenize(
             self,
             request: Union[ChatCompletionRequest, CompletionRequest,
-                           EmbeddingRequest],
+                           DetokenizeRequest, EmbeddingRequest,
+                           TokenizeRequest],
             prompt: Optional[str] = None,
             prompt_ids: Optional[List[int]] = None,
             truncate_prompt_tokens: Optional[Annotated[int,
                                                        Field(ge=1)]] = None,
-            add_special_tokens: bool = True) -> Tuple[List[int], str]:
+            add_special_tokens: Optional[bool] = True
+    ) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
@@ -139,11 +143,12 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
-            # When using OpenAIServingChat for chat completions, the
-            # special tokens (e.g., BOS) have already been added by the
-            # chat template. Therefore, we do not need to add them again.
-            # Set add_special_tokens to False to avoid adding the BOS tokens
-            # again.
+            # When using OpenAIServingChat for chat completions, for
+            # most models the special tokens (e.g., BOS) have already
+            # been added by the chat template. Therefore, we do not
+            # need to add them again.
+            # Set add_special_tokens to False (by default) to avoid
+            # adding the BOS tokens again.
             tokenizer_kwargs: Dict[str, Any] = {
                 "add_special_tokens": add_special_tokens
             }
@@ -170,6 +175,11 @@ class OpenAIServing:
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for embedding "
                     f"generation. Please reduce the length of the input.", )
+            return input_ids, input_text
+
+        # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
+        # and does not require model context length validation
+        if isinstance(request, (TokenizeRequest, DetokenizeRequest)):
             return input_ids, input_text
 
         if request.max_tokens is None:

@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
-option(VLLM_TARGET_DEVICE "Target device backend for vLLM" "cuda")
+# CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
+set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
@@ -32,8 +33,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # versions are derived from Dockerfile.rocm
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.3.0")
-set(TORCH_SUPPORTED_VERSION_ROCM_5X "2.0.1")
-set(TORCH_SUPPORTED_VERSION_ROCM_6X "2.1.1")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.4.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -67,19 +67,6 @@ endif()
 find_package(Torch REQUIRED)
 
 #
-# Normally `torch.utils.cpp_extension.CUDAExtension` would add
-# `libtorch_python.so` for linking against an extension. Torch's cmake
-# configuration does not include this library (presumably since the cmake
-# config is used for standalone C++ binaries that link against torch).
-# The `libtorch_python.so` library defines some of the glue code between
-# torch/python via pybind and is required by VLLM extensions for this
-# reason. So, add it by manually with `find_library` using torch's
-# installed library path.
-#
-find_library(torch_python_LIBRARY torch_python PATHS
-  "${TORCH_INSTALL_PREFIX}/lib")
-
-#
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
@@ -111,18 +98,11 @@ elseif(HIP_FOUND)
   # .hip extension automatically, HIP must be enabled explicitly.
   enable_language(HIP)
 
-  # ROCm 5.x
-  if (ROCM_VERSION_DEV_MAJOR EQUAL 5 AND
-      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_5X})
-    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_5X} "
-      "expected for ROCMm 5.x build, saw ${Torch_VERSION} instead.")
-  endif()
-
-  # ROCm 6.x
-  if (ROCM_VERSION_DEV_MAJOR EQUAL 6 AND
-      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_6X})
-    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_6X} "
-      "expected for ROCMm 6.x build, saw ${Torch_VERSION} instead.")
+  # ROCm 5.X and 6.X
+  if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
+      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM})
+    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM} "
+      "expected for ROCm build, saw ${Torch_VERSION} instead.")
   endif()
 else()
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")
@@ -171,7 +151,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/fp8/common.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
-  "csrc/pybind.cpp")
+  "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   include(FetchContent)
@@ -192,9 +172,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/gptq_marlin/gptq_marlin.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
     "csrc/custom_all_reduce.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_entry.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c2x.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu")
+    "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
+    "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"
+    "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
 
   #
   # The CUTLASS kernels for Hopper require sm90a to be enabled.
@@ -202,7 +182,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
     set_source_files_properties(
-          "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu"
+          "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
           PROPERTIES
           COMPILE_FLAGS
           "-gencode arch=compute_90a,code=sm_90a")
@@ -218,6 +198,7 @@ define_gpu_extension_target(
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  USE_SABI 3
   WITH_SOABI)
 
 #
@@ -225,7 +206,7 @@ define_gpu_extension_target(
 #
 
 set(VLLM_MOE_EXT_SRC
-  "csrc/moe/moe_ops.cpp"
+  "csrc/moe/torch_bindings.cpp"
   "csrc/moe/topk_softmax_kernels.cu")
 
 define_gpu_extension_target(
@@ -235,6 +216,7 @@ define_gpu_extension_target(
   SOURCES ${VLLM_MOE_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
+  USE_SABI 3
   WITH_SOABI)
 
 #
@@ -249,7 +231,7 @@ set(VLLM_PUNICA_EXT_SRC
   "csrc/punica/bgmv/bgmv_fp32_bf16_bf16.cu"
   "csrc/punica/bgmv/bgmv_fp32_fp16_fp16.cu"
   "csrc/punica/punica_ops.cu"
-  "csrc/punica/punica_pybind.cpp")
+  "csrc/punica/torch_bindings.cpp")
 
 #
 # Copy GPU compilation flags+update for punica
@@ -286,6 +268,7 @@ if (VLLM_PUNICA_GPU_ARCHES)
     SOURCES ${VLLM_PUNICA_EXT_SRC}
     COMPILE_FLAGS ${VLLM_PUNICA_GPU_FLAGS}
     ARCHITECTURES ${VLLM_PUNICA_GPU_ARCHES}
+    USE_SABI 3
     WITH_SOABI)
 else()
   message(WARNING "Unable to create _punica_C target because none of the "
