@@ -332,7 +332,7 @@ class OPTForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
-            if "lm_head.weight" in name:	
+            if "lm_head.weight" in name:
                 continue
             if name.startswith("decoder."):
                 name = "model." + name

@@ -311,20 +311,20 @@ class VocabParallelEmbedding(torch.nn.Module):
             assert param.data.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
             return
-        
+
         start_idx = self.shard_indices.org_vocab_start_index
         shard_size = self.shard_indices.org_vocab_end_index - start_idx
 
         # If param packed on the same dim we are sharding on, then
         # need to adjust offsets of loaded weight by pack_factor.
         if packed_dim is not None and packed_dim == output_dim:
-            assert loaded_weight.shape[output_dim] == (
-                self.org_vocab_size // param.pack_factor)
+            assert loaded_weight.shape[output_dim] == (self.org_vocab_size //
+                                                       param.pack_factor)
             start_idx = start_idx // param.pack_factor
             shard_size = shard_size // param.pack_factor
         else:
             assert loaded_weight.shape[output_dim] == self.org_vocab_size
-        
+
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0]:].data.fill_(0)
