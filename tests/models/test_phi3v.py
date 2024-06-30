@@ -2,16 +2,16 @@ import re
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
-from vllm.model_executor.models.phi3v import get_phi3v_image_feature_size
 from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import rescale_image_size
+from vllm.sequence import SampleLogprobs
 from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from .utils import check_outputs_equal_xfail
+from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 
@@ -47,26 +47,26 @@ model_and_vl_config = [
 ]
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
-                      vlm_config: VisionLanguageConfig, model_id: str,
-                      image_feature_size: int):
+def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+                                         Optional[SampleLogprobs]],
+                      vlm_config: VisionLanguageConfig, model_id: str):
     """Sanitize vllm output to be comparable with hf output.
     The function reduces `input_ids` from 1, 32000, 32000, ..., 32000,
     x1, x2, x3 ... to 1, 32000, x1, x2, x3 ...
     It also reduces `output_str` from "<image><image>bla" to "bla".
     """
-    output_ids, output_str = vllm_output
-    output_str_without_image = re.sub(r"(<\|image_\d+\|>)+", " ", output_str)
+    output_ids, output_str, out_logprobs = vllm_output
+    output_str_without_image = re.sub(r"(<\|image_\d+\|>)+", "", output_str)
 
     hf_output_str = output_str_without_image.replace("<|user|>", "") \
         .replace("<|end|>\n<|assistant|>", " ")
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     hf_output_ids = tokenizer.encode(output_str_without_image)
-    hf_output_ids = hf_output_ids[:4] + [0] * image_feature_size \
-        + [1] + hf_output_ids[4:]
+    assert hf_output_ids[:2] == [1, 29871]
+    hf_output_ids = hf_output_ids[2:]
 
-    return hf_output_ids, hf_output_str
+    return hf_output_ids, hf_output_str, out_logprobs
 
 
 target_dtype = "half"
@@ -83,6 +83,7 @@ def run_test(
     size_factors: List[float],
     dtype: str,
     max_tokens: int,
+    num_logprobs: int,
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
@@ -96,25 +97,51 @@ def run_test(
     The text output is sanitized to be able to compare with hf.
     """
     model_id, vlm_config = model_and_config
-    hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
 
-    hf_images = [asset.for_hf() for asset in image_assets]
-    vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
+    # NOTE: take care of the order. run vLLM first, and then run HF.
+    # vLLM needs a fresh new process without cuda initialization.
+    # if we run HF first, the cuda initialization will be done and it
+    # will hurt multiprocessing backend with fork method (the default method).
 
-    image_inputs_per_size_factors = [[(
-        prompt,
-        rescale_image_size(hf_image, factor),
-        ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
-    ) for hf_image, vllm_image, prompt in zip(
-        hf_images, vllm_images, HF_IMAGE_PROMPTS)] for factor in size_factors]
-    hf_inputs_per_size_factors = [(
-        [prompt for prompt, hf_image, vllm_image in image_inputs],
-        [hf_image for prompt, hf_image, vllm_image in image_inputs],
-    ) for image_inputs in image_inputs_per_size_factors]
-    vllm_inputs_per_size_factors = [(
-        [prompt for prompt, hf_image, vllm_image in image_inputs],
-        [vllm_image for prompt, hf_image, vllm_image in image_inputs],
-    ) for image_inputs in image_inputs_per_size_factors]
+    with vllm_runner(model_id,
+                     max_model_len=2048,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     enforce_eager=True,
+                     distributed_executor_backend=distributed_executor_backend,
+                     **vlm_config.as_cli_args_dict()) as vllm_model:
+
+        hf_images = [asset.for_hf() for asset in image_assets]
+        # NOTE: `asset.for_vllm` will call `torch.cuda.device_count()`
+        # we must put it inside the vllm_runner context manager
+        # i.e. after creating vLLM instance.
+        vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
+
+        vllm_image_prompts = [
+            p.replace("<|image_1|>",
+                      "<|image|>" * vlm_config.image_feature_size + "<s>")
+            for p in HF_IMAGE_PROMPTS
+        ]
+
+        image_inputs_per_size_factors = [[(
+            prompt,
+            rescale_image_size(hf_image, factor),
+            ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
+        ) for hf_image, vllm_image, prompt in zip(hf_images, vllm_images,
+                                                  HF_IMAGE_PROMPTS)]
+                                         for factor in size_factors]
+        hf_inputs_per_size_factors = [(
+            [prompt for prompt, hf_image, vllm_image in image_inputs],
+            [hf_image for prompt, hf_image, vllm_image in image_inputs],
+        ) for image_inputs in image_inputs_per_size_factors]
+        vllm_inputs_per_size_factors = [(
+            [prompt for prompt, hf_image, vllm_image in image_inputs],
+            [vllm_image for prompt, hf_image, vllm_image in image_inputs],
+        ) for image_inputs in image_inputs_per_size_factors]
+
+        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
+                                                  max_tokens,
+                                                  images=vllm_images)
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model_id,
@@ -125,7 +152,10 @@ def run_test(
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
         vllm_outputs_per_size_factors = [
-            vllm_model.generate_greedy(prompts, max_tokens, images=vllm_images)
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=vllm_images)
             for prompts, vllm_images in vllm_inputs_per_size_factors
         ]
 
@@ -135,54 +165,24 @@ def run_test(
                    model_kwargs=hf_model_kwargs) as hf_model:
         eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_size_factors = [
-            hf_model.generate_greedy(prompts,
-                                     max_tokens,
-                                     images=hf_images,
-                                     eos_token_id=eos_token_id)
-            for prompts, hf_images in hf_inputs_per_size_factors
-        ]
-        hf_dummy_outputs_per_size_factors = [
-            hf_model.generate_greedy(prompts,
-                                     max_tokens=1,
-                                     images=hf_images,
-                                     eos_token_id=eos_token_id)
+            hf_model.generate_greedy_logprobs_limit(prompts,
+                                                    max_tokens,
+                                                    num_logprobs=num_logprobs,
+                                                    images=hf_images,
+                                                    eos_token_id=eos_token_id)
             for prompts, hf_images in hf_inputs_per_size_factors
         ]
 
-    # Since we use _attn_implementation="eager", there is numeric
-    # difference for longer context (max_tokens=128) and test can't pass
-    for image_inputs, vllm_outputs, hf_outputs, hf_dummy_outputs in zip(
-            image_inputs_per_size_factors,
-            vllm_outputs_per_size_factors,
-            hf_outputs_per_size_factors,
-            hf_dummy_outputs_per_size_factors,
-    ):
-        image_feature_sizes = [
-            get_phi3v_image_feature_size(
-                hf_config,
-                input_height=hf_image.height,
-                input_width=hf_image.width,
-            ) for _, hf_image, _ in image_inputs
-        ]
-
-        check_outputs_equal_xfail(
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_size_factors,
+                                        vllm_outputs_per_size_factors):
+        check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
-                vllm_to_hf_output(vllm_output,
-                                  vlm_config,
-                                  model_id,
-                                  image_feature_size=image_feature_size)
-                for vllm_output, image_feature_size in zip(
-                    vllm_outputs, image_feature_sizes)
-            ],
-            outputs_num_prefix_tokens=[
-                len(hf_dummy_output[0]) - 1
-                for hf_dummy_output in hf_dummy_outputs
+                vllm_to_hf_output(vllm_output, vlm_config, model_id)
+                for vllm_output in vllm_outputs
             ],
             name_0="hf",
             name_1="vllm",
-            min_tokens_to_xfail=1,
-            min_tokens_to_pass=max_tokens,
         )
 
 
@@ -202,8 +202,10 @@ def run_test(
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
-                size_factors, dtype: str, max_tokens: int) -> None:
+                size_factors, dtype: str, max_tokens: int,
+                num_logprobs: int) -> None:
     run_test(
         hf_runner,
         vllm_runner,
@@ -212,5 +214,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
         size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
         tensor_parallel_size=1,
     )
