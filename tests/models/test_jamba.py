@@ -32,6 +32,26 @@ def test_models(
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
 
 
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float"])
+def test_state_cleanup(
+    vllm_runner,
+    model: str,
+    dtype: str,
+    example_prompts,
+) -> None:
+    # This test is for verifying that the Jamba state is cleaned up between
+    # steps, If its not cleaned, an error would be expected.
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        for _ in range(10):
+            vllm_outputs = vllm_model.generate_greedy(
+                [example_prompts[0]] * 100,
+                1
+            )
+
+
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 def test_model_print(
