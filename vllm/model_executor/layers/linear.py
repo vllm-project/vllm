@@ -41,7 +41,7 @@ def adjust_bitsandbytes_shard(param: Parameter,
     return quantized_size, quantized_offset
 
 
-def adjust_per_tensor_scale_shard(param, loaded_weight, shard_id):
+def adjust_scalar_to_fused_array(param, loaded_weight, shard_id):
     """For fused modules (QKV and MLP) we have an array of length
     N that holds 1 scale for each "logical" matrix. So the param
     is an array of length N. The loaded_weight corresponds to 
@@ -381,16 +381,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         output_dim = getattr(param, "output_dim", None)
         # Special case for AQLM codebooks.
         is_metadata = getattr(param, "is_metadata", False)
-        # Special case for per-tensor scale in fused case.
-        is_per_tensor_scale = getattr(param, "is_per_tensor_scale", False)
+        # Special case for per-tensor scale to load scalar into fused array.
+        needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
 
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
-                # If fp8 + scale, need to send to each shard.
-                if fp8_scales_shard_indexer is not None:
-                    param_data, loaded_weight = fp8_scales_shard_indexer(
-                        param_data, loaded_weight, loaded_shard_id)
+                if needs_scalar_to_array is not None:
+                    param_data, loaded_weight = adjust_scalar_to_fused_array(
+                        param_data, loaded_weight, 0)
 
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
@@ -453,8 +452,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             param_data = param_data.narrow(0, shard_offset, shard_size)
 
         # Special case for per-tensor scales in fused case.
-        elif is_per_tensor_scale:
-            param_data, loaded_weight = adjust_per_tensor_scale_shard(
+        elif needs_scalar_to_array:
+            param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id)
 
         else:
@@ -545,15 +544,14 @@ class QKVParallelLinear(ColumnParallelLinear):
         is_metadata = getattr(param, "is_metadata", False)
 
         # Special case for per-tensor scales in fused case.
-        is_per_tensor_scale = getattr(param, "is_per_tensor_scale", False)
+        needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
 
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
-                # If fp8 + scale, need to send to each shard.
-                if fp8_scales_shard_indexer is not None:
-                    param_data, loaded_weight = fp8_scales_shard_indexer(
-                        param_data, loaded_weight, loaded_shard_id)
+                if needs_scalar_to_array is not None:
+                    param_data, loaded_weight = adjust_scalar_to_fused_array(
+                        param_data, loaded_weight, 0)
 
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
@@ -644,8 +642,8 @@ class QKVParallelLinear(ColumnParallelLinear):
             param_data = param_data.narrow(0, shard_index * shard_size,
                                            shard_size)
         # Special case for per-tensor scales in fused case.
-        elif is_per_tensor_scale:
-            param_data, loaded_weight = adjust_per_tensor_scale_shard(
+        elif needs_scalar_to_array:
+            param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
