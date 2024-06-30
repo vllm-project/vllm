@@ -73,8 +73,8 @@ class MLPSpeculator(nn.Module):
         ])
 
         self.head = nn.ModuleList([
-            ParallelLMHead(num_embeddings=self.vocab_size,
-                           embedding_dim=self.inner_dim,
+            ParallelLMHead(self.vocab_size,
+                           self.inner_dim,
                            bias=False)
             for _ in range(self.max_speculative_tokens)
         ])
