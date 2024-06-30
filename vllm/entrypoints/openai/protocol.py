@@ -580,7 +580,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
 class EmbeddingResponseData(BaseModel):
     index: int
     object: str = "embedding"
-    embedding: List[float]
+    embedding: Union[List[float], str]
 
 
 class EmbeddingResponse(BaseModel):
