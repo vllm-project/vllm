@@ -104,8 +104,8 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
         prompt,
         rescale_image_size(hf_image, factor),
         ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
-    ) for hf_image, vllm_image, prompt in zip(
-        hf_images, vllm_images, HF_IMAGE_PROMPTS)] for factor in size_factors]
+    ) for factor in size_factors] for hf_image, vllm_image, prompt in zip(
+        hf_images, vllm_images, HF_IMAGE_PROMPTS)]
     hf_inputs_per_size_factors = [(
         [prompt for prompt, hf_image, vllm_image in image_inputs],
         [hf_image for prompt, hf_image, vllm_image in image_inputs],
