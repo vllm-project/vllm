@@ -98,7 +98,6 @@ class Fp8LinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: Fp8Config):
-        self.fused_module_in_checkpoint = False
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
@@ -190,7 +189,9 @@ class Fp8LinearMethod(LinearMethodBase):
             #   Loop over logical weights, requantizing with single scale.
             max_w_scale = layer.weight_scale.max()
 
-            if not self.fused_module_in_checkpoint:
+            breakpoint()
+
+            if not fused_module_in_checkpoint:
                 start = 0
                 for idx, logical_width in enumerate(layer.logical_widths):
                     end = start + logical_width
