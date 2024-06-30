@@ -93,7 +93,7 @@ class BlockTable:
         self.update(blocks)
         self._num_full_slots = len(token_ids)
 
-    def update(self, blocks):
+    def update(self, blocks: List[Block]) -> None:
         """Resets the table to the newly provided blocks 
         (with their corresponding block ids)
         """

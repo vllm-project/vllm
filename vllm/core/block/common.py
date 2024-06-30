@@ -178,6 +178,8 @@ class BlockPool:
                                    block_id=None))
 
     def increase_pool(self):
+        """Doubles the internal pool size
+        """
         cur_pool_size = self._pool_size
         new_pool_size = cur_pool_size * 2
         self._pool_size = new_pool_size
