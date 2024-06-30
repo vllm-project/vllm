@@ -906,23 +906,7 @@ class FusedMoELinear(torch.nn.Module):
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: int, expert_id: int):
-        tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
-        shard_size = self.intermediate_size_per_partition
-        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-
-        # w1, gate_proj case: Load into first shard of w13.
-        if shard_id == 0:
-            param_data[expert_id, 0:shard_size, :] = loaded_weight[shard, :]
-        # w3, up_proj case: Load into second shard of w13.
-        elif shard_id == 2:
-            param_data[expert_id,
-                       shard_size:2 * shard_size, :] = loaded_weight[shard, :]
-        # w2, down_proj case: Load into only shard of w2.
-        elif shard_id == 1:
-            param_data[expert_id, :, :] = loaded_weight[:, shard]
-        else:
-            raise ValueError(f"Shard id must be in [0,1,2] but got {shard_id}")
 
         # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.
         # Follow up PR to enable fp8 for other MoE models.
@@ -934,12 +918,33 @@ class FusedMoELinear(torch.nn.Module):
                     f"must be equal. But got {param_data[expert_id]} "
                     f"vs. {loaded_weight}")
             param_data[expert_id] = loaded_weight
+        # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral.
+        # Follow up PR to enable fp8 for other MoE models.
         elif "weight_scale" in weight_name:
             # We have to keep the weight scales of w1 and w3 because
             # we need to re-quantize w1/w3 weights after weight loading.
             assert "w1" in weight_name or "w3" in weight_name
             shard_id = 0 if "w1" in weight_name else 1
             param_data[expert_id][shard_id] = loaded_weight
+        else:
+            tp_rank = get_tensor_model_parallel_rank()
+            shard_size = self.intermediate_size_per_partition
+            shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
+
+            # w1, gate_proj case: Load into first shard of w13.
+            if shard_id == 0:
+                param_data[expert_id,
+                           0:shard_size, :] = loaded_weight[shard, :]
+            # w3, up_proj case: Load into second shard of w13.
+            elif shard_id == 2:
+                param_data[expert_id, shard_size:2 *
+                           shard_size, :] = loaded_weight[shard, :]
+            # w2, down_proj case: Load into only shard of w2.
+            elif shard_id == 1:
+                param_data[expert_id, :, :] = loaded_weight[:, shard]
+            else:
+                raise ValueError(
+                    f"Shard id must be in [0,1,2] but got {shard_id}")
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
