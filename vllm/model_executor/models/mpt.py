@@ -263,7 +263,7 @@ class MPTForCausalLM(nn.Module):
         self.quant_config = quant_config
 
         self.transformer = MPTModel(config, cache_config, quant_config)
-        self.lm_head_weight = self.transformer.wte.weight
+        self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
