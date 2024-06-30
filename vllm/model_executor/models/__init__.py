@@ -61,15 +61,17 @@ _GENERATION_MODELS = {
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
     "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
-    "WhisperForConditionalGeneration":
-    ("whisper", "WhisperForConditionalGeneration"),
 }
 
 _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
 }
 
-_MODELS = {**_GENERATION_MODELS, **_EMBEDDING_MODELS}
+_WHISPER_MODELS = {
+    "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),
+}
+
+_MODELS = {**_GENERATION_MODELS, **_EMBEDDING_MODELS, **_WHISPER_MODELS}
 
 # Architecture -> type.
 # out of tree models
@@ -131,6 +133,9 @@ class ModelRegistry:
     def is_embedding_model(model_arch: str) -> bool:
         return model_arch in _EMBEDDING_MODELS
 
+    @staticmethod
+    def is_whisper_model(model_arch: str) -> bool:
+        return model_arch in _WHISPER_MODELS
 
 __all__ = [
     "ModelRegistry",

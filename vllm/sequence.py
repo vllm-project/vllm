@@ -14,7 +14,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalData
+    from vllm.multimodal import MultiModalData, WhisperData
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -464,6 +464,12 @@ class SequenceGroup:
         return next(iter(self.seqs_dict.values())).multi_modal_data
 
     @property
+    def whisper_data(self) -> Optional["WhisperData"]:
+        # All sequences in the group should have the same multi-modal data.
+        # We use the multi-modal data of an arbitrary sequence.
+        return next(iter(self.seqs_dict.values())).whisper_data
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -641,6 +647,7 @@ class SequenceGroupMetadata:
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
         multi_modal_data: Optional["MultiModalData"] = None,
+        whisper_data: Optional["WhisperData"] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
     ) -> None:
@@ -653,6 +660,7 @@ class SequenceGroupMetadata:
         self.lora_request = lora_request
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
+        self.whisper_data = whisper_data
         self.state = SequenceGroupState() if state is None else state
         self.encoder_seq_data = encoder_seq_data
         self.cross_block_table = cross_block_table

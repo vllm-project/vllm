@@ -89,7 +89,7 @@ class EngineArgs:
     disable_image_processor: bool = False
 
     # Related to Whisper
-    whisper_input_type: Optional[str] = 'input_features'
+    whisper_input_type: Optional[str] = None
     whisper_processor: Optional[str] = None
     whisper_processor_revision: Optional[str] = None
     sample_rate: Optional[int] = 16000
@@ -747,6 +747,7 @@ class EngineArgs:
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
+            whisper_mode=model_config.whisper_mode,
             preemption_mode=self.preemption_mode,
         )
         lora_config = LoRAConfig(

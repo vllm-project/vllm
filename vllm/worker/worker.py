@@ -20,6 +20,7 @@ from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import ModelRunner
+from vllm.worker.whisper_model_runner import WhisperModelRunner
 from vllm.worker.worker_base import WorkerBase
 
 
@@ -70,6 +71,10 @@ class Worker(WorkerBase):
         if self.vision_language_config:
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
+        self.whisper_config = whisper_config
+        if self.whisper_config:
+            assert not self.lora_config, (
+                "Whisper does not support with LoRA settings.")
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
@@ -79,8 +84,12 @@ class Worker(WorkerBase):
               or (speculative_config.draft_model_config.hf_config.model_type !=
                   "mlp_speculator") else {"return_hidden_states": True}
 
-        ModelRunnerClass = (EmbeddingModelRunner if
-                            self.model_config.embedding_mode else ModelRunner)
+        if self.model_config.embedding_mode:
+            ModelRunnerClass = EmbeddingModelRunner
+        elif self.whisper_config is not None:
+            ModelRunnerClass = WhisperModelRunner
+        else:
+            ModelRunnerClass = ModelRunner
         self.model_runner = ModelRunnerClass(
             model_config,
             parallel_config,

@@ -26,6 +26,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
+from vllm.transformers_utils.whisper_processor import cached_get_whisper_processor
 
 logger = init_logger(__name__)
 
@@ -139,14 +140,15 @@ class ModelRunner:
                     self.model_config,
                     self.vision_language_config,
                 )
-        elif self.whisper_config is not None:
-            self.multi_modal_input_processor = MULTIMODAL_REGISTRY \
-                .create_input_processor(
-                    self.model_config,
-                    self.whisper_config,
-                )
         else:
             self.multi_modal_input_processor = None
+            
+        if self.whisper_config is not None:
+            self.whisper_processor = cached_get_whisper_processor(
+                self.whisper_config.whisper_processor
+            )
+        else:
+            self.whisper_processor = None
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -830,7 +832,6 @@ class ModelRunner:
         # of images processed.
         model_config = self.model_config
         vlm_config = self.vision_language_config
-        whisper_config = self.whisper_config
 
         if vlm_config:
             max_num_seqs = min(
@@ -843,9 +844,6 @@ class ModelRunner:
             if vlm_config is not None:
                 seq_data, dummy_multi_modal_data = MULTIMODAL_REGISTRY \
                     .dummy_data_for_profiling(seq_len, model_config, vlm_config)
-            elif whisper_config is not None:
-                seq_data, dummy_multi_modal_data = MULTIMODAL_REGISTRY \
-                    .dummy_data_for_profiling(seq_len, model_config, whisper_config)
             else:
                 seq_data = SequenceData([0] * seq_len)
                 dummy_multi_modal_data = None
@@ -934,11 +932,6 @@ class ModelRunner:
         slot_mapping.fill_(_PAD_SLOT_ID)
         seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
-        _, dummy_multi_modal_data = MULTIMODAL_REGISTRY.dummy_data_for_profiling(
-            max_batch_size, 
-            self.model_config, 
-            self.whisper_config
-        )
 
         # Prepare buffer for outputs. These will be reused for all batch sizes.
         # It will be filled after the first graph capture.

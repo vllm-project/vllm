@@ -228,7 +228,7 @@ class LLMEngine:
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
-
+        
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
@@ -504,6 +504,10 @@ class LLMEngine:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
 
+        if 'whisper_input' in inputs:
+            if self.whisper_config is None:
+                raise ValueError(f"Whisper config is None, must initialize a Whisper model.")
+
         if "prompt_token_ids" not in inputs:
             tokenizer = self.get_tokenizer_group("prompts must be None if "
                                                  "skip_tokenizer_init is True")
@@ -516,7 +520,8 @@ class LLMEngine:
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=inputs.get("prompt"),
-                         multi_modal_data=inputs.get("multi_modal_data"))
+                         multi_modal_data=inputs.get("multi_modal_data"),
+                         whisper_data=inputs.get('whisper_data'))
 
     def add_request(
         self,

@@ -17,7 +17,7 @@ def main():
         gpu_memory_utilization = 0.4
     )
 
-    r = requests.get('https://github.com/mesolitica/malaya-speech/raw/master/speech/singlish/singlish0.wav')
+    r = requests.get('https://github.com/mesolitica/malaya-speech/raw/master/speech/7021-79759-0004.wav')
     y = audio.decode_example(audio.encode_example(r.content))['array']
 
     output_lang = llm.generate({

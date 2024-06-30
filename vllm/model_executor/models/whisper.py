@@ -23,8 +23,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.audio import get_dummy_audio_data
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
 from xformers import ops as xops
@@ -53,8 +51,6 @@ class WhisperAttention(nn.Module):
         self,
         embed_dim: int,
         num_heads: int,
-        is_decoder: bool = False,
-        is_causal: bool = False,
         bias: bool = True,
         config: Optional[WhisperConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -74,8 +70,6 @@ class WhisperAttention(nn.Module):
                 f" and `num_heads`: {num_heads})."
             )
         self.scaling = self.head_dim**-0.5
-        self.is_decoder = is_decoder
-        self.is_causal = is_causal
 
         self.k_proj = RowParallelLinear(
             input_size = embed_dim,
@@ -101,29 +95,33 @@ class WhisperAttention(nn.Module):
             bias = bias,
             quant_config=quant_config
         )
-        if self.is_causal:
-            self.attn = Attention(
-                self.num_heads,
-                self.head_dim,
-                self.scaling,
-                num_kv_heads=self.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config
-            )
-        else:
-            self.attn = None
-
+    
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).contiguous()
+
+
+class WhisperEncoderAttention(WhisperAttention):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        bias: bool = True,
+        config: Optional[WhisperConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
+    ):
+        super().__init__(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            bias=bias,
+            config=config,
+            quant_config=quant_config,
+            cache_config=cache_config
+        )
         
     def forward(
         self,
         hidden_states: torch.Tensor,
-        encoder_hidden_states = None,
-        past_key_value = None,
-        kv_cache: torch.Tensor = None,
-        attn_metadata: AttentionMetadata = None,
-        is_cross_attention = False,
     ):
         sizes = hidden_states.size()
         if len(sizes) == 3:
@@ -131,48 +129,129 @@ class WhisperAttention(nn.Module):
         else:
             tgt_len, _ = sizes
         q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
+
+        q = self._shape(q, -1, 1)
+        k = self._shape(k, -1, 1)
+        v = self._shape(v, -1, 1)
+
+        attn_output = xops.memory_efficient_attention_forward(
+            q,
+            k,
+            v,
+            attn_bias=None,
+            p=0.0,
+            scale=None,
+            op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+            (is_hip()) else None,
+        )
         
-        past_key_value = None
-
-        if is_cross_attention or not self.is_decoder:
-            if is_cross_attention and encoder_hidden_states is not None:
-                if past_key_value is not None:
-                    k = past_key_value[0]
-                    v = past_key_value[1]
-                else:
-                    k, _ = self.k_proj(encoder_hidden_states)
-                    v, _ = self.v_proj(encoder_hidden_states)
-
-                    past_key_value = (k, v)
-            else:
-                k, _ = self.k_proj(hidden_states)
-                v, _ = self.v_proj(hidden_states)
-
-            q = self._shape(q, -1, 1)
-            k = self._shape(k, -1, 1)
-            v = self._shape(v, -1, 1)
-
-            attn_output = xops.memory_efficient_attention_forward(
-                q,
-                k,
-                v,
-                attn_bias=None,
-                p=0.0,
-                scale=None,
-                op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
-                (is_hip()) else None,
-            )
-            
-            attn_output = attn_output.reshape(-1, self.embed_dim)
-
+        attn_output = attn_output.reshape(-1, self.embed_dim)
+        output, _ = self.out_proj(attn_output)
+        return output
+    
+class WhisperDecoderAttention(WhisperAttention):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        bias: bool = True,
+        config: Optional[WhisperConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
+    ):
+        super().__init__(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            bias=bias,
+            config=config,
+            quant_config=quant_config,
+            cache_config=cache_config
+        )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config
+        )
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor = None,
+        attn_metadata: AttentionMetadata = None,
+    ):
+        sizes = hidden_states.size()
+        if len(sizes) == 3:
+            bsz, tgt_len, _ = sizes
         else:
-            k, _ = self.k_proj(hidden_states)
-            v, _ = self.v_proj(hidden_states)
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+            tgt_len, _ = sizes
+
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
         output, _ = self.out_proj(attn_output)
 
-        return output, past_key_value
+        return output
+
+class WhisperDecoderCrossAttention(WhisperAttention):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        bias: bool = True,
+        config: Optional[WhisperConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
+    ):
+        super().__init__(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            bias=bias,
+            config=config,
+            quant_config=quant_config,
+            cache_config=cache_config
+        )
+        
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        attn_metadata: AttentionMetadata = None,
+    ):
+        sizes = hidden_states.size()
+        if len(sizes) == 3:
+            bsz, tgt_len, _ = sizes
+        else:
+            tgt_len, _ = sizes
+
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(encoder_hidden_states)
+        v, _ = self.v_proj(encoder_hidden_states)
+
+        q = self._shape(q, -1, 1)
+        k = self._shape(k, -1, 1)
+        v = self._shape(v, -1, 1)
+
+        attn_output = xops.memory_efficient_attention_forward(
+            q,
+            k,
+            v,
+            attn_bias=None,
+            p=0.0,
+            scale=None,
+            op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+            (is_hip()) else None,
+        )
+        
+        attn_output = attn_output.reshape(-1, self.embed_dim)
+        output, _ = self.out_proj(attn_output)
+        return output
 
 class WhisperEncoderLayer(nn.Module):
     def __init__(
@@ -183,7 +262,7 @@ class WhisperEncoderLayer(nn.Module):
     ):
         super().__init__()
         self.embed_dim = config.d_model
-        self.self_attn = WhisperAttention(
+        self.self_attn = WhisperEncoderAttention(
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
             config=config,
@@ -212,7 +291,7 @@ class WhisperEncoderLayer(nn.Module):
     ):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states, _ = self.self_attn(
+        hidden_states = self.self_attn(
             hidden_states=hidden_states,
         )
         hidden_states = residual + hidden_states
@@ -240,11 +319,9 @@ class WhisperDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.embed_dim = config.d_model
-        self.self_attn = WhisperAttention(
+        self.self_attn = WhisperDecoderAttention(
             embed_dim=self.embed_dim,
             num_heads=config.decoder_attention_heads,
-            is_decoder=True,
-            is_causal=True,
             config=config,
             quant_config=quant_config,
             cache_config=cache_config,
@@ -252,10 +329,9 @@ class WhisperDecoderLayer(nn.Module):
         self.activation_fn = FastGELU()
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.encoder_attn = WhisperAttention(
+        self.encoder_attn = WhisperDecoderCrossAttention(
             embed_dim=self.embed_dim,
             num_heads=config.decoder_attention_heads,
-            is_decoder=True,
             config=config,
             quant_config=quant_config,
             cache_config=cache_config,
@@ -279,14 +355,13 @@ class WhisperDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        past_key_value: Tuple[torch.Tensor, torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ):
 
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states, _ = self.self_attn(
+        hidden_states = self.self_attn(
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata
@@ -295,13 +370,10 @@ class WhisperDecoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
-        hidden_states, cross_attention_past_key_value = self.encoder_attn(
+        hidden_states = self.encoder_attn(
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
-            past_key_value=past_key_value,
-            kv_cache=None,
-            attn_metadata=None,
-            is_cross_attention=True,
+            attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states
 
@@ -312,7 +384,7 @@ class WhisperDecoderLayer(nn.Module):
         hidden_states, _ = self.fc2(hidden_states)
         hidden_states = residual + hidden_states
 
-        return hidden_states, cross_attention_past_key_value
+        return hidden_states
 
 class WhisperEncoder(nn.Module):
     def __init__(
@@ -392,20 +464,16 @@ class WhisperDecoder(nn.Module):
         positions = self.embed_positions(positions)
         hidden_states = inputs_embeds + positions
 
-        cross_attention_past_key_values = []
-
         for idx, decoder_layer in enumerate(self.layers):
-            hidden_states, cross_attention_past_key_value = decoder_layer(
+            hidden_states = decoder_layer(
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
-                past_key_value=None if past_key_values is None else past_key_values[idx],
                 kv_cache=kv_caches[idx],
                 attn_metadata=attn_metadata
             )
-            cross_attention_past_key_values.append(cross_attention_past_key_value)
 
         hidden_states = self.layer_norm(hidden_states)
-        return hidden_states, cross_attention_past_key_values
+        return hidden_states
 
 class WhisperModel(nn.Module):
     def __init__(
@@ -426,26 +494,22 @@ class WhisperModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        past_key_values = None,
     ):
-        if input_features is not None:
-            encoder_outputs = self.encoder(
-                input_features[0],
-            )
+        if hasattr(attn_metadata, 'encoder_outputs'):
+            encoder_outputs = attn_metadata.encoder_outputs
         else:
-            encoder_outputs = None
-        decoder_outputs, cross_attention_past_key_values = self.decoder(
+            encoder_outputs = self.encoder(input_features)
+            attn_metadata.encoder_outputs = encoder_outputs
+
+        decoder_outputs = self.decoder(
             input_ids=input_ids,
             positions=positions,
             encoder_hidden_states=encoder_outputs,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
-            past_key_values=past_key_values
         )
-        return decoder_outputs, cross_attention_past_key_values
+        return decoder_outputs
 
-@MULTIMODAL_REGISTRY.register_audio_input()
-@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_audio_data)
 class WhisperForConditionalGeneration(nn.Module):
     def __init__(
         self, 
@@ -467,31 +531,21 @@ class WhisperForConditionalGeneration(nn.Module):
                                                 config.vocab_size, logit_scale)
         self.sampler = Sampler()
 
-    def _parse_and_validate_audio_input(
-            self, **kwargs: object) -> torch.Tensor:
-        input_features = kwargs.pop("input_features", None)
-
-        return input_features
-
     def forward(
         self,
+        input_features: torch.Tensor,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        past_key_values = None,
-        **kwargs: object,
     ) -> SamplerOutput:
-
-        input_features = self._parse_and_validate_audio_input(**kwargs)
         
-        decoder_outputs, cross_attention_past_key_values = self.model(
+        decoder_outputs = self.model(
             input_features=input_features,
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
-            past_key_values=past_key_values,
         )
         return decoder_outputs
     

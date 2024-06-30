@@ -11,10 +11,13 @@ from .base import MultiModalData, MultiModalPlugin
 
 logger = init_logger(__name__)
 
+class WhisperData:
+    pass
+
 
 def _get_dummy_seq_data(seq_len: int,
                         whisper_config: WhisperConfig) -> SequenceData:
-                        
+
     # '<|startoftranscript|><|en|><|transcribe|>'
     token_ids = [50258, 50259, 50360]
     return SequenceData(token_ids)
