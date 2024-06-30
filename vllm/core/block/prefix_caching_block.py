@@ -945,7 +945,10 @@ class LastAccessBlocksTracker:
         assert seq_id in self._seq_last_access
 
         ts = self._seq_last_access[seq_id]
-        assert ts is not None
+
+        if ts is None:
+            # No last access was recorded, no need to update
+            return
 
         self._allocator.mark_blocks_as_accessed(block_ids, ts)
 
