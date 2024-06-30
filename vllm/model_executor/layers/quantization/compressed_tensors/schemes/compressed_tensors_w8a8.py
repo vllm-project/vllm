@@ -61,7 +61,7 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
         else:
             set_weight_attrs(weight_scale, {
                 "weight_loader": weight_loader,
-                "is_per_tensor_scale": True,
+                "needs_scalar_to_array": True,
             })
 
         # WEIGHT
