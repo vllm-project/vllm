@@ -14,8 +14,8 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_tpu, is_xpu, print_warning_once,
-                        update_environment_variables)
+                        is_hip, is_neuron, is_openvino, is_tpu, is_xpu,
+                        print_warning_once, update_environment_variables)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -297,6 +297,12 @@ class ModelConfig:
         return self.hf_text_config.hidden_size
 
     def get_head_size(self) -> int:
+        # TODO remove hard code
+        if hasattr(self.hf_text_config, "model_type"
+                   ) and self.hf_text_config.model_type == 'deepseek_v2':
+            # FlashAttention supports only head_size 32, 64, 128, 256,
+            # we need to pad head_size 192 to 256
+            return 256
         if hasattr(self.hf_text_config, "head_dim"):
             return self.hf_text_config.head_dim
         # FIXME(woosuk): This may not be true for all models.
@@ -781,6 +787,8 @@ class DeviceConfig:
             # Automated device type detection
             if is_neuron():
                 self.device_type = "neuron"
+            elif is_openvino():
+                self.device_type = "openvino"
             elif is_tpu():
                 self.device_type = "tpu"
             elif is_cpu():
@@ -796,7 +804,7 @@ class DeviceConfig:
             self.device_type = device
 
         # Some device types require processing inputs on CPU
-        if self.device_type in ["neuron"]:
+        if self.device_type in ["neuron", "openvino"]:
             self.device = torch.device("cpu")
         elif self.device_type in ["tpu"]:
             self.device = None
@@ -954,9 +962,9 @@ class SpeculativeConfig:
                     # Verify provided value doesn't exceed the maximum
                     # supported by the draft model.
                     raise ValueError(
-                        "Expected both speculative_model and "
-                        "num_speculative_tokens to be provided, but found "
-                        f"{speculative_model=} and {num_speculative_tokens=}.")
+                        "This speculative model supports a maximum of "
+                        f"num_speculative_tokens={n_predict}, but "
+                        f"{num_speculative_tokens=} was provided.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(

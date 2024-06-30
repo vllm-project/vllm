@@ -99,6 +99,7 @@ class Fp8LinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: Fp8Config):
+        self.fused_module_in_checkpoint = False
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
 
@@ -112,6 +113,7 @@ class Fp8LinearMethod(LinearMethodBase):
         scale = Parameter(torch.empty(len(output_partition_sizes),
                                       dtype=torch.float32),
                           requires_grad=False)
+        scale[:] = torch.finfo(torch.float8_e4m3fn).min
         layer.register_parameter(scale_name, scale)
         set_weight_attrs(
             scale, {
@@ -237,11 +239,15 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.a2_scale = None
 
     def scales_shard_indexer(
-            self, param: torch.Tensor, loaded_weight: torch.Tensor,
-            shard_id: Union[str, int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        self, param: torch.Tensor, loaded_weight: torch.Tensor,
+        shard_id: Optional[Union[str,
+                                 int]]) -> Tuple[torch.Tensor, torch.Tensor]:
         qkv_idxs = {"q": 0, "k": 1, "v": 2}
 
-        if isinstance(shard_id, int):
+        if shard_id is None:
+            shard_id = 0
+            self.fused_module_in_checkpoint = True
+        elif isinstance(shard_id, int):
             pass
         elif isinstance(shard_id, str):
             if shard_id not in qkv_idxs:
@@ -310,43 +316,35 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.input_scale = None
                 return
 
-            # If checkpoint is fp8, requantize the separately quantized logical
-            # weights into a single fp8 weight with a single weight scale.
-            else:
-                # WEIGHT_SCALE / WEIGHT
-                #   Loop over logical weights, requantizing with single scale.
-                max_w_scale = layer.weight_scale.max()
+            # WEIGHT_SCALE / WEIGHT
+            #   Loop over logical weights, requantizing with single scale.
+            max_w_scale = layer.weight_scale.max()
+
+            if not self.fused_module_in_checkpoint:
                 start = 0
                 for idx, logical_width in enumerate(layer.logical_widths):
                     end = start + logical_width
-                    weight_dq = per_tensor_dequantize(layer.weight[start:end, :],
-                                                    layer.weight_scale[idx])
+                    weight_dq = per_tensor_dequantize(
+                        layer.weight[start:end, :], layer.weight_scale[idx])
 
                     layer.weight[start:end, :] = per_tensor_quantize(
                         weight_dq, layer.weight_scale.max())
                     start = end
-                layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
 
-                # WEIGHT
-                #   Transpose weight for passing to torch._scaled_mm
-                weight = layer.weight
-                layer.weight = Parameter(weight.t(), requires_grad=False)
+            # WEIGHT
+            #   Transpose weight for passing to torch._scaled_mm
+            weight = layer.weight
+            layer.weight = Parameter(weight.t(), requires_grad=False)
 
-                # INPUT ACTIVATION SCALE
-                #   Dynamic: set to None (required input to ops.scaled_fp8_quant).
-                #   Static:  set to max of the input_scales (since they are equal).
-                if self.quant_config.activation_scheme == "dynamic":
-                    layer.input_scale = None
-                elif self.quant_config.activation_scheme == "static":
-                    if not all_close_1d(layer.input_scale):
-                        raise ValueError(
-                            "All the input_scales for the logical weights of a "
-                            f"layer must be equal. But got {layer.input_scale}")
-                    layer.input_scale = Parameter(layer.input_scale.max(),
-                                                requires_grad=False)
-                else:
-                    raise ValueError(
-                        f"Unknown scheme {self.quant_config.activation_scheme}")
+            # INPUT ACTIVATION SCALE
+            #   Dynamic: set to None (required input to ops.scaled_fp8_quant).
+            #   Static:  set to max of the input_scales (since they are equal).
+            if self.quant_config.activation_scheme == "dynamic":
+                layer.input_scale = None
+            elif self.quant_config.activation_scheme == "static":
+                layer.input_scale = Parameter(layer.input_scale.max(),
+                                              requires_grad=False)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -446,11 +444,6 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
                     "cause accuracy issues. Please make sure kv-cache scaling "
                     "factor is available in the fp8 checkpoint.")
         del layer.kv_scale
-
-
-def all_close_1d(x: torch.Tensor) -> bool:
-    assert len(x.shape) == 1
-    return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
 
 
 def per_tensor_quantize(tensor: torch.Tensor,

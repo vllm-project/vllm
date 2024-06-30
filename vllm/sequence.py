@@ -39,24 +39,21 @@ PromptLogprobs = List[Optional[Dict[int, Logprob]]]
 SampleLogprobs = List[Dict[int, Logprob]]
 
 
-class SequenceStatus(enum.Enum):
+class SequenceStatus(enum.IntEnum):
     """Status of a sequence."""
-    WAITING = enum.auto()
-    RUNNING = enum.auto()
-    SWAPPED = enum.auto()
-    FINISHED_STOPPED = enum.auto()
-    FINISHED_LENGTH_CAPPED = enum.auto()
-    FINISHED_ABORTED = enum.auto()
-    FINISHED_IGNORED = enum.auto()
+    WAITING = 0
+    RUNNING = 1
+    SWAPPED = 2
+    # Note: anything after SWAPPED (2) will be considered
+    # as a finished status.
+    FINISHED_STOPPED = 3
+    FINISHED_LENGTH_CAPPED = 4
+    FINISHED_ABORTED = 5
+    FINISHED_IGNORED = 6
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:
-        return status in [
-            SequenceStatus.FINISHED_STOPPED,
-            SequenceStatus.FINISHED_LENGTH_CAPPED,
-            SequenceStatus.FINISHED_ABORTED,
-            SequenceStatus.FINISHED_IGNORED,
-        ]
+        return status > SequenceStatus.SWAPPED
 
     @staticmethod
     def get_finished_reason(status: "SequenceStatus") -> Union[str, None]:
@@ -880,6 +877,8 @@ class ExecuteModelRequest:
     running_queue_size: int = 0
     # Optional hidden states from prior step.
     previous_hidden_states: Optional[HiddenStates] = None
+    # The number of forward steps to run.
+    num_steps: int = 1
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -893,4 +892,5 @@ class ExecuteModelRequest:
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
             previous_hidden_states=self.previous_hidden_states,
+            num_steps=self.num_steps,
         )
