@@ -54,15 +54,18 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     It also reduces `output_str` from "<image><image>bla" to "bla".
     """
     output_ids, output_str, out_logprobs = vllm_output
+
     output_str_without_image = re.sub(r"(<\|image_\d+\|>)+", "", output_str)
+    assert output_str_without_image[0] == " "
+    output_str_without_image = output_str_without_image[1:]
 
     hf_output_str = output_str_without_image.replace("<|user|>", "") \
         .replace("<|end|>\n<|assistant|>", " ")
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     hf_output_ids = tokenizer.encode(output_str_without_image)
-    assert hf_output_ids[:2] == [1, 29871]
-    hf_output_ids = hf_output_ids[2:]
+    assert hf_output_ids[0] == 1
+    hf_output_ids = hf_output_ids[1:]
 
     return hf_output_ids, hf_output_str, out_logprobs
 
