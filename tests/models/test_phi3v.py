@@ -120,6 +120,8 @@ def run_test(
     with vllm_runner(model_id,
                      max_model_len=4096,
                      dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
         vllm_outputs_per_size_factors = [
