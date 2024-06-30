@@ -34,7 +34,7 @@ def request_output_to_embedding_response(
         if encoding_format == "base64":
             embedding = base64.b64encode(np.array(embedding))
         embedding_data = EmbeddingResponseData(index=idx,
-                                               embedding=[embedding])
+                                               embedding=embedding)
         data.append(embedding_data)
 
         num_prompt_tokens += len(prompt_token_ids)
