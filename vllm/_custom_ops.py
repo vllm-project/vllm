@@ -405,13 +405,13 @@ def convert_fp8(output: torch.Tensor,
         scale = scale.to(input.device)
     torch.ops._C.convert_fp8(output, input, scale)
 
-    
-def fp8_mm(a: torch.Tensor, b: torch.Tensor,
-           out_dtype: torch.dtype,
+
+def fp8_mm(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
            scale_a: torch.Tensor, scale_b: torch.Tensor,
-           scale_result: Optional[torch.Tensor], 
-           solidx: int) -> torch.Tensor:
-    result = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
+           scale_result: Optional[torch.Tensor], solidx: int) -> torch.Tensor:
+    result = torch.empty((a.shape[0], b.shape[1]),
+                         dtype=out_dtype,
+                         device=a.device)
     torch.ops._C.fp8_mm(a, b, result, scale_a, scale_b, scale_result, solidx)
     return result
 
