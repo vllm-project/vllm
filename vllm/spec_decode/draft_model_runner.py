@@ -76,13 +76,17 @@ class TP1DraftModelRunner(ModelRunner):
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForGPUWithSamplingMetadata:
         """A temporary solution that caches the seq_group_metadata_list
         for multi-step execution.
         TODO: In-place update model_input and remove this function.
         """
         self.cached_seq_group_metadata_list = seq_group_metadata_list
-        return super().prepare_model_input(seq_group_metadata_list)
+        return super().prepare_model_input(
+            seq_group_metadata_list,
+            finished_requests_ids
+        )
 
     def update_model_input(
             self, model_input: ModelInputForGPUWithSamplingMetadata,
