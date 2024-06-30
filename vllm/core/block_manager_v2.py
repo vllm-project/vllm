@@ -7,6 +7,8 @@ from typing import Tuple
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import Block
+from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
+                                                  LastAccessBlocksTracker)
 from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
@@ -100,9 +102,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.block_tables: Dict[SeqId, BlockTable] = {}
         self.cross_block_tables: Dict[EncoderSeqId, BlockTable] = {}
 
-        self._cached_computed_seq_blocks: Dict[SeqId, Tuple[List[int],
-                                                            bool]] = {}
-        self._seq_last_access: Dict[SeqId, float] = {}
+        self._computed_blocks_tracker = ComputedBlocksTracker(
+            self.block_allocator)
+        self._last_access_blocks_tracker = LastAccessBlocksTracker(
+            self.block_allocator)
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -161,9 +164,17 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table: BlockTable = self._allocate_sequence(seq)
         self.block_tables[seq.seq_id] = block_table
 
+        # Track seq
+        self._computed_blocks_tracker.add_seq(seq.seq_id)
+        self._last_access_blocks_tracker.add_seq(seq.seq_id)
+
         # Assign the block table for each sequence.
         for seq in waiting_seqs[1:]:
             self.block_tables[seq.seq_id] = block_table.fork()
+
+            # Track seq
+            self._computed_blocks_tracker.add_seq(seq.seq_id)
+            self._last_access_blocks_tracker.add_seq(seq.seq_id)
 
         # Allocate cross-attention block table for encoder sequence
         #
@@ -235,21 +246,16 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             return
 
         # Update seq block ids with the latest access time
-        if seq_id in self._seq_last_access:
-            ts = self._seq_last_access[seq_id]
-            # TODO: Ask Cade how it may be possible to have
-            # allocated block id inside the evictor
-            self.block_allocator.mark_blocks_as_accessed(
-                self.block_tables[
-                    seq.seq_id].physical_block_ids,  # type: ignore
-                ts)
-            del self._seq_last_access[seq_id]
+        self._last_access_blocks_tracker.update_seq_blocks_last_access(
+            seq_id, self.block_tables[seq.seq_id].physical_block_ids)
 
+        # Untrack seq
+        self._last_access_blocks_tracker.remove_seq(seq_id)
+        self._computed_blocks_tracker.remove_seq(seq_id)
+
+        # Free table/blocks
         self.block_tables[seq_id].free()
         del self.block_tables[seq_id]
-
-        if seq_id in self._cached_computed_seq_blocks:
-            del self._cached_computed_seq_blocks[seq_id]
 
     def free_cross(self, seq_group: SequenceGroup) -> None:
         request_id = seq_group.request_id
@@ -277,7 +283,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             # only during freeing of block ids, the blocks are actually added to
             # the evictor (which is when the most updated time is required)
             # (This avoids expensive calls to mark_blocks_as_accessed(..))
-            self._seq_last_access[seq.seq_id] = now
+            self._last_access_blocks_tracker.update_last_access(
+                seq.seq_id, now)
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         # The only need for mark block as computed is for prefix caching,
@@ -285,73 +292,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # or not by check whether it has content hash.
         # So this function is useless for block_v2.
         pass
-
-    def _get_and_update_computed_block_ids(self, seqs):
-        """Handles caching of per-sequence computed block ids. 
-        When a sequence appears for the first time, it traverses all of the 
-        blocks and detects the prefix of blocks that is computed. On the
-        subsequent times, it only traverses the new blocks that were added 
-        and updates the already recorded prefix of blocks with the newly 
-        computed blocks.
-
-        To avoid redundant traversals, the algorithm also detects when there
-        is a "gap" in the computed prefix. For example, if we have blocks =
-        [1,2,3,4,5], and we have detected [1,2,3] as the computed prefix, then
-        we won't try to add more computed blocks to [1,2,3] in this sequence
-        iteration, and will add more computed blocks only after the sequence is
-        freed and reused again.
-        """
-        ret = []
-        for seq in seqs:
-            seq_id = seq.seq_id
-
-            # Get block ids of this sequence, while not considering the
-            # last block
-            block_ids = self.block_tables[seq_id].physical_block_ids[:-1]
-
-            # Here we cache the detection of computed_block_ids for seq_id.
-            # Since computed_block_ids form a prefix of block_ids,
-            # the first time we see seq_id, we detect computed_block_ids
-            # fully and store them in the cache. In the next times we see
-            # seq_id, we detect computed_block_ids incrementally, by looking
-            # only at the new blocks that come after the cached
-            # computed_block_ids
-            if seq_id not in self._cached_computed_seq_blocks:
-                # First time init for seq_id => Detect fully
-                computed_block_ids = self.block_allocator.get_computed_block_ids(  # noqa: E501
-                    [], block_ids)
-                # Detect if there is "gap"
-                has_gap = len(computed_block_ids) < len(block_ids)
-
-                # Record
-                self._cached_computed_seq_blocks[seq_id] = (computed_block_ids,
-                                                            has_gap)
-            else:
-                # Get cached
-                (computed_block_ids,
-                 has_gap) = self._cached_computed_seq_blocks[seq_id]
-
-                # Try to add more computed blocks only if there is no gap
-                # (look at the example above)
-                if not has_gap:
-                    if len(computed_block_ids) < len(block_ids):
-                        # Incremental init for seq_id => Look only at the new
-                        # blocks
-                        computed_block_ids = self.block_allocator.get_computed_block_ids(  # noqa: E501
-                            computed_block_ids, block_ids)
-                        # Detect if there is "gap"
-                        has_gap = len(computed_block_ids) < len(block_ids)
-
-                        # Record
-                        self._cached_computed_seq_blocks[seq_id] = (
-                            computed_block_ids, has_gap)
-                    else:
-                        # Cache HIT
-                        assert len(computed_block_ids) == len(block_ids)
-
-            ret.append(computed_block_ids)
-
-        return ret
 
     def get_common_computed_block_ids(
             self, seqs: List[Sequence]) -> GenericSequence[int]:
@@ -364,8 +304,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         This method determines which blocks can be safely skipped for all
         sequences in the sequence group.
         """
-
-        computed_seq_block_ids = self._get_and_update_computed_block_ids(seqs)
+        computed_seq_block_ids = []
+        for seq in seqs:
+            computed_seq_block_ids.append(
+                self._computed_blocks_tracker.
+                get_cached_computed_blocks_and_update(
+                    seq.seq_id,
+                    self.block_tables[seq.seq_id].physical_block_ids))
 
         # NOTE(sang): This assumes seq_block_ids doesn't contain any None.
         return self.block_allocator.get_common_computed_block_ids(

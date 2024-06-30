@@ -305,11 +305,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].mark_blocks_as_computed(block_ids)
 
     def get_computed_block_ids(self, prev_computed_block_ids: List[int],
-                               block_ids: List[int]) -> List[int]:
+                               block_ids: List[int],
+                               skip_last_block_id: bool) -> List[int]:
         # Prefix caching only supported on GPU.
         device = Device.GPU
         return self._allocators[device].get_computed_block_ids(
-            prev_computed_block_ids, block_ids)
+            prev_computed_block_ids, block_ids, skip_last_block_id)
 
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:

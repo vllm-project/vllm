@@ -519,10 +519,17 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         else:
             return block_id in self.evictor
 
-    def get_computed_block_ids(self, prev_computed_block_ids: List[int],
-                               block_ids: List[int]) -> List[int]:
+    def get_computed_block_ids(self,
+                               prev_computed_block_ids: List[int],
+                               block_ids: List[int],
+                               skip_last_block_id: bool = True) -> List[int]:
         prev_prefix_size = len(prev_computed_block_ids)
         cur_size = len(block_ids)
+        if skip_last_block_id:
+            cur_size -= 1
+
+        # Sanity checks
+        assert cur_size >= 0
         assert prev_prefix_size <= cur_size
 
         ret = prev_computed_block_ids
@@ -823,6 +830,124 @@ class PrefixCachingBlock(Block):
         """
         assert (prev_block_hash is None) == is_first_block
         return hash((is_first_block, prev_block_hash, *cur_block_token_ids))
+
+
+class ComputedBlocksTracker:
+    """Handles caching of per-sequence computed block ids. 
+        When a sequence appears for the first time, it traverses all of the 
+        blocks and detects the prefix of blocks that is computed. On the
+        subsequent times, it only traverses the new blocks that were added 
+        and updates the already recorded prefix of blocks with the newly 
+        computed blocks.
+
+        To avoid redundant traversals, the algorithm also detects when there
+        is a "gap" in the computed prefix. For example, if we have blocks =
+        [1,2,3,4,5], and we have detected [1,2,3] as the computed prefix, then
+        we won't try to add more computed blocks to [1,2,3] in this sequence
+        iteration, and will add more computed blocks only after the sequence is
+        freed and reused again.
+
+        Note that currently, for a given sequence, we also skip the last 
+        block id for caching purposes, to avoid caching of a full sequence
+    """
+
+    def __init__(self, allocator):
+        self._allocator = allocator
+        self._cached_computed_seq_blocks: Dict[int, Tuple[List[int],
+                                                          bool]] = {}
+
+    def add_seq(self, seq_id: int) -> None:
+        """Start tracking seq_id
+        """
+        assert seq_id not in self._cached_computed_seq_blocks
+        self._cached_computed_seq_blocks[seq_id] = ([], False)
+
+    def remove_seq(self, seq_id: int) -> None:
+        """Stop tracking seq_id
+        """
+        assert seq_id in self._cached_computed_seq_blocks
+        del self._cached_computed_seq_blocks[seq_id]
+
+    def get_cached_computed_blocks_and_update(
+            self, seq_id: int, block_ids: List[int]) -> List[int]:
+        """ Look at the class documentation for details
+        """
+        # Ensure seq_id is already tracked
+        assert seq_id in self._cached_computed_seq_blocks
+
+        # Get cached data (may be empty on the first time)
+        prev_computed_block_ids, has_gap = self._cached_computed_seq_blocks[
+            seq_id]
+
+        if has_gap:
+            # When gap is detected, we do not add more computed blocks at this
+            # sequence iteration
+            return prev_computed_block_ids
+
+        # We do not consider the last block id for caching purposes
+        num_cur_blocks = len(block_ids) - 1
+        assert num_cur_blocks >= 0
+
+        if len(prev_computed_block_ids) >= num_cur_blocks:
+            # Cache HIT
+            assert len(prev_computed_block_ids) == num_cur_blocks
+            return prev_computed_block_ids
+
+        # If here, then we may possibly add more computed blocks. As a result,
+        # traverse the additional blocks after prev_computed_block_ids to
+        # detect more computed blocks and add them.
+
+        # Incremental init for seq_id => Look only at the new blocks
+        computed_block_ids = self._allocator.get_computed_block_ids(  # noqa: E501
+            prev_computed_block_ids,
+            block_ids,
+            skip_last_block_id=
+            True,  # We skip last block id to avoid caching of full seq
+        )
+
+        # Detect if there is a "gap"
+        has_gap = len(computed_block_ids) < num_cur_blocks
+
+        # Record
+        self._cached_computed_seq_blocks[seq_id] = (computed_block_ids,
+                                                    has_gap)
+
+        return computed_block_ids
+
+
+class LastAccessBlocksTracker:
+    """Manages the last access time of the tracked sequences, in order to allow
+    an efficient update of allocator's block last access times
+    """
+
+    def __init__(self, allocator):
+        self._allocator = allocator
+        self._seq_last_access: Dict[int, Optional[float]] = {}
+
+    def add_seq(self, seq_id: int) -> None:
+        """Start tracking seq_id
+        """
+        assert seq_id not in self._seq_last_access
+        self._seq_last_access[seq_id] = None
+
+    def remove_seq(self, seq_id: int) -> None:
+        """Stop tracking seq_id
+        """
+        assert seq_id in self._seq_last_access
+        del self._seq_last_access[seq_id]
+
+    def update_last_access(self, seq_id: int, time: float) -> None:
+        assert seq_id in self._seq_last_access
+        self._seq_last_access[seq_id] = time
+
+    def update_seq_blocks_last_access(self, seq_id: int,
+                                      block_ids: List[int]) -> None:
+        assert seq_id in self._seq_last_access
+
+        ts = self._seq_last_access[seq_id]
+        assert ts is not None
+
+        self._allocator.mark_blocks_as_accessed(block_ids, ts)
 
 
 def assert_prefix_caching_block_or_none(block: Optional[Block]):

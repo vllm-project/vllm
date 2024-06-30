@@ -161,7 +161,8 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def get_computed_block_ids(self, prev_computed_block_ids: List[int],
-                               block_ids: List[int]) -> List[int]:
+                               block_ids: List[int],
+                               skip_last_block_id: bool) -> List[int]:
         pass
 
     @abstractmethod
@@ -242,7 +243,8 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def get_computed_block_ids(self, prev_computed_block_ids: List[int],
-                               block_ids: List[int]) -> List[int]:
+                               block_ids: List[int],
+                               skip_last_block_id: bool) -> List[int]:
         pass
 
     @abstractmethod
