@@ -23,6 +23,22 @@ class QuantizeMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
+    def create_weights_moe(self, layer: torch.nn.Module,
+                           num_total_experts: int, hidden_size: int,
+                           intermediate_size: int, params_dtype: torch.dtype,
+                           **extra_weight_attrs):
+        raise NotImplementedError(
+            "Moe models are not supported for this LinearMethod")
+
+    def apply_moe(self,
+                  layer: torch.nn.Module,
+                  x: torch.Tensor,
+                  router_logits: torch.Tensor,
+                  top_k: int,
+                  renormalize: bool = True) -> torch.Tensor:
+        raise NotImplementedError(
+            "Moe models are not supported for this LinearMethod")
+
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.
 

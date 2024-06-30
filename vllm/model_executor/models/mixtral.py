@@ -31,10 +31,12 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (FusedMoELinear,
-                                               QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear,)
+from vllm.model_executor.layers.linear import (
+    FusedMoELinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -77,7 +79,7 @@ class MixtralMLP(nn.Module):
                                      bias=False,
                                      params_dtype=params_dtype,
                                      quant_config=None)
-        
+
         self.experts = FusedMoELinear(num_experts=num_experts,
                                       top_k=top_k,
                                       hidden_size=hidden_size,
@@ -87,13 +89,12 @@ class MixtralMLP(nn.Module):
                                       renormalize=True,
                                       quant_config=quant_config)
 
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states,router_logits)
+        final_hidden_states = self.experts(hidden_states, router_logits)
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
@@ -369,27 +370,30 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
-        
+
         expert_params_mapping = [
             # These are the weight scales for the experts
             # (param_name, weight_name, expert_id, shard_id)
-            ("experts.w13_scale" if weight_name in ["w1", "w3"] else "experts.w2_scale",
-             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id, shard_id)
-            for expert_id in range(self.config.num_local_experts)
+            ("experts.w13_scale"
+             if weight_name in ["w1", "w3"] else "experts.w2_scale",
+             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id,
+             shard_id) for expert_id in range(self.config.num_local_experts)
             for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
         ] + [
             # These are the weights for the experts
             # (param_name, weight_name, expert_id)
-            ("experts.w13_weight" if weight_name in ["w1", "w3"] else "experts.w2_weight",
+            ("experts.w13_weight"
+             if weight_name in ["w1", "w3"] else "experts.w2_weight",
              f"experts.{expert_id}.{weight_name}.weight", expert_id, shard_id)
             for expert_id in range(self.config.num_local_experts)
             for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
         ] + [
             # These are the activation scales for the experts
             # (param_name, weight_name, expert_id)
-            ("experts.a13_scale" if weight_name in ["w1", "w3"] else "experts.a2_scale",
-             f"experts.{expert_id}.{weight_name}.input_scale", expert_id, shard_id)
-            for expert_id in range(self.config.num_local_experts)
+            ("experts.a13_scale"
+             if weight_name in ["w1", "w3"] else "experts.a2_scale",
+             f"experts.{expert_id}.{weight_name}.input_scale", expert_id,
+             shard_id) for expert_id in range(self.config.num_local_experts)
             for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
         ]
 

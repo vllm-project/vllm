@@ -93,7 +93,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()        
+        self.tp_size = get_tensor_model_parallel_world_size()
 
         if self.tp_size > config.num_experts:
             raise ValueError(
@@ -403,10 +403,11 @@ class Qwen2MoeForCausalLM(nn.Module):
         expert_params_mapping = [
             # These are the weights for the experts
             # (param_name, weight_name, expert_id, shard_id)
-            ("experts.w13_weight" if weight_name in ["gate_proj", "up_proj"] else "experts.w2_weight",
+            ("experts.w13_weight" if weight_name in ["gate_proj", "up_proj"]
+             else "experts.w2_weight",
              f"experts.{expert_id}.{weight_name}.weight", expert_id, shard_id)
-            for expert_id in range(self.config.num_experts)
-            for shard_id, weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
+            for expert_id in range(self.config.num_experts) for shard_id,
+            weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
         ]
 
         params_dict = dict(self.named_parameters())
@@ -417,11 +418,11 @@ class Qwen2MoeForCausalLM(nn.Module):
                 # Skip non-stacked and experts (experts handled below).
                 if weight_name not in name:
                     continue
-                # We have mlp.experts[0].gate_proj in the checkpoint. 
+                # We have mlp.experts[0].gate_proj in the checkpoint.
                 # Since we handle the experts below in expert_params_mapping,
                 # we need to skip here BEFORE we update the name, otherwise
                 # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping 
+                # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if "mlp.experts" in name:
                     continue
