@@ -123,21 +123,20 @@ def run_test(
             for p in HF_IMAGE_PROMPTS
         ]
 
-        image_inputs_per_size_factors = [[(
+        image_inputs_per_image = [[(
             prompt,
             rescale_image_size(hf_image, factor),
             ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
-        ) for hf_image, vllm_image, prompt in zip(hf_images, vllm_images,
-                                                  HF_IMAGE_PROMPTS)]
-                                         for factor in size_factors]
-        hf_inputs_per_size_factors = [(
+        ) for factor in size_factors] for hf_image, vllm_image, prompt in zip(
+            hf_images, vllm_images, HF_IMAGE_PROMPTS)]
+        hf_inputs_per_image = [(
             [prompt for prompt, hf_image, vllm_image in image_inputs],
             [hf_image for prompt, hf_image, vllm_image in image_inputs],
-        ) for image_inputs in image_inputs_per_size_factors]
-        vllm_inputs_per_size_factors = [(
+        ) for image_inputs in image_inputs_per_image]
+        vllm_inputs_per_image = [(
             [prompt for prompt, hf_image, vllm_image in image_inputs],
             [vllm_image for prompt, hf_image, vllm_image in image_inputs],
-        ) for image_inputs in image_inputs_per_size_factors]
+        ) for image_inputs in image_inputs_per_image]
 
         vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
                                                   max_tokens,
@@ -151,12 +150,12 @@ def run_test(
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
-        vllm_outputs_per_size_factors = [
+        vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
                                                 images=vllm_images)
-            for prompts, vllm_images in vllm_inputs_per_size_factors
+            for prompts, vllm_images in vllm_inputs_per_image
         ]
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
@@ -164,17 +163,17 @@ def run_test(
     with hf_runner(model_id, dtype=dtype,
                    model_kwargs=hf_model_kwargs) as hf_model:
         eos_token_id = hf_model.processor.tokenizer.eos_token_id
-        hf_outputs_per_size_factors = [
+        hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
                                                     images=hf_images,
                                                     eos_token_id=eos_token_id)
-            for prompts, hf_images in hf_inputs_per_size_factors
+            for prompts, hf_images in hf_inputs_per_image
         ]
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_size_factors,
-                                        vllm_outputs_per_size_factors):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
+                                        vllm_outputs_per_image):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
