@@ -50,7 +50,7 @@ from vllm.utils import print_warning_once
 from .interfaces import SupportsLoRA
 
 
-class MixtralMLP(nn.Module):
+class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
     across all ranks.
 
@@ -193,7 +193,7 @@ class MixtralDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config)
-        self.block_sparse_moe = MixtralMLP(
+        self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
