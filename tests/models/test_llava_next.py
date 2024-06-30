@@ -107,16 +107,20 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     hf_images = [asset.for_hf() for asset in image_assets]
     vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
-    image_inputs = [
-        (rescale_image_size(hf_image, factor),
-         ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
-         prompt) for hf_image, vllm_image, prompt in zip(
-             hf_images, vllm_images, HF_IMAGE_PROMPTS)
-        for factor in size_factors
-    ]
-    prompt_inputs = [prompt for _, _, prompt in image_inputs]
-    hf_image_inputs = [hf_image for hf_image, _, _ in image_inputs]
-    vllm_image_inputs = [vllm_image for _, vllm_image, _ in image_inputs]
+    image_inputs_per_size_factors = [[(
+        prompt,
+        rescale_image_size(hf_image, factor),
+        ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
+    ) for hf_image, vllm_image, prompt in zip(
+        hf_images, vllm_images, HF_IMAGE_PROMPTS)] for factor in size_factors]
+    hf_inputs_per_size_factors = [(
+        [prompt for prompt, hf_image, vllm_image in image_inputs],
+        [hf_image for prompt, hf_image, vllm_image in image_inputs],
+    ) for image_inputs in image_inputs_per_size_factors]
+    vllm_inputs_per_size_factors = [(
+        [prompt for prompt, hf_image, vllm_image in image_inputs],
+        [vllm_image for prompt, hf_image, vllm_image in image_inputs],
+    ) for image_inputs in image_inputs_per_size_factors]
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model_id,
@@ -124,48 +128,59 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
                      max_model_len=4096,
                      enforce_eager=True,
                      **vlm_config.as_cli_args_dict()) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(prompt_inputs,
-                                                  max_tokens,
-                                                  images=vllm_image_inputs)
+        vllm_outputs_per_size_factors = [
+            vllm_model.generate_greedy(prompts, max_tokens, images=vllm_images)
+            for prompts, vllm_images in vllm_inputs_per_size_factors
+        ]
 
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
-        hf_outputs = hf_model.generate_greedy(prompt_inputs,
-                                              max_tokens,
-                                              images=hf_image_inputs)
-        hf_dummy_outputs = hf_model.generate_greedy(prompt_inputs,
-                                                    max_tokens=1,
-                                                    images=hf_image_inputs)
+        hf_outputs_per_size_factors = [
+            hf_model.generate_greedy(prompts, max_tokens, images=hf_images)
+            for prompts, hf_images in hf_inputs_per_size_factors
+        ]
+        hf_dummy_outputs_per_size_factors = [
+            hf_model.generate_greedy(prompts, max_tokens=1, images=hf_images)
+            for prompts, hf_images in hf_inputs_per_size_factors
+        ]
 
     # There may be numeric differences for multiscale images due to
     # our implementation of CLIPVisionModel
-    best_max_tokens_exc_list: List[Tuple[int, Optional[AssertionError]]] = []
-    for i in range(len(image_inputs)):
-        try:
-            hf_output_ids, hf_output_str = hf_outputs[i]
-            vllm_output_ids, vllm_output_str = vllm_to_hf_output(
-                vllm_outputs[i], vlm_config, model_id)
-            assert hf_output_str == vllm_output_str, (
-                f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-            assert hf_output_ids == vllm_output_ids, (
-                f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
-        except AssertionError as e:
-            num_match_tokens = sum(1 for _ in itertools.takewhile(
-                lambda pair: pair[0] == pair[1],
-                zip(hf_output_ids, vllm_output_ids),
-            ))
-            num_prefix_tokens = len(hf_dummy_outputs[i][0]) - 1
+    for image_inputs, vllm_outputs, hf_outputs, hf_dummy_outputs in zip(
+            image_inputs_per_size_factors,
+            vllm_outputs_per_size_factors,
+            hf_outputs_per_size_factors,
+            hf_dummy_outputs_per_size_factors,
+    ):
+        best_max_tokens_exc_list: List[Tuple[int,
+                                             Optional[AssertionError]]] = []
+        for i in range(len(image_inputs)):
+            try:
+                hf_output_ids, hf_output_str = hf_outputs[i]
+                vllm_output_ids, vllm_output_str = vllm_to_hf_output(
+                    vllm_outputs[i], vlm_config, model_id)
+                assert hf_output_str == vllm_output_str, (
+                    f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}"
+                )
+                assert hf_output_ids == vllm_output_ids, (
+                    f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+            except AssertionError as e:
+                num_match_tokens = sum(1 for _ in itertools.takewhile(
+                    lambda pair: pair[0] == pair[1],
+                    zip(hf_output_ids, vllm_output_ids),
+                ))
+                num_prefix_tokens = len(hf_dummy_outputs[i][0]) - 1
 
-            best_max_tokens = num_match_tokens - num_prefix_tokens
-            best_max_tokens_exc_list.append((best_max_tokens, e))
-        else:
-            best_max_tokens_exc_list.append((max_tokens, None))
+                best_max_tokens = num_match_tokens - num_prefix_tokens
+                best_max_tokens_exc_list.append((best_max_tokens, e))
+            else:
+                best_max_tokens_exc_list.append((max_tokens, None))
 
-    best_max_tokens = min(pair[0] for pair in best_max_tokens_exc_list)
-    exc_list = [pair[1] for pair in best_max_tokens_exc_list]
-    if best_max_tokens < 1:
-        raise next(exc for exc in exc_list if exc is not None)
-    if best_max_tokens < max_tokens:
-        pytest.xfail(
-            f"Test only fully passes when max_tokens={best_max_tokens} "
-            f"(instead of {max_tokens}). Errors encountered per item: "
-            f"{exc_list}")
+        best_max_tokens = min(pair[0] for pair in best_max_tokens_exc_list)
+        exc_list = [pair[1] for pair in best_max_tokens_exc_list]
+        if best_max_tokens < 1:
+            raise next(exc for exc in exc_list if exc is not None)
+        if best_max_tokens < max_tokens:
+            pytest.xfail(
+                f"Test only fully passes when max_tokens={best_max_tokens} "
+                f"(instead of {max_tokens}). Errors encountered per item: "
+                f"{exc_list}")
