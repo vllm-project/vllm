@@ -153,7 +153,6 @@ class GPTQMarlinConfig(QuantizationConfig):
         if (isinstance(layer, LinearBase) or
             (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return GPTQMarlinLinearMethod(self)
-
         return None
 
     def get_scaled_act_names(self) -> List[str]:
