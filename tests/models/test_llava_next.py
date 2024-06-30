@@ -67,12 +67,18 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     image_token_str = tokenizer.decode(image_token_id)
+    eos_token_id = tokenizer.eos_token_id
 
     hf_output_ids = [
         token_id for idx, token_id in enumerate(output_ids)
         if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
-    hf_output_str = re.sub(fr"({image_token_str})+", "", output_str).lstrip()
+
+    hf_output_str = re.sub(fr"({image_token_str})+", "", output_str)
+    assert hf_output_str[0] == " "
+    hf_output_str = hf_output_str[1:]
+    if hf_output_ids[-1] == eos_token_id:
+        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -150,6 +156,8 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
+        # TODO: Check whether using original CLIPVisionModel can improve
+        # consistency against HF
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[

@@ -4,8 +4,6 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
-from vllm.multimodal.image import ImagePixelData
-from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
@@ -57,13 +55,19 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     image_token_str = tokenizer.decode(image_token_id)
+    eos_token_id = tokenizer.eos_token_id
 
     hf_output_ids = [
         token_id for idx, token_id in enumerate(output_ids)
         if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
-    hf_output_str = output_str.lstrip() \
+
+    hf_output_str = output_str \
         .replace(image_token_str * vlm_config.image_feature_size, "")
+    assert hf_output_str[0] == " "
+    hf_output_str = hf_output_str[1:]
+    if hf_output_ids[-1] == eos_token_id:
+        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -90,6 +94,11 @@ def run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
+    # don't put this import at the top level
+    # it will call torch.cuda.device_count()
+    from vllm.multimodal.image import ImagePixelData
+    from vllm.multimodal.utils import rescale_image_size
+
     model_id, vlm_config = model_and_config
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
@@ -144,6 +153,8 @@ def run_test(
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
+        # TODO: Check whether using original CLIPVisionModel can improve
+        # consistency against HF
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
