@@ -13,9 +13,8 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA)
-from vllm.model_executor.layers.lora.sgmv_triton import (
-    sgmv_expand, sgmv_shrink)
-from vllm.lora.punica import bgmv, dispatch_bgmv_low_level
+from vllm.model_executor.layers.lora.sgmv_triton import (sgmv_expand,
+                                                         sgmv_shrink)
 
 if TYPE_CHECKING:
     pass
@@ -64,22 +63,15 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
                              dtype=torch.float32,
                              device=x.device)
 
-        sgmv_shrink(
-            x, self.lora_a_stacked, buffer, 
-            self.ranks[:self.indices_len[0]],
-            self.indices[:self.indices_len[0]], 
-            self.repeats[:self.indices_len[0] + 1],
-            self.max_repeats[0]
-        )
+        sgmv_shrink(x, self.lora_a_stacked, buffer, self.ranks,
+                    self.indices[:self.indices_len[0]],
+                    self.repeats[:self.indices_len[0] + 1],
+                    self.max_repeats[0])
         buffer = tensor_model_parallel_all_gather(buffer)
-        sgmv_expand(
-            buffer, self.lora_b_stacked, output,
-            self.ranks[:self.indices_len[0]],
-            self.indices[:self.indices_len[0]],
-            self.repeats[:self.indices_len[0] + 1],
-            self.max_repeats[0],
-            0, 1.0
-        )
+        sgmv_expand(buffer, self.lora_b_stacked, output, self.ranks,
+                    self.indices[:self.indices_len[0]],
+                    self.repeats[:self.indices_len[0] + 1],
+                    self.max_repeats[0], 0, 1.0)
         # now have column partitioned output
 
         output = output.view(*out_orig_shape)
@@ -120,26 +112,19 @@ def _mcp_apply(x, bias, layer):
                           dtype=torch.float32,
                           device=x.device)
     for idx in range(n):
-        sgmv_shrink(
-            x, layer.lora_a_stacked[idx], buffers[idx],
-            layer.ranks[:layer.indices_len[0]],
-            layer.indices[:layer.indices_len[0]],
-            layer.repeats[:layer.indices_len[0] + 1],
-            layer.max_repeats[0]
-        )
+        sgmv_shrink(x, layer.lora_a_stacked[idx], buffers[idx], layer.ranks,
+                    layer.indices[:layer.indices_len[0]],
+                    layer.repeats[:layer.indices_len[0] + 1],
+                    layer.max_repeats[0])
 
     buffers = tensor_model_parallel_all_gather(buffers)
     left_offset = 0
     for idx in range(n):
         shard_size = layer.lora_b_stacked[idx].shape[2]
-        sgmv_expand(
-            buffers[idx], layer.lora_b_stacked[idx], output,
-            layer.ranks[:layer.indices_len[0]],
-            layer.indices[:layer.indices_len[0]],
-            layer.repeats[:layer.indices_len[0] + 1],
-            layer.max_repeats[0],
-            left_offset, 1.0
-        )
+        sgmv_expand(buffers[idx], layer.lora_b_stacked[idx], output,
+                    layer.ranks, layer.indices[:layer.indices_len[0]],
+                    layer.repeats[:layer.indices_len[0] + 1],
+                    layer.max_repeats[0], left_offset, 1.0)
         left_offset += shard_size
 
     output = output.view(*out_orig_shape)
@@ -256,13 +241,10 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         buffer = torch.zeros((x.shape[0], self.lora_a_stacked.shape[2]),
                              dtype=torch.float32,
                              device=x.device)
-        sgmv_shrink(
-            x, self.lora_a_stacked, buffer, 
-            self.ranks[:self.indices_len[0]],
-            self.indices[:self.indices_len[0]], 
-            self.repeats[:self.indices_len[0] + 1],
-            self.max_repeats[0]
-        )
+        sgmv_shrink(x, self.lora_a_stacked, buffer, self.ranks,
+                    self.indices[:self.indices_len[0]],
+                    self.repeats[:self.indices_len[0] + 1],
+                    self.max_repeats[0])
         buffer = tensor_model_parallel_all_reduce(buffer)
 
         # following S-LoRA, allows the fusing of all_gather and all_reduce
@@ -271,17 +253,13 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # remains is a standard all_reduce. User should be aware though that
         # the output is not the same as a normal row_parallel, it should be
         # reduced before being used
-        
+
         shard_size = self.lora_b_stacked.shape[2]
         col_offset = self.tp_rank * shard_size
-        sgmv_expand(
-            buffer, self.lora_b_stacked, output,
-            self.ranks[:self.indices_len[0]],
-            self.indices[:self.indices_len[0]],
-            self.repeats[:self.indices_len[0] + 1],
-            self.max_repeats[0],
-            col_offset, 1.0
-        )
+        sgmv_expand(buffer, self.lora_b_stacked, output, self.ranks,
+                    self.indices[:self.indices_len[0]],
+                    self.repeats[:self.indices_len[0] + 1],
+                    self.max_repeats[0], col_offset, 1.0)
         output = output.view(*out_orig_shape)
         return output
 

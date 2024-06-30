@@ -7,21 +7,19 @@ import triton.language as tl
 MAX_REPEATS_PER_BLOCK = 32
 
 
-# @triton.autotune(
-#     configs=[
-#         triton.Config({'BLOCK_SIZE_H_IN': 32}, num_warps=1),
-#         triton.Config({'BLOCK_SIZE_H_IN': 32}, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_H_IN': 32}, num_warps=8),
-#         triton.Config({'BLOCK_SIZE_H_IN': 64}, num_warps=1),
-#         triton.Config({'BLOCK_SIZE_H_IN': 64}, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_H_IN': 64}, num_warps=8),
-#         triton.Config({'BLOCK_SIZE_H_IN': 128}, num_warps=1),
-#         triton.Config({'BLOCK_SIZE_H_IN': 128}, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_H_IN': 128}, num_warps=8),
-#     ],
-#     key=['R', 'H', 'BLOCK_SIZE_INPUT_PER_LORA'],
-#     restore_value=['o_ptr']
-# )
+@triton.autotune(configs=[
+    triton.Config({'BLOCK_SIZE_H_IN': 32}, num_warps=1),
+    triton.Config({'BLOCK_SIZE_H_IN': 32}, num_warps=4),
+    triton.Config({'BLOCK_SIZE_H_IN': 32}, num_warps=8),
+    triton.Config({'BLOCK_SIZE_H_IN': 64}, num_warps=1),
+    triton.Config({'BLOCK_SIZE_H_IN': 64}, num_warps=4),
+    triton.Config({'BLOCK_SIZE_H_IN': 64}, num_warps=8),
+    triton.Config({'BLOCK_SIZE_H_IN': 128}, num_warps=1),
+    triton.Config({'BLOCK_SIZE_H_IN': 128}, num_warps=4),
+    triton.Config({'BLOCK_SIZE_H_IN': 128}, num_warps=8),
+],
+                 key=['R', 'H', 'BLOCK_SIZE_INPUT_PER_LORA'],
+                 restore_value=['o_ptr'])
 @triton.jit
 def sgmv_shrink_multi_lora_rank(
         # Same arguments as below, some renamed
@@ -137,25 +135,23 @@ def sgmv_shrink(x, weights, out, ranks, indices, repeats, max_repeats):
         out.stride(0),
         out.stride(1),
         BLOCK_SIZE_INPUT_PER_LORA=BLOCK_SIZE_INPUT_PER_LORA,
-        BLOCK_SIZE_H_IN=64)
+    )
     return out
 
 
-# @triton.autotune(
-#     configs=[
-#         triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=1),
-#         triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=8),
-#         triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=1),
-#         triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=8),
-#         triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=1),
-#         triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=4),
-#         triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=8),
-#     ],
-#     key=['R', 'H', 'BLOCK_SIZE_INPUT_PER_LORA'],
-#     restore_value=['o_ptr']
-# )
+@triton.autotune(configs=[
+    triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=1),
+    triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=4),
+    triton.Config({'BLOCK_SIZE_H_OUT': 32}, num_warps=8),
+    triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=1),
+    triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=4),
+    triton.Config({'BLOCK_SIZE_H_OUT': 64}, num_warps=8),
+    triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=1),
+    triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=4),
+    triton.Config({'BLOCK_SIZE_H_OUT': 128}, num_warps=8),
+],
+                 key=['R', 'H', 'BLOCK_SIZE_INPUT_PER_LORA'],
+                 restore_value=['o_ptr'])
 @triton.jit
 def sgmv_expand_multi_lora_rank(
         # NOTE: Inputs MUST be grouped by lora
@@ -311,5 +307,5 @@ def sgmv_expand(buffer,
         out.stride(0),
         out.stride(1),
         BLOCK_SIZE_INPUT_PER_LORA=BLOCK_SIZE_INPUT_PER_LORA,
-        BLOCK_SIZE_H_OUT=64)
+    )
     return out

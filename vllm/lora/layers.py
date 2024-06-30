@@ -62,16 +62,10 @@ def _not_fully_sharded_can_replace(can_replace):
     return dec
 
 
-def _apply_lora(
-    x: torch.Tensor,
-    lora_a_stacked: torch.Tensor,
-    lora_b_stacked: torch.Tensor,
-    output: torch.Tensor,
-    indices: torch.LongTensor,
-    ranks: torch.LongTensor,
-    repeats: torch.LongTensor,
-    max_repeats: int
-):
+def _apply_lora(x: torch.Tensor, lora_a_stacked: torch.Tensor,
+                lora_b_stacked: torch.Tensor, output: torch.Tensor,
+                indices: torch.LongTensor, ranks: torch.LongTensor,
+                repeats: torch.LongTensor, max_repeats: int):
     """Applies lora to each input.
 
     This method applies all loras to each input. It uses the
@@ -93,10 +87,8 @@ def _apply_lora(
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
-    add_lora(
-        output, x, lora_a_stacked, lora_b_stacked, indices,
-        ranks, repeats, max_repeats, 0, 1.0
-    )
+    add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, ranks,
+             repeats, max_repeats, 0, 1.0)
     return output.view_as(org_output)
 
 
@@ -123,8 +115,10 @@ def _apply_lora_packed_nslice(
 
     Input shapes:
         x:                 (batch_size, hidden_dim)
-        lora_a_stacked:    3 element tuple of (num_loras, 1, lora_rank, hidden_dim)
-        lora_b_stacked:    3 element tuple of (num_loras, 1, output_dim, lora_rank)
+        lora_a_stacked:    3 element tuple of 
+            (num_loras, 1, lora_rank, hidden_dim)
+        lora_b_stacked:    3 element tuple of 
+            (num_loras, 1, output_dim, lora_rank)
         output:            (batch_size, q_slice_size + 2*kv_slice_size)
         indices:           (num_lora_token_groups)
         ranks:             (num_lora_token_groups)
@@ -136,12 +130,10 @@ def _apply_lora_packed_nslice(
     indices = indices.view(-1)
     offset_left = 0
     for slice_idx in range(len(lora_a_stacked)):
-        add_lora(
-            output, x, lora_a_stacked[slice_idx],
-            lora_b_stacked[slice_idx], indices, ranks, repeats, max_repeats,
-            offset_left, 1.0
-        )
-        offset_left += lora_b_stacked.shape[2]
+        add_lora(output, x, lora_a_stacked[slice_idx],
+                 lora_b_stacked[slice_idx], indices, ranks, repeats,
+                 max_repeats, offset_left, 1.0)
+        offset_left += lora_b_stacked[slice_idx].shape[2]
     return output.view_as(org_output)
 
 
@@ -200,7 +192,6 @@ class BaseLayerWithLoRA(nn.Module):
         max_repeats: List[int],
         ranks: torch.Tensor,
         sampler_indices: torch.Tensor,
-        sampler_ranks: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
         long_lora_indices: torch.Tensor,
@@ -287,7 +278,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.embeddings_indices: torch.Tensor
         self.ranks: torch.Tensor
         self.repeats: torch.Tensor
-        self.max_repeats: int
+        self.max_repeats: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -297,8 +288,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def set_lora(
         self,
         index: int,
-        lora_b: torch.Tensor,
         lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
     ):
         self.reset_lora(index)
@@ -329,7 +320,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         max_repeats: List[int],
         ranks: torch.Tensor,
         sampler_indices: torch.Tensor,
-        sampler_ranks: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
         long_lora_indices: torch.Tensor,
@@ -363,8 +353,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 full_lora_a_embeddings.shape[0] *
                 full_lora_a_embeddings.shape[1], -1)
         sgmv(full_output, full_lora_a_embeddings, self.lora_b_stacked,
-             self.indices[:self.indices_len[0]], self.ranks[:self.indices_len[0]],
-             self.repeats[:self.indices_len[0] + 1], self.max_repeats[0], 0, 1.0)
+             self.indices[:self.indices_len[0]], self.ranks,
+             self.repeats[:self.indices_len[0] + 1], self.max_repeats[0], 0,
+             1.0)
         return full_output.view_as(full_output_org)
 
     @classmethod
@@ -463,7 +454,6 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         max_repeats: List[int],
         ranks: torch.Tensor,
         sampler_indices: torch.Tensor,
-        sampler_ranks: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
         long_lora_indices: torch.Tensor,
@@ -478,16 +468,10 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        _apply_lora(
-            x,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            output,
-            self.indices[:self.indices_len[0]],
-            self.ranks[:self.indices_len[0]],
-            self.repeats[:self.indices_len[0] + 1],
-            self.max_repeats[0]
-        )
+        _apply_lora(x, self.lora_a_stacked, self.lora_b_stacked, output,
+                    self.indices[:self.indices_len[0]], self.ranks,
+                    self.repeats[:self.indices_len[0] + 1],
+                    self.max_repeats[0])
         return output
 
     def forward(self, input_):
@@ -634,16 +618,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        _apply_lora_packed_nslice(
-            x,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            output,
-            self.indices[:self.indices_len[0]],
-            self.ranks[:self.indices_len[0]],
-            self.repeats[:self.indices_len[0] + 1],
-            self.max_repeats[0]
-        )
+        _apply_lora_packed_nslice(x, self.lora_a_stacked, self.lora_b_stacked,
+                                  output, self.indices[:self.indices_len[0]],
+                                  self.ranks,
+                                  self.repeats[:self.indices_len[0] + 1],
+                                  self.max_repeats[0])
         return output
 
     @classmethod
@@ -890,16 +869,11 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        _apply_lora_packed_nslice(
-            x,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            output,
-            self.indices[:self.indices_len[0]],
-            self.ranks[:self.indices_len[0]],
-            self.repeats[:self.indices_len[0] + 1],
-            self.max_repeats[0]
-        )
+        _apply_lora_packed_nslice(x, self.lora_a_stacked, self.lora_b_stacked,
+                                  output, self.indices[:self.indices_len[0]],
+                                  self.ranks,
+                                  self.repeats[:self.indices_len[0] + 1],
+                                  self.max_repeats[0])
         return output
 
     @classmethod
@@ -998,7 +972,6 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         max_repeats: List[int],
         ranks: torch.Tensor,
         sampler_indices: torch.Tensor,
-        sampler_ranks: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
         long_lora_indices: torch.Tensor,
@@ -1012,16 +985,10 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def apply(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x)
-        _apply_lora(
-            x,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            output,
-            self.indices[:self.indices_len[0]],
-            self.ranks[:self.indices_len[0]],
-            self.repeats[:self.indices_len[0] + 1],
-            self.max_repeats[0]
-        )
+        _apply_lora(x, self.lora_a_stacked, self.lora_b_stacked, output,
+                    self.indices[:self.indices_len[0]], self.ranks,
+                    self.repeats[:self.indices_len[0] + 1],
+                    self.max_repeats[0])
         return output
 
     def forward(self, input_):
@@ -1129,9 +1096,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
-        if 32000 < self.base_layer.vocab_size > 128512:
-            raise ValueError("When using LoRA, vocab size must be "
-                             "32000 >= vocab_size <= 128512")
+        # deprecated by Triton
+        # if 32000 < self.base_layer.vocab_size > 128512:
+        #     raise ValueError("When using LoRA, vocab size must be "
+        #                      "32000 >= vocab_size <= 128512")
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
@@ -1204,7 +1172,6 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         max_repeats: List[int],
         ranks: torch.Tensor,
         sampler_indices: torch.Tensor,
-        sampler_ranks: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
         long_lora_indices: torch.Tensor,
@@ -1216,7 +1183,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         size = max(base_indices.shape[0], sampler_indices.shape[0])
         self.repeats = torch.arange(0, size + 1, device='cuda')
         self.max_repeats = [1]
-        self.ranks = sampler_ranks
+        self.ranks = ranks
 
     def _get_logits(
         self,
@@ -1275,22 +1242,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits
 
-        # print(f'hidden {hidden_states.shape}, lora_a {self.lora_a_stacked.shape}, lora_b {self.lora_b_stacked.shape}, logits {logits.shape}')
-        # print(f'indices {self.indices.shape}, ranks {self.ranks.shape}, repeats {self.repeats.shape}, max_repeats {self.max_repeats}, indices_len {self.indices_len}')
-        # print(f'indices {self.indices}') 
-        # print(f'ranks {self.ranks}')
-        # print(f'repeats {self.repeats}')
-        # assert False
-        _apply_lora(
-            hidden_states,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            logits,
-            self.indices[:self.indices_len[1]],
-            self.ranks[:self.indices_len[1]],
-            self.repeats[:self.indices_len[1] + 1],
-            self.max_repeats[0]
-        )
+        _apply_lora(hidden_states, self.lora_a_stacked, self.lora_b_stacked,
+                    logits, self.indices[:self.indices_len[1]], self.ranks,
+                    self.repeats[:self.indices_len[1] + 1],
+                    self.max_repeats[0])
 
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.base_layer.vocab_size]
@@ -1373,7 +1328,6 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         max_repeats: List[int],
         ranks: torch.Tensor,
         sampler_indices: torch.Tensor,
-        sampler_ranks: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
         long_lora_indices: torch.Tensor,

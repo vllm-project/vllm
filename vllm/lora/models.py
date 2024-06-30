@@ -15,10 +15,10 @@ from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
                               LinearScalingRotaryEmbeddingWithLora,
                               LoRAMapping)
-from vllm.model_executor.layers.lora.sgmv_triton import MAX_REPEATS_PER_BLOCK
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
+from vllm.model_executor.layers.lora.sgmv_triton import MAX_REPEATS_PER_BLOCK
 from vllm.utils import LRUCache, is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -38,23 +38,26 @@ class LongContextLoRAContext:
     offsets_by_lora_id: Dict[int, int] = field(default_factory=dict)
 
 
-def group_and_chunk_indices(indices: torch.Tensor, ranks: torch.Tensor):
+def group_and_chunk_indices(indices: torch.Tensor):
     """
-    for sgmv, this first groups the loras in indices by their id (assuming they are consecutive)
-    the number of tokens for each lora is counted in repeats (num times the lora is *repeated*)
-    then, it splits these into groups of MAX_REPEATS_PER_BLOCK + remainder
-    (the kernel launches a row of blocks for each value in indices, or each lora, which can easily
-        be too large and cause the kernel to run out of shared memory, so it is expected to be
-        broken into chunks beforehand)
+    For sgmv, this first groups the loras in indices by their id
+    (assuming they are consecutive). The number of tokens for each lora 
+    is counted in repeats (num times the lora is *repeated*)
+
+    Then, it splits these into groups of MAX_REPEATS_PER_BLOCK + remainder
+    (the kernel launches a row of blocks for each value in indices, 
+    or each lora, which can easily be too large and cause the kernel 
+    to run out of shared memory, so it is expected to be 
+    broken into chunks beforehand)
     
     Args:
-        indices: tensor [total #tokens in the batch] mapping each token to a lora index
-        ranks: tensor [total #tokens in the batch] mapping each token to the rank of the lora
+        indices: tensor [total #tokens in the batch] 
+            mapping each token to a lora index
     Returns:
-        indices: tensor [#lora token groups] mapping each group to the lora index
-        repeats: tensor [#lora token groups + 1] a cumulative sum of the number of tokens
-            for each lora group, with 0 at the beginning
-        ranks: tensor [#lora token groups] mapping each group to the rank of the lora
+        indices: tensor [#lora token groups] 
+            mapping each group to the lora index
+        repeats: tensor [#lora token groups + 1] a cumulative sum of the 
+            number of tokens for each lora token group, with 0 at the beginning
     """
     unique, repeats = indices.unique_consecutive(return_counts=True)
     num_chunks = (repeats + MAX_REPEATS_PER_BLOCK - 1) // MAX_REPEATS_PER_BLOCK
@@ -62,10 +65,11 @@ def group_and_chunk_indices(indices: torch.Tensor, ranks: torch.Tensor):
     overcount = num_chunks * MAX_REPEATS_PER_BLOCK - repeats
     repeats = torch.full_like(indices, MAX_REPEATS_PER_BLOCK)
     repeats[num_chunks.cumsum(dim=0) - 1] -= overcount
-    ranks = ranks[repeats.cumsum(dim=0) - 1]
-    repeats_ = torch.zeros((indices.shape[0] + 1,), device='cuda', dtype=torch.long)
+    repeats_ = torch.zeros((indices.shape[0] + 1, ),
+                           device='cuda',
+                           dtype=torch.long)
     repeats_[1:] = repeats.cumsum(dim=0)
-    return indices, repeats_, ranks
+    return indices, repeats_
 
 
 def convert_mapping(
@@ -76,9 +80,8 @@ def convert_mapping(
     vocab_size: int,
     extra_vocab_size: int,
     long_lora_context: Optional[LongContextLoRAContext] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, List[int], torch.Tensor, 
-           torch.Tensor, torch.Tensor, torch.Tensor,
-           Optional[torch.Tensor], List[int]]:
+) -> Tuple[torch.Tensor, torch.Tensor, List[int], torch.Tensor, torch.Tensor,
+           torch.Tensor, torch.Tensor, Optional[torch.Tensor], List[int]]:
     """Converts LoRAMapping to index tensors.
 
     Args:
@@ -94,6 +97,12 @@ def convert_mapping(
         A tuple of tensors:
             base_indices: Tensor of shape [batch_size] mapping batch rows to
                 LoRA indices.
+            repeats: Tensor [#lora token groups + 1] a cumulative 
+                sum of the number of tokens for each lora token group, 
+                with 0 at the beginning
+            max_repeats: List[1] caching the maximum of repeats, 
+                so it isn't recalculated at every layer
+            ranks: Tensor [max_num_loras] mapping LoRA index to rank
             sampler_indices: Tensor of shape [batch_size] mapping requests to
                 LoRA indices for sampler. For generation, this will be the
                 same as base_indicies. For prefill, this will map requests
@@ -118,7 +127,7 @@ def convert_mapping(
     index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
-    lora_ranks = [None] * len(lora_indices)
+    lora_ranks = [8] * len(lora_index_to_id)
     long_lora_offsets: Optional[torch.Tensor] = None
     if long_lora_context:
         long_lora_offsets = torch.zeros(len(index_mapping_indices),
@@ -128,10 +137,6 @@ def convert_mapping(
         lora_index_to_id.index(x) if x > 0 else -1
         for x in mapping.prompt_mapping
     ]
-    prompt_rank_mapping: List[int] = [
-        lora_id_to_r[id_] if id_ > 0 else 8
-        for id_ in mapping.prompt_mapping
-    ]
     lora_idx = None
     for i in range(len(index_mapping_indices)):
         # TODO index can be slow. optimize
@@ -139,8 +144,8 @@ def convert_mapping(
                     if index_mapping_indices[i] > 0 else -1)
         embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
         lora_indices[i] = lora_idx
-        lora_ranks[i] = (lora_id_to_r[index_mapping_indices[i]] 
-                         if lora_idx != -1 else 8)
+        if lora_idx > 0:
+            lora_ranks[lora_idx] = lora_id_to_r[index_mapping_indices[i]]
         if long_lora_context:
             assert long_lora_offsets is not None
             lora_offset: int = long_lora_context.offsets_by_lora_id.get(
@@ -163,10 +168,7 @@ def convert_mapping(
         indices[2] * (vocab_size + extra_vocab_size)
     ])
     embeddings_indices[embeddings_indices == -1] = max_loras - 1
-    base_indices, repeats, ranks = group_and_chunk_indices(indices[1], ranks)
-    sampler_ranks = torch.tensor(
-        prompt_rank_mapping, device='cuda', dtype=torch.long
-    )
+    base_indices, repeats = group_and_chunk_indices(indices[1])
     sampler_indices = prompt_mapping_tensor
     sampler_indices_padded = sampler_indices.clone()
     sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
@@ -188,9 +190,9 @@ def convert_mapping(
         indices_len.append(long_lora_indices_len)
 
     max_repeats = (repeats[1:] - repeats[:-1]).max().item()
-    return (base_indices, repeats, [max_repeats], ranks, 
-            sampler_indices, sampler_ranks, sampler_indices_padded, 
-            embeddings_indices, long_lora_indices, indices_len)
+    return (base_indices, repeats, [max_repeats], ranks, sampler_indices,
+            sampler_indices_padded, embeddings_indices, long_lora_indices,
+            indices_len)
 
 
 def get_lora_id():
@@ -439,18 +441,15 @@ class LoRAModelManager:
                                         dtype=torch.long,
                                         device="cuda")
         self.repeats = torch.empty(self.max_num_batched_tokens + 1,
-                                   dtype=torch.long, 
+                                   dtype=torch.long,
                                    device='cuda')
-        self.max_repeats = [None]
-        self.ranks = torch.empty(self.max_num_batched_tokens,
+        self.max_repeats = [1]
+        self.ranks = torch.empty(self.lora_slots,
                                  dtype=torch.long,
                                  device="cuda")
         self.sampler_indices = torch.empty(self.max_num_batched_tokens,
                                            dtype=torch.long,
                                            device="cuda")
-        self.sampler_ranks = torch.empty(self.max_num_batched_tokens,
-                                         dtype=torch.long,
-                                         device="cuda")
         self.sampler_indices_padded = torch.empty(self.max_num_batched_tokens,
                                                   dtype=torch.long,
                                                   device="cuda")
@@ -587,20 +586,18 @@ class LoRAModelManager:
 
     # TODO see if this can be vectorized
     def _set_lora_mapping(self, mapping: LoRAMapping) -> None:
-        (base_indices, repeats, max_repeats, ranks, 
-        sampler_indices, sampler_ranks, sampler_indices_padded, 
-        embeddings_indices, long_lora_offsets_tensor, 
-        indices_len) = convert_mapping(mapping, self.lora_index_to_id,
-                                       self.lora_id_to_r,
-                                       self.lora_slots + 1, self.vocab_size,
-                                       self.lora_config.lora_extra_vocab_size,
-                                       self.long_lora_context)
+        (base_indices, repeats, max_repeats, ranks, sampler_indices,
+         sampler_indices_padded, embeddings_indices, long_lora_offsets_tensor,
+         indices_len) = convert_mapping(mapping, self.lora_index_to_id,
+                                        self.lora_id_to_r, self.lora_slots + 1,
+                                        self.vocab_size,
+                                        self.lora_config.lora_extra_vocab_size,
+                                        self.long_lora_context)
         self.base_indices[:base_indices.shape[0]].copy_(base_indices)
         self.repeats[:repeats.shape[0]].copy_(repeats)
         self.max_repeats[:] = max_repeats
-        self.ranks[:ranks.shape[0]].copy_(ranks)
+        self.ranks.copy_(ranks)
         self.sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices)
-        self.sampler_ranks[:sampler_ranks.shape[0]].copy_(sampler_ranks)
         self.sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
             sampler_indices_padded)
         self.embeddings_indices[:embeddings_indices.
@@ -662,7 +659,9 @@ class LoRAModelManager:
                                                 self.model.config))
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
-            new_module.set_mapping(self.base_indices, self.sampler_indices,
+            new_module.set_mapping(self.base_indices, self.repeats,
+                                   self.max_repeats, self.ranks,
+                                   self.sampler_indices,
                                    self.sampler_indices_padded,
                                    self.embeddings_indices,
                                    self.long_lora_indices, self.indices_len)

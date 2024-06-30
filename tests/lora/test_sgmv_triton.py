@@ -28,7 +28,7 @@ def setup_(S, R, H, dtype, repeats_per_lora=1):
     else:
         ranks = torch.full((S, ), R, device='cuda', dtype=torch.int32)
     weights = torch.randn((num_unique, 1, H, R), device='cuda', dtype=dtype)
-    indices = torch.randint(0, num_unique, (num_unique,), device='cuda')
+    indices = torch.randint(0, num_unique, (num_unique, ), device='cuda')
     repeats = torch.full((num_unique, ),
                          repeats_per_lora,
                          device='cuda',
