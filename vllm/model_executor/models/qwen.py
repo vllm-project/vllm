@@ -300,15 +300,6 @@ class QWenLMHeadModel(nn.Module):
                         "Only text inputs are allowed. Images won't be handled "
                         "until Qwen-VL models are fully supported.")
                     continue
-                # Skip loading visual weights to support Qwen-VL models
-                # in cases with text-only inputs
-                # TODO: add support for Qwen-VL
-                if (name not in params_dict
-                        and name.startswith("transformer.visual.")):
-                    print_warning_once(
-                        "Only text inputs are allowed. Images won't be handled "
-                        "until Qwen-VL models are fully supported.")
-                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
