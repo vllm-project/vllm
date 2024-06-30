@@ -136,6 +136,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                            params_dtype: torch.dtype,
                            **extra_weight_attrs):
         
+        # gate_up_proj
         w13_weight = torch.nn.Parameter(
             torch.empty(num_total_experts,
                         2 * intermediate_size,
@@ -145,6 +146,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
         
+        # down_proj
         w2_weight = torch.nn.Parameter(
             torch.empty(num_total_experts,
                         hidden_size,
