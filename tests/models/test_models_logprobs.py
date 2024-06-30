@@ -27,15 +27,15 @@ MODELS = [
     # # "google/gemma-2-9b-it", skip: not supported in transformers yet
     # "bigcode/tiny_starcoder_py",
     # "EleutherAI/gpt-j-6b",
-    "EleutherAI/pythia-410m",
-    "gpt2",
-    "internlm/internlm2-chat-7b",
-    # jais - skip: size in automation
-    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    "openbmb/MiniCPM-2B-128k",
-    # mixtral - skip: size in automation
-    "mosaicml/mpt-7b-instruct",
-    "allenai/OLMo-1B",
+    # "EleutherAI/pythia-410m",
+    # "gpt2",
+    # "internlm/internlm2-chat-7b",
+    # # jais - skip: size in automation
+    # "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    # "openbmb/MiniCPM-2B-128k",
+    # # mixtral - skip: size in automation
+    # "mosaicml/mpt-7b-instruct",
+    # # "allenai/OLMo-1B", # skip: broken in transformers
     "facebook/opt-125m",
     # orion - skip: size in automation
     "microsoft/phi-2",
