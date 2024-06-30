@@ -11,14 +11,18 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsLinearMethod, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8DynamicToken, CompressedTensorsW8A8StaticTensor,
     CompressedTensorsWNA16)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    QuantizationType)
 
 
 @pytest.mark.parametrize("model_args", [
-    ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", "tensor"),
-    ("nm-testing/tinyllama-oneshot-w8-channel-a8-tensor", "channel"),
+    ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", "tensor",
+     QuantizationType.INT, 2560),
+    ("nm-testing/tinyllama-oneshot-w8-channel-a8-tensor", "channel",
+     QuantizationType.INT, 2560),
 ])
 def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
-    model_path, strategy = model_args
+    model_path, strategy, quant_type, shape_0 = model_args
     with vllm_runner(model_path, enforce_eager=True) as llm:
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         layer = model.model.layers[0]
@@ -34,17 +38,23 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
                           CompressedTensorsLinearMethod)
         assert isinstance(down_proj.quant_method,
                           CompressedTensorsLinearMethod)
-
         assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8StaticTensor)
 
         assert qkv_proj.scheme.strategy == strategy
-        assert qkv_proj.weight.dtype is torch.int8
-        assert o_proj.weight.dtype is torch.int8
-        assert gate_up_proj.weight.dtype is torch.int8
+        expected_type = (torch.int8 if quant_type == QuantizationType.INT else
+                         torch.float8_e4m3fn)
+
+        assert qkv_proj.weight.dtype is expected_type
+        assert o_proj.weight.dtype is expected_type
+        assert gate_up_proj.weight.dtype is expected_type
 
         if qkv_proj.scheme.strategy == "tensor":
-            assert qkv_proj.weight_scale.shard_splitter is not None
-            assert qkv_proj.weight_scale.logical_widths is not None
+            # Make sure it is a channelwise buffer
+            # After running process_weights_after_loading
+            assert len(qkv_proj.weight_scale.shape) == 2
+            assert qkv_proj.weight_scale.shape[0] == shape_0
+            assert qkv_proj.weight_scale.shape[1] == 1
+        assert qkv_proj.weight_scale.dtype is torch.float32
         assert qkv_proj.input_scale.dtype is torch.float32
 
 
