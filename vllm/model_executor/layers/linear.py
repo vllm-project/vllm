@@ -301,8 +301,8 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
 
-        # Special case for loading scales off disk, which often
-        # do not have a shape.
+        # Special case for loading scales off disk, which often do not
+        # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
@@ -385,8 +385,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         is_per_tensor_scale = getattr(param, "is_per_tensor_scale", False)
 
         if loaded_shard_id is None:
-            # Loaded weight is already packed.
+            # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
+                # If fp8 + scale, need to send to each shard.
+                if fp8_scales_shard_indexer is not None:
+                    param_data, loaded_weight = fp8_scales_shard_indexer(
+                        param_data, loaded_weight, loaded_shard_id)
+
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
@@ -543,8 +548,13 @@ class QKVParallelLinear(ColumnParallelLinear):
         is_per_tensor_scale = getattr(param, "is_per_tensor_scale", False)
 
         if loaded_shard_id is None:
-            # Loaded weight is already packed.
+            # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
+                # If fp8 + scale, need to send to each shard.
+                if fp8_scales_shard_indexer is not None:
+                    param_data, loaded_weight = fp8_scales_shard_indexer(
+                        param_data, loaded_weight, loaded_shard_id)
+
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
@@ -726,6 +736,8 @@ class RowParallelLinear(LinearBase):
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
 
+        # Special case for loading scales off disk, which often do not
+        # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 

@@ -334,7 +334,12 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self,
         model_input: ModelInputForXPU,
         kv_caches: List[torch.Tensor],
-    ) -> Optional[SamplerOutput]:
+        num_steps: int = 1,
+    ) -> Optional[List[SamplerOutput]]:
+        if num_steps > 1:
+            raise ValueError(
+                "XPUModelRunner does not support multi-step execution.")
+
         model_executable = self.model
         execute_model_kwargs = {
             "input_ids": model_input.input_tokens,
@@ -354,14 +359,14 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
-            return None
+            return []
 
         # Sample the next token.
         output = self.model.sample(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        return output
+        return [output]
 
     def _prepare_prompt(
         self,
