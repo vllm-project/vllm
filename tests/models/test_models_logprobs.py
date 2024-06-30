@@ -39,7 +39,7 @@ MODELS = [
     "facebook/opt-125m",
     # orion - skip: size in automation
     "microsoft/phi-2",
-    # "microsoft/Phi-3-small-8k-instruct", # skip: need flash attention installed
+    # "microsoft/Phi-3-small-8k-instruct", # skip: need flashattention installed
     # "Qwen/Qwen-1_8B", # skip: need transformers_stream_generator installed
     "Qwen/Qwen1.5-1.8B",
     "Qwen/Qwen2-1.5B-Instruct",
