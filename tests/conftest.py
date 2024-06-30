@@ -6,8 +6,9 @@ from collections import UserList
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import (Any, Dict, List, Literal, Optional, Tuple, TypedDict,
-                    TypeVar)
+from typing import Any, Dict, List, Literal, Optional
+from typing import Sequence as GenericSequence
+from typing import Tuple, TypedDict, TypeVar
 
 import pytest
 import torch
@@ -453,7 +454,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[List[MultiModalData]] = None,
+        images: Optional[GenericSequence[MultiModalData]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -502,7 +503,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[List[MultiModalData]] = None,
+        images: Optional[GenericSequence[MultiModalData]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)
