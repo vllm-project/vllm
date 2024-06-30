@@ -447,6 +447,7 @@ class FalconForCausalLM(nn.Module):
             if name == "lm_head.weight" and self.tie_word_embeddings:
                 # Falcon uses tied embeddings except Falcon-11b.
                 continue
+            # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
                 continue
             param = params_dict[name]

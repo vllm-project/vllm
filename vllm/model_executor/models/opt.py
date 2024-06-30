@@ -237,9 +237,6 @@ class OPTDecoder(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -247,7 +244,7 @@ class OPTDecoder(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        inputs_embeds = self.get_input_embeddings(input_ids)
+        inputs_embeds = self.embed_tokens(input_ids)
         pos_embeds = self.embed_positions(positions)
         if self.project_in is not None:
             inputs_embeds, _ = self.project_in(inputs_embeds)
@@ -335,6 +332,8 @@ class OPTForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
+            if "lm_head.weight" in name:	
+                continue
             if name.startswith("decoder."):
                 name = "model." + name
 
