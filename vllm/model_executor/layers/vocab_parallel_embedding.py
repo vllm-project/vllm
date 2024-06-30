@@ -193,6 +193,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                                                self.tp_size)
         self.embedding_dim = embedding_dim
 
+        linear_method = None
         if quant_config is not None:
             linear_method = quant_config.get_quant_method(self)
         if linear_method is None:
@@ -220,7 +221,8 @@ class VocabParallelEmbedding(torch.nn.Module):
                                           self.embedding_dim,
                                           self.num_embeddings_padded,
                                           params_dtype=params_dtype,
-                                          weigth_loader=self.weight_loader)
+                                          weight_loader=self.weight_loader,
+                                          parallel_dim=0)
 
     @classmethod
     def _get_indices(cls, vocab_size_padded: int, org_vocab_size_padded: int,
@@ -300,10 +302,30 @@ class VocabParallelEmbedding(torch.nn.Module):
         return ret
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        parallel_dim = param.parallel_dim
-        assert loaded_weight.shape[parallel_dim] == self.org_vocab_size
-        loaded_weight = loaded_weight[self.shard_indices.org_vocab_start_index:
-                                      self.shard_indices.org_vocab_end_index]
+        output_dim = getattr(param, "output_dim", None)
+        packed_dim = getattr(param, "packed_dim", None)
+
+        # If parameter does not have output dim, then it should
+        # be copied onto all gpus (e.g. g_idx for act_order gptq).
+        if output_dim is None:
+            assert param.data.shape == loaded_weight.shape
+            param.data.copy_(loaded_weight)
+            return
+        
+        start_idx = self.shard_indices.org_vocab_start_index
+        shard_size = self.shard_indices.org_vocab_end_index - start_idx
+
+        # If param packed on the same dim we are sharding on, then
+        # need to adjust offsets of loaded weight by pack_factor.
+        if packed_dim is not None and packed_dim == output_dim:
+            assert loaded_weight.shape[output_dim] == (
+                self.org_vocab_size // param.pack_factor)
+            start_idx = start_idx // param.pack_factor
+            shard_size = shard_size // param.pack_factor
+        else:
+            assert loaded_weight.shape[output_dim] == self.org_vocab_size
+        
+        loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0]:].data.fill_(0)
 
@@ -368,7 +390,7 @@ class ParallelLMHead(VocabParallelEmbedding):
                             dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "parallel_dim": 0,
-                "weight_loader": self.weight_loader
+                "weight_loader": self.weight_loader,
             })
         else:
             self.register_parameter("bias", None)
