@@ -129,7 +129,7 @@ class GroupCoordinator:
     pynccl_comm: Optional[Any]  # PyNccl communicator
     ca_comm: Optional[Any]  # Custom allreduce communicator
     shm_broadcaster: Optional[Any]  # shared memory broadcaster
-    is_tpu: bool
+    use_xla: bool # Whether to use PyTorch XLA communicator
 
     def __init__(
         self,
@@ -144,7 +144,7 @@ class GroupCoordinator:
         self.local_rank = local_rank
         self.device_group = None
         self.cpu_group = None
-        self.is_tpu = is_tpu()
+        self.use_xla = is_tpu()
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
@@ -289,7 +289,7 @@ class GroupCoordinator:
             return input_
 
         # For TPUs, use xm.all_reduce.
-        if self.is_tpu:
+        if self.use_xla:
             return xm.all_reduce(xm.REDUCE_SUM, input_)
 
         if ca_comm is not None:
@@ -312,7 +312,7 @@ class GroupCoordinator:
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
         # For TPUs, use xm.all_gather.
-        if self.is_tpu:
+        if self.use_xla:
             assert dim == -1, "TPUs only support dim=-1 for all-gather."
             return xm.all_gather(input_, dim)
 
