@@ -5,8 +5,8 @@ from collections import UserList
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import (Any, Dict, List, Literal, Optional, Tuple, TypedDict,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple,
+                    TypedDict, TypeVar)
 
 import pytest
 import torch
@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoProcessor, AutoTokenizer, BatchEncoding)
+                          AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
@@ -22,8 +22,12 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalData
-from vllm.multimodal.image import ImageFeatureData, ImagePixelData
+
+if TYPE_CHECKING:
+    from vllm.multimodal import MultiModalData
+else:
+    # it will call torch.cuda.device_count()
+    MultiModalData = None
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
 
@@ -63,6 +67,10 @@ class ImageAsset:
         return self.pil_image
 
     def for_vllm(self, vision_config: VisionLanguageConfig) -> MultiModalData:
+        # don't put this import at the top level
+        # it will call torch.cuda.device_count()
+        from vllm.multimodal.image import ImageFeatureData  # noqa: F401
+        from vllm.multimodal.image import ImagePixelData
         image_input_type = vision_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
@@ -216,6 +224,9 @@ class HfRunner:
         )
 
         try:
+            # don't put this import at the top level
+            # it will call torch.cuda.device_count()
+            from transformers import AutoProcessor  # noqa: F401
             self.processor = AutoProcessor.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
