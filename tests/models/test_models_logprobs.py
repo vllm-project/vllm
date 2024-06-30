@@ -13,38 +13,37 @@ from tests.models.utils import check_logprobs_close
 MAX_MODEL_LEN = 1024
 
 MODELS = [
-    # arctic - skip size
-    "baichuan-inc/Baichuan2-7B-Chat",
-    "bigscience/bloom-560m",
-    # "THUDM/chatglm3-6b", - skip - hf implementation broken
-    # commandr - skip size
-    # dbrx - skip size
-    "Deci/DeciLM-7B-instruct",
-    # deepseek_v2 - skip size
-    "deepseek-ai/deepseek-coder-1.3b-instruct",
-    "tiiuae/falcon-7b-instruct",
-    "google/gemma-1.1-2b-it",
-    "google/gemma-2-9b-it",
-    "bigcode/tiny_starcoder_py",
-    "EleutherAI/gpt-j-6b",
-    "EleutherAI/pythia-70m",
+    # # arctic - skip: size in automation
+    # "baichuan-inc/Baichuan2-7B-Chat",
+    # "bigscience/bloom-560m",
+    # # "THUDM/chatglm3-6b", skip: hf implementation broken
+    # # commandr - skip: size in automation size
+    # # dbrx - skip: size in automation
+    # "Deci/DeciLM-7B-instruct",
+    # # deepseek_v2 - skip: size in automation
+    # "deepseek-ai/deepseek-coder-1.3b-instruct",
+    # "tiiuae/falcon-rw-1b",
+    # "google/gemma-1.1-2b-it",
+    # # "google/gemma-2-9b-it", skip: not supported in transformers yet
+    # "bigcode/tiny_starcoder_py",
+    # "EleutherAI/gpt-j-6b",
+    "EleutherAI/pythia-410m",
     "gpt2",
     "internlm/internlm2-chat-7b",
-    # jais - skip size
+    # jais - skip: size in automation
     "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     "openbmb/MiniCPM-2B-128k",
-    # mixtral - skip size
-    # mixtral-quant - skip size
+    # mixtral - skip: size in automation
     "mosaicml/mpt-7b-instruct",
     "allenai/OLMo-1B",
     "facebook/opt-125m",
-    # orion - skip size
+    # orion - skip: size in automation
     "microsoft/phi-2",
     "microsoft/Phi-3-small-8k-instruct",
     "Qwen/Qwen-1_8B",
     "Qwen/Qwen1.5-1.8B",
     "Qwen/Qwen2-0.5B-Instruct"
-    # qwen2 moe - skip size
+    # qwen2 moe - skip: size in automation
     "stabilityai/stablelm-2-1_6b-chat",
     "bigcode/starcoder2-3b",
     "xverse/XVERSE-7B",

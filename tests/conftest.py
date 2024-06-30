@@ -437,7 +437,7 @@ class VllmRunner:
         self.model = LLM(
             model=model_name,
             tokenizer=tokenizer_name,
-            trust_remote_code=True,
+            trust_remote_code="falcon" not in model_name,
             dtype=dtype,
             swap_space=swap_space,
             enforce_eager=enforce_eager,
