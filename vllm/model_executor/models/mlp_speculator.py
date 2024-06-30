@@ -125,7 +125,7 @@ class MLPSpeculator(nn.Module):
             # TODO: not yet supporting top_k_tokens_per_head
             previous_hidden_states = states
 
-            logits = self.logits_processor(self.head[head_index].weight,
+            logits = self.logits_processor(self.head[head_index],
                                            states, sampling_metadata)
 
             output = self.sampler(logits.flatten(0, 1), sampling_metadata)
