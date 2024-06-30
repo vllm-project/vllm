@@ -5,8 +5,6 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
-from vllm.multimodal.image import ImagePixelData
-from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
 from ..conftest import IMAGE_ASSETS
@@ -112,6 +110,11 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
+    # don't put this import at the top level
+    # it will call torch.cuda.device_count()
+    from vllm.multimodal.image import ImagePixelData
+    from vllm.multimodal.utils import rescale_image_size
+
     model_id, vlm_config = model_and_config
     hf_images = [asset.for_hf() for asset in image_assets]
     vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
