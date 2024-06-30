@@ -97,6 +97,16 @@ def run_test(
     hf_images = [asset.for_hf() for asset in image_assets]
     vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
 
+    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
+    hf_model_kwargs = {"_attn_implementation": "eager"}
+    with hf_runner(model_id, dtype=dtype,
+                   model_kwargs=hf_model_kwargs) as hf_model:
+        hf_outputs = hf_model.generate_greedy(
+            HF_IMAGE_PROMPTS,
+            max_tokens,
+            images=hf_images,
+            eos_token_id=hf_model.processor.tokenizer.eos_token_id)
+
     vllm_image_prompts = [
         p.replace("<|image_1|>",
                   "<|image|>" * vlm_config.image_feature_size + "<s>")
@@ -113,16 +123,6 @@ def run_test(
         vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
                                                   max_tokens,
                                                   images=vllm_images)
-
-    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
-    hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model_id, dtype=dtype,
-                   model_kwargs=hf_model_kwargs) as hf_model:
-        hf_outputs = hf_model.generate_greedy(
-            HF_IMAGE_PROMPTS,
-            max_tokens,
-            images=hf_images,
-            eos_token_id=hf_model.processor.tokenizer.eos_token_id)
 
     for i in range(len(HF_IMAGE_PROMPTS)):
         hf_output_ids, hf_output_str = hf_outputs[i]
