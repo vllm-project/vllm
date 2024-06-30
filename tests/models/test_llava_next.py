@@ -79,13 +79,16 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str],
 @pytest.mark.parametrize(
     "size_factors",
     [
+        # No image
+        [],
         # Single-scale
         [1.0],
         # Single-scale, batched
         [1.0, 1.0, 1.0],
         # Multi-scale
         [0.25, 0.5, 1.0],
-    ])
+    ],
+)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
