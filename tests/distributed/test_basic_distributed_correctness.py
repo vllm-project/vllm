@@ -15,7 +15,8 @@ TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
 import os
 
 import pytest
-import torch
+
+from vllm.utils import cuda_device_count_stateless
 
 MODELS = [
     os.environ["TEST_DIST_MODEL"],
@@ -23,7 +24,7 @@ MODELS = [
 DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
+@pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
