@@ -233,7 +233,6 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.a13_scale = None
             layer.a2_scale = None
 
-
     def process_weights_after_loading(self, layer: Module) -> None:
         if (not hasattr(layer, "process_after_load")
                 or not layer.process_after_load):
