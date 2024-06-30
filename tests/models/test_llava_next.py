@@ -1,6 +1,5 @@
-import itertools
 import re
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import pytest
 from transformers import AutoTokenizer
@@ -10,7 +9,7 @@ from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import rescale_image_size
 
 from ..conftest import IMAGE_ASSETS
-from .utils import check_outputs_equal
+from .utils import check_outputs_equal_xfail
 
 pytestmark = pytest.mark.vlm
 
@@ -151,36 +150,18 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
             hf_outputs_per_size_factors,
             hf_dummy_outputs_per_size_factors,
     ):
-        best_max_tokens_exc_list: List[Tuple[int,
-                                             Optional[AssertionError]]] = []
-        for i in range(len(image_inputs)):
-            try:
-                hf_output_ids, hf_output_str = hf_outputs[i]
-                vllm_output_ids, vllm_output_str = vllm_to_hf_output(
-                    vllm_outputs[i], vlm_config, model_id)
-                assert hf_output_str == vllm_output_str, (
-                    f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}"
-                )
-                assert hf_output_ids == vllm_output_ids, (
-                    f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
-            except AssertionError as e:
-                num_match_tokens = sum(1 for _ in itertools.takewhile(
-                    lambda pair: pair[0] == pair[1],
-                    zip(hf_output_ids, vllm_output_ids),
-                ))
-                num_prefix_tokens = len(hf_dummy_outputs[i][0]) - 1
-
-                best_max_tokens = num_match_tokens - num_prefix_tokens
-                best_max_tokens_exc_list.append((best_max_tokens, e))
-            else:
-                best_max_tokens_exc_list.append((max_tokens, None))
-
-        best_max_tokens = min(pair[0] for pair in best_max_tokens_exc_list)
-        exc_list = [pair[1] for pair in best_max_tokens_exc_list]
-        if best_max_tokens < 1:
-            raise next(exc for exc in exc_list if exc is not None)
-        if best_max_tokens < max_tokens:
-            pytest.xfail(
-                f"Test only fully passes when max_tokens={best_max_tokens} "
-                f"(instead of {max_tokens}). Errors encountered per item: "
-                f"{exc_list}")
+        check_outputs_equal_xfail(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=[
+                vllm_to_hf_output(vllm_output, vlm_config, model_id)
+                for vllm_output in vllm_outputs
+            ],
+            outputs_num_prefix_tokens=[
+                len(hf_dummy_output[0]) - 1
+                for hf_dummy_output in hf_dummy_outputs
+            ],
+            name_0="hf",
+            name_1="vllm",
+            min_tokens_to_xfail=1,
+            min_tokens_to_pass=max_tokens,
+        )
