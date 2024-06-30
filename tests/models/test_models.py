@@ -10,35 +10,14 @@ import pytest
 from .utils import check_outputs_equal
 
 MODELS = [
-    # baichuan
-    "bigscience/bloom-560m",
-    # chatglm
-    # command-r
-    # dbrx
-    # decilm
-    "deepseek-ai/deepseek-coder-1.3b-instruct",
-    # falcon
-    # "google/gemma-1.1-2b-it", # < broken
+    "facebook/opt-125m",
     "gpt2",
     "bigcode/tiny_starcoder_py",
-    # gpt-j
     "EleutherAI/pythia-70m",
-    # internlm2
-    # jais
-    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    # llava
-    "openbmb/MiniCPM-2B-128k",
-    # mixtral
-    # mixtral-quant
-    # mpt
-    "allenai/OLMo-1B",
-    "facebook/opt-125m",
-    # orion
+    "bigscience/bloom-560m",  # Testing alibi slopes.
     "microsoft/phi-2",
-    "Qwen/Qwen-1_8B",
-    "Qwen/Qwen1.5-1.8B",
-    # qwen2 moe
-    "stabilityai/stablelm-2-1_6b-chat",
+    "stabilityai/stablelm-3b-4e1t",
+    # "allenai/OLMo-1B",  # Broken
     "bigcode/starcoder2-3b",
     "google/gemma-1.1-2b-it",
 ]

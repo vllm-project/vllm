@@ -294,7 +294,7 @@ class OPTForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.model = OPTModel(config, cache_config, quant_config)
-        self.lm_head_weight = self.model.decoder.embed_tokens.weight
+        self.lm_head = self.model.decoder.embed_tokens
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
