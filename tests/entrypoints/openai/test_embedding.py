@@ -2,11 +2,9 @@ import openai
 import pytest
 import ray
 
-from ..utils import RemoteOpenAIServer
+from ...utils import RemoteOpenAIServer
 
 EMBEDDING_MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
-
-pytestmark = pytest.mark.openai
 
 
 @pytest.fixture(scope="module")
