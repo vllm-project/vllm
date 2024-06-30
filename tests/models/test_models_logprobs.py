@@ -13,38 +13,43 @@ from tests.models.utils import check_logprobs_close
 MAX_MODEL_LEN = 1024
 
 MODELS = [
+    # arctic - skip size
     "baichuan-inc/Baichuan2-7B-Chat",
     "bigscience/bloom-560m",
     "THUDM/chatglm3-6b",
-    # command-r
-    # dbrx
+    # commandr - skip size
+    # dbrx - skip size
     "Deci/DeciLM-7B-instruct",
+    # deepseek_v2 - skip size
     "deepseek-ai/deepseek-coder-1.3b-instruct",
     "tiiuae/falcon-7b-instruct",
     "google/gemma-1.1-2b-it",
-    "gpt2",
+    "google/gemma-2-9b-it",
     "bigcode/tiny_starcoder_py",
     "EleutherAI/gpt-j-6b",
     "EleutherAI/pythia-70m",
+    "gpt2",
     "internlm/internlm2-chat-7b",
-    # jais
+    # jais - skip size
     "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    # llava
     "openbmb/MiniCPM-2B-128k",
-    # mixtral
-    # mixtral-quant
+    # mixtral - skip size
+    # mixtral-quant - skip size
     "mosaicml/mpt-7b-instruct",
     "allenai/OLMo-1B",
     "facebook/opt-125m",
-    # orion
+    # orion - skip size
     "microsoft/phi-2",
+    "microsoft/Phi-3-small-8k-instruct",
     "Qwen/Qwen-1_8B",
     "Qwen/Qwen1.5-1.8B",
-    # qwen2 moe
+    "Qwen/Qwen2-0.5B-Instruct"
+    # qwen2 moe - skip size
     "stabilityai/stablelm-2-1_6b-chat",
     "bigcode/starcoder2-3b",
     "xverse/XVERSE-7B",
 ]
+
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -62,9 +67,7 @@ def test_models(
 ) -> None:
     # Run HF.
     hf_model = hf_runner(model_name=model,
-                         dtype=dtype,
-                         max_model_len=MAX_MODEL_LEN,
-                         tensor_parallel_size=1)
+                         dtype=dtype)
     hf_outputs = hf_model.generate_greedy_logprobs(example_prompts, max_tokens,
                                                    num_logprobs)
     del hf_model

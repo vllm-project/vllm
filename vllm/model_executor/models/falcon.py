@@ -401,7 +401,6 @@ class FalconForCausalLM(nn.Module):
                 config.hidden_size,
                 quant_config=quant_config,
             )
-            self.lm_head_weight = self.lm_head.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
