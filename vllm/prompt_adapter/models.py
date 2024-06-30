@@ -24,18 +24,20 @@ def get_prompt_adapter_id():
     _GLOBAL_PROMPT_ADAPTER_ID += 1
     return _GLOBAL_PROMPT_ADAPTER_ID
 
+
 def convert_to_embedding_indices(indices):
     embedding_indices = []
     count = 0
-    
+
     for value in indices:
         if value == -1:
             count = 0
         else:
             embedding_indices.append([value, count])
             count += 1
-    
+
     return torch.tensor(embedding_indices)
+
 
 def convert_mapping(
     mapping: PromptAdapterMapping,
@@ -85,7 +87,7 @@ class PromptAdapterModel(AdapterModel):
             device: str = "cuda",
             dtype: Optional[torch.dtype] = None) -> "PromptAdapterModel":
         from peft.utils import load_peft_weights
-        
+
         adapters_weights = load_peft_weights(adapter_model_path, device)
         prompt_embedding = adapters_weights["prompt_embeddings"].to(dtype)
         num_virtual_tokens = prompt_embedding.shape[0]
@@ -173,8 +175,8 @@ class PromptAdapterModelManager(AdapterModelManager):
         self._registered_adapters[prompt_adapter.id] = prompt_adapter
 
     def _set_adapter_mapping(self, mapping: PromptAdapterMapping) -> None:
-        base_indices, base_embedding_indices = convert_mapping(mapping,
-                                       self.prompt_adapter_index_to_id)
+        base_indices, base_embedding_indices = convert_mapping(
+            mapping, self.prompt_adapter_index_to_id)
         for k, v in self.modules.items():
             v.set_mapping(base_indices, base_embedding_indices)
 
@@ -189,7 +191,7 @@ class PromptAdapterModelManager(AdapterModelManager):
                     self.model, module_name, new_module)
                 self.register_module(module.__class__.__name__,
                                      replaced_module)
-                replaced_module.set_mapping(self.base_indices, 
+                replaced_module.set_mapping(self.base_indices,
                                             self.base_embedding_indices)
                 break
 

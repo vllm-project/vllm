@@ -39,7 +39,7 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
             prompt_adapter_config.max_prompt_adapters,
             dtype=torch.long,
             device=self.emb_layer.weight.device)
-        
+
         self.indices_gpu: torch.Tensor
         self.embedding_indices_gpu: torch.Tensor
 
@@ -62,17 +62,19 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
         prompt_indices: torch.Tensor,
         prompt_embedding_indices: torch.Tensor,
     ):
-        self.indices_gpu = prompt_indices.to(device=self.emb_layer.weight.device)
-        self.embedding_indices_gpu = prompt_embedding_indices.to(device=self.emb_layer.weight.device)
-
+        self.indices_gpu = prompt_indices.to(
+            device=self.emb_layer.weight.device)
+        self.embedding_indices_gpu = prompt_embedding_indices.to(
+            device=self.emb_layer.weight.device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         hidden_states = self.base_layer(x)
         if self.embedding_indices_gpu.numel():
             valid_mask = self.indices_gpu != -1
-            gathered_embeddings = self.embeddings_tensors[self.embedding_indices_gpu[:,0],
-                                                          self.embedding_indices_gpu[:,1]]
-            
+            gathered_embeddings = self.embeddings_tensors[
+                self.embedding_indices_gpu[:, 0],
+                self.embedding_indices_gpu[:, 1]]
+
             # Update hidden states
             hidden_states[valid_mask] = gathered_embeddings
         return hidden_states
