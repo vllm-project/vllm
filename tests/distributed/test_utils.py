@@ -1,29 +1,36 @@
-import os
-
 import ray
 
-from vllm.utils import cuda_device_count_stateless
+import vllm.envs as envs
+from vllm.utils import (cuda_device_count_stateless, is_hip,
+                        update_environment_variables)
 
 
 @ray.remote
-class _CUDADeviceCountStatelessTestActor():
+class _CUDADeviceCountStatelessTestActor:
 
     def get_count(self):
         return cuda_device_count_stateless()
 
     def set_cuda_visible_devices(self, cuda_visible_devices: str):
-        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+        update_environment_variables(
+            {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
 
     def get_cuda_visible_devices(self):
-        return os.environ["CUDA_VISIBLE_DEVICES"]
+        return envs.CUDA_VISIBLE_DEVICES
 
 
 def test_cuda_device_count_stateless():
     """Test that cuda_device_count_stateless changes return value if
     CUDA_VISIBLE_DEVICES is changed."""
-
-    actor = _CUDADeviceCountStatelessTestActor.options(num_gpus=2).remote()
-    assert ray.get(actor.get_cuda_visible_devices.remote()) == "0,1"
+    if is_hip():
+        # Set HIP_VISIBLE_DEVICES == CUDA_VISIBLE_DEVICES. Conversion
+        # is handled by `update_environment_variables`
+        update_environment_variables(
+            {"CUDA_VISIBLE_DEVICES": envs.CUDA_VISIBLE_DEVICES})
+    actor = _CUDADeviceCountStatelessTestActor.options(  # type: ignore
+        num_gpus=2).remote()
+    assert sorted(ray.get(
+        actor.get_cuda_visible_devices.remote()).split(",")) == ["0", "1"]
     assert ray.get(actor.get_count.remote()) == 2
     ray.get(actor.set_cuda_visible_devices.remote("0"))
     assert ray.get(actor.get_count.remote()) == 1

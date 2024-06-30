@@ -1,11 +1,18 @@
+import contextlib
 from typing import Dict, Optional, Type
 
-from transformers import PretrainedConfig
+from transformers import GenerationConfig, PretrainedConfig
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             JAISConfig, MPTConfig, RWConfig)
+                                             JAISConfig, MLPSpeculatorConfig,
+                                             MPTConfig, RWConfig)
+
+if VLLM_USE_MODELSCOPE:
+    from modelscope import AutoConfig
+else:
+    from transformers import AutoConfig
 
 logger = init_logger(__name__)
 
@@ -16,7 +23,12 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
+    "mlp_speculator": MLPSpeculatorConfig,
 }
+
+for name, cls in _CONFIG_REGISTRY.items():
+    with contextlib.suppress(ValueError):
+        AutoConfig.register(name, cls)
 
 
 def get_config(model: str,
@@ -26,10 +38,6 @@ def get_config(model: str,
                rope_scaling: Optional[dict] = None,
                rope_theta: Optional[float] = None) -> PretrainedConfig:
     try:
-        if VLLM_USE_MODELSCOPE:
-            from modelscope import AutoConfig
-        else:
-            from transformers import AutoConfig
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
@@ -72,3 +80,25 @@ def get_hf_text_config(config: PretrainedConfig):
         return config.text_config
     else:
         return config
+
+
+def try_get_generation_config(
+    model: str,
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+) -> Optional[GenerationConfig]:
+    try:
+        return GenerationConfig.from_pretrained(
+            model,
+            revision=revision,
+        )
+    except OSError:  # Not found
+        try:
+            config = get_config(
+                model,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+            )
+            return GenerationConfig.from_model_config(config)
+        except OSError:  # Not found
+            return None

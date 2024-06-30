@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <torch/library.h>
 
 void paged_attention_v1(
@@ -49,6 +50,8 @@ void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
+void gelu_quick(torch::Tensor& out, torch::Tensor& input);
+
 #ifndef USE_ROCM
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
@@ -90,9 +93,12 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits);
 
+bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
+
 void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
-                       torch::Tensor const& b_scales);
+                       torch::Tensor const& b_scales,
+                       c10::optional<torch::Tensor> const& bias);
 
 #endif
 

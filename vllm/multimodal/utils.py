@@ -1,6 +1,7 @@
 import base64
 from io import BytesIO
 from typing import Optional, Union
+from urllib.parse import urlparse
 
 import aiohttp
 from PIL import Image
@@ -28,6 +29,10 @@ class ImageFetchAiohttp:
         """Load PIL image from a url or base64 encoded openai GPT4V format"""
 
         if image_url.startswith('http'):
+            parsed_url = urlparse(image_url)
+            if parsed_url.scheme not in ["http", "https"]:
+                raise ValueError("Invalid 'image_url': A valid 'image_url' "
+                                 "must have scheme 'http' or 'https'.")
             # Avoid circular import
             from vllm import __version__ as VLLM_VERSION
 
@@ -44,8 +49,9 @@ class ImageFetchAiohttp:
             image = load_image_from_base64(image_url.split(',', 1)[1])
 
         else:
-            raise ValueError("Invalid image url: A valid image url must start "
-                             "with either 'data:image' or 'http'.")
+            raise ValueError(
+                "Invalid 'image_url': A valid 'image_url' must start "
+                "with either 'data:image' or 'http'.")
 
         return image
 
@@ -56,7 +62,7 @@ async def async_get_and_parse_image(image_url: str) -> ImagePixelData:
 
 
 def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:
-    """encode image to base64 format."""
+    """Encode a pillow image to base64 format."""
 
     buffered = BytesIO()
     if format == 'JPEG':
@@ -79,6 +85,8 @@ def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
 
     if config.hf_config.model_type in ("llava", "llava_next"):
         full_prompt = f"{image_prompt}\n{text_prompt}"
+    elif config.hf_config.model_type == 'phi3_v':
+        full_prompt = f"{image_prompt}<s>\n{text_prompt}"
     else:
         raise ValueError(
             f"Unsupported model type: {config.hf_config.model_type}")
