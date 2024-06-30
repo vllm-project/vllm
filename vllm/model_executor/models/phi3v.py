@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from functools import lru_cache
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import numpy as np
@@ -21,7 +22,7 @@ import torch.nn as nn
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -340,6 +341,25 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
     return seq_data, mm_data
 
 
+# Reserve this function to also handle placeholders for additional images
+# [ref: PR #5820]
+@lru_cache
+def _get_image_placeholder_token_ids(model_config: ModelConfig,
+                                     idx: int) -> List[int]:
+    assert idx > 0
+
+    tokenizer = cached_get_tokenizer(model_config.tokenizer)
+
+    # We need to get the token for "<", not "▁<"
+    # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/raw/main/tokenizer.json
+    a_token_id, = tokenizer.encode("a", add_special_tokens=False)
+    a_token_id_, *image_placeholder_token_ids = tokenizer.encode(
+        f"a<|image_{idx}|>", add_special_tokens=False)
+    assert a_token_id == a_token_id_
+
+    return image_placeholder_token_ids
+
+
 def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or not isinstance(
@@ -367,14 +387,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = image_features.shape[-2]
 
     prompt_token_ids = llm_inputs["prompt_token_ids"]
-    tokenizer = cached_get_tokenizer(model_config.tokenizer)
-
-    # We need to get the token for "<", not "▁<"
-    # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/raw/main/tokenizer.json
-    a_token_id, = tokenizer.encode("a", add_special_tokens=False)
-    a_token_id_, *image_1_token_ids = tokenizer.encode(
-        "a<|image_1|>", add_special_tokens=False)
-    assert a_token_id == a_token_id_
+    image_1_token_ids = _get_image_placeholder_token_ids(model_config, idx=1)
 
     new_token_ids: List[int] = []
     for i in range(len(prompt_token_ids) - len(image_1_token_ids) + 1):
