@@ -89,7 +89,8 @@ class LinearMethodBase(QuantizeMethodBase):
                   layer: torch.nn.Module,
                   x: torch.Tensor,
                   router_logits: torch.Tensor,
-                  top_k: int) -> torch.Tensor:
+                  top_k: int,
+                  renormalize: bool = True) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -157,14 +158,15 @@ class UnquantizedLinearMethod(LinearMethodBase):
                   layer: torch.nn.Module,
                   x: torch.Tensor,
                   router_logits: torch.Tensor,
-                  top_k: int) -> torch.Tensor:
+                  top_k: int,
+                  renormalize: bool = True) -> torch.Tensor:
 
         return fused_moe(x, 
                          layer.w13_weight,
                          layer.w2_weight,
                          router_logits,
                          top_k,
-                         renormalize=True,
+                         renormalize=renormalize,
                          inplace=True)
 
 
@@ -876,7 +878,9 @@ class FusedMoELinear(torch.nn.Module):
         hidden_size: int,
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig]=None,
+        reduce_results: bool = False,
+        renormalize: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
 
@@ -886,6 +890,8 @@ class FusedMoELinear(torch.nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = top_k
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
+        self.reduce_results = reduce_results
+        self.renormalize = renormalize
         
         if quant_config is None:
             self.quant_method: Optional[
@@ -906,22 +912,28 @@ class FusedMoELinear(torch.nn.Module):
                       param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor,
                       weight_name: str,
+                      shard_id: int,
                       expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
         shard_size = self.intermediate_size_per_partition
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
 
-        # FIXME: This is going to be brittle.
-        if weight_name.endswith("w1.weight"):
+        # w1, gate_proj case: Load into first shard of w13.
+        if shard_id == 0:
             param_data[expert_id, 0:shard_size, :] = loaded_weight[shard, :]
-        if weight_name.endswith("w3.weight"):
+        # w3, up_proj case: Load into second shard of w13.
+        elif shard_id == 2:
             param_data[expert_id,
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
-        if weight_name.endswith("w2.weight"):
+        # w2, down_proj case: Load into only shard of w2.
+        elif shard_id == 1:
             param_data[expert_id, :, :] = loaded_weight[:, shard]
+        else:
+            raise ValueError(f"Shard id must be in [0,1,2] but got {shard_id}")
 
-        # FIXME: This is going to be brittle.
+        # FIXME(robertgshaw2-neuralmagic): Overfit to Mixtral. 
+        # Follow up PR to enable fp8 for other MoE models.
         if "input_scale" in weight_name or "w2.weight_scale" in weight_name:
             if param_data[expert_id] != 1 and (param_data[expert_id] -
                                                loaded_weight).abs() > 1e-5:
@@ -936,7 +948,6 @@ class FusedMoELinear(torch.nn.Module):
             assert "w1" in weight_name or "w3" in weight_name
             shard_id = 0 if "w1" in weight_name else 1
             param_data[expert_id][shard_id] = loaded_weight
-        
 
 
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
@@ -945,9 +956,10 @@ class FusedMoELinear(torch.nn.Module):
         final_hidden_states = self.quant_method.apply_moe(self,
                                                           x=hidden_states,
                                                           router_logits=router_logits,
-                                                          top_k=self.top_k)
-    
-        if self.tp_size > 1:
+                                                          top_k=self.top_k,
+                                                          renormalize=self.renormalize)
+
+        if self.reduce_results and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 

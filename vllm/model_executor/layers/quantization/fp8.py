@@ -393,14 +393,15 @@ class Fp8LinearMethod(LinearMethodBase):
                   layer: torch.nn.Module,
                   x: torch.Tensor,
                   router_logits: torch.Tensor,
-                  top_k: int) -> torch.Tensor:
+                  top_k: int,
+                  renormalize: bool=True) -> torch.Tensor:
 
         return fused_moe(x, 
                          layer.w13_weight,
                          layer.w2_weight,
                          router_logits,
                          top_k,
-                         renormalize=True,
+                         renormalize=renormalize,
                          inplace=True,
                          use_fp8=True,
                          w1_scale=layer.w13_scale,
