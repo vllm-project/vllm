@@ -221,8 +221,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                                           self.embedding_dim,
                                           self.num_embeddings_padded,
                                           params_dtype=params_dtype,
-                                          weight_loader=self.weight_loader,
-                                          parallel_dim=0)
+                                          weight_loader=self.weight_loader)
 
     @classmethod
     def _get_indices(cls, vocab_size_padded: int, org_vocab_size_padded: int,
@@ -311,20 +310,22 @@ class VocabParallelEmbedding(torch.nn.Module):
             assert param.data.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
             return
-
+        
+        # Shard indexes for loading the weight 
         start_idx = self.shard_indices.org_vocab_start_index
         shard_size = self.shard_indices.org_vocab_end_index - start_idx
 
         # If param packed on the same dim we are sharding on, then
         # need to adjust offsets of loaded weight by pack_factor.
         if packed_dim is not None and packed_dim == output_dim:
-            assert loaded_weight.shape[output_dim] == (self.org_vocab_size //
-                                                       param.pack_factor)
+            assert loaded_weight.shape[output_dim] == (
+                self.org_vocab_size // param.pack_factor)
             start_idx = start_idx // param.pack_factor
             shard_size = shard_size // param.pack_factor
         else:
             assert loaded_weight.shape[output_dim] == self.org_vocab_size
-
+        
+        # Copy the data.
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0]:].data.fill_(0)
@@ -389,7 +390,7 @@ class ParallelLMHead(VocabParallelEmbedding):
                 torch.empty(self.num_embeddings_per_partition,
                             dtype=params_dtype))
             set_weight_attrs(self.bias, {
-                "parallel_dim": 0,
+                "output_dim": 0,
                 "weight_loader": self.weight_loader,
             })
         else:
