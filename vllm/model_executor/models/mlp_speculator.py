@@ -8,7 +8,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import MLPSpeculatorConfig
@@ -73,7 +73,9 @@ class MLPSpeculator(nn.Module):
         ])
 
         self.head = nn.ModuleList([
-            nn.Linear(self.inner_dim, self.vocab_size, bias=False)
+            ParallelLMHead(num_embeddings=self.vocab_size,
+                           embedding_dim=self.inner_dim,
+                           bias=False)
             for _ in range(self.max_speculative_tokens)
         ])
         self.ln = nn.ModuleList([
@@ -125,8 +127,8 @@ class MLPSpeculator(nn.Module):
             # TODO: not yet supporting top_k_tokens_per_head
             previous_hidden_states = states
 
-            logits = self.logits_processor(self.head[head_index],
-                                           states, sampling_metadata)
+            logits = self.logits_processor(self.head[head_index], states,
+                                           sampling_metadata)
 
             output = self.sampler(logits.flatten(0, 1), sampling_metadata)
             last_tokens = output.sampled_token_ids
