@@ -1,6 +1,6 @@
 import itertools
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Type
 
 import pytest
 from transformers import AutoConfig, AutoTokenizer
@@ -11,7 +11,7 @@ from vllm.multimodal.image import ImagePixelData
 from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
 
-from ..conftest import IMAGE_ASSETS
+from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 
 pytestmark = pytest.mark.vlm
 
@@ -74,21 +74,18 @@ if is_cpu():
     target_dtype = "bfloat16"
 
 
-@pytest.mark.parametrize("model_and_config", model_and_vl_config)
-@pytest.mark.parametrize(
-    "size_factors",
-    [
-        # Single-scale
-        [1.0],
-        # Single-scale, batched
-        [1.0, 1.0, 1.0],
-        # Multi-scale
-        [0.25, 0.5, 1.0],
-    ])
-@pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_tokens", [128])
-def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
-                size_factors, dtype: str, max_tokens: int) -> None:
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model_and_config: Tuple[str, VisionLanguageConfig],
+    *,
+    size_factors: List[float],
+    dtype: str,
+    max_tokens: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
@@ -181,3 +178,30 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
             f"Test only fully passes when max_tokens={best_max_tokens} "
             f"(instead of {max_tokens}). Errors encountered per item: "
             f"{exc_list}")
+
+
+@pytest.mark.parametrize("model_and_config", model_and_vl_config)
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # Single-scale
+        [1.0],
+        # Single-scale, batched
+        [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
+    ])
+@pytest.mark.parametrize("dtype", [target_dtype])
+@pytest.mark.parametrize("max_tokens", [128])
+def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
+                size_factors, dtype: str, max_tokens: int) -> None:
+    run_test(
+        hf_runner,
+        vllm_runner,
+        image_assets,
+        model_and_config,
+        size_factors=size_factors,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        tensor_parallel_size=1,
+    )
