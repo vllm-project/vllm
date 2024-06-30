@@ -16,7 +16,7 @@ MODELS = [
     # arctic - skip size
     "baichuan-inc/Baichuan2-7B-Chat",
     "bigscience/bloom-560m",
-    "THUDM/chatglm3-6b",
+    # "THUDM/chatglm3-6b", - skip - hf implementation broken
     # commandr - skip size
     # dbrx - skip size
     "Deci/DeciLM-7B-instruct",
@@ -51,7 +51,6 @@ MODELS = [
 ]
 
 
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -66,10 +65,9 @@ def test_models(
     num_logprobs: int,
 ) -> None:
     # Run HF.
-    hf_model = hf_runner(model_name=model,
-                         dtype=dtype)
-    hf_outputs = hf_model.generate_greedy_logprobs(example_prompts, max_tokens,
-                                                   num_logprobs)
+    hf_model = hf_runner(model_name=model, dtype=dtype)
+    hf_outputs = hf_model.generate_greedy_logprobs_limit(
+        example_prompts, max_tokens, num_logprobs)
     del hf_model
 
     # Run vLLM.

@@ -363,13 +363,11 @@ class CohereForCausalLM(nn.Module):
         is_not_lora = hasattr(self.model.embed_tokens, 'weight')
         if is_not_lora:
             logits = self.logits_processor(self.model.embed_tokens,
-                                           hidden_states,
-                                           sampling_metadata)
+                                           hidden_states, sampling_metadata)
         else:
             logits = self.logits_processor(self.model.embed_tokens.base_layer,
-                                           hidden_states,
-                                           sampling_metadata)
-        
+                                           hidden_states, sampling_metadata)
+
         return logits
 
     def sample(
