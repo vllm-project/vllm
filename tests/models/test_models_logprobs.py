@@ -7,6 +7,7 @@ Marlin/GPTQ models are in the top 3 selections of each other.
 Run `pytest tests/models/test_models_medium_logprobs.py`.
 """
 import pytest
+import torch
 
 from tests.models.utils import check_logprobs_close
 
@@ -50,6 +51,8 @@ MODELS = [
 ]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(),
+                    reason="Fp16 is not supported in cpu automation")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
