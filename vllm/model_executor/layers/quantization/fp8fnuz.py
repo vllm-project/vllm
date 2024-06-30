@@ -1,9 +1,8 @@
-from typing import Any, Dict, List, Optional, Tuple, Union, Iterator
+from typing import List, Optional, Tuple, Union
 
 import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
-import torch.nn.functional as F
 
 import vllm.envs as env
 from vllm import _custom_ops as ops
@@ -254,7 +253,7 @@ def _save_shapes(m: int, n: int, k: int):
     if is_hip() and env.VLLM_TUNE_FP8 and env.LOCAL_RANK == 0:
         try:
             df = pd.read_csv(env.VLLM_FP8_UNTUNED_FILE)
-        except:
+        except FileNotFoundError:
             df = pd.DataFrame(columns=["M", "N", "K"])
         df = pd.concat([df, pd.DataFrame({
             "M": [m],

@@ -274,13 +274,14 @@ class DefaultModelLoader(BaseModelLoader):
                                                model,
                                                "fall_back_to_pt_during_load",
                                                True)), )
-            load_quantized_weights_method = getattr(model, "load_quantized_weights", "None")
-            if model_config.quantization == 'fp8' and load_quantized_weights_method is not None:
-                quant_config = _get_quantization_config(model_config, self.load_config)
-                model.load_quantized_weights(
-                        model_config.model,
-                        quant_config
-                )
+            load_quantized_weights_method = getattr(model,
+                                                    "load_quantized_weights",
+                                                    "None")
+            if (model_config.quantization == 'fp8'
+                    and load_quantized_weights_method is not None):
+                quant_config = _get_quantization_config(
+                    model_config, self.load_config)
+                model.load_quantized_weights(model_config.model, quant_config)
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)

@@ -47,7 +47,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
-from vllm.model_executor.model_loader.weight_utils import safetensors_weights_iterator
+from vllm.model_executor.model_loader.weight_utils import (
+    safetensors_weights_iterator)
 from vllm.utils import is_hip, print_warning_once
 
 from .interfaces import SupportsLoRA
