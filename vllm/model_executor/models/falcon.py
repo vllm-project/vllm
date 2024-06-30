@@ -394,11 +394,12 @@ class FalconForCausalLM(nn.Module):
                                     if config.tie_word_embeddings is not None
                                     else True)
         if self.tie_word_embeddings:
-            self.lm_head_weight = self.transformer.word_embeddings.weight
+            self.lm_head = self.transformer.word_embeddings
         else:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
+                quant_config=quant_config,
             )
             self.lm_head_weight = self.lm_head.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
