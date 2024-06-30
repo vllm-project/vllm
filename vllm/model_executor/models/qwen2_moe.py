@@ -99,15 +99,13 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {config.num_experts}.")
 
-        self.experts = FusedMoELinear(
-            num_experts=config.num_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-        )
+        self.experts = FusedMoELinear(num_experts=config.num_experts,
+                                      top_k=config.num_experts_per_tok,
+                                      hidden_size=config.hidden_size,
+                                      intermediate_size=config.moe_intermediate_size,
+                                      reduce_results=False,
+                                      renormalize=config.norm_topk_prob,
+                                      quant_config=quant_config)
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      self.n_routed_experts,
