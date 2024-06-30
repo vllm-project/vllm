@@ -320,6 +320,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.fork()
 
+        # Track child seq
+        self._computed_blocks_tracker.add_seq(child_seq.seq_id)
+        self._last_access_blocks_tracker.add_seq(child_seq.seq_id)
+
     def can_swap_in(self, seq_group: SequenceGroup,
                     num_lookahead_slots: int) -> AllocStatus:
         """Returns the AllocStatus for the given sequence_group 
