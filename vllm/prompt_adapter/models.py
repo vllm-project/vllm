@@ -24,6 +24,18 @@ def get_prompt_adapter_id():
     _GLOBAL_PROMPT_ADAPTER_ID += 1
     return _GLOBAL_PROMPT_ADAPTER_ID
 
+def convert_to_embedding_indices(indices):
+    embedding_indices = []
+    count = 0
+    
+    for value in indices:
+        if value == -1:
+            count = 0
+        else:
+            embedding_indices.append([value, count])
+            count += 1
+    
+    return torch.tensor(embedding_indices)
 
 def convert_mapping(
     mapping: PromptAdapterMapping,
@@ -46,11 +58,13 @@ def convert_mapping(
         for idx, id_ in enumerate(prompt_adapter_index_to_id)
         if id_ is not None
     }
-    pa_indices = [
+    pa_indices = torch.tensor([
         id_to_index.get(id_, -1) if id_ > 0 else -1
         for id_ in mapping.index_mapping
-    ]
-    return torch.tensor(pa_indices)
+    ])
+
+    pa_embedding_mapping = convert_to_embedding_indices(pa_indices)
+    return pa_indices, pa_embedding_mapping
 
 
 class PromptAdapterModel(AdapterModel):
@@ -104,6 +118,8 @@ class PromptAdapterModelManager(AdapterModelManager):
         self.adapter_type = 'PromptAdapter'
 
         self.base_indices = torch.tensor([-1])
+        self.base_embedding_indices = torch.tensor([-1])
+
         self.modules: Dict[str, nn.Module] = {}
         self._create_prompt_adapter_modules()
         self._last_mapping: Optional[PromptAdapterMapping] = None
@@ -157,10 +173,10 @@ class PromptAdapterModelManager(AdapterModelManager):
         self._registered_adapters[prompt_adapter.id] = prompt_adapter
 
     def _set_adapter_mapping(self, mapping: PromptAdapterMapping) -> None:
-        base_indices = convert_mapping(mapping,
+        base_indices, base_embedding_indices = convert_mapping(mapping,
                                        self.prompt_adapter_index_to_id)
         for k, v in self.modules.items():
-            v.set_mapping(base_indices)
+            v.set_mapping(base_indices, base_embedding_indices)
 
     def _create_prompt_adapter_modules(self):
         for module_name, module in self.model.named_modules(
@@ -173,7 +189,8 @@ class PromptAdapterModelManager(AdapterModelManager):
                     self.model, module_name, new_module)
                 self.register_module(module.__class__.__name__,
                                      replaced_module)
-                replaced_module.set_mapping(self.base_indices)
+                replaced_module.set_mapping(self.base_indices, 
+                                            self.base_embedding_indices)
                 break
 
     def replace_submodule(self, model: nn.Module, module_name: str,

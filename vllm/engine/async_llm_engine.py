@@ -648,6 +648,8 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
+            prompt_adapter_request: Prompt Adapter request to use 
+                                            for generation, if any.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine

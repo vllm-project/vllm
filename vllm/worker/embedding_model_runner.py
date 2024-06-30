@@ -69,8 +69,9 @@ class EmbeddingModelRunner(
         if self.prompt_adapter_config:
             assert model_input.prompt_adapter_requests is not None
             assert model_input.prompt_adapter_mapping is not None
-            self.set_active_prompt_adapters(model_input.prompt_adapter_requests,
-                                            model_input.prompt_adapter_mapping)
+            self.set_active_prompt_adapters(
+                model_input.prompt_adapter_requests,
+                model_input.prompt_adapter_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None

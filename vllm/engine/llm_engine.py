@@ -273,6 +273,8 @@ class LLMEngine:
                     # Feature flags
                     "enable_lora":
                     bool(lora_config),
+                    "enable_prompt_adapter":
+                    bool(prompt_adapter_config),
                     "enable_prefix_caching":
                     cache_config.enable_prefix_caching,
                     "enforce_eager":

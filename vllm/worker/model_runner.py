@@ -986,6 +986,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     )
                     self.set_active_loras(set(), lora_mapping)
 
+                if self.prompt_adapter_config:
+                    pa_mapping = PromptAdapterMapping(
+                        [-1] * batch_size,
+                        [-1] * batch_size,
+                    )
+                    self.set_active_prompt_adapters(set(), pa_mapping)
+
                 graph_runner = CUDAGraphRunner(self.model)
                 hidden_states = graph_runner.capture(
                     input_tokens[:batch_size],

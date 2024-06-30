@@ -39,8 +39,9 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
             prompt_adapter_config.max_prompt_adapters,
             dtype=torch.long,
             device=self.emb_layer.weight.device)
+        
         self.indices_gpu: torch.Tensor
-        self.flag: bool = False
+        self.embedding_indices_gpu: torch.Tensor
 
     def reset_prompt_adapter(self, index: int):
         self.embeddings_tensors[index] = 0
@@ -58,21 +59,20 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
 
     def set_mapping(
         self,
-        base_indices: torch.Tensor,
+        prompt_indices: torch.Tensor,
+        prompt_embedding_indices: torch.Tensor,
     ):
-        self.indices_gpu = base_indices.to(device=self.emb_layer.weight.device)
-        self.flag = (torch.sum(self.indices_gpu) / self.indices_gpu.shape[0] !=
-                     -1).item()
+        self.indices_gpu = prompt_indices.to(device=self.emb_layer.weight.device)
+        self.embedding_indices_gpu = prompt_embedding_indices.to(device=self.emb_layer.weight.device)
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         hidden_states = self.base_layer(x)
-        if self.flag:
-            unique_indices = torch.unique(self.indices_gpu)
-            for idx in unique_indices:
-                if idx != -1:
-                    pa_idx = self.embeddings_tensors[idx][:self.
-                                                          adapter_lengths[idx]]
-                    mask = (self.indices_gpu == idx)
-                    n_adapters = sum(mask) // pa_idx.shape[0]
-                    hidden_states[mask] = pa_idx.repeat(n_adapters, 1)
+        if self.embedding_indices_gpu.numel():
+            valid_mask = self.indices_gpu != -1
+            gathered_embeddings = self.embeddings_tensors[self.embedding_indices_gpu[:,0],
+                                                          self.embedding_indices_gpu[:,1]]
+            
+            # Update hidden states
+            hidden_states[valid_mask] = gathered_embeddings
         return hidden_states
