@@ -115,7 +115,7 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.register_parameter(scale_name, scale)
         set_weight_attrs(scale, {
             **extra_weight_attrs,
-            "is_per_tensor_scale": True,
+            "needs_scalar_to_array": True,
         })
 
     def create_weights(
@@ -189,16 +189,17 @@ class Fp8LinearMethod(LinearMethodBase):
             #   Loop over logical weights, requantizing with single scale.
             max_w_scale = layer.weight_scale.max()
 
-            # QKV / MLP is fused in the on disk checkpoint if any of the 
-            # weight scales are still set to the default since we initalize
+            # QKV / MLP is fused in the on disk checkpoint if any of the
+            # weight scales are still set to the default since we initialize
             # N weight scales for N shards but we only load 1 weight scale
             # from disk in this case. As a result, we skip dequant -> requant
             # since we already have quantized QKV together.
-            # Sample Model: nm-testing/Phi-3-mini-128k-instruct-FP8
-            fused_module_in_checkpoint = (
-                layer.weight_scale[-1] != torch.finfo(torch.float8_e4m3fn).min)
+            # Sample Model with fused checkpoint:
+            #   * nm-testing/Phi-3-mini-128k-instruct-FP8
+            unfused_module_in_checkpoint = (
+                layer.weight_scale[-1] > torch.finfo(torch.float8_e4m3fn).min)
 
-            if not fused_module_in_checkpoint:
+            if unfused_module_in_checkpoint:
                 start = 0
                 for idx, logical_width in enumerate(layer.logical_widths):
                     end = start + logical_width
