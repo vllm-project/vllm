@@ -17,11 +17,12 @@ import os
 import pytest
 import torch
 
+from ..models.utils import check_outputs_equal
+
 MODELS = [
     os.environ["TEST_DIST_MODEL"],
 ]
 DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
-VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -39,24 +40,19 @@ def test_models(
 ) -> None:
     distributed_executor_backend = os.getenv(DISTRIBUTED_EXECUTOR_BACKEND)
 
-    backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
-    enforce_eager = backend_by_env_var == "FLASHINFER"
-
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
     with vllm_runner(model,
                      dtype=dtype,
                      tensor_parallel_size=2,
-                     enforce_eager=enforce_eager,
                      distributed_executor_backend=distributed_executor_backend
                      ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
-    for i in range(len(example_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    check_outputs_equal(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
