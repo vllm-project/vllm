@@ -178,9 +178,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
 
 #ifdef USE_ROCM
-  ops.def("fp8_mm(Tensor a, Tensor b, Tensor result,"
-          "       Tensor scale_a, Tensor scale_b,"
-          "       Tensor? scale_result, int solidx) -> ()");
+  ops.def(
+      "fp8_mm(Tensor a, Tensor b, Tensor result,"
+      "       Tensor scale_a, Tensor scale_b,"
+      "       Tensor? scale_result, int solidx) -> ()");
   ops.impl("fp8_mm", torch::kCUDA, &fp8_mm);
 #endif
 
@@ -244,7 +245,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        str kv_cache_dtype) -> ()");
   cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
                  &reshape_and_cache_flash);
-
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {

@@ -124,15 +124,13 @@ void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
 void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                               torch::Tensor& scale);
 
-void convert_fp8(torch::Tensor& dst_data, torch::Tensor const& src_data, 
+void convert_fp8(torch::Tensor& dst_data, torch::Tensor const& src_data,
                  torch::Tensor const& scale);
 
 #ifdef USE_ROCM
-void fp8_mm(torch::Tensor& a, torch::Tensor& b, 
-                     torch::Tensor& result,
-                     torch::Tensor& scale_a, torch::Tensor& scale_b, 
-                     const c10::optional<torch::Tensor>& scale_result,
-                     int64_t solidx);
+void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
+            torch::Tensor& scale_a, torch::Tensor& scale_b,
+            const c10::optional<torch::Tensor>& scale_result, int64_t solidx);
 
 #endif
 
