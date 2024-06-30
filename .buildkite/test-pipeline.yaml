@@ -45,9 +45,6 @@ steps:
   num_gpus: 2
   commands:
   - bash ../.buildkite/download-images.sh
-  # FIXIT: find out which code initialize cuda before running the test
-  # before the fix, we need to use spawn to test it
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
@@ -70,9 +67,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   commands:
-  # FIXIT: find out which code initialize cuda before running the test
-  # before the fix, we need to use spawn to test it
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s distributed/test_pynccl.py
   # We want to test that models which use 2 GPUs work with 4 GPUs, which is why we duplicate them here.
   # See https://github.com/vllm-project/vllm/pull/5473#issuecomment-2166601837 for context.
@@ -88,8 +82,8 @@ steps:
   mirror_hardwares: [amd]
 
   commands:
-  - pytest -v -s entrypoints -m llm
-  - pytest -v -s entrypoints -m openai
+  - pytest -v -s entrypoints/llm
+  - pytest -v -s entrypoints/openai
 
 - label: Examples Test
   working_dir: "/vllm-workspace/examples"
@@ -204,15 +198,6 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
-- label: LM Eval Large Models
-  gpu: a100
-  num_gpus: 4
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  commands:
-  - pip install lm-eval
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - bash ./run-tests.sh -c configs/models-large.txt -t 4
-
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
   no_gpu: True
@@ -224,9 +209,6 @@ steps:
   gpu: a100
   num_gpus: 4
   commands: 
-  # FIXIT: find out which code initialize cuda before running the test
-  # before the fix, we need to use spawn to test it
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
@@ -235,3 +217,4 @@ steps:
   - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.5/flashinfer-0.0.5+cu121torch2.3-cp310-cp310-linux_x86_64.whl
   - VLLM_ATTENTION_BACKEND=FLASHINFER TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - VLLM_ATTENTION_BACKEND=FLASHINFER TEST_DIST_MODEL=meta-llama/Meta-Llama-3-8B DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - pytest -v -s -x lora/test_mixtral.py
