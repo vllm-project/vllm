@@ -147,9 +147,14 @@ class OpenAIServingChat(OpenAIServing):
                         "Multiple 'image_url' input is currently not supported."
                     )
 
-                image_token = self.image_token_str
-                if image_token is not None:
-                    texts.append(image_token)
+                image_token_str = self.image_token_str
+                if image_token_str is not None:
+                    if any(image_token_str in text for text in texts):
+                        logger.warning(
+                            "Detected image token string in the text prompt. "
+                            "Skipping prompt formatting.")
+                    else:
+                        texts.append(image_token_str)
 
                 image_url = cast(ChatCompletionContentPartImageParam,
                                  part)["image_url"]

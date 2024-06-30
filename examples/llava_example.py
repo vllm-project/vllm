@@ -22,7 +22,7 @@ def run_llava_pixel_values(*, disable_image_processor: bool = False):
         disable_image_processor=disable_image_processor,
     )
 
-    prompt = "<image>\nUSER: What is the content of this image?\nASSISTANT:"
+    prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     if disable_image_processor:
         image = torch.load("images/stop_sign_pixel_values.pt")
