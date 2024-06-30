@@ -59,7 +59,7 @@ vLLM is flexible and easy to use with:
 - Tensor parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
-- Support NVIDIA GPUs, AMD GPUs, Intel CPUs and GPUs
+- Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs
 - (Experimental) Prefix caching support
 - (Experimental) Multi-lora support
 
