@@ -136,7 +136,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                            params_dtype: torch.dtype,
                            **extra_weight_attrs):
         
-        # gate_up_proj
+        # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.empty(num_total_experts,
                         2 * intermediate_size,
@@ -146,7 +146,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
         
-        # down_proj
+        # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(
             torch.empty(num_total_experts,
                         hidden_size,
@@ -952,7 +952,6 @@ class FusedMoELinear(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
         # Matrix multiply.
-        assert self.quant_method is not None
         final_hidden_states = self.quant_method.apply_moe(self,
                                                           x=hidden_states,
                                                           router_logits=router_logits,
