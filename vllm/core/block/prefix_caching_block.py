@@ -884,7 +884,7 @@ class ComputedBlocksTracker:
             # sequence iteration
             return prev_computed_block_ids
 
-        # We do not consider the last block id for caching purposes
+        # We do not consider the last block id for caching purposes.
         num_cur_blocks = len(block_ids) - 1
         assert num_cur_blocks >= 0
 
