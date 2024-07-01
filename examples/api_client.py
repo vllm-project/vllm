@@ -1,5 +1,5 @@
 """Example Python client for vllm.entrypoints.api_server
-NOTE: This API server is used only for demonstrating and simple performance
+NOTE: This API server is used only for demonstration and simple performance
 benchmarks. It is not intended for production use.
 For production use, we recommend vllm.entrypoints.openai.api_server.
 """
