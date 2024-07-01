@@ -1,6 +1,6 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
-{% set hf_home = "~/.cache/huggingface" %}
+{% set hf_home = "/root/.cache/huggingface" %}
 
 steps:
   {% for step in steps %}
