@@ -532,7 +532,7 @@ class AsyncLLMEngine:
         while True:
         #     await self._request_tracker.wait_for_new_requests()
             # print('waiting on timer event')
-            time.sleep(0.01)
+            time.sleep(0.03)
             # print('after on timer event')
             self.sched_event.set()
         # print('ahhh')
@@ -594,15 +594,15 @@ class AsyncLLMEngine:
             with self.sched_lock:
                 seq_group_metadata_list, scheduler_outputs = self.engine.scheduler[
                     virtual_engine].schedule()
+                for seq_group in scheduler_outputs.scheduled_seq_groups:
+                    for seq in seq_group.seq_group.get_seqs():
+                        seq.status = SequenceStatus.PAUSED
             # print('after sched!!!!!!!!!!!!!!!')
 
             if scheduler_outputs.has_no_output():
                 # print('-------------------------has no output')
                 continue
             
-            for seq_group in scheduler_outputs.scheduled_seq_groups:
-                for seq in seq_group.seq_group.get_seqs():
-                    seq.status = SequenceStatus.PAUSED
             # if scheduler_outputs.is_empty():
             #     continue
 
