@@ -41,7 +41,7 @@ steps:
     command: bash .buildkite/run-xpu-test.sh
 
   {% for step in steps %}
-  {% if $BUILDKITE_PIPELINE_SLUG == "ci-aws" or ($BUILDKITE_PIPELINE_SLUG == "fastcheck" and {{ step.fast_check or false }}) %}
+  {% if env.BUILDKITE_PIPELINE_SLUG == "ci-aws" or (env.BUILDKITE_PIPELINE_SLUG == "fastcheck" and step.fast_check|default(false)) %}
   {% if step.gpu != "a100" %}
   - label: "{{ step.label }}"
     agents:
@@ -148,13 +148,12 @@ steps:
               path: {{ hf_home }}
               type: Directory
   
-  {% if $BUILDKITE_PIPELINE_SLUG == "fastcheck" %}
+  {% if env.BUILDKITE_PIPELINE_SLUG == "fastcheck" %}
   - block: "Run AMD tests"
     depends_on: ~
   {% endif %}
 
   - group: "AMD Tests"
-    {% if $BUILDKITE_PIPELINE_SLUG != "fastcheck" %}depends_on: ~{% endif %}
     steps:
     {% for step in steps %}
     {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
@@ -168,6 +167,7 @@ steps:
         soft_fail: true
     {% endif %}
     {% endfor %}
+    {% if env.BUILDKITE_PIPELINE_SLUG != "fastcheck" %}depends_on: ~{% endif %}
 
   {% endif %}
   {% endfor %}
