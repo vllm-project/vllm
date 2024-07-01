@@ -293,7 +293,7 @@ class Scheduler:
         # Sequence groups finished requests ids since last step iteration.
         # It lets the model know that any state associated with these requests
         # can and must be released after the current step.
-        self.finished_requests_ids: List[str] = list()
+        self._finished_requests_ids: List[str] = list()
         # Time at previous scheduling step
         self.prev_time = 0.0
         # Did we schedule a prompt at previous step?
@@ -369,8 +369,8 @@ class Scheduler:
 
     def get_and_reset_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""
-        finished_requests_ids = self.finished_requests_ids
-        self.finished_requests_ids = list()
+        finished_requests_ids = self._finished_requests_ids
+        self._finished_requests_ids = list()
         return finished_requests_ids
 
     def _schedule_running(
@@ -1036,10 +1036,11 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
-        self.finished_requests_ids += [
-            seq_group.request_id for seq_group in self.running
-            if seq_group.is_finished()
-        ]
+        for queue in [self.running, self.swapped, self.waiting]:
+            self._finished_requests_ids += [
+                seq_group.request_id for seq_group in queue
+                if seq_group.is_finished()
+            ]
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())
 
