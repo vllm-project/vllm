@@ -17,3 +17,16 @@ steps:
   - ls -a
   - cd huggingface
   - ls -a
+
+- label: LM Eval Large Models
+  gpu: a100
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+  - pip install lm-eval
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh -c configs/models-large.txt -t 4
+  - cd /root/.cache
+  - ls -a
+  - cd huggingface
+  - ls -a

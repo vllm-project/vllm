@@ -56,6 +56,7 @@ steps:
     depends_on: image-build
 
   {% for step in steps %}
+  {% if step.gpu == "a100" %}
   - label: "{{ step.label }}"
     priority: 10000
     agents:
@@ -108,4 +109,5 @@ steps:
             hostPath:
               path: {{ hf_home }}
               type: Directory
+  {% endif %}
   {% endfor %}
