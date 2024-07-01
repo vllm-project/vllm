@@ -1,7 +1,7 @@
-from vllm.model_executor.parameter import (vLLMParameter, ModelWeightParameter,
-                                           PackedvLLMParameter,
-                                           ChannelQuantScaleParameter,
-                                           GroupQuantScaleParameter)
+from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+                                           GroupQuantScaleParameter,
+                                           ModelWeightParameter,
+                                           PackedvLLMParameter, vLLMParameter)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
 

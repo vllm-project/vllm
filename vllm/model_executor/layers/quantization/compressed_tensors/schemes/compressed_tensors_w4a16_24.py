@@ -8,7 +8,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N)
-from vllm.model_executor.parameter import PackedvLLMParameter, vLLMParameter, GroupQuantScaleParameter, ChannelQuantScaleParameter
+from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+                                           GroupQuantScaleParameter,
+                                           PackedvLLMParameter, vLLMParameter)
 
 __all__ = ["CompressedTensorsW4A16Sparse24"]
 W4A16SPARSE24_SUPPORTED_BITS = [4]

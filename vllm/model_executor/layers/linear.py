@@ -13,10 +13,17 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.parameter import vLLMParameter, PackedvLLMParameter, ScalerToArrayvLLMParameter
+from vllm.model_executor.parameter import (ModelWeightParameter,
+                                           PackedvLLMParameter,
+                                           PerTensorScaleParameter,
+                                           _ColumnvLLMParameter, vLLMParameter)
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
+
+ROW_PARALLEL_LOAD_SUPPORTED = (ModelWeightParameter)
+COLUMN_PARALLEL_LOAD_SUPPORTED = (PerTensorScaleParameter,
+                                  _ColumnvLLMParameter)
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
@@ -290,7 +297,7 @@ class ColumnParallelLinear(LinearBase):
         if output_sizes is None:
             output_sizes = [output_size]
 
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501; TODO: temporary fix; have to fix circular import
             CompressedTensorsLinearMethod)
 
         self.quant_method.create_weights(
@@ -338,18 +345,10 @@ class ColumnParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
 
-        if param.use_column_loading:
-            shard_size = param_data.shape[param.output_dim]
-            start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(param.output_dim, start_idx,
-                                                 shard_size)
-
-        elif isinstance(param, ScalerToArrayvLLMParameter):
-            param_data, loaded_weight = param.col_shard_splitter(
-                param_data, loaded_weight, 0)
+        loaded_weight = param.load_column_parallel_weight(
+            loaded_weight=loaded_weight)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -539,28 +538,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def _default_loading(self, param: vLLMParameter, param_data: torch.Tensor,
-                         loaded_weight: torch.Tensor, loaded_shard_id: int):
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
-
-        shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
-        shard_size = self.output_sizes[loaded_shard_id] // tp_size
-
-        # TODO: Define this relationship more clearly
-        if isinstance(
-                param,
-                PackedvLLMParameter) and param.packed_dim == param.output_dim:
-            shard_size, shard_offset = param.adjust_packed_shard(
-                shard_offset=shard_offset, shard_size=shard_size)
-
-        param_data = param_data.narrow(param.output_dim, shard_offset,
-                                       shard_size)
-        loaded_weight = loaded_weight.narrow(param.output_dim,
-                                             tp_rank * shard_size, shard_size)
-
-        return param_data, loaded_weight
-
     def _load_no_shard_id(self, param: vLLMParameter, loaded_weight):
         current_shard_offset = 0
         shard_offsets: List[Tuple[int, int, int]] = []
@@ -575,8 +552,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # TODO: Define this relationship more clearly
             if isinstance(param, PackedvLLMParameter
                           ) and param.packed_dim == param.output_dim:
-                param.adjust_packed_shard(shard_size=shard_size,
-                                          shard_offset=shard_offset)
+                param.adjust_shard_indexes_for_packing(
+                    shard_size=shard_size, shard_offset=shard_offset)
 
             loaded_weight_shard = loaded_weight.narrow(param.output_dim,
                                                        shard_offset,
@@ -598,21 +575,17 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         assert loaded_shard_id < len(self.output_sizes)
 
-        if param.use_column_loading:
-            param_data, loaded_weight = self._default_loading(
-                param=param,
+        tp_size = get_tensor_model_parallel_world_size()
+        shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
+        shard_size = self.output_sizes[loaded_shard_id] // tp_size
+
+        if isinstance(param, COLUMN_PARALLEL_LOAD_SUPPORTED):
+            param_data, loaded_weight = param.load_merged_column_weight(
                 param_data=param_data,
                 loaded_weight=loaded_weight,
-                loaded_shard_id=loaded_shard_id)
-        elif param.use_metadata_loading:
-            shard_size = loaded_weight.shape[0]
-            shard_offset = loaded_shard_id * shard_size
-            param_data = param_data.narrow(0, shard_offset, shard_size)
-        elif isinstance(param, ScalerToArrayvLLMParameter):
-            param_data, loaded_weight = param.col_shard_splitter(
-                param_data=param_data,
-                loaded_weight=loaded_weight,
-                shard_id=loaded_shard_id)
+                shard_id=loaded_shard_id,
+                shard_offset=shard_offset,
+                shard_size=shard_size)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -705,33 +678,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         }
         return shard_size_mapping.get(loaded_shard_id)
 
-    def _default_loading(self, param: vLLMParameter, param_data: torch.Tensor,
-                         loaded_weight: torch.Tensor, loaded_shard_id: str):
-
-        tp_rank = get_tensor_model_parallel_rank()
-        shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
-        shard_size = self._get_shard_size_mapping(loaded_shard_id)
-
-        # TODO: Define this relationship more clearly
-        if isinstance(
-                param,
-                PackedvLLMParameter) and param.output_dim == param.packed_dim:
-            shard_size, shard_offset = param.adjust_packed_shard(
-                shard_offset=shard_offset, shard_size=shard_size)
-
-        param_data = param_data.narrow(param.output_dim, shard_offset,
-                                       shard_size)
-        if loaded_shard_id == "q":
-            shard_id = tp_rank
-        else:
-            shard_id = tp_rank // self.num_kv_head_replicas
-
-        loaded_weight = loaded_weight.narrow(param.output_dim,
-                                             shard_id * shard_size, shard_size)
-
-        return param_data, loaded_weight
-
-    def _load_no_shard_id(self, param: vLLMParameter, loaded_weight):
+    def _load_no_shard_id(self, param: vLLMParameter,
+                          loaded_weight: torch.Tensor):
         shard_offsets = [
             # (shard_id, shard_offset, shard_size)
             ("q", 0, self.total_num_heads * self.head_size),
@@ -747,11 +695,10 @@ class QKVParallelLinear(ColumnParallelLinear):
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
 
-            # TODO: Define this relationship more clearly
             if isinstance(param, PackedvLLMParameter
                           ) and param.packed_dim == param.output_dim:
-                param.adjust_packed_shard(shard_size=shard_size,
-                                          shard_offset=shard_offset)
+                param.adjust_shard_indexes_for_packing(
+                    shard_size=shard_size, shard_offset=shard_offset)
 
             loaded_weight_shard = loaded_weight.narrow(param.output_dim,
                                                        shard_offset,
@@ -774,22 +721,17 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         assert loaded_shard_id in ["q", "k", "v"]
 
-        if param.use_column_loading:
-            param_data, loaded_weight = self._default_loading(
-                param=param,
+        shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
+        shard_size = self._get_shard_size_mapping(loaded_shard_id)
+
+        if isinstance(param, COLUMN_PARALLEL_LOAD_SUPPORTED):
+            param_data, loaded_weight = param.load_qkv_weight(
                 param_data=param_data,
                 loaded_weight=loaded_weight,
-                loaded_shard_id=loaded_shard_id)
-        elif param.use_metadata_loading:  # What case is this?
-            shard_size = loaded_weight.shape[0]
-            shard_index = ["q", "k", "v"].index(loaded_shard_id)
-            param_data = param_data.narrow(0, shard_index * shard_size,
-                                           shard_size)
-        elif isinstance(param, ScalerToArrayvLLMParameter):
-            param_data, loaded_weight = param.col_shard_splitter(
-                param_data=param_data,
-                loaded_weight=loaded_weight,
-                shard_id=loaded_shard_id)
+                num_heads=self.num_kv_head_replicas,
+                shard_id=loaded_shard_id,
+                shard_offset=shard_offset,
+                shard_size=shard_size)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -986,7 +928,7 @@ class RowParallelLinear(LinearBase):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = divide(input_size, self.tp_size)
         assert self.quant_method is not None
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501; TODO: fix cir import
             CompressedTensorsLinearMethod)
 
         self.quant_method.create_weights(
@@ -1043,19 +985,15 @@ class RowParallelLinear(LinearBase):
     def weight_loader_v2(self, param: vLLMParameter,
                          loaded_weight: torch.Tensor):
 
-        param_data = param.data
-        tp_rank = get_tensor_model_parallel_rank()
+        if isinstance(param, ROW_PARALLEL_LOAD_SUPPORTED):
+            loaded_weight = param.load_row_parallel_weight(
+                loaded_weight=loaded_weight)
 
-        if param.use_row_loading:
-            shard_size = param_data.shape[param.input_dim]
-            start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(param.input_dim, start_idx,
-                                                 shard_size)
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        assert param.data.shape == loaded_weight.shape
+        param.data.copy_(loaded_weight)
 
     def forward(self, input_):
         if self.input_is_parallel:
