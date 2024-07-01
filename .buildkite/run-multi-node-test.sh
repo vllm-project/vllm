@@ -12,13 +12,7 @@ NUM_NODES=$1
 NUM_GPUS=$2
 DOCKER_IMAGE=$3
 
-if ! [[ $NUM_NODES =~ ^[0-9]+$ ]] || ! [[ $NUM_GPUS =~ ^[0-9]+$ ]]; then
-    echo "Error: num_nodes and num_gpus must be integers."
-    exit 1
-fi
-
 shift 3
-
 COMMANDS=("$@")
 if [ ${#COMMANDS[@]} -ne $NUM_NODES ]; then
     echo "The number of commands must be equal to the number of nodes."
@@ -30,6 +24,7 @@ fi
 echo "List of commands"
 for command in "${COMMANDS[@]}"; do
     echo $command
+    echo "Z"
 done
 
 start_network() {
@@ -50,7 +45,7 @@ start_nodes() {
         GPU_DEVICES+='"'
         GPU_DEVICES+="'"
         echo "Starting node$node with GPU devices: $GPU_DEVICES"
-        docker run -d --gpus $GPU_DEVICES --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE tail -f /dev/null
+        echo 'docker run -d --gpus $GPU_DEVICES --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE tail -f /dev/null'
     done
 }
 
@@ -69,9 +64,9 @@ run_nodes() {
         GPU_DEVICES+="'"
         echo "Running node$node with GPU devices: $GPU_DEVICES"
         if [ $node -lt $(($NUM_NODES - 1)) ]; then
-            docker run -d --gpus $GPU_DEVICES --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "${COMMANDS[$node]}"
+            echo 'docker run -d --gpus $GPU_DEVICES --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "${COMMANDS[$node]}"'
         else
-            docker run --gpus $GPU_DEVICES --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "${COMMANDS[$node]}"
+            echo 'docker run --gpus $GPU_DEVICES --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "${COMMANDS[$node]}"'
         fi
     done
 }

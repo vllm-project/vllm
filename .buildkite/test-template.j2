@@ -10,6 +10,6 @@ steps:
     agents:
       queue: gpu_4_queue
     commands:
-      - echo {{ step.commands | map('quote') | join(' ') }}
+      - ./run-multi-node-test.sh {{ step.num_nodes }} {{ step.num_gpus }} {{ docker_image }} {{ step.commands }}
   {% endif %}
   {% endfor %}
