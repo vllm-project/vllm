@@ -113,7 +113,7 @@ run_serving_tests() {
     # run the server
     echo "Running test case $test_name"
     echo "Server command: $server_command"
-    eval "$server_command" &
+    bash -c "$server_command" &
 
     # wait until the server is alive
     wait_for_server
