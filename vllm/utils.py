@@ -12,7 +12,6 @@ import threading
 import uuid
 import warnings
 from collections import defaultdict
-from contextlib import contextmanager
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
@@ -824,28 +823,27 @@ def cuda_device_count_stateless() -> int:
 
 try:
     import pynvml
-
-    @contextmanager
-    def with_nvml_context():
-        try:
-            pynvml.nvmlInit()
-            yield
-        finally:
-            pynvml.nvmlShutdown()
-
 except ImportError:
     # For non-NV devices
     pynvml = None
 
-    @contextmanager
-    def with_nvml_context():
+
+def with_nvml_context(fn):
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if pynvml is not None:
+            pynvml.nvmlInit()
         try:
-            yield
+            return fn(*args, **kwargs)
         finally:
-            pass
+            if pynvml is not None:
+                pynvml.nvmlShutdown()
+
+    return wrapper
 
 
-@with_nvml_context()
+@with_nvml_context
 def is_full_nvlink(device_ids: List[int]) -> bool:
     """
     query if the set of gpus are fully connected by nvlink (1 hop)
@@ -868,7 +866,8 @@ def is_full_nvlink(device_ids: List[int]) -> bool:
     return True
 
 
-@with_nvml_context()
+@lru_cache(maxsize=8)
+@with_nvml_context
 def get_device_capability_stateless(device_id: int = 0) -> Tuple[int, int]:
     handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
     return pynvml.nvmlDeviceGetCudaComputeCapability(handle)
