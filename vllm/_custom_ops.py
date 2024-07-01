@@ -1,6 +1,5 @@
 import contextlib
 import functools
-import importlib
 from typing import List, Optional, Tuple, Type
 
 import torch
@@ -45,33 +44,26 @@ def hint_on_error(fn):
 
     return wrapper
 
-_ops = torch.ops._C
-_cache_ops = torch.ops._C_cache_ops
-if importlib.util.find_spec('habana_frameworks') is not None:
-    from vllm.hpu import ops as vllm_ops
-    from vllm.hpu import cache_ops as vllm_cache_ops
-    _ops = vllm_ops
-    _cache_ops = vllm_cache_ops
 
 # activation ops
 def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    _ops.silu_and_mul(out, x)
+    torch.ops._C.silu_and_mul(out, x)
 
 
 def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    _ops.gelu_and_mul(out, x)
+    torch.ops._C.gelu_and_mul(out, x)
 
 
 def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    _ops.gelu_tanh_and_mul(out, x)
+    torch.ops._C.gelu_tanh_and_mul(out, x)
 
 
 def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
-    _ops.gelu_fast(out, x)
+    torch.ops._C.gelu_fast(out, x)
 
 
 def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
-    _ops.gelu_new(out, x)
+    torch.ops._C.gelu_new(out, x)
 
 
 def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
@@ -99,7 +91,7 @@ def paged_attention_v1(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    _ops.paged_attention_v1(
+    torch.ops._C.paged_attention_v1(
         out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
         kv_scale, tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
@@ -129,7 +121,7 @@ def paged_attention_v2(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    _ops.paged_attention_v2(
+    torch.ops._C.paged_attention_v2(
         out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
         alibi_slopes, kv_cache_dtype, kv_scale, tp_rank,
@@ -146,7 +138,7 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    _ops.rotary_embedding(positions, query, key, head_size,
+    torch.ops._C.rotary_embedding(positions, query, key, head_size,
                                   cos_sin_cache, is_neox)
 
 
@@ -155,7 +147,7 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
                              cos_sin_cache: torch.Tensor, is_neox: bool,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
-    _ops.batched_rotary_embedding(positions, query, key, head_size,
+    torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
                                           cos_sin_cache, is_neox, rot_dim,
                                           cos_sin_cache_offsets)
 
@@ -163,12 +155,12 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
 # layer norm ops
 def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
              epsilon: float) -> None:
-    _ops.rms_norm(out, input, weight, epsilon)
+    torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
-    _ops.fused_add_rms_norm(input, residual, weight, epsilon)
+    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
 # quantization ops
@@ -176,13 +168,13 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
-    return _ops.awq_dequantize(qweight, scales, zeros, split_k_iters,
+    return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
                                        thx, thy)
 
 
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
              scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
-    return _ops.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
+    return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
 # gptq
@@ -190,26 +182,26 @@ def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
               b_g_idx: torch.Tensor, use_exllama: bool,
               bit: int) -> torch.Tensor:
-    return _ops.gptq_gemm(a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
+    return torch.ops._C.gptq_gemm(a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
                                   b_g_idx, use_exllama, bit)
 
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
                  bit: int) -> None:
-    _ops.gptq_shuffle(q_weight, q_perm, bit)
+    torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
 
 # squeezellm
 def squeezellm_gemm(vec: torch.Tensor, mat: torch.Tensor, mul: torch.Tensor,
                     lookup_table: torch.Tensor) -> None:
-    _ops.squeezellm_gemm(vec, mat, mul, lookup_table)
+    torch.ops._C.squeezellm_gemm(vec, mat, mul, lookup_table)
 
 
 # marlin
 def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                 b_scales: torch.Tensor, workspace: torch.Tensor, size_m: int,
                 size_n: int, size_k: int) -> torch.Tensor:
-    return _ops.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
+    return torch.ops._C.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
                                     size_n, size_k)
 
 
@@ -218,7 +210,7 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_meta: torch.Tensor, b_scales: torch.Tensor,
                         workspace: torch.Tensor, num_bits: int, size_m: int,
                         size_n: int, size_k: int) -> torch.Tensor:
-    return _ops.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
+    return torch.ops._C.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
                                             workspace, num_bits, size_m,
                                             size_n, size_k)
 
@@ -241,7 +233,7 @@ def cutlass_scaled_mm(a: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    _ops.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
     return out
 
@@ -251,13 +243,13 @@ def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
               codebook_partition_sizes: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
-    return _ops.aqlm_gemm(input, codes, codebooks, scales,
+    return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
                                   codebook_partition_sizes, bias)
 
 
 def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
                  codebook_partition_sizes: torch.Tensor) -> torch.Tensor:
-    return _ops.aqlm_dequant(codes, codebooks,
+    return torch.ops._C.aqlm_dequant(codes, codebooks,
                                      codebook_partition_sizes)
 
 
@@ -265,7 +257,7 @@ def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
 def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                        size_k: int, size_n: int,
                        num_bits: int) -> torch.Tensor:
-    return _ops.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
+    return torch.ops._C.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
                                            num_bits)
 
 
@@ -274,7 +266,7 @@ def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                      perm: torch.Tensor, workspace: torch.Tensor,
                      num_bits: int, size_m: int, size_n: int, size_k: int,
                      is_k_full: bool) -> torch.Tensor:
-    return _ops.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
+    return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
                                          workspace, num_bits, size_m, size_n,
                                          size_k, is_k_full)
 
@@ -313,9 +305,9 @@ def scaled_fp8_quant(
         output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
     if scale is None:
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-        _ops.dynamic_scaled_fp8_quant(output, input, scale)
+        torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        _ops.static_scaled_fp8_quant(output, input, scale)
+        torch.ops._C.static_scaled_fp8_quant(output, input, scale)
     return output, scale
 
 
@@ -338,14 +330,14 @@ def scaled_int8_quant(
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
-        _ops.static_scaled_int8_quant(output, input, scale)
+        torch.ops._C.static_scaled_int8_quant(output, input, scale)
         return output, scale
 
     # dynamic-per-token quantization.
     input_scales = torch.empty((input.numel() // input.shape[-1], 1),
                                device=input.device,
                                dtype=torch.float32)
-    _ops.dynamic_scaled_int8_quant(output, input, input_scales)
+    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales)
     return output, input_scales
 
 
@@ -354,7 +346,7 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
                          experts_ids: torch.Tensor,
                          num_tokens_post_pad: torch.Tensor) -> None:
-    _ops.moe_align_block_size(topk_ids, num_experts, block_size,
+    torch.ops._C.moe_align_block_size(topk_ids, num_experts, block_size,
                                       sorted_token_ids, experts_ids,
                                       num_tokens_post_pad)
 
@@ -375,7 +367,7 @@ def reshape_and_cache(
     kv_cache_dtype: str,
     kv_scale: float,
 ) -> None:
-    _cache_ops.reshape_and_cache(key, value, key_cache,
+    torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
                                              value_cache, slot_mapping,
                                              kv_cache_dtype, kv_scale)
 
@@ -388,7 +380,7 @@ def reshape_and_cache_flash(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
 ) -> None:
-    _cache_ops.reshape_and_cache_flash(key, value, key_cache,
+    torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
                                                    value_cache, slot_mapping,
                                                    kv_cache_dtype)
 
@@ -396,19 +388,19 @@ def reshape_and_cache_flash(
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
-    _cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+    torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
-    _cache_ops.swap_blocks(src, dst, block_mapping)
+    torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
 def convert_fp8(output: torch.Tensor,
                 input: torch.Tensor,
                 scale: float = 1.0,
                 kv_dtype: str = "fp8") -> None:
-    _cache_ops.convert_fp8(output, input, scale, kv_dtype)
+    torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
 def get_device_attribute(attribute: int, device: int) -> int:

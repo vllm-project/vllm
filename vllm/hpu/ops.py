@@ -26,12 +26,24 @@ def silu_and_mul(output, input):
     output.copy_(silu(x) * y)
 
 
+def gelu_and_mul(output, input):
+    raise NotImplementedError("gelu_and_mul is not implemented for HPU backend")
+
+
+def gelu_tanh_and_mul(output, input):
+    raise NotImplementedError("gelu_tanh_and_mul is not implemented for HPU backend")
+
+
 def gelu_new(output, input):
-    raise NotImplementedError
+    raise NotImplementedError("gelu_new is not implemented for HPU backend")
 
 
 def gelu_fast(output, input):
-    raise NotImplementedError
+    raise NotImplementedError("gelu_fast is not implemented for HPU backend")
+
+
+def gelu_quick(output, input):
+    raise NotImplementedError("gelu_quick is not implemented for HPU backend")
 
 
 def fetch_from_cache(cache, blocks, permutations):

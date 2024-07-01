@@ -31,9 +31,6 @@ class CustomOp(nn.Module):
     def forward_xpu(self, *args, **kwargs):
         raise NotImplementedError
 
-    def forward_hpu(self, *args, **kwargs):
-        return self.forward_cuda(*args, **kwargs)
-
     def forward_cpu(self, *args, **kwargs):
         # By default, we assume that CPU ops are compatible with CUDA ops.
         return self.forward_cuda(*args, **kwargs)
@@ -44,10 +41,9 @@ class CustomOp(nn.Module):
         # NOTE(woosuk): This is a placeholder for future extensions.
         return self.forward_native(*args, **kwargs)
 
-    def forward_gaudi(self, *args, **kwargs):
+    def forward_hpu(self, *args, **kwargs):
         # By default, we assume that Gaudi ops are compatible with the
         # PyTorch-native implementation.
-        # NOTE(woosuk): This is a placeholder for future extensions.
         return self.forward_native(*args, **kwargs)
 
     def dispatch_forward(self):
