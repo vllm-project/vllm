@@ -256,12 +256,11 @@ class Scheduler:
         self,
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
         lora_config: Optional[LoRAConfig],
+        pipeline_parallel_size: int = 1,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
-        self.parallel_config = parallel_config
         # Note for LoRA scheduling: the current policy is extremely
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
@@ -278,11 +277,11 @@ class Scheduler:
 
         num_gpu_blocks = cache_config.num_gpu_blocks
         if num_gpu_blocks:
-            num_gpu_blocks //= parallel_config.pipeline_parallel_size
+            num_gpu_blocks //= pipeline_parallel_size
 
         num_cpu_blocks = cache_config.num_cpu_blocks
         if num_cpu_blocks:
-            num_cpu_blocks //= parallel_config.pipeline_parallel_size
+            num_cpu_blocks //= pipeline_parallel_size
 
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
