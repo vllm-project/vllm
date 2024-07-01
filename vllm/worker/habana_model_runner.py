@@ -14,7 +14,7 @@ import itertools
 import operator
 import torch
 import habana_frameworks.torch as htorch
-
+import contextlib
 from vllm.attention import (AttentionMetadata, get_attn_backend)
 from vllm.config import (DeviceConfig, LoadConfig, CacheConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
@@ -522,7 +522,7 @@ class HabanaModelRunner:
             num_prefills=real_num_seqs,
             num_prefill_tokens=sum_query_len,
             num_decode_tokens=0, 
-            slot_mapping=slot_mapping
+            slot_mapping=slot_mapping,
         )
         return PreparePromptMetadata(
             input_tokens=input_tokens,
@@ -625,7 +625,7 @@ class HabanaModelRunner:
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=num_decode_tokens,
-            slot_mapping=slot_mapping
+            slot_mapping=slot_mapping,
         )
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
@@ -808,9 +808,8 @@ class HabanaModelRunner:
                                     ['block_tables',
                                      'seq_lens_tensor',
                                      'attn_bias',
-                                     'num_prefills',
-                                     'num_decode_tokens',
-                                     'slot_mapping'])
+                                     'slot_mapping',
+                                     'is_prompt'])
         return prefill_metadata
 
     @torch.inference_mode()

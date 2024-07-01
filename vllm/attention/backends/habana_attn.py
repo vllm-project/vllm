@@ -196,9 +196,9 @@ class HabanaAttentionImpl(AttentionImpl):
                                                       value_cache,
                                                       attn_metadata.slot_mapping,
                                                       self.kv_cache_dtype,
-                                                      attn_metadata.num_prefills > 0)
+                                                      attn_metadata.is_prompt)
 
-        if attn_metadata.num_prefills > 0:
+        if attn_metadata.is_prompt:
             # Prompt run.
             if kv_cache is None or attn_metadata.block_tables.numel() == 0:
                 # TODO: move this outside of model
@@ -233,7 +233,7 @@ class HabanaAttentionImpl(AttentionImpl):
                     attn_metadata.max_query_len,
                     self.alibi_slopes,
                 )
-        if attn_metadata.num_decode_tokens > 0:
+        else:
             # Decoding run.
             output = HabanaPagedAttention.forward_decode(
                 query,
