@@ -1,4 +1,3 @@
-
 #ifndef CPU_TYPES_HPP
 #define CPU_TYPES_HPP
 

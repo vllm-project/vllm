@@ -2,7 +2,7 @@
 
 namespace {
 
-template <typename scalar_t>
+template <typename scalar_t, typename cache_t = scalar_t>
 struct KernelVecType {
   using q_load_vec_type = void;
   using q_vec_type = void;
@@ -22,6 +22,16 @@ struct KernelVecType<float> {
   using v_load_vec_type = vec_op::FP32Vec16;
 };
 
+template <>
+struct KernelVecType<float, cpu_fp8> {
+  using q_load_vec_type = vec_op::FP32Vec16;
+  using q_vec_type = vec_op::FP32Vec16;
+  using k_load_vec_type = vec_op::FP8Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
+  using qk_acc_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::FP8Vec16;
+};
+
 #ifdef __AVX512BF16__
 template <>
 struct KernelVecType<c10::BFloat16> {
@@ -32,6 +42,16 @@ struct KernelVecType<c10::BFloat16> {
   using qk_acc_vec_type = vec_op::FP32Vec16;
   using v_load_vec_type = vec_op::BF16Vec16;
 };
+
+template <>
+struct KernelVecType<c10::BFloat16, cpu_fp8> {
+  using q_load_vec_type = vec_op::BF16Vec8;
+  using q_vec_type = vec_op::BF16Vec32;
+  using k_load_vec_type = vec_op::FP8Vec16;
+  using k_vec_type = vec_op::BF16Vec32;
+  using qk_acc_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::FP8Vec16;
+};
 #else
 template <>
 struct KernelVecType<c10::BFloat16> {
@@ -41,6 +61,16 @@ struct KernelVecType<c10::BFloat16> {
   using k_vec_type = vec_op::FP32Vec16;
   using qk_acc_vec_type = vec_op::FP32Vec16;
   using v_load_vec_type = vec_op::BF16Vec16;
+};
+
+template <>
+struct KernelVecType<c10::BFloat16, cpu_fp8> {
+  using q_load_vec_type = vec_op::BF16Vec16;
+  using q_vec_type = vec_op::FP32Vec16;
+  using k_load_vec_type = vec_op::FP8Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
+  using qk_acc_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::FP8Vec16;
 };
 #endif
 
@@ -121,28 +151,27 @@ FORCE_INLINE void reducePartitonSoftmax(const T* max_data, T* sum_data,
   }
 }
 
-template <typename scalar_t, int HEAD_SIZE, int BLOCK_SIZE, int x>
+template <typename scalar_t, int HEAD_SIZE, int BLOCK_SIZE, int x,
+          typename cache_t = scalar_t>
 struct reduceQKBlockKernel {
-  using q_load_vec_type = typename KernelVecType<scalar_t>::q_load_vec_type;
-  using q_vec_type = typename KernelVecType<scalar_t>::q_vec_type;
-  using k_load_vec_type = typename KernelVecType<scalar_t>::k_load_vec_type;
-  using k_vec_type = typename KernelVecType<scalar_t>::k_vec_type;
-  using qk_acc_vec_type = typename KernelVecType<scalar_t>::qk_acc_vec_type;
+  using q_load_vec_type =
+      typename KernelVecType<scalar_t, cache_t>::q_load_vec_type;
+  using q_vec_type = typename KernelVecType<scalar_t, cache_t>::q_vec_type;
+  using k_load_vec_type =
+      typename KernelVecType<scalar_t, cache_t>::k_load_vec_type;
+  using k_vec_type = typename KernelVecType<scalar_t, cache_t>::k_vec_type;
+  using qk_acc_vec_type =
+      typename KernelVecType<scalar_t, cache_t>::qk_acc_vec_type;
 
   constexpr static int TOKEN_PER_GROUP = k_load_vec_type::get_elem_num() / x;
   constexpr static int MAX_GROUP_NUM = 16 / TOKEN_PER_GROUP;
   constexpr static int UNROLL_GROUP_NUM = MAX_GROUP_NUM / 4;
 
-  static_assert(MAX_GROUP_NUM == 8 || MAX_GROUP_NUM == 4);
-  static_assert(k_load_vec_type::get_elem_num() % x == 0);
-  static_assert(q_load_vec_type::get_elem_num() * sizeof(scalar_t) == 16);
-
   FORCE_INLINE static void call(const scalar_t* __restrict__ q,
-                                const scalar_t* __restrict__ k_block,
+                                const cache_t* __restrict__ k_block,
                                 float* __restrict__ logits, float scale,
                                 const int token_num) {
     const int group_num = (token_num + TOKEN_PER_GROUP - 1) / TOKEN_PER_GROUP;
-
     qk_acc_vec_type group_accums[MAX_GROUP_NUM];
     if (token_num == BLOCK_SIZE) {
       for (int q_offset = 0; q_offset < HEAD_SIZE;
@@ -200,10 +229,11 @@ struct reduceQKBlockKernel {
 };
 
 template <typename scalar_t, int HEAD_SIZE, int BLOCK_SIZE,
-          int HEAD_PARTITION_SIZE, typename acc_t>
-FORCE_INLINE void reduceValueBlock(const float* prob, const scalar_t* v_block,
+          int HEAD_PARTITION_SIZE, typename cache_t, typename acc_t>
+FORCE_INLINE void reduceValueBlock(const float* prob, const cache_t* v_block,
                                    acc_t&& acc) {
-  using v_load_vec_type = typename KernelVecType<scalar_t>::v_load_vec_type;
+  using v_load_vec_type =
+      typename KernelVecType<scalar_t, cache_t>::v_load_vec_type;
   constexpr int ELEM_NUM = v_load_vec_type::get_elem_num();
   static_assert(BLOCK_SIZE == ELEM_NUM);
   vec_op::FP32Vec16 prob_vec(prob);
@@ -218,15 +248,16 @@ FORCE_INLINE void reduceValueBlock(const float* prob, const scalar_t* v_block,
 
 // Paged attention v1
 namespace {
-template <typename scalar_t, int HEAD_SIZE, int BLOCK_SIZE>
+template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
+          bool IS_FP8_KV_CACHE>
 struct paged_attention_v1_impl {
   static void call(
-      scalar_t* __restrict__ out,            // [num_seqs, num_heads, head_size]
-      const scalar_t* __restrict__ q,        // [num_seqs, num_heads, head_size]
-      const scalar_t* __restrict__ k_cache,  // [num_blocks, num_kv_heads,
-                                             // head_size/x, block_size, x]
-      const scalar_t* __restrict__ v_cache,  // [num_blocks, num_kv_heads,
-                                             // head_size, block_size]
+      scalar_t* __restrict__ out,           // [num_seqs, num_heads, head_size]
+      const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
+      const cache_t* __restrict__ k_cache,  // [num_blocks, num_kv_heads,
+                                            // head_size/x, block_size, x]
+      const cache_t* __restrict__ v_cache,  // [num_blocks, num_kv_heads,
+                                            // head_size, block_size]
       const int num_kv_heads, const float scale,
       const int* __restrict__ block_tables,  // [num_seqs,
                                              // max_num_blocks_per_seq]
@@ -235,7 +266,7 @@ struct paged_attention_v1_impl {
       const float* __restrict__ alibi_slopes,  // [num_heads]
       const int q_stride, const int kv_block_stride, const int kv_head_stride,
       const int num_seqs, const int num_heads) {
-    constexpr int x = 16 / sizeof(scalar_t);
+    constexpr int x = 16 / sizeof(cache_t);
     const int num_queries_per_kv = num_heads / num_kv_heads;
 
     static_assert(BLOCK_SIZE == 16);
@@ -269,15 +300,18 @@ struct paged_attention_v1_impl {
         // Compute logits
         for (int block_idx = 0; block_idx < block_num; ++block_idx) {
           const int64_t physical_block_idx = seq_block_table[block_idx];
-          const scalar_t* __restrict__ k_block_cache_ptr =
+          const cache_t* __restrict__ k_block_cache_ptr =
               k_cache + physical_block_idx * kv_block_stride +
               kv_head_idx * kv_head_stride;
           float* __restrict__ head_block_logits =
               thread_block_logits + block_idx * BLOCK_SIZE;
 
-          reduceQKBlockKernel<scalar_t, HEAD_SIZE, BLOCK_SIZE, x>::call(
-              q_vec_ptr, k_block_cache_ptr, head_block_logits, scale,
-              block_idx == block_num - 1 ? last_block_token_num : BLOCK_SIZE);
+          reduceQKBlockKernel<scalar_t, HEAD_SIZE, BLOCK_SIZE, x,
+                              cache_t>::call(q_vec_ptr, k_block_cache_ptr,
+                                             head_block_logits, scale,
+                                             block_idx == block_num - 1
+                                                 ? last_block_token_num
+                                                 : BLOCK_SIZE);
         }
 
         // Compute softmax
@@ -303,18 +337,18 @@ struct paged_attention_v1_impl {
             const int64_t physical_block_idx = seq_block_table[block_idx];
             const float* __restrict__ prob_vec_ptr =
                 thread_block_logits + block_idx * BLOCK_SIZE;
-            const scalar_t* __restrict__ v_block_cache_ptr =
+            const cache_t* __restrict__ v_block_cache_ptr =
                 v_cache + physical_block_idx * kv_block_stride +
                 kv_head_idx * kv_head_stride +
                 BLOCK_SIZE * head_part_idx * head_elem_num_per_partition;
             reduceValueBlock<scalar_t, HEAD_SIZE, BLOCK_SIZE,
-                             head_elem_num_per_partition>(
+                             head_elem_num_per_partition, cache_t>(
                 prob_vec_ptr, v_block_cache_ptr, accums);
 
             if (block_idx != block_num - 1) {
               const int64_t next_physical_block_idx =
                   seq_block_table[block_idx + 1];
-              const scalar_t* __restrict__ next_v_block_cache_ptr =
+              const cache_t* __restrict__ next_v_block_cache_ptr =
                   v_cache + next_physical_block_idx * kv_block_stride +
                   kv_head_idx * kv_head_stride +
                   BLOCK_SIZE * head_part_idx * head_elem_num_per_partition;
@@ -340,14 +374,21 @@ struct paged_attention_v1_impl {
   }
 };
 
-#define LAUNCH_V1_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE)                   \
-  paged_attention_v1_impl<T, HEAD_SIZE, BLOCK_SIZE>::call(                     \
-      out_ptr, query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale, \
-      block_tables_ptr, seq_lens_ptr, max_num_blocks_per_seq,                  \
-      alibi_slopes_ptr, q_stride, kv_block_stride, kv_head_stride, num_seqs,   \
-      num_heads);
+#define LAUNCH_V1_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE)                 \
+  paged_attention_v1_impl<T, CACHE_T, HEAD_SIZE, BLOCK_SIZE,                 \
+                          IS_FP8_KV_CACHE>::call(out_ptr, query_ptr,         \
+                                                 key_cache_ptr,              \
+                                                 value_cache_ptr,            \
+                                                 num_kv_heads, scale,        \
+                                                 block_tables_ptr,           \
+                                                 seq_lens_ptr,               \
+                                                 max_num_blocks_per_seq,     \
+                                                 alibi_slopes_ptr, q_stride, \
+                                                 kv_block_stride,            \
+                                                 kv_head_stride, num_seqs,   \
+                                                 num_heads);
 
-template <typename T, int BLOCK_SIZE>
+template <typename T, typename CACHE_T, int BLOCK_SIZE, bool IS_FP8_KV_CACHE>
 void paged_attention_v1_impl_launcher(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int num_kv_heads, float scale,
@@ -369,8 +410,8 @@ void paged_attention_v1_impl_launcher(
 
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
-  T* key_cache_ptr = reinterpret_cast<T*>(key_cache.data_ptr());
-  T* value_cache_ptr = reinterpret_cast<T*>(value_cache.data_ptr());
+  CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
+  CACHE_T* value_cache_ptr = reinterpret_cast<CACHE_T*>(value_cache.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
@@ -402,19 +443,19 @@ void paged_attention_v1_impl_launcher(
   }
 }
 
-#define CALL_V1_KERNEL_LAUNCHER(T, BLOCK_SIZE)                               \
-  paged_attention_v1_impl_launcher<T, BLOCK_SIZE>(                           \
+#define CALL_V1_KERNEL_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)     \
+  paged_attention_v1_impl_launcher<T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE>( \
       out, query, key_cache, value_cache, num_kv_heads, scale, block_tables, \
       seq_lens, max_seq_len, alibi_slopes);
 
-#define CALL_V1_KERNEL_LAUNCHER_BLOCK_SIZE(T)                     \
-  switch (block_size) {                                           \
-    case 16:                                                      \
-      CALL_V1_KERNEL_LAUNCHER(T, 16);                             \
-      break;                                                      \
-    default:                                                      \
-      TORCH_CHECK(false, "Unsupported block size: ", block_size); \
-      break;                                                      \
+#define CALL_V1_KERNEL_LAUNCHER_BLOCK_SIZE(T, CACHE_T, IS_FP8_KV_CACHE) \
+  switch (block_size) {                                                 \
+    case 16:                                                            \
+      CALL_V1_KERNEL_LAUNCHER(T, CACHE_T, 16, IS_FP8_KV_CACHE);         \
+      break;                                                            \
+    default:                                                            \
+      TORCH_CHECK(false, "Unsupported block size: ", block_size);       \
+      break;                                                            \
   }
 }  // namespace
 
@@ -428,33 +469,48 @@ void paged_attention_v1(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step) {
   TORCH_CHECK(kv_scale == 1.0f);
-  TORCH_CHECK(blocksparse_vert_stride <= 1,
-              "CPU backend does not support blocksparse attention yet.");
-  VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v1_impl",
-                               [&] {
-                                 CPU_KERNEL_GUARD_IN(paged_attention_v1_impl)
-                                 CALL_V1_KERNEL_LAUNCHER_BLOCK_SIZE(scalar_t);
-                                 CPU_KERNEL_GUARD_OUT(paged_attention_v1_impl)
-                               });
+  if (kv_cache_dtype == "auto") {
+    TORCH_CHECK(blocksparse_vert_stride <= 1,
+                "CPU backend does not support blocksparse attention yet.");
+    VLLM_DISPATCH_FLOATING_TYPES(
+        query.scalar_type(), "paged_attention_v1_impl", [&] {
+          CPU_KERNEL_GUARD_IN(paged_attention_v1_impl)
+          CALL_V1_KERNEL_LAUNCHER_BLOCK_SIZE(scalar_t, scalar_t, false);
+          CPU_KERNEL_GUARD_OUT(paged_attention_v1_impl)
+        });
+  } else if (kv_cache_dtype == "fp8") {
+    if (query.dtype() == at::ScalarType::Float) {
+      CALL_V1_KERNEL_LAUNCHER_BLOCK_SIZE(float, cpu_fp8, true);
+    } else if (query.dtype() == at::ScalarType::Half) {
+      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
+    } else if (query.dtype() == at::ScalarType::BFloat16) {
+      CALL_V1_KERNEL_LAUNCHER_BLOCK_SIZE(c10::BFloat16, cpu_fp8, true);
+    } else {
+      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
+    }
+  } else {
+    TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
+  }
 }
 
 // Paged attention v2
 namespace {
-template <typename scalar_t, int HEAD_SIZE, int BLOCK_SIZE, int PARTITION_SIZE>
+template <typename scalar_t, int HEAD_SIZE, int BLOCK_SIZE, int PARTITION_SIZE,
+          typename cache_t = scalar_t>
 struct paged_attention_v2_impl {
   static void call(
-      scalar_t* __restrict__ out,            // [num_seqs, num_heads, head_size]
-      float* __restrict__ exp_sums,          // [num_seqs, num_heads,
-                                             // max_num_partitions]
-      float* __restrict__ max_logits,        // [num_seqs, num_heads,
-                                             // max_num_partitions]
-      scalar_t* __restrict__ tmp_out,        // [num_seqs, num_heads,
-                                             // max_num_partitions, head_size]
-      const scalar_t* __restrict__ q,        // [num_seqs, num_heads, head_size]
-      const scalar_t* __restrict__ k_cache,  // [num_blocks, num_kv_heads,
-                                             // head_size/x, block_size, x]
-      const scalar_t* __restrict__ v_cache,  // [num_blocks, num_kv_heads,
-                                             // head_size, block_size]
+      scalar_t* __restrict__ out,           // [num_seqs, num_heads, head_size]
+      float* __restrict__ exp_sums,         // [num_seqs, num_heads,
+                                            // max_num_partitions]
+      float* __restrict__ max_logits,       // [num_seqs, num_heads,
+                                            // max_num_partitions]
+      scalar_t* __restrict__ tmp_out,       // [num_seqs, num_heads,
+                                            // max_num_partitions, head_size]
+      const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
+      const cache_t* __restrict__ k_cache,  // [num_blocks, num_kv_heads,
+                                            // head_size/x, block_size, x]
+      const cache_t* __restrict__ v_cache,  // [num_blocks, num_kv_heads,
+                                            // head_size, block_size]
       const int num_kv_heads, const float scale,
       const int* __restrict__ block_tables,  // [num_seqs,
                                              // max_num_blocks_per_seq]
@@ -463,7 +519,7 @@ struct paged_attention_v2_impl {
       const float* __restrict__ alibi_slopes,  // [num_heads]
       const int q_stride, const int kv_block_stride, const int kv_head_stride,
       const int num_seqs, const int num_heads, const int max_num_partitions) {
-    constexpr int x = 16 / sizeof(scalar_t);
+    constexpr int x = 16 / sizeof(cache_t);
     const int num_queries_per_kv = num_heads / num_kv_heads;
 
     static_assert(BLOCK_SIZE == 16);
@@ -501,15 +557,18 @@ struct paged_attention_v2_impl {
           // Compute logits
           for (int block_idx = 0; block_idx < block_num; ++block_idx) {
             const int64_t physical_block_idx = seq_block_table[block_idx];
-            const scalar_t* __restrict__ k_block_cache_ptr =
+            const cache_t* __restrict__ k_block_cache_ptr =
                 k_cache + physical_block_idx * kv_block_stride +
                 kv_head_idx * kv_head_stride;
             float* __restrict__ head_block_logits =
                 logits + block_idx * BLOCK_SIZE;
 
-            reduceQKBlockKernel<scalar_t, HEAD_SIZE, BLOCK_SIZE, x>::call(
-                q_vec_ptr, k_block_cache_ptr, head_block_logits, scale,
-                block_idx == block_num - 1 ? last_block_token_num : BLOCK_SIZE);
+            reduceQKBlockKernel<scalar_t, HEAD_SIZE, BLOCK_SIZE, x,
+                                cache_t>::call(q_vec_ptr, k_block_cache_ptr,
+                                               head_block_logits, scale,
+                                               block_idx == block_num - 1
+                                                   ? last_block_token_num
+                                                   : BLOCK_SIZE);
           }
 
           std::pair<float, float> max_and_sum;
@@ -552,18 +611,18 @@ struct paged_attention_v2_impl {
               const int64_t physical_block_idx = seq_block_table[block_idx];
               const float* __restrict__ prob_vec_ptr =
                   logits + block_idx * BLOCK_SIZE;
-              const scalar_t* __restrict__ v_block_cache_ptr =
+              const cache_t* __restrict__ v_block_cache_ptr =
                   v_cache + physical_block_idx * kv_block_stride +
                   kv_head_idx * kv_head_stride +
                   BLOCK_SIZE * head_part_idx * head_elem_num_per_partition;
               reduceValueBlock<scalar_t, HEAD_SIZE, BLOCK_SIZE,
-                               head_elem_num_per_partition>(
+                               head_elem_num_per_partition, cache_t>(
                   prob_vec_ptr, v_block_cache_ptr, accums);
 
               if (block_idx != block_num - 1) {
                 const int64_t next_physical_block_idx =
                     seq_block_table[block_idx + 1];
-                const scalar_t* __restrict__ next_v_block_cache_ptr =
+                const cache_t* __restrict__ next_v_block_cache_ptr =
                     v_cache + next_physical_block_idx * kv_block_stride +
                     kv_head_idx * kv_head_stride +
                     BLOCK_SIZE * head_part_idx * head_elem_num_per_partition;
@@ -651,15 +710,21 @@ struct paged_attention_v2_impl {
   }
 };
 
-#define LAUNCH_V2_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE)                 \
-  paged_attention_v2_impl<T, HEAD_SIZE, BLOCK_SIZE, PARTITION_SIZE>::call(   \
-      out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, query_ptr,         \
-      key_cache_ptr, value_cache_ptr, num_kv_heads, scale, block_tables_ptr, \
-      seq_lens_ptr, max_num_blocks_per_seq, alibi_slopes_ptr, q_stride,      \
-      kv_block_stride, kv_head_stride, num_seqs, num_heads,                  \
-      max_num_partitions);
+#define LAUNCH_V2_ATTENTION_KERNEL(T, CACHE_T, HEAD_SIZE, BLOCK_SIZE)          \
+  paged_attention_v2_impl<T, HEAD_SIZE, BLOCK_SIZE, PARTITION_SIZE,            \
+                          CACHE_T>::call(out_ptr, exp_sums_ptr,                \
+                                         max_logits_ptr, tmp_out_ptr,          \
+                                         query_ptr, key_cache_ptr,             \
+                                         value_cache_ptr, num_kv_heads, scale, \
+                                         block_tables_ptr, seq_lens_ptr,       \
+                                         max_num_blocks_per_seq,               \
+                                         alibi_slopes_ptr, q_stride,           \
+                                         kv_block_stride, kv_head_stride,      \
+                                         num_seqs, num_heads,                  \
+                                         max_num_partitions);
 
-template <typename T, int BLOCK_SIZE, int PARTITION_SIZE = 512>
+template <typename T, typename CACHE_T, int BLOCK_SIZE,
+          int PARTITION_SIZE = 512>
 void paged_attention_v2_impl_launcher(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
@@ -686,32 +751,32 @@ void paged_attention_v2_impl_launcher(
   float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
   T* tmp_out_ptr = reinterpret_cast<T*>(tmp_out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
-  T* key_cache_ptr = reinterpret_cast<T*>(key_cache.data_ptr());
-  T* value_cache_ptr = reinterpret_cast<T*>(value_cache.data_ptr());
+  CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
+  CACHE_T* value_cache_ptr = reinterpret_cast<CACHE_T*>(value_cache.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   switch (head_size) {
     case 64:
-      LAUNCH_V2_ATTENTION_KERNEL(T, 64, BLOCK_SIZE);
+      LAUNCH_V2_ATTENTION_KERNEL(T, CACHE_T, 64, BLOCK_SIZE);
       break;
     case 80:
-      LAUNCH_V2_ATTENTION_KERNEL(T, 80, BLOCK_SIZE);
+      LAUNCH_V2_ATTENTION_KERNEL(T, CACHE_T, 80, BLOCK_SIZE);
       break;
     case 96:
-      LAUNCH_V2_ATTENTION_KERNEL(T, 96, BLOCK_SIZE);
+      LAUNCH_V2_ATTENTION_KERNEL(T, CACHE_T, 96, BLOCK_SIZE);
       break;
     case 112:
-      LAUNCH_V2_ATTENTION_KERNEL(T, 112, BLOCK_SIZE);
+      LAUNCH_V2_ATTENTION_KERNEL(T, CACHE_T, 112, BLOCK_SIZE);
       break;
     case 128:
-      LAUNCH_V2_ATTENTION_KERNEL(T, 128, BLOCK_SIZE);
+      LAUNCH_V2_ATTENTION_KERNEL(T, CACHE_T, 128, BLOCK_SIZE);
       break;
     case 192:
-      LAUNCH_V2_ATTENTION_KERNEL(T, 192, BLOCK_SIZE);
+      LAUNCH_V2_ATTENTION_KERNEL(T, CACHE_T, 192, BLOCK_SIZE);
       break;
     case 256:
-      LAUNCH_V2_ATTENTION_KERNEL(T, 256, BLOCK_SIZE);
+      LAUNCH_V2_ATTENTION_KERNEL(T, CACHE_T, 256, BLOCK_SIZE);
       break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
@@ -719,16 +784,16 @@ void paged_attention_v2_impl_launcher(
   }
 }
 
-#define CALL_V2_KERNEL_LAUNCHER(T, BLOCK_SIZE)                              \
-  paged_attention_v2_impl_launcher<T, BLOCK_SIZE>(                          \
+#define CALL_V2_KERNEL_LAUNCHER(T, CACHE_T, BLOCK_SIZE)                     \
+  paged_attention_v2_impl_launcher<T, CACHE_T, BLOCK_SIZE>(                 \
       out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,    \
       num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len, \
       alibi_slopes);
 
-#define CALL_V2_KERNEL_LAUNCHER_BLOCK_SIZE(T)                     \
+#define CALL_V2_KERNEL_LAUNCHER_BLOCK_SIZE(T, CACHE_T)            \
   switch (block_size) {                                           \
     case 16:                                                      \
-      CALL_V2_KERNEL_LAUNCHER(T, 16);                             \
+      CALL_V2_KERNEL_LAUNCHER(T, CACHE_T, 16);                    \
       break;                                                      \
     default:                                                      \
       TORCH_CHECK(false, "Unsupported block size: ", block_size); \
@@ -749,10 +814,19 @@ void paged_attention_v2(
   TORCH_CHECK(kv_scale == 1.0f);
   TORCH_CHECK(blocksparse_vert_stride <= 1,
               "CPU backend does not support blocksparse attention yet.");
-  VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v2_impl",
-                               [&] {
-                                 CPU_KERNEL_GUARD_IN(paged_attention_v2_impl)
-                                 CALL_V2_KERNEL_LAUNCHER_BLOCK_SIZE(scalar_t);
-                                 CPU_KERNEL_GUARD_OUT(paged_attention_v2_impl)
-                               });
+  if (kv_cache_dtype == "auto") {
+    VLLM_DISPATCH_FLOATING_TYPES(
+        query.scalar_type(), "paged_attention_v2_impl", [&] {
+          CPU_KERNEL_GUARD_IN(paged_attention_v2_impl)
+          CALL_V2_KERNEL_LAUNCHER_BLOCK_SIZE(scalar_t, scalar_t);
+          CPU_KERNEL_GUARD_OUT(paged_attention_v2_impl)
+        });
+  } else if (kv_cache_dtype == "fp8") {
+    VLLM_DISPATCH_FLOATING_TYPES(
+        query.scalar_type(), "paged_attention_v2_impl", [&] {
+          CPU_KERNEL_GUARD_IN(paged_attention_v2_impl)
+          CALL_V2_KERNEL_LAUNCHER_BLOCK_SIZE(scalar_t, cpu_fp8);
+          CPU_KERNEL_GUARD_OUT(paged_attention_v2_impl)
+        });
+  }
 }

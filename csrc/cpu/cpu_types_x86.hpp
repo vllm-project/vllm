@@ -5,6 +5,10 @@
 #include <immintrin.h>
 #include <torch/all.h>
 
+#include "fp8_utils.h"
+
+typedef uint8_t cpu_fp8;
+
 #ifndef __AVX2__
 static_assert(false, "AVX2 must be supported for the current implementation.");
 #endif
@@ -49,6 +53,19 @@ template <typename T> struct Vec {
 
 struct FP32Vec8;
 struct FP32Vec16;
+
+struct FP8Vec16 : public Vec<FP8Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+  union AliasReg {
+    __m128 reg;
+    cpu_fp8 values[VEC_ELEM_NUM];
+  };
+  __m128 reg;
+
+  explicit FP8Vec16() : reg(_mm_set1_ps(0)) {}
+  explicit FP8Vec16(const cpu_fp8 *ptr) : reg((__m128)_mm_loadu_epi8(ptr)) {}
+
+};
 
 #ifdef __AVX512FP16__
 struct FP16Vec8 : public Vec<FP16Vec8> {
@@ -278,6 +295,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(__m512 data) : reg(data) {}
 
   explicit FP32Vec16(const FP32Vec16 &data) : reg(data.reg) {}
+
+  explicit FP32Vec16(const FP8Vec16 &data) : reg(cast_fp8x16_to_fp32x16((__m128)data.reg)) {}
 
   explicit FP32Vec16(const FP32Vec4 &data)
       : reg((__m512)_mm512_inserti32x4(
