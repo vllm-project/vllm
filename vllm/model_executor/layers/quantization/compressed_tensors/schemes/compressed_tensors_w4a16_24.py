@@ -8,7 +8,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N)
-from vllm.model_executor.parameter import PackedvLLMParameter, vLLMParameter
+from vllm.model_executor.parameter import PackedvLLMParameter, vLLMParameter, GroupQuantScaleParameter, ChannelQuantScaleParameter
 
 __all__ = ["CompressedTensorsW4A16Sparse24"]
 W4A16SPARSE24_SUPPORTED_BITS = [4]
@@ -54,8 +54,6 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                                       input_dim=0,
                                       output_dim=1,
                                       packed_dim=1,
-                                      use_row_loading=True,
-                                      use_col_loading=True,
                                       packed_factor=pack_factor,
                                       marlin_tile_size=self.tile_size,
                                       weight_loader=weight_loader)
@@ -63,20 +61,24 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         input_groups = (1 if self.group_size is None else
                         input_size_per_partition // self.group_size)
 
-        input_dim = None if input_groups == 1 else 0
-
-        scales = vLLMParameter(
-            data=torch.empty(
+        weight_scale_args = {
+            "data":
+            torch.empty(
                 input_groups,
                 output_size_per_partition,
                 dtype=params_dtype,
             ),
-            output_dim=1,
-            input_dim=input_dim,
-            use_col_loading=True,
-            use_row_loading=True  #noqa: SIM210
-            if input_dim is not None else False,
-            weight_loader=weight_loader)
+            "weight_loader":
+            weight_loader
+        }
+
+        if self.group_size is not None:
+            scales = GroupQuantScaleParameter(output_dim=1,
+                                              input_dim=0,
+                                              **weight_scale_args)
+        else:
+            scales = ChannelQuantScaleParameter(output_dim=1,
+                                                **weight_scale_args)
 
         weight_shape = vLLMParameter(data=torch.empty(2, dtype=torch.int64),
                                      weight_loader=weight_loader)
@@ -88,8 +90,6 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         ),
                                    input_dim=0,
                                    output_dim=1,
-                                   use_col_loading=True,
-                                   use_row_loading=True,
                                    packed_dim=1,
                                    packed_factor=1,
                                    marlin_tile_size=2,

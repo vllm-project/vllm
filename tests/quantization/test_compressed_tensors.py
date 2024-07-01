@@ -54,6 +54,9 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
             assert qkv_proj.weight_scale.shape[0] == shape_0
             assert qkv_proj.weight_scale.shape[1] == 1
         assert qkv_proj.weight_scale.dtype is torch.float32
+        #if qkv_proj.scheme.strategy == "tensor":
+        #    assert qkv_proj.weight_scale.shard_splitter is not None
+        #    assert qkv_proj.weight_scale.logical_widths is not None
         assert qkv_proj.input_scale.dtype is torch.float32
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
@@ -109,7 +112,7 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 
         assert qkv_proj.weight_packed.dtype is torch.int32
         assert qkv_proj.weight_scale.dtype is torch.float16
-        assert qkv_proj.weight_packed.pack_factor == pack_factor
+        assert qkv_proj.weight_packed.packed_factor == pack_factor
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output

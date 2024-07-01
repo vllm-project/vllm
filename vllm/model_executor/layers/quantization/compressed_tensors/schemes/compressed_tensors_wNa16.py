@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
     marlin_permute_scales, replace_tensor, verify_gptq_marlin_supported,
     verify_marlin_supports_shape)
-from vllm.model_executor.parameter import vLLMParameter, PackedParameter
+from vllm.model_executor.parameter import PackedvLLMParameter, vLLMParameter, GroupQuantScaleParameter, ChannelQuantScaleParameter
 
 __all__ = ["CompressedTensorsWNA16"]
 WNA16_SUPPORTED_BITS = [4, 8]
@@ -25,17 +25,13 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.num_bits = num_bits
         self.pack_factor = 32 // self.num_bits
         self.strategy = strategy
+        self.group_size = group_size
 
-        self.group_size: int
-        if group_size is None:
-            if self.strategy != "channel":
-                raise ValueError(
-                    "Marlin kernels require group quantization or "
-                    "channelwise quantization, but found no group "
-                    "size and strategy is not channelwise.")
-            self.group_size = -1
-        else:
-            self.group_size = group_size
+        if self.group_size is None and self.strategy != "channel":
+            raise ValueError(
+                "Marlin kernels require group quantization or "
+                "channelwise quantization, but found no group "
+                "size and strategy is not channelwise.")
 
         # Verify supported on platform.
         verify_gptq_marlin_supported(num_bits=self.num_bits,
@@ -54,9 +50,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                        **kwargs):
         output_size_per_partition = sum(output_partition_sizes)
 
-        # If group_size is -1, we are in channelwise case.
-        channelwise = (self.group_size == -1)
-        group_size = input_size if channelwise else self.group_size
+        # If group_size is None, we are in channelwise case.
+        channelwise = self.group_size is None
+        group_size = self.group_size if group_size is not None else input_size
         row_parallel = (input_size != input_size_per_partition)
         # In the case of channelwise quantization, we need to replicate the
         # scales across all gpus.
@@ -68,18 +64,14 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             input_size=input_size,
             group_size=group_size)
 
-        weight_scale_dim = None
         scales_and_zp_size = input_size // group_size
 
         if partition_scales:
             assert input_size_per_partition % group_size == 0
-            weight_scale_dim = 1
             scales_and_zp_size = input_size_per_partition // group_size
 
         weight = PackedvLLMParameter(input_dim=1,
                                      output_dim=0,
-                                     use_row_loading=True,
-                                     use_col_loading=True,
                                      weight_loader=weight_loader,
                                      packed_factor=pack_factor,
                                      packed_dim=1,
@@ -90,18 +82,23 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                          dtype=torch.int32,
                                      ))
 
-        weight_scale = vLLMParameter(
-            input_dim=weight_scale_dim,
-            output_dim=0,
-            use_col_loading=True,
-            use_row_loading=True  # noqa: SIM210
-            if weight_scale_dim is not None else False,
-            weight_loader=weight_loader,
-            data=torch.empty(
+        weight_scale_args = {
+            "weight_loader":
+            weight_loader,
+            "data":
+            torch.empty(
                 output_size_per_partition,
                 scales_and_zp_size,
                 dtype=params_dtype,
-            ))
+            )
+        }
+        if self.group_size is not None:
+            weight_scale = GroupQuantScaleParameter(output_dim=0,
+                                                    input_dim=1,
+                                                    **weight_scale_args)
+        else:
+            weight_scale = ChannelQuantScaleParameter(output_dim=0,
+                                                      **weight_scale_args)
 
         # A 2D array defining the original shape of the weights
         # before packing

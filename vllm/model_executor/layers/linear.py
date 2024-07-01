@@ -13,9 +13,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.compressed_tensors import (
-    CompressedTensorsLinearMethod)
-from vllm.model_executor.parameter import vLLMParameter
+from vllm.model_executor.parameter import vLLMParameter, PackedvLLMParameter, ScalerToArrayvLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -292,6 +290,9 @@ class ColumnParallelLinear(LinearBase):
         if output_sizes is None:
             output_sizes = [output_size]
 
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+            CompressedTensorsLinearMethod)
+
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size,
@@ -345,7 +346,8 @@ class ColumnParallelLinear(LinearBase):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(param.output_dim, start_idx,
                                                  shard_size)
-        elif param.use_col_shard_split:
+
+        elif isinstance(param, ScalerToArrayvLLMParameter):
             param_data, loaded_weight = param.col_shard_splitter(
                 param_data, loaded_weight, 0)
 
@@ -546,14 +548,16 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         shard_size = self.output_sizes[loaded_shard_id] // tp_size
 
         # TODO: Define this relationship more clearly
-        if param.is_packed and param.packed_dim == param.output_dim:
+        if isinstance(
+                param,
+                PackedvLLMParameter) and param.packed_dim == param.output_dim:
             shard_size, shard_offset = param.adjust_packed_shard(
                 shard_offset=shard_offset, shard_size=shard_size)
 
         param_data = param_data.narrow(param.output_dim, shard_offset,
                                        shard_size)
-        loaded_weight.narrow(param.output_dim, tp_rank * shard_size,
-                             shard_size)
+        loaded_weight = loaded_weight.narrow(param.output_dim,
+                                             tp_rank * shard_size, shard_size)
 
         return param_data, loaded_weight
 
@@ -569,7 +573,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
             # TODO: Define this relationship more clearly
-            if param.is_packed and param.packed_dim == param.output_dim:
+            if isinstance(param, PackedvLLMParameter
+                          ) and param.packed_dim == param.output_dim:
                 param.adjust_packed_shard(shard_size=shard_size,
                                           shard_offset=shard_offset)
 
@@ -603,7 +608,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             shard_size = loaded_weight.shape[0]
             shard_offset = loaded_shard_id * shard_size
             param_data = param_data.narrow(0, shard_offset, shard_size)
-        elif param.use_col_shard_split:
+        elif isinstance(param, ScalerToArrayvLLMParameter):
             param_data, loaded_weight = param.col_shard_splitter(
                 param_data=param_data,
                 loaded_weight=loaded_weight,
@@ -708,7 +713,9 @@ class QKVParallelLinear(ColumnParallelLinear):
         shard_size = self._get_shard_size_mapping(loaded_shard_id)
 
         # TODO: Define this relationship more clearly
-        if param.is_packed and param.output_dim == param.packed_dim:
+        if isinstance(
+                param,
+                PackedvLLMParameter) and param.output_dim == param.packed_dim:
             shard_size, shard_offset = param.adjust_packed_shard(
                 shard_offset=shard_offset, shard_size=shard_size)
 
@@ -719,8 +726,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         else:
             shard_id = tp_rank // self.num_kv_head_replicas
 
-        loaded_weight.narrow(param.output_dim, shard_id * shard_size,
-                             shard_size)
+        loaded_weight = loaded_weight.narrow(param.output_dim,
+                                             shard_id * shard_size, shard_size)
 
         return param_data, loaded_weight
 
@@ -741,7 +748,8 @@ class QKVParallelLinear(ColumnParallelLinear):
             # for the packing.
 
             # TODO: Define this relationship more clearly
-            if param.is_packed and param.packed_dim == param.output_dim:
+            if isinstance(param, PackedvLLMParameter
+                          ) and param.packed_dim == param.output_dim:
                 param.adjust_packed_shard(shard_size=shard_size,
                                           shard_offset=shard_offset)
 
@@ -777,7 +785,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_index = ["q", "k", "v"].index(loaded_shard_id)
             param_data = param_data.narrow(0, shard_index * shard_size,
                                            shard_size)
-        elif param.use_col_shard_split:
+        elif isinstance(param, ScalerToArrayvLLMParameter):
             param_data, loaded_weight = param.col_shard_splitter(
                 param_data=param_data,
                 loaded_weight=loaded_weight,
@@ -978,6 +986,9 @@ class RowParallelLinear(LinearBase):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = divide(input_size, self.tp_size)
         assert self.quant_method is not None
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+            CompressedTensorsLinearMethod)
+
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
