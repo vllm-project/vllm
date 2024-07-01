@@ -4,7 +4,8 @@ from typing import Dict
 
 @functools.lru_cache
 def _get_op_configs(op_type: str, batch: int, hidden_size: int):
-    raise NotImplementedError
+    # TODO: add optimal configurations
+    return None
 
 
 def _get_default_config(op_type: str, batch: int, hidden_size: int):
