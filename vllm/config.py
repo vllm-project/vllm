@@ -374,7 +374,8 @@ class ModelConfig:
 
     def contains_seqlen_agnostic_layers(
             self, parallel_config: "ParallelConfig") -> bool:
-        return self.get_num_seqlen_agnostic_layers(parallel_config) > 0
+        """True for Mamba/SSM models (Jamba)"""
+        return self._get_num_seqlen_agnostic_layers(parallel_config) > 0
 
     def get_layers_block_type(self,
                               parallel_config: "ParallelConfig") -> List[str]:
@@ -390,7 +391,7 @@ class ModelConfig:
             if t == "attention"
         ])
 
-    def get_num_seqlen_agnostic_layers(
+    def _get_num_seqlen_agnostic_layers(
             self, parallel_config: "ParallelConfig") -> int:
         return len([
             t for t in self.get_layers_block_type(parallel_config)
