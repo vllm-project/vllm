@@ -28,21 +28,20 @@ class MLPSpeculatorLayerNorm(nn.Module):
         Safety term to prevent division by zero. Make sure the chosen value
          fits in the range of your encoding scheme
          (i.e. fp16 requires eps >= 6e-8).
+    elementwise_scale_and_shift : bool
+        Include a learned scaling and shift term after normalization.
     """
 
     def __init__(
         self,
         normalized_shape,
         eps=1e-06,
-        elementwise_scale=True,
-        elementwise_shift=False,
+        elementwise_scale_and_shift=True,
     ):
         super(MLPSpeculatorLayerNorm, self).__init__()
-        self.elementwise_scale = elementwise_scale
-        self.elementwise_shift = elementwise_shift
-        if self.elementwise_scale:
+        self.elementwise_scale_and_shift = elementwise_scale_and_shift
+        if self.elementwise_scale_and_shift:
             self.weight = nn.Parameter(torch.empty(normalized_shape))
-        if self.elementwise_shift:
             self.bias = nn.Parameter(torch.empty(normalized_shape))
         self.eps = eps
 
@@ -50,9 +49,8 @@ class MLPSpeculatorLayerNorm(nn.Module):
         xf = x
         xf = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
         x = xf.type_as(x)
-        if self.elementwise_scale:
+        if self.elementwise_scale_and_shift:
             x = self.weight * x
-        if self.elementwise_shift:
             x = x + self.bias
         return x
 
@@ -93,8 +91,7 @@ class MLPSpeculator(nn.Module):
             self.head = nn.ModuleList([head] * self.max_speculative_tokens)
 
             ln = MLPSpeculatorLayerNorm(self.inner_dim,
-                                        elementwise_shift=True,
-                                        elementwise_scale=True)
+                                        elementwise_scale_and_shift=True)
             self.ln = nn.ModuleList([ln] * self.max_speculative_tokens)
 
         else:
@@ -118,14 +115,12 @@ class MLPSpeculator(nn.Module):
             ])
             self.ln = nn.ModuleList([
                 MLPSpeculatorLayerNorm(self.inner_dim,
-                                       elementwise_shift=True,
-                                       elementwise_scale=True)
+                                       elementwise_scale_and_shift=True)
                 for _ in range(self.max_speculative_tokens)
             ])
         if self.scale_input:
-            self.ln0 = MLPSpeculatorLayerNorm(self.emb_dim,
-                                              elementwise_shift=False,
-                                              elementwise_scale=False)
+            self.ln0 = MLPSpeculatorLayerNorm(
+                self.emb_dim, elementwise_scale_and_shift=False)
 
         self.state_weight = 0.5**(0.5 / config.n_predict)
         self.emb_weight = math.sqrt(
