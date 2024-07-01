@@ -6,7 +6,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import (CacheConfig, LoRAConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.core.policy import Policy, PolicyFactory
 from vllm.logger import init_logger
@@ -255,10 +256,12 @@ class Scheduler:
         self,
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
+        parallel_config: ParallelConfig,
         lora_config: Optional[LoRAConfig],
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
+        self.parallel_config = parallel_config
         # Note for LoRA scheduling: the current policy is extremely
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
@@ -273,11 +276,19 @@ class Scheduler:
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
 
+        num_gpu_blocks = cache_config.num_gpu_blocks
+        if num_gpu_blocks:
+            num_gpu_blocks //= parallel_config.pipeline_parallel_size
+
+        num_cpu_blocks = cache_config.num_cpu_blocks
+        if num_cpu_blocks:
+            num_cpu_blocks //= parallel_config.pipeline_parallel_size
+
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
-            num_gpu_blocks=self.cache_config.num_gpu_blocks,
-            num_cpu_blocks=self.cache_config.num_cpu_blocks,
+            num_gpu_blocks=num_gpu_blocks,
+            num_cpu_blocks=num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
 
