@@ -19,11 +19,11 @@ class RefCounterProtocol(Protocol):
 
 
 class RefCounter(RefCounterProtocol):
-    """A class for managing reference counts for a set of block indices.
+    """A class for managing reference counts for a range of block indices.
 
-    The RefCounter class maintains a dictionary that maps block indices to their
-    corresponding reference counts. It provides methods to increment, decrement,
-    and retrieve the reference count for a given block index.
+    The RefCounter class maintains a list of reference counts.
+    It provides methods to increment, decrement,
+    and retrieve the reference count for a given block index in that range.
 
     Args:
         block_index_start (BlockId): The starting block index for the reference
