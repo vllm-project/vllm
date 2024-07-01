@@ -457,6 +457,7 @@ class LoRAModelManager:
         # Dict instead of a Set for compatibility with LRUCache.
         self._active_loras: Dict[int, None] = {}
         self._last_mapping: Optional[LoRAMapping] = None
+        self._find_attn_modules()
         self._create_lora_modules()
 
     @property
@@ -604,7 +605,7 @@ class LoRAModelManager:
     def _create_lora_modules(self):
         for module_name, module in self.model.named_modules(
                 remove_duplicate=False):
-            if not self._match_target_modules(module_name):
+            if not self._match_target_modules(module_name, module):
                 continue
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
@@ -649,9 +650,9 @@ class LoRAModelManager:
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {}, scaling_factor)
         for module_name, module in self.model.named_modules():
-            if not self._match_target_modules(module_name) or not isinstance(
-                    module, BaseLayerWithLoRA) or isinstance(
-                        module, LinearScalingRotaryEmbeddingWithLora):
+            if not self._match_target_modules(module_name, module) or \
+                    not isinstance(module, BaseLayerWithLoRA) or \
+                    isinstance(module, LinearScalingRotaryEmbeddingWithLora):
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:
@@ -705,7 +706,18 @@ class LoRAModelManager:
             model.loras[module_name] = lora
         return model
 
-    def _match_target_modules(self, module_name: str):
+    def _find_attn_modules(self):
+        self._attn_modules = {}
+        for name, module in self.model.named_modules(remove_duplicate=False):
+            if module.__class__.__name__.endswith("Attention"):
+                self._attn_modules[name] = module
+
+    def _match_target_modules(self, module_name: str, module: nn.Module):
+        is_attn_child = any(
+            module_name.startswith(x + ".") for x in self._attn_modules)
+        if self.lora_config.linear_lora_attn_only and not is_attn_child and \
+                "Linear" in module.__class__.__name__:
+            return False
         return any(
             re.match(
                 r".*\.{target_module}$".format(target_module=target_module),
