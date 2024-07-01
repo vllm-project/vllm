@@ -5,17 +5,21 @@ import subprocess
 import torch
 from PIL import Image
 
-from vllm import LLM
-from vllm.multimodal.image import ImageFeatureData, ImagePixelData
-from vllm.model_executor.models.deepseek_vl import VLMImageProcessor
-
 # The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
 # You can use `.buildkite/download-images.sh` to download them
-from vllm import SamplingParams
+from vllm import LLM, SamplingParams
+from vllm.model_executor.models.deepseek_vl import VLMImageProcessor
+from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 
 sample_params = SamplingParams(temperature=0, max_tokens=1024)
 
 model = "deepseek-ai/deepseek-vl-7b-chat"
+prompt = "You are a helpful language and vision assistant." \
+    "You are able to understand the visual content that the user provides," \
+    "and assist the user with a variety of tasks using natural language.\n" \
+    "User: <image_placeholder> Describe the content of this image.\nAssistant:"
+
+prompt = prompt.replace("<image_placeholder>", "<image_placeholder>" * 576)
 
 
 def run_deepseek_vl_pixel_values(*, disable_image_processor: bool = False):
@@ -30,8 +34,6 @@ def run_deepseek_vl_pixel_values(*, disable_image_processor: bool = False):
         max_model_len=3072,
         enforce_eager=True,
     )
-
-    prompt = f"You are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.\n User: {'<image_placeholder>'*576} Describe the content of this image.\nAssistant:"
 
     if disable_image_processor:
         image = get_image_features()
@@ -62,7 +64,6 @@ def run_deepseek_vl_image_features():
         max_model_len=3072,
         enforce_eager=True,
     )
-    prompt = f"You are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.\n User: {'<image_placeholder>'*576} Describe the content of this image.\nAssistant:"
 
     image: torch.Tensor = get_image_features()
 

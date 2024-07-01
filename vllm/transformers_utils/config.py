@@ -6,9 +6,9 @@ from transformers import GenerationConfig, PretrainedConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
+                                             DeepSeekMultiModalityConfig,
                                              JAISConfig, MLPSpeculatorConfig,
-                                             MPTConfig, RWConfig,
-                                             DeepSeekMultiModalityConfig)
+                                             MPTConfig, RWConfig)
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig

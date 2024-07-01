@@ -1,68 +1,53 @@
 # Copyright (c) 2023-2024 DeepSeek.
 #
-# Permission is hereby granted, free of charge, to any person obtaining a copy of
+# Permission is hereby granted,free of charge, to any person obtaining a copy of
 # this software and associated documentation files (the "Software"), to deal in
 # the Software without restriction, including without limitation the rights to
-# use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-# the Software, and to permit persons to whom the Software is furnished to do so,
+# use, copy, modify, merge, publish, distribute,sublicense,and/or sell copies of
+# the Software,and to permit persons to whom the Software is furnished to do so,
 # subject to the following conditions:
 #
 # The above copyright notice and this permission notice shall be included in all
 # copies or substantial portions of the Software.
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+# IMPLIED,INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,FITNESS
 # FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 # COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+import collections.abc
+import copy
 import math
 import warnings
-import copy
-import collections.abc
-
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
-from typing import (
-    Callable,
-    Dict,
-    Final,
-    List,
-    Literal,
-    Optional,
-    Sequence,
-    Set,
-    Tuple,
-    Type,
-    Union,
-)
-from itertools import (repeat, chain)
+from itertools import chain, repeat
+from typing import (Callable, Dict, Final, List, Literal, Optional, Sequence,
+                    Set, Tuple, Type, Union)
 
+import numpy as np
 import torch
 import torch.nn as nn
-import torchvision.transforms
 import torch.nn.functional as F
+import torchvision
+import torchvision.transforms
+import torchvision.transforms.functional
+from PIL import Image
 from torch import _assert
 from torch.utils.checkpoint import checkpoint
-import numpy as np
-import torchvision
-import torchvision.transforms.functional
-from transformers import PreTrainedModel
-from PIL import Image
-from transformers import AutoImageProcessor, PretrainedConfig
-from transformers.image_processing_utils import (
-    BaseImageProcessor,
-    BatchFeature,
-)
+from transformers import AutoImageProcessor, PretrainedConfig, PreTrainedModel
+from transformers.image_processing_utils import (BaseImageProcessor,
+                                                 BatchFeature)
 from transformers.image_utils import to_numpy_array
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, )
+    QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -71,8 +56,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import get_dummy_image_data
 from vllm.sequence import SamplerOutput
-from .vlm_base import VisionLanguageModelBase
 from vllm.transformers_utils.configs import DeepSeekMultiModalityConfig
+
+from .vlm_base import VisionLanguageModelBase
 
 ImageType = Union[np.ndarray, torch.Tensor, Image.Image]
 IMAGENET_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -113,7 +99,7 @@ def nchw_to(x: torch.Tensor, fmt: Format):
     return x
 
 
-# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/attention_pool.py
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/attention_pool.py # noqa
 class AttentionPoolLatent(nn.Module):
     """Attention pooling w/ latent query"""
 
@@ -205,20 +191,13 @@ class AttentionPoolLatent(nn.Module):
         return x
 
 
-# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/drop.py
-def drop_path(x,
-              drop_prob: float = 0.0,
-              training: bool = False,
-              scale_by_keep: bool = True):
-    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
-
-    This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
-    the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...
-    See discussion: https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for
-    changing the layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use
-    'survival rate' as the argument.
-
-    """
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/drop.py # noqa
+def drop_path(
+    x,
+    drop_prob: float = 0.0,
+    training: bool = False,
+    scale_by_keep: bool = True,
+):
     if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1 - drop_prob
@@ -230,9 +209,12 @@ def drop_path(x,
     return x * random_tensor
 
 
-# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/drop.py
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/drop.py # noqa
 class DropPath(nn.Module):
-    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
+    """
+    Drop paths (Stochastic Depth) per sample  
+    (when applied in main path of residual blocks).
+    """
 
     def __init__(self, drop_prob: float = 0.0, scale_by_keep: bool = True):
         super(DropPath, self).__init__()
@@ -246,7 +228,7 @@ class DropPath(nn.Module):
         return f"drop_prob={round(self.drop_prob,3):0.3f}"
 
 
-# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/mlp.py
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/mlp.py # noqa
 class Mlp(nn.Module):
     """MLP as used in Vision Transformer, MLP-Mixer and related networks"""
 
@@ -266,8 +248,8 @@ class Mlp(nn.Module):
         hidden_features = hidden_features or in_features
         bias = to_2tuple(bias)
         drop_probs = to_2tuple(drop)
-        linear_layer = partial(nn.Conv2d,
-                               kernel_size=1) if use_conv else nn.Linear
+        linear_layer = (partial(nn.Conv2d, kernel_size=1)
+                        if use_conv else nn.Linear)
 
         self.fc1 = linear_layer(in_features, hidden_features, bias=bias[0])
         self.act = act_layer()
@@ -287,7 +269,7 @@ class Mlp(nn.Module):
         return x
 
 
-# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/patch_dropout.py
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/patch_dropout.py # noqa
 class PatchDropout(nn.Module):
     """
     https://arxiv.org/abs/2212.00794
@@ -333,7 +315,8 @@ class PatchDropout(nn.Module):
         keep_indices = torch.argsort(torch.randn(B, L, device=x.device),
                                      dim=-1)[:, :num_keep]
         if self.ordered:
-            # NOTE does not need to maintain patch order in typical transformer use,
+            # NOTE does not need to maintain patch order in typical
+            # transformer use,
             # but possibly useful for debug / visualization
             keep_indices = keep_indices.sort(dim=-1)[0]
         x = x.gather(1,
@@ -347,7 +330,7 @@ class PatchDropout(nn.Module):
         return x
 
 
-# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/patch_embed.py
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/patch_embed.py # noqa
 class PatchEmbed(nn.Module):
     """2D Image to Patch Embedding"""
 
@@ -383,17 +366,20 @@ class PatchEmbed(nn.Module):
             self.flatten = False
             self.output_fmt = Format(output_fmt)
         else:
-            # flatten spatial dim and transpose to channels last, kept for bwd compat
+            # flatten spatial dim and transpose to channels last,
+            # kept for bwd compat
             self.flatten = flatten
             self.output_fmt = Format.NCHW
         self.strict_img_size = strict_img_size
         self.dynamic_img_pad = dynamic_img_pad
 
-        self.proj = nn.Conv2d(in_chans,
-                              embed_dim,
-                              kernel_size=patch_size,
-                              stride=patch_size,
-                              bias=bias)
+        self.proj = nn.Conv2d(
+            in_chans,
+            embed_dim,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=bias,
+        )
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def feat_ratio(self, as_scalar=True) -> Union[Tuple[int, int], int]:
@@ -403,15 +389,18 @@ class PatchEmbed(nn.Module):
             return self.patch_size
 
     def dynamic_feat_size(self, img_size: Tuple[int, int]) -> Tuple[int, int]:
-        """Get grid (feature) size for given image size taking account of dynamic padding.
+        """Get grid (feature) size for given image size taking account 
+           of dynamic padding.
         NOTE: must be torchscript compatible so using fixed tuple indexing
         """
         if self.dynamic_img_pad:
             return math.ceil(img_size[0] / self.patch_size[0]), math.ceil(
                 img_size[1] / self.patch_size[1])
         else:
-            return img_size[0] // self.patch_size[0], img_size[
-                1] // self.patch_size[1]
+            return (
+                img_size[0] // self.patch_size[0],
+                img_size[1] // self.patch_size[1],
+            )
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -419,20 +408,20 @@ class PatchEmbed(nn.Module):
             if self.strict_img_size:
                 _assert(
                     self.img_size[0] == H,
-                    f"Input height ({H}) doesn't match model ({self.img_size[0]}).",
+                    f"Input height ({H}) doesn't match model ({self.img_size[0]}).",  # noqa
                 )
                 _assert(
                     self.img_size[1] == W,
-                    f"Input width ({W}) doesn't match model ({self.img_size[1]}).",
+                    f"Input width ({W}) doesn't match model ({self.img_size[1]}).",  # noqa
                 )
             elif not self.dynamic_img_pad:
                 _assert(
                     H % self.patch_size[0] == 0,
-                    f"Input height ({H}) should be divisible by patch size ({self.patch_size[0]}).",
+                    f"Input height ({H}) should be divisible by patch size ({self.patch_size[0]}).",  # noqa
                 )
                 _assert(
                     W % self.patch_size[1] == 0,
-                    f"Input width ({W}) should be divisible by patch size ({self.patch_size[1]}).",
+                    f"Input width ({W}) should be divisible by patch size ({self.patch_size[1]}).",  # noqa
                 )
         if self.dynamic_img_pad:
             pad_h = (self.patch_size[0] -
@@ -449,7 +438,7 @@ class PatchEmbed(nn.Module):
         return x
 
 
-# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/pos_embed.py
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/pos_embed.py # noqa
 def resample_abs_pos_embed(
     posemb,
     new_size: List[int],
@@ -500,49 +489,15 @@ def resample_abs_pos_embed(
     return posemb
 
 
-# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/_manipulate.py
-def checkpoint_seq(functions,
-                   x,
-                   every=1,
-                   flatten=False,
-                   skip_last=False,
-                   preserve_rng_state=True):
-    r"""A helper function for checkpointing sequential models.
-
-    Sequential models execute a list of modules/functions in order
-    (sequentially). Therefore, we can divide such a sequence into segments
-    and checkpoint each segment. All segments except run in :func:`torch.no_grad`
-    manner, i.e., not storing the intermediate activations. The inputs of each
-    checkpointed segment will be saved for re-running the segment in the backward pass.
-
-    See :func:`~torch.utils.checkpoint.checkpoint` on how checkpointing works.
-
-    .. warning::
-        Checkpointing currently only supports :func:`torch.autograd.backward`
-        and only if its `inputs` argument is not passed. :func:`torch.autograd.grad`
-        is not supported.
-
-    .. warning:
-        At least one of the inputs needs to have :code:`requires_grad=True` if
-        grads are needed for model inputs, otherwise the checkpointed part of the
-        model won't have gradients.
-
-    Args:
-        functions: A :class:`torch.nn.Sequential` or the list of modules or functions to run sequentially.
-        x: A Tensor that is input to :attr:`functions`
-        every: checkpoint every-n functions (default: 1)
-        flatten (bool): flatten nn.Sequential of nn.Sequentials
-        skip_last (bool): skip checkpointing the last function in the sequence if True
-        preserve_rng_state (bool, optional, default=True):  Omit stashing and restoring
-            the RNG state during each checkpoint.
-
-    Returns:
-        Output of running :attr:`functions` sequentially on :attr:`*inputs`
-
-    Example:
-        >>> model = nn.Sequential(...)
-        >>> input_var = checkpoint_seq(model, input_var, every=2)
-    """
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/_manipulate.py # noqa
+def checkpoint_seq(
+    functions,
+    x,
+    every=1,
+    flatten=False,
+    skip_last=False,
+    preserve_rng_state=True,
+):
 
     def run_function(start, end, functions):
 
@@ -798,7 +753,8 @@ class MlpProjector(nn.Module):
         Args:
             x_or_tuple (Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
             if it is a tuple of torch.Tensor,
-            then it comes from the hybrid vision encoder, and x = high_res_x, low_res_x);
+            then it comes from the hybrid vision encoder, 
+            and x = high_res_x, low_res_x);
             otherwise it is the feature from the single vision encoder.
 
         Returns:
@@ -818,8 +774,9 @@ class MlpProjector(nn.Module):
 
 
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
-    # Cut & paste from PyTorch official master until it's in a few official releases - RW
-    # Method based on https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
+    # Cut & paste from PyTorch official master until it's in a few official
+    # releases - RW Method based on
+    # https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
     def norm_cdf(x):
         # Computes standard normal cumulative distribution function
         return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
@@ -856,25 +813,6 @@ def _no_grad_trunc_normal_(tensor, mean, std, a, b):
 
 
 def trunc_normal_(tensor, mean=0.0, std=1.0, a=-2.0, b=2.0):
-    # type: (torch.Tensor, float, float, float, float) -> torch.Tensor
-    r"""The original timm.models.layers.weight_init.trunc_normal_ can not handle bfloat16 yet, here we first
-    convert the tensor to float32, apply the trunc_normal_() in float32, and then convert it back to its original dtype.
-    Fills the input Tensor with values drawn from a truncated normal distribution. The values are effectively drawn
-    from the normal distribution :math:`\mathcal{N}(\text{mean}, \text{std}^2)`
-    with values outside :math:`[a, b]` redrawn until they are within
-    the bounds. The method used for generating the random values works
-    best when :math:`a \leq \text{mean} \leq b`.
-    Args:
-        tensor: an n-dimensional `torch.Tensor`
-        mean: the mean of the normal distribution
-        std: the standard deviation of the normal distribution
-        a: the minimum cutoff value
-        b: the maximum cutoff value
-    Examples:
-        >>> w = torch.empty(3, 5)
-        >>> nn.init.trunc_normal_(w)
-    """
-
     with torch.no_grad():
         dtype = tensor.dtype
         tensor_fp32 = tensor.float()
@@ -914,8 +852,8 @@ class SigLipAttention(nn.Module):
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(
-            proj_drop) if proj_drop > 0.0 else nn.Identity()
+        self.proj_drop = (nn.Dropout(proj_drop)
+                          if proj_drop > 0.0 else nn.Identity())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
@@ -990,8 +928,8 @@ class SigLipBlock(nn.Module):
         )
         self.ls1 = (LayerScale(dim, init_values=init_values)
                     if init_values else nn.Identity())
-        self.drop_path1 = DropPath(
-            drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path1 = (DropPath(drop_path)
+                           if drop_path > 0.0 else nn.Identity())
 
         self.norm2 = norm_layer(dim)
         self.mlp = mlp_layer(
@@ -1002,8 +940,8 @@ class SigLipBlock(nn.Module):
         )
         self.ls2 = (LayerScale(dim, init_values=init_values)
                     if init_values else nn.Identity())
-        self.drop_path2 = DropPath(
-            drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path2 = (DropPath(drop_path)
+                           if drop_path > 0.0 else nn.Identity())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
@@ -1014,7 +952,8 @@ class SigLipBlock(nn.Module):
 class VisionTransformer(nn.Module):
     """Vision Transformer
 
-    A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`
+    A PyTorch impl of : `An Image is Worth 16x16 Words: 
+    Transformers for Image Recognition at Scale`
         - https://arxiv.org/abs/2010.11929
     """
 
@@ -1060,17 +999,21 @@ class VisionTransformer(nn.Module):
             patch_size: Patch size.
             in_chans: Number of image input channels.
             num_classes: Number of classes for classification head.
-            global_pool: Type of global pooling for final sequence (default: 'token').
+            global_pool: Type of global pooling for final sequence 
+            (default: 'token').
             embed_dim: Transformer embedding dimension.
             depth: Depth of transformer.
             num_heads: Number of attention heads.
             mlp_ratio: Ratio of mlp hidden dim to embedding dim.
             qkv_bias: Enable bias for qkv projections if True.
-            init_values: Layer-scale init values (layer-scale enabled if not None).
+            init_values: Layer-scale init values 
+            (layer-scale enabled if not None).
             class_token: Use class token.
-            no_embed_class: Don't include position embeddings for class (or reg) tokens.
+            no_embed_class: Don't include position embeddings for class 
+            (or reg) tokens.
             reg_tokens: Number of register tokens.
-            fc_norm: Pre head norm after pool (instead of before), if None, enabled when global_pool == 'avg'.
+            fc_norm: Pre head norm after pool (instead of before), if None, 
+            enabled when global_pool == 'avg'.
             drop_rate: Head dropout rate.
             pos_drop_rate: Position embedding dropout rate.
             attn_drop_rate: Attention dropout rate.
@@ -1085,8 +1028,7 @@ class VisionTransformer(nn.Module):
         assert global_pool in ("", "avg", "token", "map")
         assert class_token or global_pool != "token"
         use_fc_norm = global_pool == "avg" if fc_norm is None else fc_norm
-        # norm_layer = get_norm_layer(norm_layer) or partial(nn.LayerNorm, eps=1e-6)
-        # act_layer = get_act_layer(act_layer) or nn.GELU
+
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
         act_layer = nn.GELU
 
@@ -1200,7 +1142,7 @@ class VisionTransformer(nn.Module):
             assert global_pool in ("", "avg", "token", "map")
             if global_pool == "map" and self.attn_pool is None:
                 raise AssertionError(
-                    "Cannot currently add attention pooling in reset_classifier()."
+                    "Cannot currently add attention pooling in reset_classifier()."  # noqa
                 )
             elif global_pool != "map " and self.attn_pool is not None:
                 self.attn_pool = None  # remove attention pooling
@@ -1229,7 +1171,8 @@ class VisionTransformer(nn.Module):
 
         if self.no_embed_class:
             # deit-3, updated JAX (big vision)
-            # position embedding does not overlap with class token, add then concat
+            # position embedding does not overlap with class token,
+            # add then concat
             x = x + pos_embed
             if to_cat:
                 x = torch.cat(to_cat + [x], dim=1)
@@ -1274,7 +1217,8 @@ class VisionTransformer(nn.Module):
         """Intermediate layer accessor (NOTE: This is a WIP experiment).
         Inspired by DINO / DINOv2 interface
         """
-        # take last n blocks if n is an int, if in is a sequence, select by matching indices
+        # take last n blocks if n is an int, if in is a sequence,
+        # select by matching indices
         outputs = self._intermediate_layers(x, n)
         if norm:
             outputs = [self.norm(out) for out in outputs]
@@ -1484,10 +1428,12 @@ class ImageEncoderViT(nn.Module):
             norm_layer (nn.Module): Normalization layer.
             act_layer (nn.Module): Activation layer.
             use_abs_pos (bool): If True, use absolute positional embeddings.
-            use_rel_pos (bool): If True, add relative positional embeddings to the attention map.
-            rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
-            window_size (int): Window size for window attention blocks.
-            global_attn_indexes (list): Indexes for blocks using global attention.
+            use_rel_pos (bool): If True, add relative positional embeddings to 
+            the attention map.
+            rel_pos_zero_init (bool): If True, zero initialize relative 
+            positional parameters. window_size (int): Window size for window 
+            attention blocks. global_attn_indexes (list): Indexes for blocks 
+            using global attention.
             downsample_channels (list): Channels for downsampling layers.
         """
         super().__init__()
@@ -1605,7 +1551,10 @@ class ImageEncoderViT(nn.Module):
 
 
 class Block(nn.Module):
-    """Transformer blocks with support of window attention and residual propagation blocks"""
+    """
+    Transformer blocks with support of window attention and 
+    residual propagation blocks
+    """
 
     def __init__(
         self,
@@ -1625,14 +1574,18 @@ class Block(nn.Module):
             dim (int): Number of input channels.
             num_heads (int): Number of attention heads in each ViT block.
             mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
-            qkv_bias (bool): If True, add a learnable bias to query, key, value.
+            qkv_bias (bool): If True, add a learnable bias to 
+            query, key, value.
             norm_layer (nn.Module): Normalization layer.
             act_layer (nn.Module): Activation layer.
-            use_rel_pos (bool): If True, add relative positional embeddings to the attention map.
-            rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
-            window_size (int): Window size for window attention blocks. If it equals 0, then
-                use global attention.
-            input_size (tuple(int, int) or None): Input resolution for calculating the relative
+            use_rel_pos (bool): If True, add relative positional embeddings to 
+            the attention map.
+            rel_pos_zero_init (bool): If True, zero initialize relative 
+            positional parameters.
+            window_size (int): Window size for window attention blocks. If 
+            it equals 0, then use global attention. input_size 
+            (tuple(int, int) or None): Input resolution for calculating 
+            the relative
                 positional parameter size.
         """
         super().__init__()
@@ -1689,10 +1642,14 @@ class Attention(nn.Module):
         Args:
             dim (int): Number of input channels.
             num_heads (int): Number of attention heads.
-            qkv_bias (bool):  If True, add a learnable bias to query, key, value.
-            rel_pos (bool): If True, add relative positional embeddings to the attention map.
-            rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
-            input_size (tuple(int, int) or None): Input resolution for calculating the relative
+            qkv_bias (bool):  If True, add a learnable bias to 
+            query, key, value.
+            rel_pos (bool): If True, add relative positional embeddings 
+            to the attention map.
+            rel_pos_zero_init (bool): If True, zero initialize relative 
+            positional parameters.
+            input_size (tuple(int, int) or None): Input resolution for 
+            calculating the relative
                 positional parameter size.
         """
         super().__init__()
@@ -1707,7 +1664,7 @@ class Attention(nn.Module):
         if self.use_rel_pos:
             assert (
                 input_size is not None
-            ), "Input size must be provided if using relative positional encoding."
+            ), "Input size must be provided if using relative positional encoding."  # noqa
             # initialize relative positional embeddings
             self.rel_pos_h = nn.Parameter(
                 torch.zeros(2 * input_size[0] - 1, head_dim))
@@ -1752,7 +1709,8 @@ def window_partition(x: torch.Tensor,
         window_size (int): window size.
 
     Returns:
-        windows: windows after partition with [B * num_windows, window_size, window_size, C].
+        windows: windows after partition with [B * num_windows, window_size,
+          window_size, C].
         (Hp, Wp): padded height and width before partition
     """
     B, H, W, C = x.shape
@@ -1779,7 +1737,8 @@ def window_unpartition(
     """
     Window unpartition into original sequences and removing padding.
     Args:
-        windows (tensor): input tokens with [B * num_windows, window_size, window_size, C].
+        windows (tensor): input tokens with 
+        [B * num_windows, window_size, window_size, C].
         window_size (int): window size.
         pad_hw (Tuple): padded height and width (Hp, Wp).
         hw (Tuple): original height and width (H, W) before padding.
@@ -1845,11 +1804,10 @@ def add_decomposed_rel_pos(
 ) -> torch.Tensor:
     """
     Calculate decomposed Relative Positional Embeddings from :paper:`mvitv2`.
-    https://github.com/facebookresearch/mvit/blob/19786631e330df9f3622e5402b4a419a263a2c80/mvit/models/attention.py   # noqa B950
     Args:
         attn (Tensor): attention map.
         q (Tensor): query q in the attention layer with shape (B, q_h * q_w, C).
-        rel_pos_h (Tensor): relative position embeddings (Lh, C) for height axis.
+        rel_pos_h (Tensor): relative position embeddings (Lh, C) for height axis
         rel_pos_w (Tensor): relative position embeddings (Lw, C) for width axis.
         q_size (Tuple): spatial sequence size of query q with (q_h, q_w).
         k_size (Tuple): spatial sequence size of key k with (k_h, k_w).
@@ -2060,7 +2018,8 @@ class CLIPVisionTower(nn.Module):
         if self.select_feature == "patch":
             # if the output has cls_token
             image_features = image_features[:, 1:]
-        elif self.select_feature == "cls_patch" or self.select_feature == "same":
+        elif (self.select_feature == "cls_patch"
+              or self.select_feature == "same"):
             image_features = image_features
         else:
             raise ValueError(
@@ -2164,7 +2123,7 @@ class HybridVisionTower(nn.Module):
 
         else:
             raise ValueError(
-                "Currently only support `feature`, `sequence`, `add` and `tuple` concat type."
+                "Currently only support `feature`, `sequence`, `add` and `tuple` concat type."  # noqa
             )
 
         return images_features
