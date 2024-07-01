@@ -78,7 +78,7 @@ def get_attn_backend(
     elif backend == _Backend.FLASHINFER:
         logger.info("Using Flashinfer backend.")
         logger.warning(("Flashinfer will be stuck on llma-2-7b,"
-                        " please avoid using Flashinfer as the"
+                        " please avoid using Flashinfer as the "
                         "backend when running on llma-2-7b."))
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
