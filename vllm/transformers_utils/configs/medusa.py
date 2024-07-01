@@ -51,5 +51,10 @@ class MedusaConfig(PretrainedConfig):
     def num_attention_heads(self):
         return 0
 
-    def set_num_lookahead_tokens(self, num_lookahead_tokens: int):
+    @property
+    def num_lookahead_tokens(self):
+        return self.num_heads
+
+    @num_lookahead_tokens.setter
+    def num_lookahead_tokens(self, num_lookahead_tokens: int):
         self.num_heads = num_lookahead_tokens
