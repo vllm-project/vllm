@@ -27,7 +27,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.multimodal import ExternalMultiModalDataDict
-from vllm.multimodal.utils import get_full_image_text_prompt, ImageFetchAiohttp
+from vllm.multimodal.utils import ImageFetchAiohttp, get_full_image_text_prompt
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
@@ -46,7 +46,8 @@ class ConversationMessage(TypedDict):
 @dataclass(frozen=True)
 class ChatMessageParseResult:
     messages: List[ConversationMessage]
-    mm_futures: List[Awaitable[ExternalMultiModalDataDict]] = field(default_factory=list)
+    mm_futures: List[Awaitable[ExternalMultiModalDataDict]] = field(
+        default_factory=list)
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -119,7 +120,7 @@ class OpenAIServingChat(OpenAIServing):
                         "model is not multimodal.")
                 assert self.tokenizer is not None
                 image_url = cast(ChatCompletionContentPartImageParam,
-                                    part)["image_url"]
+                                 part)["image_url"]
 
                 if image_url.get("detail", "auto") != "auto":
                     logger.warning(
@@ -127,7 +128,8 @@ class OpenAIServingChat(OpenAIServing):
                         "will be ignored.")
 
                 async def async_get_and_parse_image(image_url: str):
-                    with await ImageFetchAiohttp.fetch_image(image_url) as image:
+                    with await ImageFetchAiohttp.fetch_image(image_url
+                                                             ) as image:
                         return {"image": image}
 
                 mm_future = async_get_and_parse_image(image_url["url"])
@@ -139,7 +141,7 @@ class OpenAIServingChat(OpenAIServing):
         text_prompt = "\n".join(texts)
 
         if vlm_config is not None and len(mm_futures):
-            
+
             assert len(mm_futures) == 1, "Multiple images is not supported."
             (image_token_prompt,
              image_token_str) = vlm_config.get_image_token_text(self.tokenizer)
@@ -166,8 +168,7 @@ class OpenAIServingChat(OpenAIServing):
         else:
             messages = [ConversationMessage(role=role, content=text_prompt)]
 
-        return ChatMessageParseResult(messages=messages,
-                                      mm_futures=mm_futures)
+        return ChatMessageParseResult(messages=messages, mm_futures=mm_futures)
 
     def _parse_chat_message_content(
         self,
