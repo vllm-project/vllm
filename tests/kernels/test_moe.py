@@ -69,7 +69,6 @@ def test_mixtral_moe(dtype: torch.dtype):
         hidden_size=config.hidden_size,
         intermediate_size=config.intermediate_size,
         params_dtype=dtype,
-        tp_size=1,
     ).cuda()
 
     # Load the weights
