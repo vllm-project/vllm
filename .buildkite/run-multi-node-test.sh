@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
-
+set -x
 
 if [[ $# -lt 3 ]]; then
     echo "Please provide the number of nodes and GPU per node."
