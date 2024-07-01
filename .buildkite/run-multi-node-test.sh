@@ -58,9 +58,9 @@ run_nodes() {
         GPU_DEVICES+='"'
         echo "Running node$node with GPU devices: $GPU_DEVICES"
         if [ $node -lt $(($NUM_NODES - 1)) ]; then
-            docker run -d --gpus "$GPU_DEVICES" --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "${COMMANDS[$node]}"
+            docker exec -d --gpus "$GPU_DEVICES" --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "${COMMANDS[$node]}"
         else
-            docker run --gpus "$GPU_DEVICES" --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "${COMMANDS[$node]}"
+            docker exec --gpus "$GPU_DEVICES" --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "${COMMANDS[$node]}"
         fi
     done
 }
