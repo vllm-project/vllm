@@ -13,6 +13,7 @@ steps:
       - docker network create --subnet=192.168.10.0/24 docker-net
       {% for node in range(step.num_nodes) %}
       - docker run 
+        {% if not loop.last %}-d {%endif %}
         --gpus '"device={% for gpu in range(step.num_gpus) %}{{ node * step.num_gpus + gpu }}{% if not loop.last %},{% endif %}{% endfor %}"' 
         -it 
         --network docker-net 
