@@ -8,6 +8,7 @@
 
 steps:
 - label: Regression Test
+  fastcheck: true
   mirror_hardwares: [amd]
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
@@ -15,6 +16,7 @@ steps:
 - label: AsyncEngine Test
   #mirror_hardwares: [amd]
   command: pytest -v -s async_engine
+  fastcheck: true
 
 - label: Basic Correctness Test
   mirror_hardwares: [amd]
