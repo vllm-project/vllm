@@ -6,10 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
-import math
-import vllm.hpu.xops as xops
-from vllm.hpu.attn_bias import (AttentionBias,
-                                LowerTriangularMaskWithTensorBias)
+import vllm.hpu.ops as ops
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
@@ -107,7 +104,7 @@ class HabanaAttentionMetadata(AttentionMetadata, HabanaPagedAttentionMetadata):
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
         # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[List[AttentionBias]] = None
+        self.attn_bias: Optional[List[torch.Tensor]] = None
 
 
 class HabanaAttentionImpl(AttentionImpl):
@@ -203,7 +200,7 @@ class HabanaAttentionImpl(AttentionImpl):
                 assert attn_metadata.attn_bias is not None, 'attn_bias must be set before calling model.forward!'
                 query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
                 kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
-                out = xops.prompt_attention(
+                out = ops.prompt_attention(
                     query.view(query_shape),
                     key.view(kv_shape),
                     value.view(kv_shape),
