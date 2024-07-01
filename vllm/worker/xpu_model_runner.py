@@ -12,7 +12,8 @@ from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, SamplerOutput, SequenceData,
+                           SequenceGroupMetadata)
 from vllm.utils import CudaMemoryProfiler, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import (
@@ -175,7 +176,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        model_input = self.prepare_model_input(seqs)
+        model_input = self.prepare_model_input(seqs, 0)
         self.execute_model(model_input, kv_caches)
         torch.xpu.synchronize()
         return
@@ -190,6 +191,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
     ) -> ModelInputForXPU:
         multi_modal_input = None
         if self.is_driver_worker:
@@ -334,6 +336,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self,
         model_input: ModelInputForXPU,
         kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
