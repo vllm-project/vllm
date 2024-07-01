@@ -457,6 +457,7 @@ class Scheduler:
             running_queue.popleft()
 
             while not self._can_append_slots(seq_group):
+                print('stuck here')
                 #continue
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
@@ -511,6 +512,7 @@ class Scheduler:
                     budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
+        print('returning from sched')
 
         return running, SchedulerRunningOutputs(
             decode_seq_groups=decode_seq_groups,
