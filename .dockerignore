@@ -1,1 +1,4 @@
 vllm/*.so
+
+# Ignore deploy_docker
+deploy_docker/
