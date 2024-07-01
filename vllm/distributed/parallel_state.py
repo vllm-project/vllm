@@ -28,9 +28,10 @@ from multiprocessing import shared_memory
 from typing import Any, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
 
+import flux
+
 import torch
 import torch.distributed
-from flux import pynvshmem
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
@@ -164,7 +165,7 @@ class GroupCoordinator:
 
         # Initialize pynvshmem
         if torch.distributed.get_world_size(self.device_group) > 1:
-            pynvshmem.init_with_c10d_pg(self.device_group)
+            flux.init_flux_shm(self.device_group)
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
