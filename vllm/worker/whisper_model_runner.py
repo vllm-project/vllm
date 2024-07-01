@@ -79,8 +79,6 @@ class WhisperModelRunner(ModelRunner):
         else:
             model_executable = self.model
 
-        model_executable = self.model
-
         hidden_states = model_executable(
             whisper_data=whisper_data,
             input_ids=input_tokens,

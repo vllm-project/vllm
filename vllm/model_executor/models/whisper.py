@@ -494,12 +494,8 @@ class WhisperModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-    ):
-        if hasattr(attn_metadata, 'encoder_outputs'):
-            encoder_outputs = attn_metadata.encoder_outputs
-        else:
-            encoder_outputs = self.encoder(input_features)
-            attn_metadata.encoder_outputs = encoder_outputs
+    ): 
+        encoder_outputs = self.encoder(input_features)
 
         decoder_outputs = self.decoder(
             input_ids=input_ids,

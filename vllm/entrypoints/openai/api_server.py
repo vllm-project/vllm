@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from vllm.entrypoints.openai.serving_whisper import OpenAIServingWhisper
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.version import __version__ as VLLM_VERSION
@@ -35,6 +36,7 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
+openai_serving_whisper: OpenAIServingWhisper
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
@@ -137,7 +139,35 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     else:
         return JSONResponse(content=generator.model_dump())
 
-
+@app.post("/audio/transcriptions")
+async def audio_transcriptions(
+    file: bytes = File(),
+    language: str = Form(None),
+    response_format: str = Form('text'),
+    timestamp_granularities: str = Form('segment'),
+    repetition_penalty: float = Form(1.0),
+    stream: bool = Form(False),
+    raw_request: Request = None,
+):
+    generator = await openai_serving_chat.create_audio_transcriptions(
+        file=file, 
+        language=language,
+        response_format=response_format,
+        timestamp_granularities=timestamp_granularities,
+        repetition_penalty=repetition_penalty,
+        stream=stream,
+        raw_request=raw_request,
+    )
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    if stream:
+        return StreamingResponse(content=generator,
+                                 media_type="text/event-stream")
+    else:
+        assert isinstance(generator, ChatCompletionResponse)
+        return JSONResponse(content=generator.model_dump())
+        
 if __name__ == "__main__":
     args = parse_args()
 
@@ -219,6 +249,8 @@ if __name__ == "__main__":
         engine, model_config, served_model_names, args.lora_modules)
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
                                                       served_model_names)
+    openai_serving_whisper = OpenAIServingWhisper(
+        engine, model_config, served_model_names, args.max_size_whisper)
     app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,

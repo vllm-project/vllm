@@ -28,7 +28,7 @@ def main():
     outputs = llm.generate({
         "prompt_token_ids": [50258, output_lang[0].outputs[0].token_ids[0], 50360],
         "multi_modal_data": AudioData(y),
-    }, sampling_params = SamplingParams(min_tokens = 20, max_tokens = 20, temperature = 0))
+    }, sampling_params = SamplingParams(max_tokens = 100, temperature = 0))
 
     # ' without going to any such extreme as this we can easily see on reflection how vast an influence on the'
     print(outputs[0].outputs[0].text)

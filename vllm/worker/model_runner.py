@@ -760,6 +760,8 @@ class ModelRunner:
         else:
             model_executable = self.model
 
+        print(input_tokens, input_positions, attn_metadata)
+
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,

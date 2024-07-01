@@ -532,7 +532,8 @@ class LLMEngine:
 
             prompt_token_ids = tokenizer.encode(request_id=request_id,
                                                 prompt=inputs["prompt"],
-                                                lora_request=lora_request)
+                                                lora_request=lora_request,
+                                                add_special_tokens=self.whisper_processor is None)
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
             
