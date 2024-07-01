@@ -6,6 +6,7 @@ steps:
   {% for step in steps %}
   {% if step.gpu != "a100" %}
   - label: "{{ step.label }}"
+    priority: 10000
     agents:
       {% if step.label == "Documentation Build" %}
       queue: small_cpu_queue
