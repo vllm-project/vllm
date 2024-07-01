@@ -10,6 +10,6 @@ steps:
     agents:
       queue: gpu_4_queue
     commands:
-      - echo {{ step.commands }}
+      - echo {{ step.commands | map('quote') | join(' ') }}
   {% endif %}
   {% endfor %}
