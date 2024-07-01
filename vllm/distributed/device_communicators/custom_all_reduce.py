@@ -14,14 +14,10 @@ from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless, is_full_nvlink
 
 try:
-    # Simulate ImportError if custom_ar ops are not supported.
-    if not ops.is_custom_op_supported("_C_custom_ar::meta_size"):
-        raise ImportError("custom_ar", __file__)
-
+    assert ops.is_custom_op_supported("_C_custom_ar::meta_size")
     custom_ar = True
-
-except ImportError:
-    # For AMD GPUs
+except Exception:
+    # For AMD GPUs and CPUs
     custom_ar = False
 
 logger = init_logger(__name__)
