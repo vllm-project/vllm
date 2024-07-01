@@ -1,4 +1,8 @@
-"""Example Python client for vllm.entrypoints.api_server"""
+"""Example Python client for vllm.entrypoints.api_server
+NOTE: This API server is used only for demonstrating and simple performance
+benchmarks. It is not intended for production use.
+For production use, we recommend vllm.entrypoints.openai.api_server.
+"""
 
 import argparse
 import json
