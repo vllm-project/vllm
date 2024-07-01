@@ -166,33 +166,6 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self._cached_decode_metadata
 
 
-def _make_alibi_bias(
-    alibi_slopes: torch.Tensor,
-    dtype: torch.dtype,
-    seq_lens: List[int],
-) -> List[torch.Tensor]:
-    attn_biases = []
-    for seq_len in seq_lens:
-        bias = torch.arange(seq_len, dtype=dtype)
-        # NOTE(zhuohan): HF uses
-        #     `bias = bias[None, :].repeat(seq_len, 1)`
-        # here. We find that both biases give the same results, but
-        # the bias below more accurately follows the original ALiBi
-        # paper.
-        bias = bias[None, :] - bias[:, None]
-
-        num_heads = alibi_slopes.shape[0]
-        bias = bias[None, :].repeat((num_heads, 1, 1)).to(alibi_slopes.device)
-        bias.mul_(alibi_slopes[:, None, None])
-        inf_mask = torch.empty(
-            (1, seq_len, seq_len),
-            dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1).to(
-                alibi_slopes.device)
-        attn_biases.append((bias + inf_mask).to(dtype))
-
-    return attn_biases
-
-
 def _make_alibi_bias_v2(alibi_slopes: torch.Tensor,
                         dtype: torch.dtype,
                         seq_lens: Optional[List[int]],
@@ -410,32 +383,25 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         value = self.repeat_kv(value, self.num_queries_per_kv)
                     if self.alibi_slopes is not None:
                         att_masks = _make_alibi_bias_v2(
-                            self.alibi_slopes, query.dtype,
-                            attn_metadata.seq_lens, make_attn_mask=True)  # type: ignore
-                        # Fall back to naive attention function with alibi slopes support
-                        out = _naive_attention(
-                            query,
-                            key,
-                            value,
-                            prefill_meta.seq_lens,
-                            self.scale,
-                            att_masks
-                        )
-                    else:
-                        query = query.movedim(0, query.dim() - 2)
-                        key = key.movedim(0, key.dim() - 2)
-                        value = value.movedim(0, value.dim() - 2)
-                        # sdpa math backend attention
-                        out = self.attn_func(
-                            query,
-                            key,
-                            value,
-                            prefill_meta.seq_lens,
-                            num_tokens,
-                            self.num_heads,
-                            self.head_size,
-                            self.scale,
-                        )
+                            self.alibi_slopes,
+                            query.dtype,
+                            attn_metadata.seq_lens,
+                            make_attn_mask=True)  # type: ignore
+                    query = query.movedim(0, query.dim() - 2)
+                    key = key.movedim(0, key.dim() - 2)
+                    value = value.movedim(0, value.dim() - 2)
+                    # sdpa math backend attention
+                    out = self.attn_func(
+                        query,
+                        key,
+                        value,
+                        prefill_meta.seq_lens,
+                        num_tokens,
+                        self.num_heads,
+                        self.head_size,
+                        self.scale,
+                        att_masks,
+                    )
                 else:
                     out = self.attn_func(
                         q=query,
@@ -498,13 +464,14 @@ def _sdpa_attention(
     num_heads: int,
     head_size: int,
     scale: float,
+    attn_masks: Optional[List[torch.Tensor]] = None,
 ) -> torch.Tensor:
     start = 0
     output = torch.empty((num_tokens, num_heads, head_size),
                          dtype=query.dtype,
                          device=query.device)
 
-    for seq_len in seq_lens:
+    for i, seq_len in enumerate(seq_lens):
         end = start + seq_len
         with torch.backends.cuda.sdp_kernel(enable_math=True,
                                             enable_flash=False,
@@ -514,57 +481,10 @@ def _sdpa_attention(
                 key[:, start:end, :],
                 value[:, start:end, :],
                 dropout_p=0.0,
-                is_causal=True,
+                is_causal=False,
+                attn_mask=attn_masks[i] if attn_masks else None,
                 scale=scale).movedim(query.dim() - 2, 0)
             output[start:end, :, :] = sub_out
             start = end
 
     return output
-
-
-def _naive_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    seq_lens: List[int],
-    scale: float,
-    attn_masks: Optional[List[torch.Tensor]],
-) -> torch.Tensor:
-    output = torch.empty_like(query)
-    start = 0
-    for i, seq_len in enumerate(seq_lens):
-        end = start + seq_len
-        out = _naive_masked_attention(
-            query[start:end],
-            key[start:end],
-            value[start:end],
-            scale,
-            attn_masks[i],
-        )
-        # TODO(woosuk): Unnecessary copy. Optimize.
-        output[start:end].copy_(out)
-        start += seq_len
-
-    return output
-
-
-def _naive_masked_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    scale: float,
-    attn_mask: Optional[torch.Tensor],
-) -> torch.Tensor:
-    seq_len, head_size, head_dim = query.shape
-    if attn_mask is None:
-        attn_mask = torch.triu(torch.ones(seq_len,
-                                        seq_len,
-                                        dtype=query.dtype,
-                                        device=query.device),
-                            diagonal=1)
-        attn_mask = attn_mask * torch.finfo(query.dtype).min
-    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
-    attn_weights = attn_weights + attn_mask.float()
-    attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
-    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
-    return out
