@@ -115,31 +115,24 @@ class HpuModelAdapter():
         prefill_metadata = attn_metadata.prefill_metadata
         if prefill_metadata is None:
             return attn_metadata
-        #FIXME: Restore alibi support
-        #if self.alibi_slopes is None:
-        if True:
-            seq_lens_t = prefill_metadata.seq_lens_tensor
-            len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32)
-                        .view(1, seq_len)
-                        .ge(seq_lens_t.unsqueeze(-1))
-                        .view(batch_size, 1, 1, seq_len))
-            causal_mask = torch.triu(
-                torch.ones((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool),
-                diagonal=1
-            )
-            mask = causal_mask.logical_or(len_mask)
-            attn_bias = (torch.zeros_like(mask, dtype=dtype)
-                         .masked_fill_(mask, -math.inf))
-            #FIXME: Restore sliding window support
-            #if self.sliding_window is not None:
-            prefill_metadata = prefill_metadata._replace(attn_bias=attn_bias)
-            attn_metadata = attn_metadata._replace(prefill_metadata=prefill_metadata)
-            return attn_metadata
-        else:
-            # FIXME: This needs updating...
-            prefill_meta.attn_bias = _make_alibi_bias(
-                self.alibi_slopes, self.num_kv_heads, batch_size,
-                seq_len, query.dtype)
+
+        seq_lens_t = prefill_metadata.seq_lens_tensor
+        len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32)
+                    .view(1, seq_len)
+                    .ge(seq_lens_t.unsqueeze(-1))
+                    .view(batch_size, 1, 1, seq_len))
+        causal_mask = torch.triu(
+            torch.ones((batch_size, 1, seq_len, seq_len), device=device, dtype=torch.bool),
+            diagonal=1
+        )
+        mask = causal_mask.logical_or(len_mask)
+        attn_bias = (torch.zeros_like(mask, dtype=dtype)
+                      .masked_fill_(mask, -math.inf))
+        #FIXME: Restore sliding window support
+        #if self.sliding_window is not None:
+        prefill_metadata = prefill_metadata._replace(attn_bias=attn_bias)
+        attn_metadata = attn_metadata._replace(prefill_metadata=prefill_metadata)
+        return attn_metadata
 
 
     def forward(self, *args, **kwargs):

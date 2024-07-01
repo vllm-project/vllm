@@ -136,16 +136,21 @@ class HabanaAttentionImpl(AttentionImpl):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        max_seq_len : Optional[int] = 4096,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
+        self.position_bias = None
         if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
+            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.bfloat16)
+            self.position_bias = _make_alibi_bias(alibi_slopes,
+                                                  num_kv_heads,
+                                                  alibi_slopes.dtype,
+                                                  max_seq_len)
         self.alibi_slopes = alibi_slopes
-
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
@@ -199,13 +204,17 @@ class HabanaAttentionImpl(AttentionImpl):
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 # TODO: move this outside of model
                 assert prefill_meta.attn_bias is not None, 'attn_bias must be set before calling model.forward!'
+                attn_bias = prefill_meta.attn_bias
+                if self.alibi_slopes is not None:
+                    attn_bias.add_(self.position_bias[:, :, -attn_bias.size(2):, -attn_bias.size(3):])
+
                 query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
                 kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
                 out = xops.prompt_attention(
                     query.view(query_shape),
                     key.view(kv_shape),
                     value.view(kv_shape),
-                    attn_bias=prefill_meta.attn_bias,
+                    attn_bias=attn_bias,
                     p=0.0,
                     scale=self.scale,
                 )
@@ -236,10 +245,9 @@ class HabanaAttentionImpl(AttentionImpl):
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
-                self.alibi_slopes,
+                self.position_bias,
                 kv_scale
             )
-
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
 
@@ -248,33 +256,29 @@ def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     num_kv_heads: int,
     dtype: torch.dtype,
-    seq_lens: List[int],
-) -> LowerTriangularMaskWithTensorBias:
-    attn_biases = []
-    for seq_len in seq_lens:
-        bias = torch.arange(seq_len, dtype=dtype)
-        # NOTE(zhuohan): HF uses
-        #     `bias = bias[None, :].repeat(seq_len, 1)`
-        # here. We find that both biases give the same results, but
-        # the bias below more accurately follows the original ALiBi
-        # paper.
-        # Calculate a matrix where each element represents ith element- jth
-        # element.
-        bias = bias[None, :] - bias[:, None]
+    seq_len: int,
+) -> torch.Tensor:
+    bias = torch.arange(seq_len, dtype=dtype)
+    # NOTE(zhuohan): HF uses
+    #     `bias = bias[None, :].repeat(seq_len, 1)`
+    # here. We find that both biases give the same results, but
+    # the bias below more accurately follows the original ALiBi
+    # paper.
+    # Calculate a matrix where each element represents ith element- jth
+    # element.
+    bias = bias[None, :] - bias[:, None]
 
-        padded_len = (seq_len + 7) // 8 * 8
-        num_heads = alibi_slopes.shape[0]
-        bias = torch.empty(
-            1,  # batch size
-            num_heads,
-            seq_len,
-            padded_len,
-            device=alibi_slopes.device,
-            dtype=dtype,
-        )[:, :, :, :seq_len].copy_(bias)
-        bias.mul_(alibi_slopes[:, None, None])
-        if num_heads != num_kv_heads:
-            bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
-        attn_biases.append(LowerTriangularMaskWithTensorBias(bias))
-
-    return attn_biases
+    padded_len = (seq_len + 7) // 8 * 8
+    num_heads = alibi_slopes.shape[0]
+    bias = torch.empty(
+        1,  # batch size
+        num_heads,
+        seq_len,
+        padded_len,
+        device=alibi_slopes.device,
+        dtype=dtype,
+    )[:, :, :, :seq_len].copy_(bias)
+    bias.mul_(alibi_slopes[:, None, None])
+    if num_heads != num_kv_heads:
+        bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
+    return bias

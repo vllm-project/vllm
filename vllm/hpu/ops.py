@@ -36,7 +36,7 @@ def fetch_from_cache(cache, blocks, permutations):
 
 
 @hpu_utils.with_mark_steps
-def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block_tables, context_lens, block_size, alibi_slopes, kv_cache_dtype=None) -> None:
+def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block_tables, context_lens, block_size, alibi_slopes=None, kv_cache_dtype=None) -> None:
     seq_len = block_tables.size(1)
     batch_size, query_heads, _ = query.shape
     _, _, kv_heads, _ = key_cache.shape
@@ -55,7 +55,10 @@ def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block
         mask = mask.unsqueeze(2)
 
     attn_weights = [torch.matmul(query, k) for k in keys]
-    attn_weights = (torch.cat(attn_weights, dim=-1)
+    attn_weights = torch.cat(attn_weights, dim=-1)
+    if alibi_slopes is not None:
+        attn_weights.add_(alibi_slopes[:,:,-attn_weights.size(2):, -attn_weights.size(3):])
+    attn_weights = (attn_weights
                     .masked_fill(mask, min_inf)
                     .softmax(dim=-1))
 
