@@ -26,6 +26,14 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
 
+def adjust_bitblas_shard(param, shard_size, shard_offset):
+    bitblas_tile_size = getattr(param, "bitblas_tile_size", None)
+    if bitblas_tile_size is None:
+        return shard_size, shard_offset
+
+    return shard_size // bitblas_tile_size, shard_offset // bitblas_tile_size
+
+
 def adjust_bitsandbytes_shard(param: Parameter,
                               qkv_offsets: Dict[str, Tuple[int, int]],
                               loaded_shard_id: str) -> Tuple[int, int]:
@@ -306,7 +314,8 @@ class ColumnParallelLinear(LinearBase):
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
-        assert param_data.shape == loaded_weight.shape
+        assert param_data.dtype == loaded_weight.dtype, f"{param.data.dtype} != {loaded_weight.dtype}"
+        assert param_data.shape == loaded_weight.shape, f"{param_data.shape} != {loaded_weight.shape}"
         param_data.copy_(loaded_weight)
 
     def forward(self, input_):
@@ -411,6 +420,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
 
+                shard_size, shard_offset = adjust_bitblas_shard(
+                    param, shard_size, shard_offset)
+
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
@@ -432,7 +444,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
-
+            shard_size, shard_offset = adjust_bitblas_shard(
+                param, shard_size, shard_offset)
             use_bitsandbytes = getattr(param, "use_bitsandbytes", False)
             if use_bitsandbytes:
                 shard_size = loaded_weight.shape[output_dim]
@@ -576,7 +589,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
-
+                shard_size, shard_offset = adjust_bitblas_shard(
+                    param, shard_size, shard_offset)
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
@@ -608,7 +622,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
-
+            shard_size, shard_offset = adjust_bitblas_shard(
+                param, shard_size, shard_offset)
             use_bitsandbytes = getattr(param, "use_bitsandbytes", False)
             if use_bitsandbytes:
                 orig_qkv_offsets = {
