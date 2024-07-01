@@ -14,6 +14,12 @@ from vllm.logger import init_logger
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
+# time to wait if the queue is full or empty
+# if we sleep for too short, it will consume too much CPU
+# if we sleep for too long, it will slow down the writer/reader
+# 0.1 us is a good balance
+RINGBUFFER_SLEEP_INTERVAL = 1e-7
+
 logger = init_logger(__name__)
 
 
@@ -48,6 +54,26 @@ class ShmRingBuffer:
         | written_flag | reader0_flag | reader1_flag | ... | readerN_flag |
         +--------------+--------------+--------------+-----+--------------+
 
+        The state of metadata is as follows:
+
+        (case 1) 0???...???: the block is not written yet, cannot read, can write
+        (case 2) 1000...000: the block is just written, can read, cannot write
+        (case 3) 1???...???: the block is written and read by some readers, can read if not read, cannot write
+        (case 4) 1111...111: the block is written and read by all readers, cannot read, can write
+
+        State transition for readers:
+
+        When a reader finds a block that it can read (case 2 or 3), it can yield the block for caller to read.
+        Only after the caller finishes reading the block, the reader can mark the block as read.
+        Readers only mark the block as read (from 0 to 1), the writer marks the block as ready to read (from 1 to 0).
+
+        State transition for writer:
+
+        When the writer writes to a block (case 1 or 4), it first resets the written flag to 0, converting either case
+        to case 1. Then it can yield the block for caller to write. After the caller finishes writing the block, the writer
+        can reset the reader flags to 0, and mark the block as written (from 0 to 1).
+        NOTE: the order is important here, first reset the reader flags (so that we are still in case 1), then mark the block as written. The state transition is atomic. If we do it in the reverse order, it will go through case 3 and then back to case 2, and readers might read the intermediate case 3, which is not correct.
+
         During creation, `name` is None and the buffer is created. We can pass the
         created object to other processes by pickling it. The other processes will
         get the name of the shared memory and open it, so that they can access the
@@ -81,10 +107,6 @@ class ShmRingBuffer:
                        lambda *args, **kwargs: None):
                 self.shared_memory = shared_memory.SharedMemory(name=name)
             assert self.shared_memory.size == self.total_bytes_of_buffer
-            with memoryview(self.shared_memory.buf[self.metadata_offset:]
-                            ) as metadata_buffer:
-                tensor = torch.frombuffer(metadata_buffer, dtype=torch.uint8)
-                assert torch.all(tensor == 0)
 
     def __reduce__(self):
         return (
@@ -129,8 +151,7 @@ class ShmRingBufferIO:
     @contextmanager
     def acquire_write(self):
         assert self._is_writer, "Only writers can acquire write"
-        start_index = self.current_idx
-        start_time = time.time()
+        start_time = time.monotonic()
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
@@ -138,19 +159,21 @@ class ShmRingBufferIO:
                 written_flag = metadata_buffer[0]
                 if written_flag and read_count != self.buffer.n_reader:
                     # this block is written and not read by all readers
-                    # try to write to the next block
-                    self.current_idx = (self.current_idx +
-                                        1) % self.buffer.max_chunks
-                    if self.current_idx == start_index:
-                        # no empty block found
-                        if time.time(
-                        ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
-                            logger.warning(
-                                "No available block found in %s second. ",
-                                VLLM_RINGBUFFER_WARNING_INTERVAL)
-                            n_warning += 1
-                        # wait for a while (0.1 us)
-                        time.sleep(1e-7)
+                    # for writers, `self.current_idx` is the next block to write
+                    # if this block is not ready to write,
+                    # we need to wait until it is read by all readers
+
+                    # wait for a while
+                    time.sleep(RINGBUFFER_SLEEP_INTERVAL)
+
+                    # if we wait for a long time, we should warn the user
+                    if time.monotonic(
+                    ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
+                        logger.warning(
+                            "No available block found in %s second. ",
+                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        n_warning += 1
+
                     continue
                 # found a block that is either
                 # (1) not written
@@ -163,18 +186,23 @@ class ShmRingBufferIO:
                     yield buf
 
                 # caller has written to the buffer
-                # mark the block as written
-                metadata_buffer[0] = 1
+                # NOTE: order is important here
+                # first set the read flags to 0
+                # then set the written flag to 1
+                # otherwise, the readers may think they already read the block
                 for i in range(1, self.buffer.n_reader + 1):
                     # set read flag to 0, meaning it is not read yet
                     metadata_buffer[i] = 0
+                # mark the block as written
+                metadata_buffer[0] = 1
+                self.current_idx = (self.current_idx +
+                                    1) % self.buffer.max_chunks
                 break
 
     @contextmanager
     def acquire_read(self):
         assert self._is_reader, "Only readers can acquire read"
-        start_index = self.current_idx
-        start_time = time.time()
+        start_time = time.monotonic()
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
@@ -184,19 +212,22 @@ class ShmRingBufferIO:
                     # this block is either
                     # (1) not written
                     # (2) already read by this reader
-                    # try to read the next block
-                    self.current_idx = (self.current_idx +
-                                        1) % self.buffer.max_chunks
-                    if self.current_idx == start_index:
-                        # no block found
-                        if time.time(
-                        ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
-                            logger.warning(
-                                "No available block found in %s second. ",
-                                VLLM_RINGBUFFER_WARNING_INTERVAL)
-                            n_warning += 1
-                        # wait for a while (0.1 us)
-                        time.sleep(1e-7)
+
+                    # for readers, `self.current_idx` is the next block to read
+                    # if this block is not ready,
+                    # we need to wait until it is written
+
+                    # wait for a while
+                    time.sleep(RINGBUFFER_SLEEP_INTERVAL)
+
+                    # if we wait for a long time, we should warn the user
+                    if time.monotonic(
+                    ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
+                        logger.warning(
+                            "No available block found in %s second. ",
+                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        n_warning += 1
+
                     continue
                 # found a block that is not read by this reader
                 # let caller read from the buffer
@@ -206,6 +237,8 @@ class ShmRingBufferIO:
                 # caller has read from the buffer
                 # set the read flag
                 metadata_buffer[self.reader_rank + 1] = 1
+                self.current_idx = (self.current_idx +
+                                    1) % self.buffer.max_chunks
                 break
 
     def enqueue(self, obj):
@@ -235,6 +268,7 @@ class ShmRingBufferIO:
         else:
             return self.dequeue()
 
+    @staticmethod
     def create_from_process_group(pg: ProcessGroup,
                                   max_chunk_bytes,
                                   max_chunks,
@@ -247,13 +281,15 @@ class ShmRingBufferIO:
         buffer: ShmRingBuffer
         if group_rank == writer_rank:
             buffer = ShmRingBuffer(n_reader, max_chunk_bytes, max_chunks)
-            dist.broadcast_object_list([buffer], src=global_ranks[writer_rank])
-            dist.barrier(pg)
+            dist.broadcast_object_list([buffer],
+                                       src=global_ranks[writer_rank],
+                                       group=pg)
             return ShmRingBufferIO(buffer, -1)
         else:
             recv = [None]
-            dist.broadcast_object_list(recv, src=global_ranks[writer_rank])
-            dist.barrier(pg)
+            dist.broadcast_object_list(recv,
+                                       src=global_ranks[writer_rank],
+                                       group=pg)
             buffer = recv[0]  # type: ignore
             rest_ranks = [r for r in ranks_inside_group if r != writer_rank]
             return ShmRingBufferIO(buffer, rest_ranks.index(group_rank))

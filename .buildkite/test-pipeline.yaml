@@ -1,7 +1,10 @@
 # In this file, you can add more tests to run either by adding a new step or
 # adding a new command to an existing step. See different options here for examples.
-# This script will be feed into Jinja template in `test-template-aws.j2` to generate
-# the final pipeline yaml file.
+
+# This script will be feed into Jinja template in `test-template-aws.j2` at
+# https://github.com/vllm-project/buildkite-ci/blob/main/scripts/test-template-aws.j2 
+# to generate the final pipeline yaml file.
+
 
 steps:
 - label: Regression Test
@@ -24,7 +27,9 @@ steps:
 
 - label: Core Test
   mirror_hardwares: [amd]
-  command: pytest -v -s core
+  commands: 
+  - pytest -v -s core
+  - pytest -v -s distributed/test_parallel_state.py
 
 - label: Distributed Comm Ops Test
   #mirror_hardwares: [amd]
@@ -39,19 +44,21 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   commands:
-  # FIXIT: find out which code initialize cuda before running the test
-  # before the fix, we need to use spawn to test it
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ../.buildkite/download-images.sh
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - TEST_DIST_MODEL=llava-hf/llava-1.5-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_multimodal_broadcast.py
+  - TEST_DIST_MODEL=microsoft/Phi-3-vision-128k-instruct DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_multimodal_broadcast.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
-  - pytest -v -s spec_decode/e2e/test_integration_dist.py
+  - TEST_DIST_MODEL=llava-hf/llava-1.5-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_multimodal_broadcast.py
+  - TEST_DIST_MODEL=microsoft/Phi-3-vision-128k-instruct DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_multimodal_broadcast.py
+  - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
@@ -60,14 +67,12 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   commands:
-  # FIXIT: find out which code initialize cuda before running the test
-  # before the fix, we need to use spawn to test it
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s distributed/test_pynccl.py
   # We want to test that models which use 2 GPUs work with 4 GPUs, which is why we duplicate them here.
   # See https://github.com/vllm-project/vllm/pull/5473#issuecomment-2166601837 for context.
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
+  - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
 - label: Engine Test
   mirror_hardwares: [amd]
@@ -77,8 +82,8 @@ steps:
   mirror_hardwares: [amd]
 
   commands:
-  - pytest -v -s entrypoints -m llm
-  - pytest -v -s entrypoints -m openai
+  - pytest -v -s entrypoints/llm
+  - pytest -v -s entrypoints/openai
 
 - label: Examples Test
   working_dir: "/vllm-workspace/examples"
@@ -186,6 +191,13 @@ steps:
   - pip install aiohttp
   - bash run-benchmarks.sh
 
+- label: LM Eval Small Models
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+  - pip install lm-eval
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh -c configs/models-small.txt -t 1
+
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
   no_gpu: True
@@ -197,9 +209,6 @@ steps:
   gpu: a100
   num_gpus: 4
   commands: 
-  # FIXIT: find out which code initialize cuda before running the test
-  # before the fix, we need to use spawn to test it
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
@@ -210,6 +219,8 @@ steps:
   num_gpus: 2
   num_nodes: 2
   commands:
+  - VLLM_TEST_SAME_HOST=0 torchrun --nproc-per-node=2 --nnodes 2 --rdzv_backend=c10d --rdzv_endpoint=192.168.0.1 distributed/test_same_node.py
+  - VLLM_TEST_SAME_HOST=0 torchrun --nproc-per-node=2 --nnodes 2 --rdzv_backend=c10d --rdzv_endpoint=192.168.0.1 distributed/test_same_node.py
   - docker network create --subnet=192.168.10.0/24 docker-net
   - docker run --gpus 'device=0,1' -it --network my-custom-network --ip 192.168.10.10 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f31c1f90e381967d25591a8928782d8a6a13693e nvidia-smi
   - docker run --gpus 'device=2,3' -it --network my-custom-network --ip 192.168.10.11 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f31c1f90e381967d25591a8928782d8a6a13693e nvidia-smi

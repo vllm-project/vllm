@@ -5,7 +5,7 @@ import pytest
 
 from vllm import LLM, EmbeddingRequestOutput, PoolingParams
 
-from ..conftest import cleanup
+from ...conftest import cleanup
 
 MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 
@@ -24,8 +24,6 @@ TOKEN_IDS = [
     [1000, 1002, 1001],
     [1000, 1003, 1001, 1002],
 ]
-
-pytestmark = pytest.mark.llm
 
 
 @pytest.fixture(scope="module")
