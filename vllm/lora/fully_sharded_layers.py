@@ -201,11 +201,15 @@ class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
                              dtype=torch.float32,
                              device=x.device)
 
-        bgmv(buffer, x, self.lora_a_stacked,
-             self.indices[:self.indices_len[0]], 0, 1.0)
+        sgmv_shrink(x, self.lora_a_stacked, buffer, self.ranks,
+                    self.indices[:self.indices_len[0]],
+                    self.repeats[:self.indices_len[0] + 1],
+                    self.max_repeats[0])
         buffer = tensor_model_parallel_all_gather(buffer)
-        bgmv(output, buffer, self.lora_b_stacked,
-             self.indices[:self.indices_len[0]], 0, 1.0)
+        sgmv_expand(buffer, self.lora_b_stacked, output, self.ranks,
+                    self.indices[:self.indices_len[0]],
+                    self.repeats[:self.indices_len[0] + 1],
+                    self.max_repeats[0], 0, 1.0)
         # now have column partitioned output
 
         output = output.view(*out_orig_shape)

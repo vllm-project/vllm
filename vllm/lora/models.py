@@ -18,8 +18,8 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
-from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.model_executor.layers.lora.sgmv_triton import MAX_REPEATS_PER_BLOCK
+from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.utils import LRUCache, is_pin_memory_available
 
 logger = init_logger(__name__)
