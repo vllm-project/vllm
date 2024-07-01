@@ -8,7 +8,7 @@ from PIL import Image
 from transformers import CLIPVisionConfig
 from transformers.models.clip.modeling_clip import CLIPAttention
 
-from vllm.config import ModelConfig, VisionLanguageConfig
+from vllm.config import ModelConfig
 from vllm.inputs import LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
