@@ -219,5 +219,5 @@ steps:
   num_gpus: 2
   num_nodes: 2
   commands:
-  - VLLM_TEST_SAME_HOST=0 torchrun --nproc-per-node=2 --nnodes 2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.11 distributed/test_same_node.py
-  - VLLM_TEST_SAME_HOST=0 torchrun --nproc-per-node=2 --nnodes 2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.11 distributed/test_same_node.py
+  - VLLM_TEST_SAME_HOST=0 torchrun --nproc-per-node=2 --nnodes 2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.11 tests/distributed/test_same_node.py
+  - VLLM_TEST_SAME_HOST=0 torchrun --nproc-per-node=2 --nnodes 2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.11 tests/distributed/test_same_node.py
