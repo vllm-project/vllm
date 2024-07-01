@@ -165,6 +165,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             vision_language_config=self.vision_language_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker)
+        self.use_spmd_worker = False
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: CPUCacheEngine
