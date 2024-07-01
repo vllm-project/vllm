@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 import aiohttp
 from PIL import Image
 
-from vllm.config import ModelConfig
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.image import ImagePixelData
 
@@ -76,18 +75,8 @@ def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     return Image.open(BytesIO(base64.b64decode(image)))
 
 
-# TODO(ywang96): move this to a model registry for preprocessing vision
-# language prompts based on the model type.
-def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
-                               config: ModelConfig) -> str:
-    """Combine image and text prompts for vision language model depending on
-    the model architecture."""
-
-    if config.hf_config.model_type in ("llava", "llava_next"):
-        full_prompt = f"{image_prompt}\n{text_prompt}"
-    elif config.hf_config.model_type == 'phi3_v':
-        full_prompt = f"{image_prompt}<s>\n{text_prompt}"
-    else:
-        raise ValueError(
-            f"Unsupported model type: {config.hf_config.model_type}")
-    return full_prompt
+def rescale_image_size(image: Image.Image, size_factor: float) -> Image.Image:
+    """Rescale the dimensions of an image by a constant factor."""
+    new_width = int(image.width * size_factor)
+    new_height = int(image.height * size_factor)
+    return image.resize((new_width, new_height))

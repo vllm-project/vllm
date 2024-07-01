@@ -19,7 +19,7 @@ llm = LLM(
     image_feature_size=1176,
 )
 
-prompt = "[INST] " + "<image>" * 1176 + "\nWhat is shown in this image? [/INST]"
+prompt = "[INST] <image>\nWhat is shown in this image? [/INST]"
 url = "https://h2o-release.s3.amazonaws.com/h2ogpt/bigben.jpg"
 image = Image.open(BytesIO(requests.get(url).content))
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=100)

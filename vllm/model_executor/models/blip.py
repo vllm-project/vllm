@@ -1,12 +1,12 @@
-"""Minimal implementation of CLIPVisionModel intended to be only used 
+"""Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
 from typing import Optional
 
 import torch
 import torch.nn as nn
 from PIL import Image
-from transformers import CLIPVisionConfig
-from transformers.models.clip.modeling_clip import CLIPAttention
+from transformers import BlipVisionConfig
+from transformers.models.blip.modeling_blip import BlipAttention
 
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.inputs import LLMInputs
@@ -20,31 +20,31 @@ from vllm.multimodal.image import (ImageFeatureData, ImagePixelData,
 from vllm.sequence import SequenceData
 
 
-def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
+def get_blip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
     assert image_size % patch_size == 0
     return image_size // patch_size
 
 
-def get_clip_num_patches(*, image_size: int, patch_size: int) -> int:
-    grid_length = get_clip_patch_grid_length(image_size=image_size,
+def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
+    grid_length = get_blip_patch_grid_length(image_size=image_size,
                                              patch_size=patch_size)
     return grid_length * grid_length
 
 
-def get_clip_image_feature_size(hf_config: CLIPVisionConfig) -> int:
-    return get_clip_num_patches(image_size=hf_config.image_size,
+def get_blip_image_feature_size(hf_config: BlipVisionConfig) -> int:
+    return get_blip_num_patches(image_size=hf_config.image_size,
                                 patch_size=hf_config.patch_size)
 
 
-def dummy_seq_data_for_clip(
-    hf_config: CLIPVisionConfig,
+def dummy_seq_data_for_blip(
+    hf_config: BlipVisionConfig,
     seq_len: int,
     *,
     image_token_id: int,
     image_feature_size_override: Optional[int] = None,
 ):
     if image_feature_size_override is None:
-        image_feature_size = get_clip_image_feature_size(hf_config)
+        image_feature_size = get_blip_image_feature_size(hf_config)
     else:
         image_feature_size = image_feature_size_override
 
@@ -53,8 +53,8 @@ def dummy_seq_data_for_clip(
     return SequenceData(token_ids)
 
 
-def dummy_pixel_data_for_clip(
-    hf_config: CLIPVisionConfig,
+def dummy_pixel_data_for_blip(
+    hf_config: BlipVisionConfig,
     *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
@@ -69,13 +69,13 @@ def dummy_pixel_data_for_clip(
     return ImagePixelData(image)
 
 
-def dummy_feature_data_for_clip(
-    hf_config: CLIPVisionConfig,
+def dummy_feature_data_for_blip(
+    hf_config: BlipVisionConfig,
     *,
     image_feature_size_override: Optional[int] = None,
 ):
     if image_feature_size_override is None:
-        image_feature_size = get_clip_image_feature_size(hf_config)
+        image_feature_size = get_blip_image_feature_size(hf_config)
     else:
         image_feature_size = image_feature_size_override
 
@@ -84,10 +84,10 @@ def dummy_feature_data_for_clip(
     return ImageFeatureData(values)
 
 
-def input_processor_for_clip(
+def input_processor_for_blip(
     model_config: ModelConfig,
     multimodal_config: VisionLanguageConfig,
-    hf_config: CLIPVisionConfig,
+    hf_config: BlipVisionConfig,
     llm_inputs: LLMInputs,
     *,
     image_token_id: int,
@@ -101,7 +101,7 @@ def input_processor_for_clip(
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
     if image_feature_size_override is None:
-        image_feature_size = get_clip_image_feature_size(hf_config)
+        image_feature_size = get_blip_image_feature_size(hf_config)
     else:
         image_feature_size = image_feature_size_override
 
@@ -119,34 +119,32 @@ def input_processor_for_clip(
                      multi_modal_data=multi_modal_data)
 
 
-# Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa
-class CLIPVisionEmbeddings(nn.Module):
+# Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa
+class BlipVisionEmbeddings(nn.Module):
 
-    def __init__(self, config: CLIPVisionConfig):
+    def __init__(self, config: BlipVisionConfig):
         super().__init__()
+
         self.config = config
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
 
-        self.class_embedding = nn.Parameter(torch.randn(self.embed_dim))
+        self.class_embedding = nn.Parameter(torch.randn(1, 1, self.embed_dim))
 
         self.patch_embedding = nn.Conv2d(
-            in_channels=config.num_channels,
+            in_channels=3,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
             stride=self.patch_size,
-            bias=False,
         )
 
-        self.num_patches = get_clip_num_patches(image_size=self.image_size,
+        self.num_patches = get_blip_num_patches(image_size=self.image_size,
                                                 patch_size=self.patch_size)
         self.num_positions = self.num_patches + 1
-        self.position_embedding = nn.Embedding(self.num_positions,
-                                               self.embed_dim)
-        self.register_buffer("position_ids",
-                             torch.arange(self.num_positions).expand((1, -1)),
-                             persistent=False)
+
+        self.position_embedding = nn.Parameter(
+            torch.randn(1, self.num_positions, self.embed_dim))
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         batch_size = pixel_values.shape[0]
@@ -157,18 +155,22 @@ class CLIPVisionEmbeddings(nn.Module):
 
         class_embeds = self.class_embedding.expand(batch_size, 1, -1)
         embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
-        embeddings = embeddings + self.position_embedding(self.position_ids)
+
+        position_embeds = self.position_embedding.to(target_dtype)
+        embeddings = embeddings + position_embeds[:, :embeddings.size(1), :]
 
         return embeddings
 
 
-class CLIPMLP(nn.Module):
+class BlipMLP(nn.Module):
 
     def __init__(self,
-                 config: CLIPVisionConfig,
+                 config: BlipVisionConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
+
         self.config = config
+
         self.activation_fn = get_act_fn(config.hidden_act)
         self.fc1 = ColumnParallelLinear(config.hidden_size,
                                         config.intermediate_size,
@@ -187,17 +189,17 @@ class CLIPMLP(nn.Module):
         return hidden_states
 
 
-class CLIPEncoderLayer(nn.Module):
+class BlipEncoderLayer(nn.Module):
 
     def __init__(self,
-                 config: CLIPVisionConfig,
+                 config: BlipVisionConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
-        self.self_attn = CLIPAttention(config)
+        self.self_attn = BlipAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
-        self.mlp = CLIPMLP(config, quant_config=quant_config)
+        self.mlp = BlipMLP(config, quant_config=quant_config)
         self.layer_norm2 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
 
@@ -217,22 +219,24 @@ class CLIPEncoderLayer(nn.Module):
         return hidden_states
 
 
-class CLIPEncoder(nn.Module):
+class BlipEncoder(nn.Module):
     """
     Transformer encoder consisting of `config.num_hidden_layers` self 
-    attention layers. Each layer is a [`CLIPEncoderLayer`].
+    attention layers. Each layer is a [`BlipEncoderLayer`].
 
     Args:
-        config: CLIPConfig
+        config: BlipConfig
     """
 
     def __init__(self,
-                 config: CLIPVisionConfig,
+                 config: BlipVisionConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
+
         self.config = config
+
         self.layers = nn.ModuleList([
-            CLIPEncoderLayer(config=config, quant_config=quant_config)
+            BlipEncoderLayer(config=config, quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
 
@@ -249,21 +253,21 @@ class CLIPEncoder(nn.Module):
         return hidden_states
 
 
-class CLIPVisionTransformer(nn.Module):
+class BlipVisionModel(nn.Module):
+    config_class = BlipVisionConfig
+    main_input_name = "pixel_values"
 
     def __init__(self,
-                 config: CLIPVisionConfig,
+                 config: BlipVisionConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
+
         self.config = config
-        embed_dim = config.hidden_size
 
-        self.embeddings = CLIPVisionEmbeddings(config)
-
-        # NOTE: This typo of "layrnorm" is not fixed on purpose to match
-        # the original transformers code and name of the model weights.
-        self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self.encoder = CLIPEncoder(config=config, quant_config=quant_config)
+        self.embeddings = BlipVisionEmbeddings(config)
+        self.encoder = BlipEncoder(config=config, quant_config=quant_config)
+        self.post_layernorm = nn.LayerNorm(config.hidden_size,
+                                           eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -272,32 +276,7 @@ class CLIPVisionTransformer(nn.Module):
     ) -> torch.Tensor:
 
         hidden_states = self.embeddings(pixel_values)
-        hidden_states = self.pre_layrnorm(hidden_states)
         hidden_states = self.encoder(inputs_embeds=hidden_states,
                                      vision_feature_layer=vision_feature_layer)
 
-        return hidden_states
-
-
-class CLIPVisionModel(nn.Module):
-
-    config_class = CLIPVisionConfig
-    main_input_name = "pixel_values"
-
-    def __init__(self,
-                 config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
-        super().__init__()
-        self.vision_model = CLIPVisionTransformer(config=config,
-                                                  quant_config=quant_config)
-
-    def forward(self,
-                pixel_values: Optional[torch.Tensor] = None,
-                vision_feature_layer: int = -1):
-
-        return self.vision_model(pixel_values=pixel_values,
-                                 vision_feature_layer=vision_feature_layer)
-
-    @property
-    def device(self):
-        return next(self.parameters()).device
+        return self.post_layernorm(hidden_states)
