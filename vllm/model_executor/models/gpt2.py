@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -218,7 +218,12 @@ class GPT2LMHeadModel(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.transformer = GPT2Model(config, cache_config, quant_config)
-        self.lm_head_weight = self.transformer.wte.weight
+        if self.config.tie_word_embeddings:
+            self.lm_head_weight = self.transformer.wte.weight
+        else:
+            self.lm_head = ParallelLMHead(self.config.vocab_size,
+                                          self.config.hidden_size)
+            self.lm_head_weight = self.lm_head.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 

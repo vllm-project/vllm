@@ -315,7 +315,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
         self.quant_config = quant_config
         self.model = Qwen2Model(config, cache_config, quant_config)
 
-        if config.tie_word_embeddings:
+        if self.config.tie_word_embeddings:
             self.lm_head_weight = self.model.embed_tokens.weight
         else:
             self.lm_head = ParallelLMHead(config.vocab_size,

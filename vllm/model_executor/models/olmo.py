@@ -282,7 +282,7 @@ class OlmoForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.model = OlmoModel(config, cache_config, quant_config)
-        if config.tie_word_embeddings:
+        if self.config.tie_word_embeddings:
             self.lm_head_weight = self.model.embed_tokens.weight
         else:
             self.unpadded_vocab_size = config.vocab_size

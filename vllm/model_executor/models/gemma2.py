@@ -326,6 +326,8 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA):
         del lora_config  # Unused.
         super().__init__()
         self.config = config
+        # currently all existing Gemma models have `tie_word_embeddings` enabled
+        assert config.tie_word_embeddings
         self.quant_config = quant_config
         self.model = Gemma2Model(config, cache_config, quant_config)
         self.logits_processor = LogitsProcessor(
