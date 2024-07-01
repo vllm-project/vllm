@@ -29,7 +29,7 @@ Registry
 Base Classes
 ------------
 
-.. autoclass:: vllm.multimodal.MultiModalData
+.. autoclass:: vllm.multimodal.ExternalMultiModalDataDict
     :members:
     :show-inheritance:
 

@@ -4,7 +4,6 @@ from transformers import CLIPImageProcessor, LlavaNextImageProcessor
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import ImageData
 
 from ..conftest import _STR_DTYPE_TO_TORCH_DTYPE
 
@@ -33,7 +32,7 @@ def test_clip_image_processor(image_assets, dtype):
         ).to(dtype=_STR_DTYPE_TO_TORCH_DTYPE[dtype])
         vllm_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
-            ImageData(asset.pil_image),
+            {"image": asset.pil_image},
         )
 
         assert hf_result.keys() == vllm_result.keys()
@@ -72,7 +71,7 @@ def test_llava_next_image_processor(image_assets, dtype):
         ).to(dtype=_STR_DTYPE_TO_TORCH_DTYPE[dtype])
         vllm_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
-            ImageData(asset.pil_image),
+            {"image": asset.pil_image},
         )
 
         assert hf_result.keys() == vllm_result.keys()
@@ -102,11 +101,11 @@ def test_image_pixel_types(image_assets, dtype):
     for asset in image_assets:
         image_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
-            ImageData(asset.pil_image),
+            {"image": asset.pil_image},
         )
         tensor_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
-            ImageData(asset.pil_image),
+            {"image": asset.pil_image},
         )
 
         assert image_result.keys() == tensor_result.keys()

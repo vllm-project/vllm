@@ -14,7 +14,7 @@ from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
-    from vllm.multimodal import ExternalMultiModalDataDict, MultiModalData
+    from vllm.multimodal import ExternalMultiModalDataDict
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -432,7 +432,7 @@ class SequenceGroup:
         return next(iter(self.seqs_dict.values())).prompt_token_ids
 
     @property
-    def multi_modal_data(self) -> Optional["MultiModalData"]:
+    def multi_modal_data(self) -> Optional["ExternalMultiModalDataDict"]:
         # All sequences in the group should have the same multi-modal data.
         # We use the multi-modal data of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).multi_modal_data

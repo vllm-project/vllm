@@ -75,8 +75,8 @@ def run_test(
 
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalData objects and corresponding
-    vision language config as input.
+    For vllm runner, we provide ExternalMultiModalDataDict objects 
+    and corresponding vision language config as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """

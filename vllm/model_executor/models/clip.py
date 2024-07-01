@@ -12,7 +12,6 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal.image import ImageData
 from vllm.sequence import SequenceData
 
 
@@ -49,7 +48,7 @@ def dummy_seq_data_for_clip(
     return SequenceData(token_ids)
 
 
-def dummy_pixel_data_for_clip(
+def dummy_image_for_clip(
     hf_config: CLIPVisionConfig,
     *,
     image_width_override: Optional[int] = None,
@@ -62,7 +61,7 @@ def dummy_pixel_data_for_clip(
         height = image_height_override
 
     image = Image.new("RGB", (width, height), color=0)
-    return ImageData(image)
+    return {"image": image}
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa

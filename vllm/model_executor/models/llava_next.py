@@ -2,6 +2,7 @@ from typing import Dict, Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
+from PIL import Image
 from transformers import CLIPVisionConfig, LlavaNextConfig
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
@@ -20,11 +21,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
-from vllm.multimodal.image import ImageData
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput
 
-from .clip import (dummy_pixel_data_for_clip, dummy_seq_data_for_clip,
+from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_patch_grid_length)
 from .interfaces import SupportsVision
 from .llava import LlavaMultiModalProjector, merge_vision_embeddings
@@ -127,8 +127,7 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
             image_feature_size_override=image_feature_size,
         )
 
-        mm_data: MultiModalData
-        mm_data = dummy_pixel_data_for_clip(
+        mm_data = dummy_image_for_clip(
             vision_config,
             image_width_override=dummy_width,
             image_height_override=dummy_height,
@@ -140,28 +139,23 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
     raise NotImplementedError(msg)
 
 
-def _pixel_mapper(ctx: InputContext,
-                  data: ImageData) -> Dict[str, torch.Tensor]:
-    image = data.image
+def _pixel_mapper(ctx: InputContext, image: object) -> Dict[str, torch.Tensor]:
 
-    if isinstance(image, torch.Tensor):
-        pixel_values = image.to(ctx.model_config.dtype)
-        batch_size, _, _, h, w = pixel_values.shape
-        image_sizes = torch.tensor([(w, h) for _ in range(batch_size)])
+    if isinstance(image, Image.Image):
 
-        return {"pixel_values": pixel_values, "image_sizes": image_sizes}
+        # Temporary patch before dynamic number of image tokens is supported
+        _, _, h, w = ctx.get_multimodal_config().image_input_shape
+        if (w, h) != (image.width, image.height):
+            logger.warning(
+                "Dynamic image shape is currently not supported. "
+                "Resizing input image to (%d, %d).", w, h)
 
-    # Temporary patch before dynamic number of image tokens is supported
-    _, _, h, w = ctx.get_multimodal_config().image_input_shape
-    if (w, h) != (image.width, image.height):
-        logger.warning(
-            "Dynamic image shape is currently not supported. "
-            "Resizing input image to (%d, %d).", w, h)
+            image = image.resize((w, h))
 
-        data.image = image.resize((w, h))
+        return MULTIMODAL_REGISTRY._get_plugin("image") \
+            ._default_input_mapper(ctx, image)
 
-    return MULTIMODAL_REGISTRY._get_plugin_for_internal_data_type(ImageData) \
-        ._default_input_mapper(ctx, data)
+    raise TypeError(f"Invalid type for 'image': {type(image)}")
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(_pixel_mapper)

@@ -35,10 +35,9 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import ImageData
 from vllm.sequence import SamplerOutput
 
-from .clip import dummy_pixel_data_for_clip, dummy_seq_data_for_clip
+from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsVision
 
 logger = init_logger(__name__)
@@ -286,7 +285,7 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
         image_token_id=32044,
         image_feature_size_override=image_feature_size,
     )
-    mm_data = dummy_pixel_data_for_clip(
+    mm_data = dummy_image_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         image_width_override=dummy_width,
         image_height_override=dummy_height,
@@ -331,8 +330,7 @@ def _calc_hd_transform_size(*, width: int, height: int, hd_num: int = 16):
 
 
 def _image_processor(ctx: InputContext,
-                     data: ImageData) -> Dict[str, torch.Tensor]:
-    image = data.image
+                     image: object) -> Dict[str, torch.Tensor]:
 
     if isinstance(image, Image.Image):
         # Temporary patch before dynamic number of image tokens is supported
@@ -343,10 +341,11 @@ def _image_processor(ctx: InputContext,
                 "Dynamic image shape is currently not supported. "
                 "Resizing input image to (%d, %d).", w, h)
 
-            data.image = image.resize((w, h))
+            image = image.resize((w, h))
 
-    return MULTIMODAL_REGISTRY._get_plugin_for_internal_data_type(ImageData) \
-            ._default_input_mapper(ctx, data)
+        return MULTIMODAL_REGISTRY._get_plugin("image") \
+                ._default_input_mapper(ctx, image)
+    raise TypeError(f"Invalid type for 'image': {type(image)}")
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(_image_processor)

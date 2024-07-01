@@ -17,10 +17,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput
 
-from .clip import dummy_pixel_data_for_clip, dummy_seq_data_for_clip
+from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsVision
 
 _KEYS_TO_MODIFY_MAPPING = {
@@ -89,8 +89,7 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int):
             image_token_id=hf_config.image_token_index,
         )
 
-        mm_data: MultiModalData
-        mm_data = dummy_pixel_data_for_clip(vision_config)
+        mm_data = dummy_image_for_clip(vision_config)
         return seq_data, mm_data
 
     msg = f"Unsupported vision config: {type(vision_config)}"

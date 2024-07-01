@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Generic, Optional,
-                    Tuple, Type, TypedDict, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Type,
+                    TypedDict, TypeVar, Union)
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
@@ -13,27 +13,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
-class MultiModalData:
-    """
-    Base class that contains multi-modal data.
-
-    This is for internal use.
-
-    To add a new modality, add a new file under ``multimodal`` directory.
-
-    In this new file, subclass :class:`~MultiModalData` and
-    :class:`~MultiModalPlugin`.
-
-    Finally, register the new plugin to
-    :const:`vllm.multimodal.MULTIMODAL_REGISTRY` (beyond default plugins).
-    This enables models to call :meth:`MultiModalRegistry.map_input` for
-    the new modality.
-    """
-    pass
-
-
-D = TypeVar("D", bound=MultiModalData)
 N = TypeVar("N", bound=Type["nn.Module"])
 
 
@@ -44,13 +23,14 @@ class ExternalMultiModalDataBuiltins(TypedDict, total=False):
 ExternalMultiModalDataDict = Union[ExternalMultiModalDataBuiltins, Dict[str,
                                                                         Any]]
 
-MultiModalInputMapper = Callable[[InputContext, D], Dict[str, "torch.Tensor"]]
+MultiModalInputMapper = Callable[[InputContext, object], Dict[str,
+                                                              "torch.Tensor"]]
 """Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
 and processors in HuggingFace Transformers."""
 
 
-class MultiModalPlugin(ABC, Generic[D]):
+class MultiModalPlugin(ABC):
     """
     Base class that defines data processing logic for a specific modality.
 
@@ -63,29 +43,18 @@ class MultiModalPlugin(ABC, Generic[D]):
 
     def __init__(self) -> None:
         self._input_mappers: Dict[Type["nn.Module"],
-                                  MultiModalInputMapper[D]] = {}
+                                  MultiModalInputMapper] = {}
 
     @abstractmethod
-    def get_internal_data_type(self) -> Type[D]:
+    def get_data_key(self) -> str:
         """
-        Get the modality (subclass of :class:`~MultiModalData`) served by
-        this plugin.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_external_data_type(self) -> Tuple[str, Type[Any]]:
-        """The data type that this plugin handles. 
-        
-        For `LLM.generate(multi_modal_data={"key": value})` will 
-        be handled by plugin with an external data type of
-        (key, type(value)). 
+        Get the data key corresponding to the modality.
         """
         raise NotImplementedError
 
     @abstractmethod
     def _default_input_mapper(self, ctx: InputContext,
-                              data: D) -> Dict[str, "torch.Tensor"]:
+                              data: object) -> Dict[str, "torch.Tensor"]:
         """Return a dictionary to be passed as keyword arguments to
         :meth:`~torch.nn.Module.forward`. This is similar in concept to
         tokenizers and processors in HuggingFace Transformers.
@@ -94,7 +63,7 @@ class MultiModalPlugin(ABC, Generic[D]):
 
     def register_input_mapper(
         self,
-        mapper: Optional[MultiModalInputMapper[D]] = None,
+        mapper: Optional[MultiModalInputMapper] = None,
     ):
         """
         Register an input mapper to a model class.
@@ -122,10 +91,12 @@ class MultiModalPlugin(ABC, Generic[D]):
         return wrapper
 
     def map_input(self, model_config: ModelConfig,
-                  data: D) -> Dict[str, "torch.Tensor"]:
+                  data: object) -> Dict[str, "torch.Tensor"]:
         """
-        Apply an input mapper to a :class:`~MultiModalData` instance passed
+        Apply an input mapper to a data passed
         to the model, transforming the data into a dictionary of model inputs.
+
+        If the data is not something that the mapper expects, throws TypeError.
 
         The model is identified by ``model_config``.
 

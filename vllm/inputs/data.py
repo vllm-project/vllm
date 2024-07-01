@@ -4,7 +4,7 @@ from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
 from typing_extensions import NotRequired
 
 if TYPE_CHECKING:
-    from vllm.multimodal import ExternalMultiModalDataDict, MultiModalData
+    from vllm.multimodal import ExternalMultiModalDataDict
 
 
 class ParsedText(TypedDict):
@@ -72,7 +72,7 @@ class TextPrompt(TypedDict):
     prompt: str
     """The input text to be tokenized before passing to the model."""
 
-    multi_modal_data: NotRequired["MultiModalData"]
+    multi_modal_data: NotRequired["ExternalMultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
@@ -85,7 +85,7 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: List[int]
     """A list of token IDs to pass to the model."""
 
-    multi_modal_data: NotRequired["MultiModalData"]
+    multi_modal_data: NotRequired["ExternalMultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
@@ -103,7 +103,7 @@ class TextTokensPrompt(TypedDict):
     prompt_token_ids: List[int]
     """The token IDs of the prompt."""
 
-    multi_modal_data: NotRequired["MultiModalData"]
+    multi_modal_data: NotRequired["ExternalMultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
