@@ -26,11 +26,13 @@ class RefCounter(RefCounterProtocol):
     and retrieve the reference count for a given block index.
 
     Args:
-        all_block_indices (Iterable[BlockId]): An iterable of block indices
-            to initialize the reference counter with.
+        block_index_start (BlockId): The starting block index for the reference
+            counter.
+        block_index_end (BlockId): The ending block index for the reference
+            counter.
     """
 
-    def __init__(self, block_index_start, block_index_end):
+    def __init__(self, block_index_start: BlockId, block_index_end: BlockId):
         self.block_index_start = block_index_start
         self.block_index_end = block_index_end
         self._refcounts = [0] * (block_index_end - block_index_start)
