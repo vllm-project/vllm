@@ -128,9 +128,8 @@ class OpenAIServingChat(OpenAIServing):
                         "will be ignored.")
 
                 async def async_get_and_parse_image(image_url: str):
-                    with await ImageFetchAiohttp.fetch_image(image_url
-                                                             ) as image:
-                        return {"image": image}
+                    image = await ImageFetchAiohttp.fetch_image(image_url)
+                    return {"image": image}
 
                 mm_future = async_get_and_parse_image(image_url["url"])
                 mm_futures.append(mm_future)
