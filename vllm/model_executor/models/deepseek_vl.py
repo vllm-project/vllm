@@ -38,7 +38,7 @@ from typing import (
     Type,
     Union,
 )
-from itertools import repeat
+from itertools import (repeat, chain)
 
 import torch
 import torch.nn as nn
@@ -101,6 +101,16 @@ class Format(str, Enum):
     NHWC = "NHWC"
     NCL = "NCL"
     NLC = "NLC"
+
+
+def nchw_to(x: torch.Tensor, fmt: Format):
+    if fmt == Format.NHWC:
+        x = x.permute(0, 2, 3, 1)
+    elif fmt == Format.NLC:
+        x = x.flatten(2).transpose(1, 2)
+    elif fmt == Format.NCL:
+        x = x.flatten(2)
+    return x
 
 
 # From https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/attention_pool.py
@@ -408,11 +418,11 @@ class PatchEmbed(nn.Module):
         if self.img_size is not None:
             if self.strict_img_size:
                 _assert(
-                    H == self.img_size[0],
+                    self.img_size[0] == H,
                     f"Input height ({H}) doesn't match model ({self.img_size[0]}).",
                 )
                 _assert(
-                    W == self.img_size[1],
+                    self.img_size[1] == W,
                     f"Input width ({W}) doesn't match model ({self.img_size[1]}).",
                 )
             elif not self.dynamic_img_pad:
@@ -490,6 +500,7 @@ def resample_abs_pos_embed(
     return posemb
 
 
+# From https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/_manipulate.py
 def checkpoint_seq(functions,
                    x,
                    every=1,
