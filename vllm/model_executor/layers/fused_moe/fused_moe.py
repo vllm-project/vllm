@@ -520,8 +520,8 @@ def fused_experts(hidden_states: torch.Tensor,
                                 use_fp8=use_fp8)
 
         torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                      dim=1,
-                      out=out_hidden_states[begin_chunk_idx:end_chunk_idx])
+                  dim=1,
+                  out=out_hidden_states[begin_chunk_idx:end_chunk_idx])
     return out_hidden_states
 
 
