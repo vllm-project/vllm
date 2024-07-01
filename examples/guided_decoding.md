@@ -17,7 +17,7 @@ These guided decoding options can help you unlock the full potential of LLMs and
 
 ## Guided Decoding Theory ##
 
-Lets say you have a classification problem. You want to classify sentences as positive or negative. You ask the question: "What connotation does this sentence have?" The LLM generates token probabilities of:
+Let's say you have a classification problem. You want to classify sentences as positive or negative. You ask the question: "What connotation does this sentence have?" The LLM generates token probabilities of:
 
 * Positive: 0.5
 * Negative: 0.1
@@ -102,7 +102,7 @@ print(json.dumps(user_schema, indent=4))
     }
     
 
-Using this schema, we may construct the model prompt. Here, we give the model our instruction, the schema, and the sentence. Note that while outlines does force the output to conform to the JSON schema, it is still useful to tell the model what that schema is. Remember, at their core, LLMs are next-token predictors, they do well when the tokens you want are easy to understand with the information given.
+Using this schema, we may construct the model prompt. Here, we give the model our instruction, the schema, and the sentence. Note that while Outlines does force the output to conform to the JSON schema, it is still useful to tell the model what that schema is. Remember, at their core, LLMs are next-token predictors, they do well when the tokens you want are easy to understand with the information given.
 
 Using this prompt, we construct the messages object and call the LLM using the client object from earlier. Note that we include the `user_schema` as part of the `guided_json` in the `extra_body`. You may do a similar operation with curl or offline LLM.
 
@@ -152,7 +152,7 @@ print(output.choices[0].message.content)
     {"name": "John", "age": 30}
     
 
-Note that without the guided decoding, the LLM included an extra "User" portion in the response. This would cause problems with downstream tasks. Meanwhile, the guided decoding outputted a json that is easily parsed without error.
+Note that without the guided decoding, the LLM included an extra "User" portion in the response. This would cause problems with downstream tasks. Meanwhile, the guided decoding outputted a JSON that is easily parsed without error.
 
 ## Guided Regex <a id='guided-regex'></a>
 Regular expressions (regex) provide a powerful way to match and validate patterns in text. Guided Regex allows you to specify a regex pattern as a guiding mechanism, constraining the generated text to match the defined pattern. By providing a regex pattern, you can control the output of the language model and generate text that conforms to specific formats, such as dates, times, phone numbers, or other structured data.
@@ -319,7 +319,6 @@ print('Without Guided Decoding')
 print(output.choices[0].message.content)
 print()
 
-# messages.append({"role": "assistant", "content": '1.)'})
 response_start = '1.)'
 prompt = f'<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nGive me 3 ways to propose to my girlfriend<|im_end|>\n<|im_start|>assistant\n{response_start}'
 output = client.completions.create(
@@ -344,7 +343,7 @@ print(response_start + output.choices[0].text)
     Remember, the most important aspect of proposing is showing your genuine love and commitment to your partner. Tailor the proposal to reflect your relationship and ensure it is a moment that you both will cherish forever.
     
     With Guided Decoding
-    1.) Speak to her in person: This is perhaps the most romantic way to ask your girl friend to marry you. Getting in a romantic setting and expressing your love and commitment to her publicly can create a memorable moment you and she can cherish.
+    1.) Speak to her in person: This is perhaps the most romantic way to ask your girlfriend to marry you. Getting in a romantic setting and expressing your love and commitment to her publicly can create a memorable moment you and she can cherish.
     
     2.) Write her a love letter: There is no better way to express your feelings for her and ask her to marry you than with a hand-written love letter. This type of proposal shows her that you take the commitment seriously and cherish her enough to put your feelings into words.
     
