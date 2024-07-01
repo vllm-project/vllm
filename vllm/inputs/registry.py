@@ -12,7 +12,7 @@ from .data import LLMInputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VisionLanguageConfig
-    from vllm.multimodal import ExternalMultiModalDataDict
+    from vllm.multimodal import MultiModalDataDict
     from vllm.sequence import SequenceData
 
 logger = init_logger(__name__)
@@ -67,7 +67,7 @@ N = TypeVar("N", bound=Type[nn.Module])
 
 DummyDataFactory = Callable[[InputContext, int],
                             Tuple["SequenceData",
-                                  Optional["ExternalMultiModalDataDict"]]]
+                                  Optional["MultiModalDataDict"]]]
 """
 Create dummy data to be inputted into the model.
 
@@ -95,7 +95,7 @@ class InputRegistry:
         self,
         ctx: InputContext,
         seq_len: int,
-    ) -> Tuple["SequenceData", Optional["ExternalMultiModalDataDict"]]:
+    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         The default dummy data factory represents the longest possible text
         that can be inputted to the model.

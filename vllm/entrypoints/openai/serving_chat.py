@@ -26,7 +26,7 @@ from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
-from vllm.multimodal import ExternalMultiModalDataDict
+from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import ImageFetchAiohttp, get_full_image_text_prompt
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
@@ -46,7 +46,7 @@ class ConversationMessage(TypedDict):
 @dataclass(frozen=True)
 class ChatMessageParseResult:
     messages: List[ConversationMessage]
-    mm_futures: List[Awaitable[ExternalMultiModalDataDict]] = field(
+    mm_futures: List[Awaitable[MultiModalDataDict]] = field(
         default_factory=list)
 
 
@@ -102,7 +102,7 @@ class OpenAIServingChat(OpenAIServing):
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
         texts: List[str] = []
-        mm_futures: List[Awaitable[ExternalMultiModalDataDict]] = []
+        mm_futures: List[Awaitable[MultiModalDataDict]] = []
 
         vlm_config: Optional[VisionLanguageConfig] = getattr(
             self.engine.engine, "vision_language_config", None)
@@ -205,7 +205,7 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             conversation: List[ConversationMessage] = []
-            mm_futures: List[Awaitable[ExternalMultiModalDataDict]] = []
+            mm_futures: List[Awaitable[MultiModalDataDict]] = []
 
             for msg in request.messages:
                 chat_parsed_result = self._parse_chat_message_content(msg)
@@ -222,7 +222,7 @@ class OpenAIServingChat(OpenAIServing):
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
 
-        mm_data: Optional[ExternalMultiModalDataDict] = None
+        mm_data: Optional[MultiModalDataDict] = None
         try:
             if len(mm_futures):
                 # since we support only single mm data currently

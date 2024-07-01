@@ -16,12 +16,11 @@ logger = init_logger(__name__)
 N = TypeVar("N", bound=Type["nn.Module"])
 
 
-class ExternalMultiModalDataBuiltins(TypedDict, total=False):
+class MultiModalDataBuiltins(TypedDict, total=False):
     image: Union["Image.Image", "torch.Tensor"]
 
 
-ExternalMultiModalDataDict = Union[ExternalMultiModalDataBuiltins, Dict[str,
-                                                                        Any]]
+MultiModalDataDict = Union[MultiModalDataBuiltins, Dict[str, Any]]
 
 MultiModalInputMapper = Callable[[InputContext, object], Dict[str,
                                                               "torch.Tensor"]]

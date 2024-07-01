@@ -6,8 +6,7 @@ from torch import nn
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 
-from .base import (ExternalMultiModalDataDict, MultiModalInputMapper,
-                   MultiModalPlugin)
+from .base import MultiModalDataDict, MultiModalInputMapper, MultiModalPlugin
 from .image import ImagePlugin
 
 logger = init_logger(__name__)
@@ -61,7 +60,7 @@ class MultiModalRegistry:
         """
         return self.register_input_mapper("image", mapper)
 
-    def _process_external_input(self, key, value, model_config: ModelConfig):
+    def _process_input(self, key, value, model_config: ModelConfig):
         plugin = self._plugins.get(key)
         if plugin:
             return plugin.map_input(model_config, value)
@@ -93,16 +92,14 @@ class MultiModalRegistry:
         """
         return self.register_input_mapper("image", mapper)
 
-    def map_input(self, model_config: ModelConfig,
-                  data: ExternalMultiModalDataDict):
+    def map_input(self, model_config: ModelConfig, data: MultiModalDataDict):
         """
         Apply an input mapper to the data passed to the model.
         
         See :meth:`MultiModalPlugin.map_input` for more details.
         """
         result_list = [
-            self._process_external_input(k, v, model_config)
-            for k, v in data.items()
+            self._process_input(k, v, model_config) for k, v in data.items()
         ]
         return {k: v for d in result_list for k, v in d.items()}
 
