@@ -22,6 +22,7 @@ class WorkerBase(ABC):
     different hardware. Also abstracts control plane communication, e.g., to
     communicate request metadata to other workers.
     """
+    use_spmd_worker: bool
 
     @abstractmethod
     def init_device(self) -> None:
@@ -212,6 +213,20 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
+        if self.use_spmd_worker:
+            assert execute_model_req is not None, (
+                "VLLM_USE_SPMD_WORKER=1 requires each worker to take in an "
+                "ExecuteModelRequest")
+            return self._execute_model_spmd(execute_model_req)
+
+        return self._execute_model_with_nccl_control_plane(execute_model_req)
+
+    def _execute_model_with_nccl_control_plane(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
+        """Executes at least one model step on the given sequences, unless no
+        sequences are provided."""
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
@@ -258,6 +273,30 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         return self.model_runner.execute_model(model_input, self.kv_cache,
                                                num_steps)
 
+    def _execute_model_spmd(
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[SamplerOutput]]:
+        print("_execute_model_spmd")
+        #import time
+        #time.sleep(100)
+        #return [None]
+        worker_input: WorkerInput = self.prepare_worker_input(
+            execute_model_req=execute_model_req)
+        model_input: ModelRunnerInputBase = (
+            self.model_runner.prepare_model_input(
+                execute_model_req.seq_group_metadata_list))
+
+        self.execute_worker(worker_input)
+
+        # If there is no input, we don't need to execute the model.
+        if worker_input.num_seq_groups == 0:
+            return []
+
+        output = self.model_runner.execute_model(model_input, self.kv_cache)
+        # Worker only supports single-step execution. Wrap the output in a
+        # list to conform to interface.
+        return [output]
+
 
 class WorkerWrapperBase:
     """
@@ -270,10 +309,12 @@ class WorkerWrapperBase:
     def __init__(self,
                  worker_module_name: str,
                  worker_class_name: str,
-                 trust_remote_code: bool = False) -> None:
+                 trust_remote_code: bool = False,
+                 use_spmd_worker: bool = False) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
-        self.worker = None
+        self.use_spmd_worker = use_spmd_worker
+        self.worker: Optional[WorkerBase] = None
         if trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -308,7 +349,14 @@ class WorkerWrapperBase:
 
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
+        if self.use_spmd_worker:
+            assert issubclass(worker_class, LocalOrDistributedWorkerBase), (
+                f"VLLM_USE_SPMD_WORKER=1 requires worker class {worker_class}"
+                " to inherit from LocalOrDistributedWorkerBase")
+
         self.worker = worker_class(*args, **kwargs)
+        assert self.worker is not None
+        self.worker.use_spmd_worker = self.use_spmd_worker
 
     def execute_method(self, method, *args, **kwargs):
         try:
