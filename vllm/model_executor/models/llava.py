@@ -219,7 +219,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values.to(vision_tower.device),
+        image_features = vision_tower(pixel_values,
                                       self.config.vision_feature_layer)
 
         return self._select_image_features(

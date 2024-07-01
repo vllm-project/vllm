@@ -3,13 +3,12 @@ from typing import Tuple
 
 import torch
 import torch.jit
-import torch.nn as nn
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
 
 
-class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
+class RejectionSampler(SpecDecodeBaseSampler):
     """Apply modified rejection sampling as described in "Accelerating Large
         Language Model Decoding with Speculative Sampling"
         https://arxiv.org/pdf/2302.01318.pdf.
@@ -28,8 +27,8 @@ class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
             during sampling. This catches correctness issues but adds
             nontrivial latency.
         """
-        SpecDecodeBaseSampler.__init__(self, disable_bonus_tokens, strict_mode)
-        nn.Module.__init__(self)
+        super().__init__(disable_bonus_tokens=disable_bonus_tokens,
+                         strict_mode=strict_mode)
 
     def forward(
         self,
@@ -78,11 +77,12 @@ class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
             self._raise_if_incorrect_input(target_probs, bonus_token_ids,
                                            draft_probs, draft_token_ids)
 
-        accepted, recovered_token_ids = self._batch_modified_rejection_sampling(
-            target_probs,
-            draft_probs,
-            draft_token_ids,
-        )
+        accepted, recovered_token_ids = (
+            self._batch_modified_rejection_sampling(
+                target_probs,
+                draft_probs,
+                draft_token_ids,
+            ))
 
         output_token_ids = self._create_output(
             accepted,
