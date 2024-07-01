@@ -852,6 +852,7 @@ class FusedMoELinear(torch.nn.Module):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = top_k
+        self.num_total_experts = num_experts
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
         self.renormalize = renormalize
