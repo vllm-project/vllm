@@ -5,8 +5,8 @@ from collections import UserList
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import (Any, Dict, List, Literal, Optional, Tuple, TypedDict,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple,
+                    TypedDict, TypeVar)
 
 import pytest
 import torch
@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoProcessor, AutoTokenizer, BatchEncoding)
+                          AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig
@@ -22,7 +22,12 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalData
+
+if TYPE_CHECKING:
+    from vllm.multimodal import MultiModalData
+else:
+    # it will call torch.cuda.device_count()
+    MultiModalData = None
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
 
@@ -159,6 +164,7 @@ class HfRunner:
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
+        is_sparseml_model: bool = False,
     ) -> None:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
@@ -176,6 +182,9 @@ class HfRunner:
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
+            elif is_sparseml_model:
+                from sparseml.transformers import SparseAutoModelForCausalLM
+                auto_cls = SparseAutoModelForCausalLM
             else:
                 auto_cls = AutoModelForCausalLM
 
@@ -195,6 +204,9 @@ class HfRunner:
         )
 
         try:
+            # don't put this import at the top level
+            # it will call torch.cuda.device_count()
+            from transformers import AutoProcessor  # noqa: F401
             self.processor = AutoProcessor.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
