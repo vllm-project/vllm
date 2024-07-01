@@ -18,7 +18,12 @@ def _compute_params(
     token_lora_tensor: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, ]:
     """
-    Get the information required for the sgmv kernel.
+    Get the information required for the sgmv kernel. With the  features:
+    1. If consecutive requests in the batch use the same LoRA, this function 
+    will combine them into a single request, improving sgmv kernel inference 
+    performance.
+    2. At the beginning of each prefilling stage inference, recalculations are 
+    needed based on the input, but only once. 
     """
     pointer = token_lora_tensor.data_ptr()
     if pointer not in _PARAMS_CACHE:
