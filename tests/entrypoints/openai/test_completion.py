@@ -305,8 +305,9 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                              stream_options={
                                                  "include_usage": False,
                                                  "continuous_usage_stats":
-                                                 False
+                                                 False,
                                              })
+
     async for chunk in stream:
         assert chunk.usage is None
 
@@ -319,7 +320,8 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                              stream=True,
                                              stream_options={
                                                  "include_usage": False,
-                                                 "continuous_usage_stats": True
+                                                 "continuous_usage_stats":
+                                                 True,
                                              })
     async for chunk in stream:
         assert chunk.usage is None
@@ -334,7 +336,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                              stream_options={
                                                  "include_usage": True,
                                                  "continuous_usage_stats":
-                                                 False
+                                                 False,
                                              })
     async for chunk in stream:
         if chunk.choices[0].finish_reason is None:
@@ -359,7 +361,8 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                              stream=True,
                                              stream_options={
                                                  "include_usage": True,
-                                                 "continuous_usage_stats": True
+                                                 "continuous_usage_stats":
+                                                 True,
                                              })
     async for chunk in stream:
         assert chunk.usage is not None
