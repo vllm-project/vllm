@@ -53,20 +53,20 @@ wait_for_server() {
 
 run_trt_server() {
 
-  params=$1
+  server_params=$1
   common_params=$2
 
 
 
   model_path=$(echo "$common_params" | jq -r '.model')
   model_name="${model_path#*/}"
-  model_type=$(echo "$params" | jq -r '.model_type')
-  model_dtype=$(echo "$params" | jq -r '.model_dtype')
+  model_type=$(echo "$server_params" | jq -r '.model_type')
+  model_dtype=$(echo "$server_params" | jq -r '.model_dtype')
   model_tp_size=$(echo "$common_params" | jq -r '.tp')
-  max_batch_size=$(echo "$params" | jq -r '.max_batch_size')
-  max_input_len=$(echo "$params" | jq -r '.max_input_len')
-  max_output_len=$(echo "$params" | jq -r '.max_output_len')
-  trt_llm_version=$(echo "$params" | jq -r '.trt_llm_version')
+  max_batch_size=$(echo "$server_params" | jq -r '.max_batch_size')
+  max_input_len=$(echo "$server_params" | jq -r '.max_input_len')
+  max_output_len=$(echo "$server_params" | jq -r '.max_output_len')
+  trt_llm_version=$(echo "$server_params" | jq -r '.trt_llm_version')
 
   cd ~
   rm -rf models
