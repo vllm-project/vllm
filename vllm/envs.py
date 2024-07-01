@@ -249,7 +249,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH":
     lambda: os.getenv("VLLM_XLA_CACHE_PATH", "~/.vllm/xla_cache/"),
-
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
 }
