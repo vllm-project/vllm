@@ -6,9 +6,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
-from vllm.model_executor.parameter import (ModelWeightParameter,
-                                           ChannelQuantScaleParameter,
-                                           ScalerToArrayvLLMParameter)
+from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+                                           ModelWeightParameter,
+                                           PerTensorScaleParameter)
 
 
 class CompressedTensorsW8A8(CompressedTensorsScheme):
@@ -46,7 +46,7 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
                 output_dim=0,
                 weight_loader=weight_loader)
         else:
-            weight_scale = ScalerToArrayvLLMParameter(
+            weight_scale = PerTensorScaleParameter(
                 data=weight_scale_data,
                 weight_loader=weight_loader,
                 logical_widths=output_partition_sizes)

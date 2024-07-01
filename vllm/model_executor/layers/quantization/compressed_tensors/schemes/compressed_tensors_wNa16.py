@@ -9,7 +9,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N, GPTQMarlinState,
     marlin_permute_scales)
-from vllm.model_executor.parameter import PackedvLLMParameter, vLLMParameter, GroupQuantScaleParameter, ChannelQuantScaleParameter
+from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+                                           GroupQuantScaleParameter,
+                                           PackedvLLMParameter, vLLMParameter)
 
 __all__ = ["CompressedTensorsWNA16"]
 WNA16_SUPPORTED_BITS = [4, 8]
