@@ -5,6 +5,8 @@ test_big_models.py because it could use a larger instance to run tests.
 
 Run `pytest tests/models/test_models.py`.
 """
+import os
+
 import pytest
 
 from .utils import check_outputs_equal
@@ -20,6 +22,7 @@ MODELS = [
     # "allenai/OLMo-1B",  # Broken
     "bigcode/starcoder2-3b",
     "google/gemma-1.1-2b-it",
+    "google/gemma-2-9b"
 ]
 
 
@@ -39,6 +42,9 @@ def test_models(
 
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+
+    if "gemma-2" in model:
+        os.environ['VLLM_ATTENTION_BACKEND'] = "FLASHINFER"
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)

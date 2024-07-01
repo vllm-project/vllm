@@ -659,6 +659,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                            dtype=torch.long,
                                            device=self.device)
 
+        logits_soft_cap = getattr(self.model_config.hf_config,
+                                  'final_logit_softcapping', None)
+        if logits_soft_cap is not None and self.attn_backend.get_name(
+        ) != "flashinfer":
+            logger.warning(("Please use Flashinfer backend for models with",
+                            "logits_soft_cap (i.e., Gemma-2).",
+                            " Otherwise, the output might be wrong.",
+                            " Set Flashinfer backend by ",
+                            "export VLLM_ATTENTION_BACKEND=FLASHINFER."))
+
         if self.attn_backend.get_name() == "flashinfer":
             if len(paged_kv_indptr) > 0:
                 paged_kv_indices_tensor = torch.tensor(paged_kv_indices,
@@ -676,7 +686,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
             kv_cache_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype,
                                                       self.model_config.dtype)
-
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=num_prefills,
                 slot_mapping=slot_mapping_tensor,
@@ -697,7 +706,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 query_start_loc=query_start_loc,
                 device=self.device,
                 data_type=kv_cache_dtype,
-                use_cuda_graph=use_captured_graph)
+                use_cuda_graph=use_captured_graph,
+                logits_soft_cap=logits_soft_cap)
 
         else:
             attn_metadata = self.attn_backend.make_metadata(
