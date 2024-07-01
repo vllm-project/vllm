@@ -53,7 +53,7 @@ class LogitsProcessor(nn.Module):
 
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, embedding, embedding_bias)
-        
+
         if logits is not None:
             if self.soft_cap is not None:
                 logits = logits / self.soft_cap
