@@ -11,10 +11,11 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
     marlin_permute_scales)
 from vllm.model_executor.utils import set_weight_attrs
 
-__all__ = ["CompressedTensorsW4A16"]
+__all__ = ["CompressedTensorsWNA16"]
+WNA16_SUPPORTED_BITS = [4, 8]
 
 
-class CompressedTensorsW4A16(CompressedTensorsScheme):
+class CompressedTensorsWNA16(CompressedTensorsScheme):
 
     def __init__(self,
                  strategy: str,
@@ -27,6 +28,9 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
         if self.strategy == "group" and self.group_size is None:
             raise ValueError(
                 "group_size must be given when using strategy group")
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],

@@ -177,6 +177,15 @@ def is_cpu() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_openvino() -> bool:
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return "openvino" in version("vllm")
+    except PackageNotFoundError:
+        return False
+
+
+@lru_cache(maxsize=None)
 def is_neuron() -> bool:
     try:
         import transformers_neuronx
@@ -376,6 +385,10 @@ def get_open_port() -> int:
 
 
 def update_environment_variables(envs: Dict[str, str]):
+    if is_hip() and "CUDA_VISIBLE_DEVICES" in envs:
+        # Propagate changes to CUDA_VISIBLE_DEVICES to
+        # ROCm's HIP_VISIBLE_DEVICES as well
+        envs["HIP_VISIBLE_DEVICES"] = envs["CUDA_VISIBLE_DEVICES"]
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
@@ -542,7 +555,7 @@ def is_pin_memory_available() -> bool:
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
-    elif is_cpu():
+    elif is_cpu() or is_openvino():
         return False
     return True
 
@@ -779,9 +792,14 @@ def _cuda_device_count_stateless(
 
     if not torch.cuda._is_compiled():
         return 0
-    # bypass _device_count_nvml() if rocm (not supported)
-    nvml_count = -1 if torch.version.hip else torch.cuda._device_count_nvml()
-    r = torch._C._cuda_getDeviceCount() if nvml_count < 0 else nvml_count
+    if is_hip():
+        # ROCm uses amdsmi instead of nvml for stateless device count
+        # This requires a sufficiently modern version of Torch 2.4.0
+        raw_count = torch.cuda._device_count_amdsmi() if (hasattr(
+            torch.cuda, "_device_count_amdsmi")) else -1
+    else:
+        raw_count = torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
     return r
 
 
@@ -795,8 +813,64 @@ def cuda_device_count_stateless() -> int:
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
-
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+# NVML utils
+# Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
+# all the related functions work on real physical device ids.
+# the major benefit of using NVML is that it will not initialize CUDA
+
+try:
+    import pynvml
+except ImportError:
+    # For non-NV devices
+    pynvml = None
+
+
+def with_nvml_context(fn):
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if pynvml is not None:
+            pynvml.nvmlInit()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if pynvml is not None:
+                pynvml.nvmlShutdown()
+
+    return wrapper
+
+
+@with_nvml_context
+def is_full_nvlink(device_ids: List[int]) -> bool:
+    """
+    query if the set of gpus are fully connected by nvlink (1 hop)
+    """
+    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
+    for i, handle in enumerate(handles):
+        for j, peer_handle in enumerate(handles):
+            if i < j:
+                try:
+                    p2p_status = pynvml.nvmlDeviceGetP2PStatus(
+                        handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+                    if p2p_status != pynvml.NVML_P2P_STATUS_OK:
+                        return False
+                except pynvml.NVMLError as error:
+                    logger.error(
+                        "NVLink detection failed. This is normal if your"
+                        " machine has no NVLink equipped.",
+                        exc_info=error)
+                    return False
+    return True
+
+
+@lru_cache(maxsize=8)
+@with_nvml_context
+def get_device_capability_stateless(device_id: int = 0) -> Tuple[int, int]:
+    handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+    return pynvml.nvmlDeviceGetCudaComputeCapability(handle)
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
@@ -822,7 +896,13 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         processed_args = []
         for arg in args:
             if arg.startswith('--'):
-                processed_args.append('--' + arg[len('--'):].replace('_', '-'))
+                if '=' in arg:
+                    key, value = arg.split('=', 1)
+                    key = '--' + key[len('--'):].replace('_', '-')
+                    processed_args.append(f'{key}={value}')
+                else:
+                    processed_args.append('--' +
+                                          arg[len('--'):].replace('_', '-'))
             else:
                 processed_args.append(arg)
 
