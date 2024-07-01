@@ -132,7 +132,7 @@ class Medusa(nn.Module):
         for name, loaded_weight in weights:
             name = name.replace("medusa_heads.", "")
 
-            if name == "token_map":
+            if name == "token_map" and self.truncated_vocab_size < self.orig_vocab_size:
                 self.token_map = nn.Parameter(
                     loaded_weight, requires_grad=False).to(
                         device=self.lm_heads[0].weight.device)
@@ -146,3 +146,5 @@ class Medusa(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+
+        assert (self.truncated_vocab_size == self.orig_vocab_size) or (self.token_map is not None)
