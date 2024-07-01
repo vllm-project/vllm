@@ -172,6 +172,8 @@ class ModelInputForGPUBuilder(
         # Common inputs.
         self.input_tokens: List[int] = []
         self.input_positions: List[int] = []
+        self.seq_lens: List[int] = []
+        self.query_lens: List[int] = []
 
         # LoRA inputs.
         self.lora_index_mapping: List[int] = []
@@ -184,11 +186,9 @@ class ModelInputForGPUBuilder(
 
         # Attention metadata inputs.
         self.slot_mapping: List[int] = []
-        self.seq_lens: List[int] = []
         self.prefill_seq_lens: List[int] = []
         self.decode_seq_lens: List[int] = []
         self.context_lens: List[int] = []
-        self.query_lens: List[int] = []
         self.block_tables: List[List[int]] = []
         self.num_prefills = 0
         self.num_prefill_tokens = 0
@@ -211,6 +211,28 @@ class ModelInputForGPUBuilder(
         self.paged_kv_indptr: List[int] = [0]
         # paged_kv_last_page_len is the length of the last page of each request
         self.paged_kv_last_page_len: List[int] = []
+
+    def _compute_for_sliding_window(self, seq_len, context_len):
+        curr_sliding_window_blocks = None
+        sliding_seq_len = seq_len
+        sliding_context_len = context_len
+
+        # TODO(sang): This is a hack to make sliding window work with
+        # paged attn. We can remove it if we make paged attn kernel
+        # to properly handle slinding window attn.
+        if self.sliding_window is not None:
+            curr_sliding_window_blocks = self.sliding_window_blocks
+            if self.scheduler_config.use_v2_block_manager:
+                # number of elements in last block
+                suff_len = seq_len % self.block_size
+                sliding_seq_len = min(
+                    seq_len, self.block_aligned_sliding_window + suff_len)
+                if suff_len > 0:
+                    curr_sliding_window_blocks += 1
+            else:
+                sliding_seq_len = min(seq_len, self.sliding_window)
+            sliding_context_len = sliding_seq_len - 1
+        return curr_sliding_window_blocks, sliding_seq_len, sliding_context_len
 
     def _compute_slot_mapping(self, seq_len, context_len, start_idx,
                               block_table):
@@ -283,6 +305,9 @@ class ModelInputForGPUBuilder(
                       context_len + seq_group_metadata.token_chunk_size)
         tokens = seq_data.get_token_ids()[context_len:seq_len]
 
+        (curr_sliding_window_blocks, _,
+         _) = self._compute_for_sliding_window(seq_len, context_len)
+
         # Uodate context_len and tokens if prefix cache hit.
         if prefix_cache_hit:
             assert computed_block_nums is not None
@@ -292,6 +317,9 @@ class ModelInputForGPUBuilder(
 
         self.input_tokens.extend(tokens)
         self.input_positions.extend(list(range(context_len, seq_len)))
+        self.seq_lens.append(seq_len)
+        query_len = seq_len - context_len
+        self.query_lens.append(query_len)
 
         ### Attention metadata. TODO: Move to attention metadata builder.
         # TODO(sang): Combine chunked prefill and prefix caching by
@@ -309,15 +337,17 @@ class ModelInputForGPUBuilder(
                 block_table = seq_group_metadata.block_tables[seq_id]
             else:
                 block_table = computed_block_nums
+        elif (self.scheduler_config.chunked_prefill_enabled
+              and seq_group_metadata.block_tables is not None):
+            block_table = seq_group_metadata.block_tables[seq_id]
+            if curr_sliding_window_blocks is not None:
+                block_table = block_table[-curr_sliding_window_blocks:]
         else:
             # Prefill without chunked prefill or memory profiling.
             block_table = []
 
         self.block_tables.append(block_table)
-        self.seq_lens.append(seq_len)
         self.context_lens.append(context_len)
-        query_len = seq_len - context_len
-        self.query_lens.append(query_len)
 
         assert len(seq_ids) == 1
         self.num_prefills += 1
@@ -361,13 +391,9 @@ class ModelInputForGPUBuilder(
             # Avoid using .get_token_ids because it copies all tokens.
             tokens = [seq_data.get_last_token_id()]
 
-            # These are seq_len/context_len capped to the sliding window.
-            # They are passed to decode kernel.
-            # We still need original seq_len/context_len to compute slot
-            # mapping (and input position) below.
-            curr_sliding_window_blocks = None
-            sliding_seq_len = seq_len
-            sliding_context_len = context_len
+            (curr_sliding_window_blocks, sliding_seq_len,
+             sliding_context_len) = self._compute_for_sliding_window(
+                 seq_len, context_len)
 
             # TODO(sang): This is a hack to make sliding window work with
             # paged attn. We can remove it if we make paged attn kernel
@@ -387,6 +413,9 @@ class ModelInputForGPUBuilder(
 
             self.input_tokens.extend(tokens)
             self.input_positions.extend(list(range(context_len, seq_len)))
+            self.seq_lens.append(sliding_seq_len)
+            query_len = sliding_seq_len - sliding_context_len
+            self.query_lens.append(query_len)
 
             ### Attention metadata. TODO: Move to attention metadata builder.
             if seq_group_metadata.block_tables is not None:
@@ -399,10 +428,7 @@ class ModelInputForGPUBuilder(
                 block_table = []
 
             self.block_tables.append(block_table)
-            self.seq_lens.append(sliding_seq_len)
             self.context_lens.append(sliding_context_len)
-            query_len = sliding_seq_len - sliding_context_len
-            self.query_lens.append(query_len)
 
             assert query_len == 1, (
                 "seq_len: {}, context_len: {}, query_len: {}".format(
