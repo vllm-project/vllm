@@ -408,6 +408,7 @@ class LLMEngine:
         else:
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
+
         # Create the LLM engine.
         engine = cls(
             **engine_config.to_dict(),
@@ -838,6 +839,7 @@ class LLMEngine:
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
             scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
+
         # Log stats.
         self.do_log_stats(scheduler_outputs, output)
 
@@ -852,14 +854,6 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             self.model_executor.stop_remote_worker_execution_loop()
 
-#        out_prompt = [ro.prompt for ro in request_outputs]
-#        out_indices =  [ro.outputs[-1].index for ro in request_outputs]
-#        out_text =  [f'{ro.outputs[-1].text!r}' for ro in request_outputs]
-#        for idx, (p, i, t) in enumerate(zip(out_prompt, out_indices, out_text)):
-#            logger.info(f'\tPROMPT ({idx}): {p}')            
-#            logger.info(f'\tGEN IDX ({idx}): {i}')            
-#            logger.info(f'\tGEN TXT ({idx}): {t}')            
-#            logger.info('')            
         return request_outputs
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
