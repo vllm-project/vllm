@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     find_first_name_or_class_match)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.utils import get_device_capability_stateless
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -38,9 +39,9 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16]
 
-    # Need to figure it out
-    def get_min_capability(self) -> int:
-        return 60
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 75
 
     def get_name(self) -> str:
         return "compressed_tensors"
@@ -91,6 +92,14 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_config_filenames(cls) -> List[str]:
         return []
 
+    def _check_gptq_and_marlin_can_run(self):
+        capability = get_device_capability_stateless()
+        capability = capability[0] * 10 + capability[1]
+        if capability < 80:
+            raise RuntimeError("The quantization config is not supported for ",
+                               "the current GPU. Minimum capability: 80. ",
+                               f"Current capability: {capability}.")
+
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
@@ -133,6 +142,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     input_quant: BaseModel) -> "CompressedTensorsScheme":
 
         if self._is_wNa16_group_channel(weight_quant, input_quant):
+            self._check_gptq_and_marlin_can_run()
             if (self.quant_format == CompressionFormat.marlin_24.value
                     and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS):
                 return CompressedTensorsW4A16Sparse24(
@@ -222,6 +232,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
     def __init__(self, quantization_config: CompressedTensorsConfig):
         self.quantization_config = quantization_config
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        return layer.scheme.process_weights_after_loading(layer)
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
