@@ -6,6 +6,7 @@ from transformers import AutoTokenizer
 from vllm.config import VisionLanguageConfig
 
 from ..conftest import IMAGE_ASSETS
+from .utils import check_outputs_equal
 
 pytestmark = pytest.mark.vlm
 
@@ -115,11 +116,12 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
                                                   max_tokens,
                                                   images=vllm_images)
 
-    for i in range(len(HF_IMAGE_PROMPTS)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_to_hf_output(
-            vllm_outputs[i], vlm_config, model_id)
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    check_outputs_equal(
+        hf_outputs,
+        [
+            vllm_to_hf_output(vllm_output, vlm_config, model_id)
+            for vllm_output in vllm_outputs
+        ],
+        name_0="hf",
+        name_1="vllm",
+    )
