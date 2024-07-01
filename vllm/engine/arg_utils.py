@@ -614,7 +614,7 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
-        if self.image_token_id:
+        if self.image_token_id is not None:
             if (not self.image_input_shape or not self.image_feature_size):
                 raise ValueError(
                     'Specify `image_input_shape` and '

@@ -60,7 +60,8 @@ class MultiModalRegistry:
         """
         return self.register_input_mapper("image", mapper)
 
-    def _process_input(self, key, value, model_config: ModelConfig):
+    def _process_input(self, key: str, value: object,
+                       model_config: ModelConfig):
         plugin = self._plugins.get(key)
         if plugin:
             return plugin.map_input(model_config, value)

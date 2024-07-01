@@ -17,7 +17,7 @@ N = TypeVar("N", bound=Type["nn.Module"])
 
 
 class MultiModalDataBuiltins(TypedDict, total=False):
-    image: Union["Image.Image", "torch.Tensor"]
+    image: "Image.Image"
 
 
 MultiModalDataDict = Union[MultiModalDataBuiltins, Dict[str, Any]]
