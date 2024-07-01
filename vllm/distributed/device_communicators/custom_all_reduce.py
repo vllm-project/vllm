@@ -6,64 +6,21 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
-from vllm.distributed.parallel_state import (
-    get_local_rank, get_tensor_model_parallel_cpu_group)
+from vllm.distributed.parallel_state import is_in_the_same_node
 from vllm.logger import init_logger
+from vllm.utils import cuda_device_count_stateless, is_full_nvlink
 
 try:
-    import pynvml
-
-    from vllm._C import custom_ar
-
-    @contextmanager
-    def _nvml():
-        try:
-            pynvml.nvmlInit()
-            yield
-        finally:
-            pynvml.nvmlShutdown()
-
-except ImportError:
-    # For AMD GPUs
-    custom_ar = None
-    pynvml = None
-
-    @contextmanager
-    def _nvml():
-        try:
-            yield
-        finally:
-            pass
-
+    assert ops.is_custom_op_supported("_C_custom_ar::meta_size")
+    custom_ar = True
+except Exception:
+    # For AMD GPUs and CPUs
+    custom_ar = False
 
 logger = init_logger(__name__)
-
-
-@_nvml()
-def _is_full_nvlink(device_ids: List[int]) -> bool:
-    """
-    query if the set of gpus are fully connected by nvlink (1 hop)
-    Note that `pynvml` is not affected by `CUDA_VISIBLE_DEVICES`,
-    so it works on real physical device ids.
-    """
-    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
-    for i, handle in enumerate(handles):
-        for j, peer_handle in enumerate(handles):
-            if i < j:
-                try:
-                    p2p_status = pynvml.nvmlDeviceGetP2PStatus(
-                        handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
-                    if p2p_status != pynvml.NVML_P2P_STATUS_OK:
-                        return False
-                except pynvml.NVMLError as error:
-                    logger.error(
-                        "NVLink detection failed. This is normal if your"
-                        " machine has no NVLink equipped.",
-                        exc_info=error)
-                    return False
-    return True
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
@@ -81,8 +38,8 @@ class CustomAllreduce:
 
     # max_size: max supported allreduce size
     def __init__(self,
-                 group: Optional[ProcessGroup] = None,
-                 device: Optional[Union[int, str, torch.device]] = None,
+                 group: ProcessGroup,
+                 device: Union[int, str, torch.device],
                  max_size=8192 * 1024) -> None:
         """
         Args:
@@ -97,16 +54,22 @@ class CustomAllreduce:
         self._IS_CAPTURING = False
         self.disabled = True
 
-        if custom_ar is None:
+        if not custom_ar:
             # disable because of missing custom allreduce library
             # e.g. in a non-cuda environment
             return
 
-        group = group or get_tensor_model_parallel_cpu_group()
         self.group = group
 
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "CustomAllreduce should be attached to a non-NCCL group.")
+
+        if not is_in_the_same_node(group):
+            # No need to initialize custom allreduce for multi-node case.
+            logger.warning(
+                "Custom allreduce is disabled because this process group"
+                " spans across nodes.")
+            return
 
         rank = dist.get_rank(group=self.group)
         world_size = dist.get_world_size(group=self.group)
@@ -122,10 +85,7 @@ class CustomAllreduce:
                 world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
             return
 
-        if device is None:
-            local_rank = get_local_rank()
-            device = torch.device(f"cuda:{local_rank}")
-        elif isinstance(device, int):
+        if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
             device = torch.device(device)
@@ -137,7 +97,7 @@ class CustomAllreduce:
         if cuda_visible_devices:
             device_ids = list(map(int, cuda_visible_devices.split(",")))
         else:
-            device_ids = list(range(torch.cuda.device_count()))
+            device_ids = list(range(cuda_device_count_stateless()))
 
         physical_device_id = device_ids[device.index]
         tensor = torch.tensor([physical_device_id],
@@ -153,7 +113,7 @@ class CustomAllreduce:
         # test nvlink first, this will filter out most of the cases
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-        full_nvlink = _is_full_nvlink(physical_device_ids)
+        full_nvlink = is_full_nvlink(physical_device_ids)
         if world_size > 2 and not full_nvlink:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
@@ -175,7 +135,7 @@ class CustomAllreduce:
         # meta data composes of two parts: meta data for synchronization
         # (256 bytes) and a temporary buffer for storing intermediate
         # allreduce results.
-        self.meta = torch.zeros(custom_ar.meta_size() + max_size,
+        self.meta = torch.zeros(ops.meta_size() + max_size,
                                 dtype=torch.uint8,
                                 device=self.device)
         # This is a pre-registered IPC buffer. In eager mode, input tensors
@@ -196,9 +156,8 @@ class CustomAllreduce:
         self.world_size = world_size
         handles, offsets = self._get_ipc_meta(self.meta)
         self.full_nvlink = full_nvlink
-        self._ptr = custom_ar.init_custom_ar(self.meta, self.rank_data,
-                                             handles, offsets, rank,
-                                             self.full_nvlink)
+        self._ptr = ops.init_custom_ar(self.meta, self.rank_data, handles,
+                                       offsets, rank, self.full_nvlink)
         self.register_buffer(self.buffer)
 
     @contextmanager
@@ -252,31 +211,31 @@ class CustomAllreduce:
 
     def register_buffer(self, inp: torch.Tensor):
         handles, offsets = self._get_ipc_meta(inp)
-        custom_ar.register_buffer(self._ptr, inp, handles, offsets)
+        ops.register_buffer(self._ptr, inp, handles, offsets)
 
     def register_graph_buffers(self):
-        handle, offset = custom_ar.get_graph_buffer_ipc_meta(self._ptr)
+        handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
         handles, offsets = self._gather_ipc_meta((bytes(handle), offset))
         logger.info("Registering %d cuda graph addresses", len(offset))
-        custom_ar.register_graph_buffers(self._ptr, handles, offsets)
+        ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
-        return custom_ar.should_custom_ar(inp, self.max_size, self.world_size,
-                                          self.full_nvlink)
+        return ops.should_custom_ar(inp, self.max_size, self.world_size,
+                                    self.full_nvlink)
 
     # all reduce, assuming inp tensor is IPC registered with register_buffer,
     # or, in the context of cuda graphs, register_graph_buffers
     def all_reduce_reg(self, inp: torch.Tensor, out: torch.Tensor = None):
         if out is None:
             out = torch.empty_like(inp)
-        custom_ar.all_reduce_reg(self._ptr, inp, out)
+        ops.all_reduce_reg(self._ptr, inp, out)
         return out
 
     # all reduce, assuming inp tensor is NOT IPC registered
     def all_reduce_unreg(self, inp: torch.Tensor, out: torch.Tensor = None):
         if out is None:
             out = torch.empty_like(inp)
-        custom_ar.all_reduce_unreg(self._ptr, inp, self.buffer, out)
+        ops.all_reduce_unreg(self._ptr, inp, self.buffer, out)
         return out
 
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
@@ -304,7 +263,7 @@ class CustomAllreduce:
 
     def close(self):
         if not self.disabled and self._ptr:
-            custom_ar.dispose(self._ptr)
+            ops.dispose(self._ptr)
             self._ptr = 0
 
     def __del__(self):

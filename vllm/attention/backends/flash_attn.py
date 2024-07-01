@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
-from vllm._C import cache_ops
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 
@@ -25,8 +25,8 @@ class FlashAttentionBackend(AttentionBackend):
         return FlashAttentionImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "FlashAttentionMetadata":
-        return FlashAttentionMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return FlashAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -47,11 +47,11 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> None:
         src_key_cache = src_kv_cache[0]
         dst_key_cache = dst_kv_cache[0]
-        cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+        ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
 
         src_value_cache = src_kv_cache[1]
         dst_value_cache = dst_kv_cache[1]
-        cache_ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
+        ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
@@ -60,7 +60,7 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
-        cache_ops.copy_blocks(key_caches, value_caches, src_to_dists)
+        ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
 @dataclass
@@ -83,7 +83,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
-    # |-------------------- seq_len ----------------------|
+    # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
 
     # Maximum query length in the batch. None for decoding.
@@ -285,7 +285,7 @@ class FlashAttentionImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            cache_ops.reshape_and_cache_flash(
+            ops.reshape_and_cache_flash(
                 key,
                 value,
                 key_cache,
@@ -317,7 +317,7 @@ class FlashAttentionImpl(AttentionImpl):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                flash_attn_varlen_func(
+                out = flash_attn_varlen_func(
                     q=query,
                     k=key,
                     v=value,
@@ -329,13 +329,14 @@ class FlashAttentionImpl(AttentionImpl):
                     causal=True,
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
-                    out=output[:num_prefill_tokens],
                 )
+                assert output[:num_prefill_tokens].shape == out.shape
+                output[:num_prefill_tokens] = out
             else:
                 # prefix-enabled attention
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
-                flash_attn_varlen_func(
+                output[:num_prefill_tokens] = flash_attn_varlen_func(
                     q=query,
                     k=key_cache,
                     v=value_cache,
@@ -347,12 +348,11 @@ class FlashAttentionImpl(AttentionImpl):
                     causal=True,
                     alibi_slopes=self.alibi_slopes,
                     block_table=prefill_meta.block_tables,
-                    out=output[:num_prefill_tokens],
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            flash_attn_with_kvcache(
+            output[num_prefill_tokens:] = flash_attn_with_kvcache(
                 decode_query.unsqueeze(1),
                 key_cache,
                 value_cache,
@@ -361,8 +361,7 @@ class FlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
-                out=output[num_prefill_tokens:].unsqueeze(1),
-            )
+            ).squeeze(1)
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

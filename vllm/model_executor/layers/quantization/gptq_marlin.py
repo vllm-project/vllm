@@ -11,6 +11,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.utils import get_device_capability_stateless
 
 logger = init_logger(__name__)
 
@@ -25,24 +26,25 @@ GPTQ_MARLIN_SUPPORTED_SYM = [True]
 
 
 # Permutations for Marlin scale shuffling
-def get_scale_perms(num_bits):
-    scale_perm = []
+def get_scale_perms(num_bits: int):
+    scale_perm: List[int] = []
     for i in range(8):
         scale_perm.extend([i + 8 * j for j in range(8)])
-    scale_perm_single = []
+    scale_perm_single: List[int] = []
     for i in range(4):
         scale_perm_single.extend(
             [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
     return scale_perm, scale_perm_single
 
 
-def get_pack_factor(num_bits):
+def get_pack_factor(num_bits: int):
     assert (num_bits in GPTQ_MARLIN_SUPPORTED_NUM_BITS
             ), f"Unsupported num_bits = {num_bits}"
     return 32 // num_bits
 
 
-def marlin_permute_scales(s, size_k, size_n, group_size, num_bits):
+def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
+                          group_size: int, num_bits: int):
     scale_perm, scale_perm_single = get_scale_perms(num_bits)
     if group_size < size_k and group_size != -1:
         s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
@@ -164,7 +166,7 @@ class GPTQMarlinConfig(QuantizationConfig):
             return False
 
         # If the capability of the device is too low, cannot convert.
-        major, minor = torch.cuda.get_device_capability()
+        major, minor = get_device_capability_stateless()
         device_capability = major * 10 + minor
         if device_capability < cls.get_min_capability():
             return False

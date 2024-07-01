@@ -54,6 +54,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 
+from .interfaces import SupportsLoRA
+
 
 class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
@@ -147,7 +149,7 @@ class MixtralMoE(nn.Module):
                     "weight_loader": self.weight_loader,
                 })
 
-            # ACT_SCALE (for fp8)
+            # INPUT_SCALE (for fp8)
             if quant_config.activation_scheme == "static":
                 if not quant_config.is_checkpoint_fp8_serialized:
                     raise ValueError(
@@ -182,11 +184,11 @@ class MixtralMoE(nn.Module):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
 
         # Loading scales
-        if "act_scale" in weight_name or "w2.weight_scale" in weight_name:
+        if "input_scale" in weight_name or "w2.weight_scale" in weight_name:
             if param_data[expert_id] != 1 and (param_data[expert_id] -
                                                loaded_weight).abs() > 1e-5:
                 raise ValueError(
-                    "act_scales of w1 and w3 of a layer "
+                    "input_scales of w1 and w3 of a layer "
                     f"must be equal. But got {param_data[expert_id]} "
                     f"vs. {loaded_weight}")
             param_data[expert_id] = loaded_weight
@@ -225,9 +227,9 @@ class MixtralMoE(nn.Module):
             self.w2_weight = nn.Parameter(w2_weight, requires_grad=False)
 
         else:
-            # If checkpoint is fp8 + static, cleanup act_scales.
-            #   Since state_dict has an act_scale per expert but our kernels
-            #   are passed one act_scale shared across all experts.
+            # If checkpoint is fp8 + static, cleanup input_scales.
+            #   Since state_dict has an input_scale per expert but our kernels
+            #   are passed one input_scale shared across all experts.
             if self.quant_config.activation_scheme == "static":
                 if self.a13_scale is None or self.a2_scale is None:
                     raise ValueError(
@@ -237,7 +239,7 @@ class MixtralMoE(nn.Module):
                 if (not all_close_1d(self.a13_scale)
                         or not all_close_1d(self.a2_scale)):
                     print_warning_once(
-                        "Found act_scales that are not equal for "
+                        "Found input_scales that are not equal for "
                         "fp8 MoE layer. Using the maximum across experts "
                         "for each layer. ")
 
@@ -472,7 +474,7 @@ class MixtralModel(nn.Module):
         return hidden_states
 
 
-class MixtralForCausalLM(nn.Module):
+class MixtralForCausalLM(nn.Module, SupportsLoRA):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -504,7 +506,10 @@ class MixtralForCausalLM(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
@@ -576,7 +581,7 @@ class MixtralForCausalLM(nn.Module):
             # These are the activation scales for the experts
             # (param_name, weight_name, expert_id)
             ("a13_scale" if weight_name in ["w1", "w3"] else "a2_scale",
-             f"experts.{expert_id}.{weight_name}.act_scale", expert_id)
+             f"experts.{expert_id}.{weight_name}.input_scale", expert_id)
             for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
         ]
