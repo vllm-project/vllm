@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest  # noqa
 
-from vllm.config import (CacheConfig, LoRAConfig, SchedulerConfig)
+from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
 from vllm.core.policy import PolicyFactory
 from vllm.core.scheduler import Scheduler, SchedulingBudget
@@ -321,7 +321,7 @@ def initialize_scheduler(*,
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
-    scheduler = Scheduler(scheduler_config, cache_config, lora_config) 
+    scheduler = Scheduler(scheduler_config, cache_config, lora_config)
     return scheduler
 
 

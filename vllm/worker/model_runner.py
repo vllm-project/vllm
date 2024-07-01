@@ -821,7 +821,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        model_input = self.prepare_model_input(seqs, 0)
+        model_input = self.prepare_model_input(seqs)
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = self.model.make_empty_intermediate_tensors(

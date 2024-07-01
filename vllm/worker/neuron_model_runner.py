@@ -176,7 +176,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        virtual_engine: int,
+        virtual_engine: int = 0,
     ) -> ModelInputForNeuron:
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
