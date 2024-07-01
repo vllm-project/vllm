@@ -33,7 +33,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         self,
         scheduler_config: SchedulerConfig,
         detokenizer: Detokenizer,
-        scheduler: Scheduler,
+        scheduler: List[Scheduler],
         seq_counter: Counter,
         stop_checker: StopChecker,
     ):
