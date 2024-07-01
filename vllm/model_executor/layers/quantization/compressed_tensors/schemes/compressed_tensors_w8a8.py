@@ -6,8 +6,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
-from vllm.model_executor.parameter import (ScalerToArrayvLLMParameter,
-                                           vLLMParameter)
+from vllm.model_executor.parameter import (ModelWeightParameter,
+                                           ChannelQuantScaleParameter,
+                                           ScalerToArrayvLLMParameter)
 
 
 class CompressedTensorsW8A8(CompressedTensorsScheme):
@@ -30,23 +31,20 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
         if self.strategy == QuantizationStrategy.CHANNEL:
             shape = (weight_scale_dim, 1)
 
-        weight = vLLMParameter(data=torch.empty(sum(output_partition_sizes),
-                                                input_size_per_partition,
-                                                dtype=torch.int8),
-                               input_dim=1,
-                               output_dim=0,
-                               use_row_loading=True,
-                               use_col_loading=True,
-                               weight_loader=weight_loader)
+        weight = ModelWeightParameter(data=torch.empty(
+            sum(output_partition_sizes),
+            input_size_per_partition,
+            dtype=torch.int8),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
 
-        # Don't need a shard_splitter for channel-wise quantization
-        # Use the default loading method
         weight_scale_data = torch.empty(*shape, dtype=torch.float32)
         if self.strategy == QuantizationStrategy.CHANNEL:
-            weight_scale = vLLMParameter(data=weight_scale_data,
-                                         output_dim=0,
-                                         use_col_loading=True,
-                                         weight_loader=weight_loader)
+            weight_scale = ChannelQuantScaleParameter(
+                data=weight_scale_data,
+                output_dim=0,
+                weight_loader=weight_loader)
         else:
             weight_scale = ScalerToArrayvLLMParameter(
                 data=weight_scale_data,

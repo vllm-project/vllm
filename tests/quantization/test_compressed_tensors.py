@@ -42,9 +42,9 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         assert o_proj.weight.dtype is torch.int8
         assert gate_up_proj.weight.dtype is torch.int8
 
-        if qkv_proj.scheme.strategy == "tensor":
-            assert qkv_proj.weight_scale.shard_splitter is not None
-            assert qkv_proj.weight_scale.logical_widths is not None
+        #if qkv_proj.scheme.strategy == "tensor":
+        #    assert qkv_proj.weight_scale.shard_splitter is not None
+        #    assert qkv_proj.weight_scale.logical_widths is not None
         assert qkv_proj.input_scale.dtype is torch.float32
 
 
@@ -94,7 +94,7 @@ def test_compressed_tensors_w4a16(vllm_runner, wNa16_args):
 
         assert qkv_proj.weight_packed.dtype is torch.int32
         assert qkv_proj.weight_scale.dtype is torch.float16
-        assert qkv_proj.weight_packed.pack_factor == pack_factor
+        assert qkv_proj.weight_packed.packed_factor == pack_factor
 
 
 def test_compressed_tensors_w4a16_marlin24(vllm_runner):

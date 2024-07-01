@@ -9,7 +9,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N, GPTQMarlinState,
     marlin_permute_scales)
-from vllm.model_executor.parameter import PackedvLLMParameter, vLLMParameter
+from vllm.model_executor.parameter import PackedvLLMParameter, vLLMParameter, GroupQuantScaleParameter, ChannelQuantScaleParameter
 
 __all__ = ["CompressedTensorsWNA16"]
 WNA16_SUPPORTED_BITS = [4, 8]
@@ -43,18 +43,14 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         else:
             group_size = input_size
 
-        weight_scale_dim = None
         scales_and_zp_size = input_size // group_size
 
         if (input_size != input_size_per_partition
                 and self.group_size is not None):
-            weight_scale_dim = 1
             scales_and_zp_size = input_size_per_partition // group_size
 
         weight = PackedvLLMParameter(input_dim=1,
                                      output_dim=0,
-                                     use_row_loading=True,
-                                     use_col_loading=True,
                                      weight_loader=weight_loader,
                                      packed_factor=pack_factor,
                                      packed_dim=1,
@@ -65,18 +61,23 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                          dtype=torch.int32,
                                      ))
 
-        weight_scale = vLLMParameter(
-            input_dim=weight_scale_dim,
-            output_dim=0,
-            use_col_loading=True,
-            use_row_loading=True  # noqa: SIM210
-            if weight_scale_dim is not None else False,
-            weight_loader=weight_loader,
-            data=torch.empty(
+        weight_scale_args = {
+            "weight_loader":
+            weight_loader,
+            "data":
+            torch.empty(
                 output_size_per_partition,
                 scales_and_zp_size,
                 dtype=params_dtype,
-            ))
+            )
+        }
+        if self.group_size is not None:
+            weight_scale = GroupQuantScaleParameter(output_dim=0,
+                                                    input_dim=1,
+                                                    **weight_scale_args)
+        else:
+            weight_scale = ChannelQuantScaleParameter(output_dim=0,
+                                                      **weight_scale_args)
 
         # A 2D array defining the original shape of the weights
         # before packing

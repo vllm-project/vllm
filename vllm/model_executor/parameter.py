@@ -6,7 +6,9 @@ from torch.nn import Parameter
 from vllm.logger import init_logger
 
 __all__ = [
-    "vLLMParameter", "PackedvLLMParameter", "ScalerToArrayvLLMParameter"
+    "vLLMParameter", "PackedvLLMParameter", "ScalerToArrayvLLMParameter",
+    "ModelWeightParameter", "ChannelQuantScaleParameter",
+    "GroupQuantScaleParameter"
 ]
 
 logger = init_logger(__name__)
@@ -14,75 +16,32 @@ logger = init_logger(__name__)
 
 class vLLMParameter(Parameter):
 
-    def __new__(cls,
-                data: torch.Tensor,
-                requires_grad: Optional[bool] = False,
-                **kwargs):
+    def __new__(cls, data: torch.Tensor, **kwargs):
 
-        return super().__new__(cls, data=data, requires_grad=requires_grad)
+        return super().__new__(cls, data=data, requires_grad=False)
 
     def __init__(self,
                  data: torch.Tensor,
-                 requires_grad: Optional[bool] = False,
+                 weight_loader: Callable,
+                 use_column_loading: Optional[bool] = False,
                  use_row_loading: Optional[bool] = False,
-                 use_col_loading: Optional[bool] = False,
-                 input_dim: Optional[int] = None,
-                 output_dim: Optional[int] = None,
-                 weight_loader: Optional[Callable] = None,
-                 packed: Optional[bool] = False,
-                 use_col_shard_split: Optional[bool] = False,
                  ignore_warnings: Optional[bool] = True):
 
         self._ignore_warnings = True
-        self._use_row_loading = use_row_loading
-        self._use_col_loading = use_col_loading
-
-        if self._use_row_loading and input_dim is None:
-            raise ValueError(
-                "In order to use row loading, an input dim must be set")
-        if self._use_col_loading and output_dim is None:
-            raise ValueError(
-                "In order to use col loading, an output dim must be set")
-
-        self._input_dim = input_dim
-        self._output_dim = output_dim
         self._weight_loader = weight_loader
-        self._is_packed = packed
-        self._use_col_shard_split = use_col_shard_split
-        if not self._use_col_loading and not self._use_col_shard_split:
-            logger.warning(
-                "Loading a weight without using default column loading "
-                "or column shard splitting, assume the weight is the same "
-                "for all partitions.")
+        self.use_column_loading = use_column_loading
+        self.use_row_loading = use_row_loading
+        """
+        logger.warning(
+            "Loading a weight without using default column loading "
+            "or column shard splitting, assume the weight is the same "
+            "for all partitions.")
+        """
         self._use_metadata_loading = False
-
-    @property
-    def input_dim(self):
-        return self._input_dim
-
-    @property
-    def output_dim(self):
-        return self._output_dim
 
     @property
     def weight_loader(self):
         return self._weight_loader
-
-    @property
-    def is_packed(self):
-        return self._is_packed
-
-    @property
-    def use_col_shard_split(self):
-        return self._use_col_shard_split
-
-    @property
-    def use_column_loading(self):
-        return self._use_col_loading
-
-    @property
-    def use_row_loading(self):
-        return self._use_row_loading
 
     # TODO: should be part of ScalerToArrayvLLMParameter logic?
     @property
@@ -94,17 +53,50 @@ class vLLMParameter(Parameter):
         self._use_metadata_loading = value
 
 
+# uses row loading and column loading
+class ModelWeightParameter(vLLMParameter):
+
+    def __init__(self, input_dim: int, output_dim: int, **kwargs):
+        self._input_dim = input_dim
+        self._output_dim = output_dim
+        # TODO: log using row loading and col loading
+        super().__init__(**kwargs,
+                         use_row_loading=True,
+                         use_column_loading=True)
+
+    @property
+    def input_dim(self):
+        return self._input_dim
+
+    @property
+    def output_dim(self):
+        return self._output_dim
+
+
+class GroupQuantScaleParameter(ModelWeightParameter):
+    pass
+
+
+# use col loading, now row loading
+class ChannelQuantScaleParameter(vLLMParameter):
+
+    def __init__(self, output_dim: int, **kwargs):
+        self._output_dim = output_dim
+        # TODO: log using col loading
+        super().__init__(**kwargs, use_column_loading=True)
+
+    @property
+    def output_dim(self):
+        return self._output_dim
+
+
 class ScalerToArrayvLLMParameter(vLLMParameter):
 
     def __init__(self, logical_widths: List[int], **kwargs):
         self.logical_widths = logical_widths
         self.qkv_idxs = {"q": 0, "k": 1, "v": 2}
 
-        super().__init__(**kwargs, use_col_shard_split=True)
-
-        if self.use_column_loading:
-            raise ValueError("Can only use one of column shard splitting "
-                             "or column default loading")
+        super().__init__(**kwargs)
 
     def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
         if isinstance(shard_id, int):
@@ -125,7 +117,7 @@ class ScalerToArrayvLLMParameter(vLLMParameter):
         return param_data[offset:offset + size], loaded_weight
 
 
-class PackedvLLMParameter(vLLMParameter):
+class PackedvLLMParameter(ModelWeightParameter):
 
     def __init__(self,
                  packed_factor: int,
@@ -135,7 +127,7 @@ class PackedvLLMParameter(vLLMParameter):
         self._packed_factor = packed_factor
         self._packed_dim = packed_dim
         self._marlin_tile = marlin_tile_size
-        super().__init__(**kwargs, packed=True)
+        super().__init__(**kwargs)
 
     @property
     def packed_dim(self):
