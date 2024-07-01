@@ -39,7 +39,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available, make_tensor_with_pad)
+                        is_pin_memory_available)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -160,20 +160,12 @@ class ModelInputForGPUBuilder(
         self.multi_modal_input_mapper = multi_modal_input_mapper
         self.decode_only = True
 
-        self.chunked_prefill_enabled = (
-            self.scheduler_config is not None
-            and self.scheduler_config.chunked_prefill_enabled)
-        if self.sliding_window is not None:
-            self.sliding_window_blocks = (
-                self.sliding_window + self.block_size - 1) // self.block_size
-            self.block_aligned_sliding_window = \
-                self.sliding_window_blocks * self.block_size
-
         # Common inputs.
         self.input_tokens: List[int] = []
         self.input_positions: List[int] = []
         self.seq_lens: List[int] = []
         self.query_lens: List[int] = []
+        self.decode_seq_lens: List[int] = []
 
         # LoRA inputs.
         self.lora_index_mapping: List[int] = []
@@ -185,32 +177,44 @@ class ModelInputForGPUBuilder(
             str, List[torch.Tensor]] = defaultdict(list)
 
         # Attention metadata inputs.
-        self.slot_mapping: List[int] = []
-        self.prefill_seq_lens: List[int] = []
-        self.decode_seq_lens: List[int] = []
-        self.context_lens: List[int] = []
-        self.block_tables: List[List[int]] = []
-        self.num_prefills = 0
-        self.num_prefill_tokens = 0
-        self.num_decode_tokens = 0
+        self.attn_metadata_builder = self.attn_backend.make_metadata_builder(
+            self.block_size, self.sliding_window,
+            self.scheduler_config.use_v2_block_manager)
 
-        # The following fields are only for flashinfer
-        # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
-        # for the precise definition of the following fields.
-        # An example:
-        # request 1, page indices [0, 5, 8]
-        # request 2, page indices [1, 6, 7]
-        # request 3, page indices [3, 4]
-        # paged_kv_indices is a concatenation of page indices of all requests:
-        # [0, 5, 8, 1, 6, 7, 3, 4]
-        # paged_kv_indptr is used to index into paged_kv_indices:
-        # [0, 3, 6, 8]
-        self.paged_kv_indices: List[int] = []
-        # 0 at the beginning of paged_kv_indptr indicates the start of the
-        # first request’s page indices in the paged_kv_indices list.
-        self.paged_kv_indptr: List[int] = [0]
-        # paged_kv_last_page_len is the length of the last page of each request
-        self.paged_kv_last_page_len: List[int] = []
+        self.chunked_prefill_enabled = (
+            self.scheduler_config is not None
+            and self.scheduler_config.chunked_prefill_enabled)
+        if self.sliding_window is not None:
+            self.sliding_window_blocks = (
+                self.sliding_window + self.block_size - 1) // self.block_size
+            self.block_aligned_sliding_window = \
+                self.sliding_window_blocks * self.block_size
+
+        # self.slot_mapping: List[int] = []
+        # self.prefill_seq_lens: List[int] = []
+        # self.context_lens: List[int] = []
+        # self.block_tables: List[List[int]] = []
+        # self.num_prefills = 0
+        # self.num_prefill_tokens = 0
+        # self.num_decode_tokens = 0
+
+        # # The following fields are only for flashinfer
+        # # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
+        # # for the precise definition of the following fields.
+        # # An example:
+        # # request 1, page indices [0, 5, 8]
+        # # request 2, page indices [1, 6, 7]
+        # # request 3, page indices [3, 4]
+        # # paged_kv_indices is a concatenation of page indices of all requests:
+        # # [0, 5, 8, 1, 6, 7, 3, 4]
+        # # paged_kv_indptr is used to index into paged_kv_indices:
+        # # [0, 3, 6, 8]
+        # self.paged_kv_indices: List[int] = []
+        # # 0 at the beginning of paged_kv_indptr indicates the start of the
+        # # first request’s page indices in the paged_kv_indices list.
+        # self.paged_kv_indptr: List[int] = [0]
+        # # paged_kv_last_page_len is the length of the last page of each request # noqa: E501
+        # self.paged_kv_last_page_len: List[int] = []
 
     def _compute_for_sliding_window(self, seq_len, context_len):
         curr_sliding_window_blocks = None
@@ -234,53 +238,53 @@ class ModelInputForGPUBuilder(
             sliding_context_len = sliding_seq_len - 1
         return curr_sliding_window_blocks, sliding_seq_len, sliding_context_len
 
-    def _compute_slot_mapping(self, seq_len, context_len, start_idx,
-                              block_table):
-        """TODO: Move to attention metadata builder."""
-        if block_table is None:
-            # During memory profiling, the block tables are not
-            # initialized yet. In this case, we just use a dummy
-            # slot mapping.
-            # In embeddings, the block tables are {seq_id: None}.
-            self.slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
-            return
+    # def _compute_slot_mapping(self, seq_len, context_len, start_idx,
+    #                           block_table):
+    #     """TODO: Move to attention metadata builder."""
+    #     if block_table is None:
+    #         # During memory profiling, the block tables are not
+    #         # initialized yet. In this case, we just use a dummy
+    #         # slot mapping.
+    #         # In embeddings, the block tables are {seq_id: None}.
+    #         self.slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
+    #         return
 
-        # Mask the [0, start_idx) tokens of the prompt with
-        # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
-        # sliding_window). For example, if the prompt len is 10,
-        # sliding window is 8, and block size is 4, the first two
-        # tokens are masked and the slot mapping will be
-        # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
-        self.slot_mapping.extend([_PAD_SLOT_ID] *
-                                 max(0, start_idx - context_len))
-        for i in range(max(start_idx, context_len), seq_len):
-            block_number = block_table[i // self.block_size]
-            block_offset = i % self.block_size
-            slot = block_number * self.block_size + block_offset
-            self.slot_mapping.append(slot)
+    #     # Mask the [0, start_idx) tokens of the prompt with
+    #     # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
+    #     # sliding_window). For example, if the prompt len is 10,
+    #     # sliding window is 8, and block size is 4, the first two
+    #     # tokens are masked and the slot mapping will be
+    #     # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
+    #     self.slot_mapping.extend([_PAD_SLOT_ID] *
+    #                              max(0, start_idx - context_len))
+    #     for i in range(max(start_idx, context_len), seq_len):
+    #         block_number = block_table[i // self.block_size]
+    #         block_offset = i % self.block_size
+    #         slot = block_number * self.block_size + block_offset
+    #         self.slot_mapping.append(slot)
 
-    def _add_seq_group_for_flashinfer(self, seq_data, block_table):
-        if block_table is None:
-            return
+    # def _add_seq_group_for_flashinfer(self, seq_data, block_table):
+    #     if block_table is None:
+    #         return
 
-        seq_len = seq_data.get_len()
-        # Get the number of valid blocks based on sequence length.
-        # If seq_len = 16, block_size = 16,
-        # block_table_bound is 1 with 1 valid block.
-        # If seq_len = 15, block_size = 16,
-        # block_table_bound is 0 + 1 with 1 valid block.
-        block_table_bound = seq_len // self.block_size + 1 \
-                            if seq_len % self.block_size != 0 \
-                            else seq_len // self.block_size
+    #     seq_len = seq_data.get_len()
+    #     # Get the number of valid blocks based on sequence length.
+    #     # If seq_len = 16, block_size = 16,
+    #     # block_table_bound is 1 with 1 valid block.
+    #     # If seq_len = 15, block_size = 16,
+    #     # block_table_bound is 0 + 1 with 1 valid block.
+    #     block_table_bound = seq_len // self.block_size + 1 \
+    #                         if seq_len % self.block_size != 0 \
+    #                         else seq_len // self.block_size
 
-        self.paged_kv_indices.extend(block_table[:block_table_bound])
-        self.paged_kv_indptr.append(self.paged_kv_indptr[-1] +
-                                    block_table_bound)
+    #     self.paged_kv_indices.extend(block_table[:block_table_bound])
+    #     self.paged_kv_indptr.append(self.paged_kv_indptr[-1] +
+    #                                 block_table_bound)
 
-        last_page_len = seq_len % self.block_size
-        if last_page_len == 0:
-            last_page_len = self.block_size
-        self.paged_kv_last_page_len.append(last_page_len)
+    #     last_page_len = seq_len % self.block_size
+    #     if last_page_len == 0:
+    #         last_page_len = self.block_size
+    #     self.paged_kv_last_page_len.append(last_page_len)
 
     def _add_prompt_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
                               seq_ids: List[int]):
@@ -322,59 +326,64 @@ class ModelInputForGPUBuilder(
         self.query_lens.append(query_len)
 
         ### Attention metadata. TODO: Move to attention metadata builder.
-        # TODO(sang): Combine chunked prefill and prefix caching by
-        # only allowing multiple of block_size chunk size.
-        # NOTE: This only works for oooooooxxx style attention.
-        if prefix_cache_hit:
-            assert computed_block_nums is not None
-            assert self.sliding_window is None
+        self.attn_metadata_builder.add_prefill_seq_group(
+            seq_group_metadata, tokens, seq_id, seq_len, query_len,
+            context_len, prefix_cache_hit, self.chunked_prefill_enabled,
+            computed_block_nums, curr_sliding_window_blocks)
 
-            if self.attn_backend.get_name() == "flash-attn":
-                # NOTE(woosuk): For flash-attn, the block table should
-                # include the entries for the incoming prefill tokens.
-                # TODO(woosuk): This is a temporary fix. We should
-                # provide a unified interface for different backends.
-                block_table = seq_group_metadata.block_tables[seq_id]
-            else:
-                block_table = computed_block_nums
-        elif (self.scheduler_config.chunked_prefill_enabled
-              and seq_group_metadata.block_tables is not None):
-            block_table = seq_group_metadata.block_tables[seq_id]
-            if curr_sliding_window_blocks is not None:
-                block_table = block_table[-curr_sliding_window_blocks:]
-        else:
-            # Prefill without chunked prefill or memory profiling.
-            block_table = []
+        # # TODO(sang): Combine chunked prefill and prefix caching by
+        # # only allowing multiple of block_size chunk size.
+        # # NOTE: This only works for oooooooxxx style attention.
+        # if prefix_cache_hit:
+        #     assert computed_block_nums is not None
+        #     assert self.sliding_window is None
 
-        self.block_tables.append(block_table)
-        self.context_lens.append(context_len)
+        #     if self.attn_backend.get_name() == "flash-attn":
+        #         # NOTE(woosuk): For flash-attn, the block table should
+        #         # include the entries for the incoming prefill tokens.
+        #         # TODO(woosuk): This is a temporary fix. We should
+        #         # provide a unified interface for different backends.
+        #         block_table = seq_group_metadata.block_tables[seq_id]
+        #     else:
+        #         block_table = computed_block_nums
+        # elif (self.scheduler_config.chunked_prefill_enabled
+        #       and seq_group_metadata.block_tables is not None):
+        #     block_table = seq_group_metadata.block_tables[seq_id]
+        #     if curr_sliding_window_blocks is not None:
+        #         block_table = block_table[-curr_sliding_window_blocks:]
+        # else:
+        #     # Prefill without chunked prefill or memory profiling.
+        #     block_table = []
 
-        assert len(seq_ids) == 1
-        self.num_prefills += 1
-        self.num_prefill_tokens += len(tokens)
-        self.prefill_seq_lens.append(seq_len)
+        # self.block_tables.append(block_table)
+        # self.context_lens.append(context_len)
 
-        # Compute the block table for slot mapping and flashinfer.
-        block_table = None
-        is_profile_run = _is_block_tables_empty(
-            seq_group_metadata.block_tables)
-        if not is_profile_run:
-            block_table = seq_group_metadata.block_tables[seq_id]
+        # assert len(seq_ids) == 1
+        # self.num_prefills += 1
+        # self.num_prefill_tokens += len(tokens)
+        # self.prefill_seq_lens.append(seq_len)
 
-        start_idx = 0
-        if self.sliding_window is not None:
-            assert self.scheduler_config.use_v2_block_manager \
-                or context_len == 0, (
-                "Prefix caching is currently not supported with "
-                "sliding window attention in V1 block manager")
-            # When prefill, we use it to not write slots to kv cache
-            # to save memory.
-            start_idx = max(0, query_len - self.sliding_window)
+        # # Compute the block table for slot mapping and flashinfer.
+        # block_table = None
+        # is_profile_run = _is_block_tables_empty(
+        #     seq_group_metadata.block_tables)
+        # if not is_profile_run:
+        #     block_table = seq_group_metadata.block_tables[seq_id]
 
-        self._compute_slot_mapping(seq_len, context_len, start_idx,
-                                   block_table)
-        if self.attn_backend.get_name() == "flashinfer":
-            self._add_seq_group_for_flashinfer(seq_data, block_table)
+        # start_idx = 0
+        # if self.sliding_window is not None:
+        #     assert self.scheduler_config.use_v2_block_manager \
+        #         or context_len == 0, (
+        #         "Prefix caching is currently not supported with "
+        #         "sliding window attention in V1 block manager")
+        #     # When prefill, we use it to not write slots to kv cache
+        #     # to save memory.
+        #     start_idx = max(0, query_len - self.sliding_window)
+
+        # self._compute_slot_mapping(seq_len, context_len, start_idx,
+        #                            block_table)
+        # if self.attn_backend.get_name() == "flashinfer":
+        #     self._add_seq_group_for_flashinfer(seq_data, block_table)
 
     def _add_decode_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
                               seq_ids: List[int]):
@@ -395,56 +404,45 @@ class ModelInputForGPUBuilder(
              sliding_context_len) = self._compute_for_sliding_window(
                  seq_len, context_len)
 
-            # TODO(sang): This is a hack to make sliding window work with
-            # paged attn. We can remove it if we make paged attn kernel
-            # to properly handle slinding window attn.
-            if self.sliding_window is not None:
-                curr_sliding_window_blocks = self.sliding_window_blocks
-                if self.scheduler_config.use_v2_block_manager:
-                    # number of elements in last block
-                    suff_len = seq_len % self.block_size
-                    sliding_seq_len = min(
-                        seq_len, self.block_aligned_sliding_window + suff_len)
-                    if suff_len > 0:
-                        curr_sliding_window_blocks += 1
-                else:
-                    sliding_seq_len = min(seq_len, self.sliding_window)
-                sliding_context_len = sliding_seq_len - 1
-
             self.input_tokens.extend(tokens)
             self.input_positions.extend(list(range(context_len, seq_len)))
             self.seq_lens.append(sliding_seq_len)
             query_len = sliding_seq_len - sliding_context_len
             self.query_lens.append(query_len)
-
-            ### Attention metadata. TODO: Move to attention metadata builder.
-            if seq_group_metadata.block_tables is not None:
-                # chunked prefill or decode
-                block_table = seq_group_metadata.block_tables[seq_id]
-                if curr_sliding_window_blocks is not None:
-                    block_table = block_table[-curr_sliding_window_blocks:]
-            else:
-                # Only happens when memory profiling runs.
-                block_table = []
-
-            self.block_tables.append(block_table)
-            self.context_lens.append(sliding_context_len)
-
-            assert query_len == 1, (
-                "seq_len: {}, context_len: {}, query_len: {}".format(
-                    seq_len, context_len, query_len))
-            self.num_decode_tokens += query_len
             self.decode_seq_lens.append(sliding_seq_len)
 
-            # Compute the slot mapping.
-            block_table = None
-            is_profile_run = _is_block_tables_empty(
-                seq_group_metadata.block_tables)
-            if not is_profile_run:
-                block_table = seq_group_metadata.block_tables[seq_id]
-            self._compute_slot_mapping(seq_len, context_len, 0, block_table)
-            if self.attn_backend.get_name() == "flashinfer":
-                self._add_seq_group_for_flashinfer(seq_data, block_table)
+            ### Attention metadata. TODO: Move to attention metadata builder.
+            self.attn_metadata_builder.add_decode_seq_group(
+                seq_group_metadata, seq_id, seq_len, query_len, context_len,
+                curr_sliding_window_blocks, sliding_seq_len,
+                sliding_context_len)
+
+            # if seq_group_metadata.block_tables is not None:
+            #     # chunked prefill or decode
+            #     block_table = seq_group_metadata.block_tables[seq_id]
+            #     if curr_sliding_window_blocks is not None:
+            #         block_table = block_table[-curr_sliding_window_blocks:]
+            # else:
+            #     # Only happens when memory profiling runs.
+            #     block_table = []
+
+            # self.block_tables.append(block_table)
+            # self.context_lens.append(sliding_context_len)
+
+            # assert query_len == 1, (
+            #     "seq_len: {}, context_len: {}, query_len: {}".format(
+            #         seq_len, context_len, query_len))
+            # self.num_decode_tokens += query_len
+
+            # # Compute the slot mapping.
+            # block_table = None
+            # is_profile_run = _is_block_tables_empty(
+            #     seq_group_metadata.block_tables)
+            # if not is_profile_run:
+            #     block_table = seq_group_metadata.block_tables[seq_id]
+            # self._compute_slot_mapping(seq_len, context_len, 0, block_table)
+            # if self.attn_backend.get_name() == "flashinfer":
+            #     self._add_seq_group_for_flashinfer(seq_data, block_table)
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -485,10 +483,10 @@ class ModelInputForGPUBuilder(
             return self._model_input_cls()
 
         batch_size = len(self.input_tokens)
-        max_query_len = max(self.query_lens)
-        max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
+        # max_query_len = max(self.query_lens)
+        # max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.decode_seq_lens, default=0)
-        num_decode_tokens = self.num_decode_tokens
+        # num_decode_tokens = self.num_decode_tokens
         use_captured_graph = (self.decode_only
                               and not model_config.enforce_eager
                               and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
@@ -503,7 +501,7 @@ class ModelInputForGPUBuilder(
             assert graph_batch_size >= batch_size
             cuda_graph_pad_size = graph_batch_size - batch_size
             batch_size = graph_batch_size
-            num_decode_tokens = batch_size
+            # num_decode_tokens = batch_size
 
         #### Tokens and positions.
         self.input_tokens.extend([0] * cuda_graph_pad_size)
@@ -514,6 +512,10 @@ class ModelInputForGPUBuilder(
         input_positions_tensor = torch.tensor(self.input_positions,
                                               dtype=torch.long,
                                               device=device)
+
+        #### Sequence and query lenghes.
+        if use_captured_graph:
+            self.seq_lens.extend([1] * cuda_graph_pad_size)
 
         #### LoRA and multi-modal data.
         if self.enable_lora:
@@ -531,119 +533,123 @@ class ModelInputForGPUBuilder(
         }
 
         #### Attention metadata. TODO: Move to attention metadata builder.
-        if use_captured_graph:
-            self.slot_mapping.extend([_PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.seq_lens.extend([1] * cuda_graph_pad_size)
-            self.block_tables.extend([] * cuda_graph_pad_size)
+        attn_metadata = self.attn_metadata_builder.build(
+            model_config, parallel_config, kv_cache_dtype, self.seq_lens,
+            self.query_lens, self.decode_seq_lens, use_captured_graph,
+            cuda_graph_pad_size, graph_block_tables, batch_size, device)
 
-            # The shape of graph_block_tables is
-            # [max batch size, max context len // block size].
-            input_block_tables = graph_block_tables[:batch_size]
-            for i, block_table in enumerate(self.block_tables):
-                if block_table:
-                    input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.tensor(input_block_tables, device=device)
+        # if use_captured_graph:
+        #     self.slot_mapping.extend([_PAD_SLOT_ID] * cuda_graph_pad_size)
+        #     self.block_tables.extend([] * cuda_graph_pad_size)
 
-            if self.attn_backend.get_name() == "flashinfer":
-                last_paged_kv_indptr = self.paged_kv_indptr[-1]
-                self.paged_kv_indptr.extend([last_paged_kv_indptr] *
-                                            cuda_graph_pad_size)
-                self.paged_kv_last_page_len.extend([0] * cuda_graph_pad_size)
-        else:
-            max_block_table_len = max(
-                len(block_table) for block_table in self.block_tables)
-            block_tables = make_tensor_with_pad(
-                self.block_tables,
-                max_len=max_block_table_len,
-                pad=0,
-                dtype=torch.int,
-                device=device,
-            )
-        assert max_query_len > 0, ("query_lens: {}".format(self.query_lens))
+        #     # The shape of graph_block_tables is
+        #     # [max batch size, max context len // block size].
+        #     input_block_tables = graph_block_tables[:batch_size]
+        #     for i, block_table in enumerate(self.block_tables):
+        #         if block_table:
+        #             input_block_tables[i, :len(block_table)] = block_table
+        #     block_tables = torch.tensor(input_block_tables, device=device)
 
-        context_lens_tensor = torch.tensor(self.context_lens,
-                                           dtype=torch.int,
-                                           device=device)
-        seq_lens_tensor = torch.tensor(self.seq_lens,
-                                       dtype=torch.int,
-                                       device=device)
-        query_lens_tensor = torch.tensor(self.query_lens,
-                                         dtype=torch.long,
-                                         device=device)
-        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=device)
-        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
-                                    dtype=torch.int32,
-                                    device=device)
-        torch.cumsum(seq_lens_tensor,
-                     dim=0,
-                     dtype=seq_start_loc.dtype,
-                     out=seq_start_loc[1:])
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=query_start_loc.dtype,
-                     out=query_start_loc[1:])
+        #     if self.attn_backend.get_name() == "flashinfer":
+        #         last_paged_kv_indptr = self.paged_kv_indptr[-1]
+        #         self.paged_kv_indptr.extend([last_paged_kv_indptr] *
+        #                                     cuda_graph_pad_size)
+        #         self.paged_kv_last_page_len.extend([0] * cuda_graph_pad_size)
+        # else:
+        #     max_block_table_len = max(
+        #         len(block_table) for block_table in self.block_tables)
+        #     block_tables = make_tensor_with_pad(
+        #         self.block_tables,
+        #         max_len=max_block_table_len,
+        #         pad=0,
+        #         dtype=torch.int,
+        #         device=device,
+        #     )
+        # assert max_query_len > 0, ("query_lens: {}".format(self.query_lens))
 
-        slot_mapping_tensor = torch.tensor(self.slot_mapping,
-                                           dtype=torch.long,
-                                           device=device)
+        # context_lens_tensor = torch.tensor(self.context_lens,
+        #                                    dtype=torch.int,
+        #                                    device=device)
+        # seq_lens_tensor = torch.tensor(self.seq_lens,
+        #                                dtype=torch.int,
+        #                                device=device)
+        # query_lens_tensor = torch.tensor(self.query_lens,
+        #                                  dtype=torch.long,
+        #                                  device=device)
+        # query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
+        #                               dtype=torch.int32,
+        #                               device=device)
+        # seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
+        #                             dtype=torch.int32,
+        #                             device=device)
+        # torch.cumsum(seq_lens_tensor,
+        #              dim=0,
+        #              dtype=seq_start_loc.dtype,
+        #              out=seq_start_loc[1:])
+        # torch.cumsum(query_lens_tensor,
+        #              dim=0,
+        #              dtype=query_start_loc.dtype,
+        #              out=query_start_loc[1:])
 
-        if self.attn_backend.get_name() == "flashinfer":
-            if len(self.paged_kv_indptr) > 0:
-                paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
-                                                       device="cpu",
-                                                       dtype=torch.int)
-                paged_kv_indptr_tensor = torch.tensor(self.paged_kv_indptr,
-                                                      device="cpu",
-                                                      dtype=torch.int)
-                paged_kv_last_page_len_tensor = torch.tensor(
-                    self.paged_kv_last_page_len, device="cpu", dtype=torch.int)
-            else:
-                paged_kv_indices_tensor = None
-                paged_kv_indptr_tensor = None
-                paged_kv_last_page_len_tensor = None
+        # slot_mapping_tensor = torch.tensor(self.slot_mapping,
+        #                                    dtype=torch.long,
+        #                                    device=device)
 
-            kv_cache_dtype = get_kv_cache_torch_dtype(kv_cache_dtype,
-                                                      model_config.dtype)
+        # if self.attn_backend.get_name() == "flashinfer":
+        #     if len(self.paged_kv_indptr) > 0:
+        #         paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
+        #                                                device="cpu",
+        #                                                dtype=torch.int)
+        #         paged_kv_indptr_tensor = torch.tensor(self.paged_kv_indptr,
+        #                                               device="cpu",
+        #                                               dtype=torch.int)
+        #         paged_kv_last_page_len_tensor = torch.tensor(
+        #             self.paged_kv_last_page_len, device="cpu", dtype=torch.int) # noqa: E501
+        #     else:
+        #         paged_kv_indices_tensor = None
+        #         paged_kv_indptr_tensor = None
+        #         paged_kv_last_page_len_tensor = None
 
-            attn_metadata = self.attn_backend.make_metadata(
-                num_prefills=self.num_prefills,
-                slot_mapping=slot_mapping_tensor,
-                num_prefill_tokens=self.num_prefill_tokens,
-                num_decode_tokens=num_decode_tokens,
-                max_prefill_seq_len=max_prefill_seq_len,
-                block_tables=block_tables,
-                paged_kv_indptr=paged_kv_indptr_tensor,
-                paged_kv_indices=paged_kv_indices_tensor,
-                paged_kv_last_page_len=paged_kv_last_page_len_tensor,
-                num_qo_heads=model_config.get_num_attention_heads(
-                    parallel_config),
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
-                head_dim=model_config.get_head_size(),
-                page_size=self.block_size,
-                seq_start_loc=seq_start_loc,
-                query_start_loc=query_start_loc,
-                device=device,
-                data_type=kv_cache_dtype,
-                use_cuda_graph=use_captured_graph)
-        else:
-            attn_metadata = self.attn_backend.make_metadata(
-                num_prefills=self.num_prefills,
-                slot_mapping=slot_mapping_tensor,
-                num_prefill_tokens=self.num_prefill_tokens,
-                num_decode_tokens=num_decode_tokens,
-                seq_lens=self.seq_lens,
-                seq_lens_tensor=seq_lens_tensor,
-                max_query_len=max_query_len,
-                max_prefill_seq_len=max_prefill_seq_len,
-                max_decode_seq_len=max_decode_seq_len,
-                query_start_loc=query_start_loc,
-                seq_start_loc=seq_start_loc,
-                context_lens_tensor=context_lens_tensor,
-                block_tables=block_tables,
-                use_cuda_graph=use_captured_graph,
-            )
+        #     kv_cache_dtype = get_kv_cache_torch_dtype(kv_cache_dtype,
+        #                                               model_config.dtype)
+
+        #     attn_metadata = self.attn_backend.make_metadata(
+        #         num_prefills=self.num_prefills,
+        #         slot_mapping=slot_mapping_tensor,
+        #         num_prefill_tokens=self.num_prefill_tokens,
+        #         num_decode_tokens=num_decode_tokens,
+        #         max_prefill_seq_len=max_prefill_seq_len,
+        #         block_tables=block_tables,
+        #         paged_kv_indptr=paged_kv_indptr_tensor,
+        #         paged_kv_indices=paged_kv_indices_tensor,
+        #         paged_kv_last_page_len=paged_kv_last_page_len_tensor,
+        #         num_qo_heads=model_config.get_num_attention_heads(
+        #             parallel_config),
+        #         num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+        #         head_dim=model_config.get_head_size(),
+        #         page_size=self.block_size,
+        #         seq_start_loc=seq_start_loc,
+        #         query_start_loc=query_start_loc,
+        #         device=device,
+        #         data_type=kv_cache_dtype,
+        #         use_cuda_graph=use_captured_graph)
+        # else:
+        #     attn_metadata = self.attn_backend.make_metadata(
+        #         num_prefills=self.num_prefills,
+        #         slot_mapping=slot_mapping_tensor,
+        #         num_prefill_tokens=self.num_prefill_tokens,
+        #         num_decode_tokens=num_decode_tokens,
+        #         seq_lens=self.seq_lens,
+        #         seq_lens_tensor=seq_lens_tensor,
+        #         max_query_len=max_query_len,
+        #         max_prefill_seq_len=max_prefill_seq_len,
+        #         max_decode_seq_len=max_decode_seq_len,
+        #         query_start_loc=query_start_loc,
+        #         seq_start_loc=seq_start_loc,
+        #         context_lens_tensor=context_lens_tensor,
+        #         block_tables=block_tables,
+        #         use_cuda_graph=use_captured_graph,
+        #     )
 
         return self._model_input_cls(
             input_tokens=input_tokens_tensor,

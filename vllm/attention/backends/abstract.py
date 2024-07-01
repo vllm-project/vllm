@@ -3,6 +3,7 @@ from dataclasses import dataclass, fields
 from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
                     TypeVar)
 
+import numpy as np
 import torch
 
 
@@ -27,6 +28,16 @@ class AttentionBackend(ABC):
     @classmethod
     def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
         return cls.get_metadata_cls()(*args, **kwargs)
+
+    @staticmethod
+    @abstractmethod
+    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
+        raise NotImplementedError
+
+    @classmethod
+    def make_metadata_builder(cls, *args,
+                              **kwargs) -> "AttentionMetadataBuilder":
+        return cls.get_builder_cls()(*args, **kwargs)
 
     @staticmethod
     @abstractmethod
@@ -101,6 +112,31 @@ class AttentionMetadata:
 
 
 T = TypeVar("T", bound=AttentionMetadata)
+
+
+class AttentionMetadataBuilder(ABC, Generic[T]):
+    """Abstract class for attention metadata builders."""
+
+    @abstractmethod
+    def __init__(self, block_size: int, sliding_window: int,
+                 use_v2_block_manager: bool) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def add_prefill_seq_group(self, *args, **kwargs) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def add_decode_seq_group(self, *args, **kwargs) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def build(self, model_config: Any, parallel_config: Any,
+              kv_cache_dtype: Any, seq_lens: Any, query_lens: Any,
+              decode_seq_lens: Any, use_captured_graph: bool,
+              cuda_graph_pad_size: int, graph_block_tables: np.ndarray,
+              batch_size: int, device: Any) -> T:
+        raise NotImplementedError
 
 
 class AttentionImpl(ABC, Generic[T]):
