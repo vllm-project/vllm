@@ -81,6 +81,17 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         else:
             raise ValueError(f"Unknown allocator type {allocator_type=}")
 
+        cpu_index = set(
+            list(
+                range(cpu_allocator.block_index_start,
+                      cpu_allocator.block_index_end)))
+        gpu_index = set(
+            list(
+                range(gpu_allocator.block_index_start,
+                      gpu_allocator.block_index_end)))
+        intersection = cpu_index & gpu_index
+        assert not intersection, f"block indices overlap: {intersection}"
+
         return CpuGpuBlockAllocator(
             cpu_block_allocator=cpu_allocator,
             gpu_block_allocator=gpu_allocator,
