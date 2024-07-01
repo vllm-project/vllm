@@ -13,6 +13,7 @@ from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptStrictInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.utils import FlexibleArgumentParser
 
 
 def main(args: argparse.Namespace):
@@ -24,6 +25,8 @@ def main(args: argparse.Namespace):
         model=args.model,
         speculative_model=args.speculative_model,
         num_speculative_tokens=args.num_speculative_tokens,
+        speculative_draft_tensor_parallel_size=\
+            args.speculative_draft_tensor_parallel_size,
         tokenizer=args.tokenizer,
         quantization=args.quantization,
         tensor_parallel_size=args.tensor_parallel_size,
@@ -120,12 +123,16 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
     parser.add_argument('--speculative-model', type=str, default=None)
     parser.add_argument('--num-speculative-tokens', type=int, default=None)
+    parser.add_argument('--speculative-draft-tensor-parallel-size',
+                        '-spec-draft-tp',
+                        type=int,
+                        default=None)
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
@@ -200,9 +207,10 @@ if __name__ == '__main__':
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
-        choices=["cuda", "cpu", "tpu", "xpu"],
-        help='device type for vLLM execution, supporting CUDA and CPU.')
+        default="auto",
+        choices=["auto", "cuda", "cpu", "openvino", "tpu", "xpu"],
+        help='device type for vLLM execution, supporting CUDA, OpenVINO and '
+        'CPU.')
     parser.add_argument('--block-size',
                         type=int,
                         default=16,

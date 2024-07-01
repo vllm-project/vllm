@@ -2,5 +2,6 @@
 -r requirements-common.txt
 
 # Dependencies for x86_64 CPUs
-torch == 2.3.1+cpu
+torch == 2.3.1+cpu; platform_machine != "ppc64le"
+torchvision == 0.18.1+cpu; platform_machine != "ppc64le"   # required for the image processor of phi3v, this must be updated alongside torch
 triton >= 2.2.0  # FIXME(woosuk): This is a hack to avoid import error.
