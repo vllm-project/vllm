@@ -313,6 +313,9 @@ class Fp8LinearMethod(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         if self.use_marlin:
+            # For GPUs that lack FP8 hardware support, we can leverage the
+            # Marlin kernel for fast weight-only FP8 quantization
+
             reshaped_x = x.reshape(-1, x.shape[-1])
             out_shape = x.shape[:-1] + (layer.output_size_per_partition, )
 
