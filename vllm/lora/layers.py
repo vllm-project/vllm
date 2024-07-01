@@ -359,9 +359,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 full_lora_a_embeddings.shape[1],
                 -1,
             )
-        full_lora_a_embeddings = full_lora_a_embeddings.view(
-            -1, full_lora_a_embeddings.shape[-1])
-        full_output = full_output.view(-1, full_output.shape[-1])
+        # full_lora_a_embeddings = full_lora_a_embeddings.view(
+        #     -1, full_lora_a_embeddings.shape[-1])
+        # full_output = full_output.view(-1, full_output.shape[-1])
         token_num = self.indices_len[0]
         is_prefilling = bool(self.indices_len[5])
         add_expand(

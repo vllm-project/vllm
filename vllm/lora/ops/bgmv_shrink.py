@@ -123,7 +123,7 @@ def bgmv_shrink(
         config = override_config
     else:
         # First try to load optimal config from the file
-        config = get_lora_op_configs("shrink", batches, K)
+        config = get_lora_op_configs("bgmv_shrink", batches, K)
 
     grid = lambda META: (
         META["SPLIT_K"],
