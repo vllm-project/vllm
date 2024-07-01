@@ -88,7 +88,7 @@ class QuantizationConfig(ABC):
                          "quantization config.")
 
     @staticmethod
-    def get_from_keys_optional(config: Dict[str, Any], keys: List[str],
+    def get_from_keys_or(config: Dict[str, Any], keys: List[str],
                                default: Any) -> Any:
         """Get a optional value from the model's quantization config."""
         try:

@@ -65,8 +65,8 @@ class GPTQConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
-        lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"],
-                                                       default=False)
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
+                                                 default=False)
         return cls(weight_bits, group_size, desc_act, lm_head_quantized)
 
     def get_quant_method(
