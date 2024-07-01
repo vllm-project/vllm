@@ -5,13 +5,14 @@ from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.utils import get_device_capability_stateless
 
 
 def _check_punica_support():
     if ops.is_custom_op_supported("_punica_C::dispatch_bgmv"):
         return
 
-    if torch.cuda.get_device_capability() < (8, 0):
+    if get_device_capability_stateless() < (8, 0):
         raise ImportError(
             "punica LoRA kernels require compute capability >= 8.0")
     else:
