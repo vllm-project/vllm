@@ -189,7 +189,8 @@ run_serving_tests() {
 
     # run the server
     echo "Running test case $test_name"
-    run_trt_server "$server_params" "$common_params"
+    # run_trt_server "$server_params" "$common_params"
+    bash ../.buildkite/nightly-benchmarks/scripts/launch-trt-server.sh "$server_params" "$common_params"
 
     # wait until the server is alive
     wait_for_server
