@@ -423,6 +423,8 @@ def fused_experts(hidden_states: torch.Tensor,
 
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
+    # We execute the fused_moe kernel in chunks to circumvent this issue:
+    # https://github.com/vllm-project/vllm/issues/5938
     CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
     M = min(num_tokens, CHUNK_SIZE)
 
@@ -456,7 +458,11 @@ def fused_experts(hidden_states: torch.Tensor,
     compute_type = (tl.bfloat16
                     if hidden_states.dtype == torch.bfloat16 else tl.float16)
 
-    states_acc = []
+    if inplace:
+        out_hidden_states = hidden_states
+    else:
+        out_hidden_states = torch.zeros_like(hidden_states)
+
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -513,18 +519,10 @@ def fused_experts(hidden_states: torch.Tensor,
                                 compute_type=compute_type,
                                 use_fp8=use_fp8)
 
-        if inplace:
-            torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
+        torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                       dim=1,
-                      out=hidden_states[begin_chunk_idx:end_chunk_idx])
-        else:
-            states_acc.append(
-                torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                          dim=1))
-    if inplace:
-        return hidden_states
-    else:
-        return torch.cat(states_acc, dim=0)
+                      out=out_hidden_states[begin_chunk_idx:end_chunk_idx])
+    return out_hidden_states
 
 
 def fused_moe(
