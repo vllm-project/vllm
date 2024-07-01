@@ -10,8 +10,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_24_perms import (
     marlin_24_perm, marlin_24_scale_perm, marlin_24_scale_perm_single)
 from vllm.model_executor.layers.quantization.utils.marlin_perms import (
     marlin_perm, marlin_scale_perm, marlin_scale_perm_single)
+from vllm.model_executor.layers.quantization.utils.marlin_qqq_perms import (
+    marlin_qqq_perm, marlin_qqq_scale_perm, marlin_qqq_scale_perm_single)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_pack_factor, quantize_weights, sort_weights)
+    get_pack_factor, qqq_quantize_weights, quantize_weights, sort_weights)
 
 __cuda_arch = torch.cuda.get_device_capability()
 
@@ -57,6 +59,30 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm):
     return q_packed
 
 
+def marlin_qqq_weights(q_w, size_k, size_n, num_bits, perm, group_size):
+    # Permute
+    q_w = marlin_permute_weights(q_w, size_k, size_n, perm)
+
+    # Pack
+    pack_factor = get_pack_factor(num_bits)
+    orig_device = q_w.device
+
+    q_w = q_w.cpu().numpy().astype(numpy.uint32)
+
+    q_packed = numpy.zeros((q_w.shape[0], q_w.shape[1] // pack_factor),
+                           dtype=numpy.uint32)
+    if group_size == size_k:
+        for i in range(pack_factor):
+            q_packed |= (q_w[:, i::pack_factor] & 0xF) << num_bits * i
+    else:
+        for i in range(pack_factor):
+            q_packed |= q_w[:, i::pack_factor] << num_bits * i
+
+    q_packed = torch.from_numpy(q_packed.astype(numpy.int32)).to(orig_device)
+
+    return q_packed
+
+
 def marlin_permute_scales(s, size_k, size_n, group_size, scale_perm,
                           scale_perm_single):
     if group_size < size_k and group_size != -1:
@@ -66,6 +92,21 @@ def marlin_permute_scales(s, size_k, size_n, group_size, scale_perm,
     s = s.reshape((-1, size_n)).contiguous()
 
     return s
+
+
+def marlin_qqq_permute_scales(s_group, s_channel, size_k, size_n, group_size,
+                              scale_perm, scale_perm_single):
+    if group_size < size_k and group_size != -1:
+        s_group = s_group.reshape((-1, len(scale_perm)))[:, scale_perm]
+        s_channel = s_channel.reshape(
+            (-1, len(scale_perm_single)))[:, scale_perm_single]
+        s_group = s_group.reshape((-1, size_n)).contiguous()
+    else:
+        s_channel = s_channel.reshape(
+            (-1, len(scale_perm_single)))[:, scale_perm_single]
+    s_channel = s_channel.reshape((-1, size_n)).contiguous()
+
+    return s_group, s_channel
 
 
 def marlin_quantize(
@@ -199,6 +240,42 @@ def marlin_24_quantize(
 
     # Create result
     res_list = [w_24_ref, marlin_24_q_w_comp, meta, marlin_24_s]
+    for i in range(len(res_list)):
+        res_list[i] = res_list[i].to(w.device)
+
+    return res_list
+
+
+def marlin_qqq_quantize(
+    w: torch.Tensor,
+    num_bits: int,
+    group_size: int,
+):
+    size_k, size_n = w.shape
+
+    # Normalize group_size
+    if group_size == -1:
+        group_size = size_k
+    assert group_size <= size_k
+    quant_type = "per-channel" if group_size == size_k else "per-group"
+
+    # Quantize
+    w_ref, q_w, s_group, s_channel = qqq_quantize_weights(
+        w, num_bits, group_size)
+
+    # Reformat to marlin_qqq
+    marlin_qqq_q_w = marlin_qqq_weights(q_w, size_k, size_n, num_bits,
+                                        marlin_qqq_perm[num_bits][quant_type],
+                                        group_size)
+    marlin_qqq_s_group, marlin_qqq_s_channel = marlin_qqq_permute_scales(
+        s_group, s_channel, size_k, size_n, group_size,
+        marlin_qqq_scale_perm[num_bits][quant_type],
+        marlin_qqq_scale_perm_single[num_bits][quant_type])
+
+    # Create result
+    res_list = [
+        w_ref, marlin_qqq_q_w, marlin_qqq_s_group, marlin_qqq_s_channel
+    ]
     for i in range(len(res_list)):
         res_list[i] = res_list[i].to(w.device)
 
