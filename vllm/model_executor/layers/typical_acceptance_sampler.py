@@ -1,12 +1,11 @@
 import torch
 import torch.jit
-import torch.nn as nn
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
 
 
-class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
+class TypicalAcceptanceSampler(SpecDecodeBaseSampler):
     """Apply typical acceptance sampling as described in section 3.3.1 in 
         "MEDUSA: Simple LLM Inference Acceleration Framework with 
         Multiple Decoding Heads"
@@ -15,10 +14,10 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
 
     def __init__(
         self,
+        posterior_threshold: float,
+        posterior_alpha: float,
         disable_bonus_tokens: bool = False,
         strict_mode: bool = False,
-        posterior_threshold: float = 0.09,
-        posterior_alpha: float = 0.3,
     ):
         """Create a Typical Acceptance Sampler.
 
@@ -31,23 +30,20 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
             nontrivial latency.
             posterior_threshold : A threshold value that sets a lower bound 
             on the posterior probability of a token in target model for it
-            to be accepted. Default is 0.09
+            to be accepted.
             posterior_alpha : A scaling factor for the entropy-based
-            threshold in typical acceptance sampling. Typically defaults to
-            sqrt of posterior_threshold and is set to 0.3.
+            threshold in typical acceptance sampling.
         """
-        SpecDecodeBaseSampler.__init__(
-            self,
-            disable_bonus_tokens=disable_bonus_tokens,
-            strict_mode=strict_mode)
-        nn.Module.__init__(self)
         self._posterior_threshold = posterior_threshold
         self._posterior_alpha = posterior_alpha
+        super().__init__(disable_bonus_tokens=disable_bonus_tokens,
+                         strict_mode=strict_mode)
 
     def forward(
         self,
         target_probs: torch.Tensor,
         bonus_token_ids: torch.Tensor,
+        draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Sample token ids using typical acceptance sampling. This accepts 
@@ -68,6 +64,8 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
             bonus_token_ids: The "bonus" token ids that are accepted iff all
                 speculative tokens in a sequence are accepted.
             shape = [batch_size, num_bonus_tokens]
+
+            draft_probs: This parameter is unused by the acceptance sampler.
 
             draft_token_ids: The token ids that were sampled from the draft
                 probabilities.
