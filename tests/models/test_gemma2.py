@@ -1,15 +1,14 @@
-"""Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
+"""Compare the outputs of HF and vLLM for Gemma2 models using greedy sampling.
 
-Run `pytest tests/models/test_mistral.py`.
+Run `pytest tests/models/test_gemma2.py`.
 """
-import pytest
 import os
+
+import pytest
 
 from .utils import check_logprobs_close
 
-MODELS = [
-    "google/gemma-2-9b"
-]
+MODELS = ["google/gemma-2-9b"]
 
 
 @pytest.mark.parametrize("model", MODELS)
