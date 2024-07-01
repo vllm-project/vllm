@@ -13,7 +13,6 @@ from vllm.lora.ops.sgmv_shrink import sgmv_shrink
 
 _PARAMS_CACHE: Dict[int, Tuple] = {}
 
-
 def _compute_params(
     token_lora_tensor: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, ]:

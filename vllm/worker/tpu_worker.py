@@ -215,7 +215,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         assert len(seq_group_metadata_list) > 0
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.tpu_cache)
-        return [output]
+        return output
 
     def cache_swap(
         self,
