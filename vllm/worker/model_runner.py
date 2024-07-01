@@ -663,11 +663,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                   'final_logit_softcapping', None)
         if logits_soft_cap is not None and self.attn_backend.get_name(
         ) != "flashinfer":
-            logger.warning(("Please use Flashinfer backend for models with",
-                            "logits_soft_cap (i.e., Gemma-2).",
-                            " Otherwise, the output might be wrong.",
-                            " Set Flashinfer backend by ",
-                            "export VLLM_ATTENTION_BACKEND=FLASHINFER."))
+            logger.warning("Please use Flashinfer backend for models with"
+                            "logits_soft_cap (i.e., Gemma-2)."
+                            " Otherwise, the output might be wrong."
+                            " Set Flashinfer backend by "
+                            "export VLLM_ATTENTION_BACKEND=FLASHINFER.")
 
         if self.attn_backend.get_name() == "flashinfer":
             if len(paged_kv_indptr) > 0:
