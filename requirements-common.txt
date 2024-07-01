@@ -6,7 +6,7 @@ numpy < 2.0.0
 requests
 tqdm
 py-cpuinfo
-transformers >= 4.42.0  # Required for Gemma 2.
+transformers == 4.40.0  # >=4.42.0 required for Gemma 2.
 tokenizers >= 0.19.1  # Required for Llama 3.
 fastapi
 aiohttp
