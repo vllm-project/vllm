@@ -6,7 +6,6 @@ Run `pytest tests/models/test_big_models.py`.
 """
 import pytest
 import torch
-from vllm.utils import is_hpu
 
 from .utils import check_outputs_equal
 
@@ -26,7 +25,6 @@ if torch.cuda.is_available():
     target_dtype = "half"
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -51,7 +49,7 @@ def test_models(
         name_1="vllm",
     )
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [target_dtype])
 def test_model_print(

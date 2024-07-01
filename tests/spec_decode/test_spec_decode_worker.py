@@ -14,12 +14,11 @@ from vllm.spec_decode.metrics import (AsyncMetricsCollector,
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.spec_decode_worker import (SpecDecodeWorker,
                                                  split_num_cache_blocks_evenly)
-from vllm.utils import is_hpu
 
 from .test_utils import mock_spec_decode_sampler
 from .utils import create_batch, create_sampler_output_list, mock_worker
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
+
 @pytest.mark.parametrize('k', [1, 2, 6])
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @pytest.mark.parametrize("acceptance_sampler_method",
@@ -54,7 +53,6 @@ def test_correctly_calls_draft_model(k: int, batch_size: int,
         assert actual_execute_model_data == execute_model_req
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize('k', [1, 2, 6])
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @pytest.mark.parametrize("acceptance_sampler_method",
@@ -137,7 +135,6 @@ def test_correctly_calls_target_model(k: int, batch_size: int,
     assert expected_seen_contexts == seen_contexts
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize('k', [1, 2, 6])
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @pytest.mark.parametrize("acceptance_sampler_method",
@@ -229,7 +226,6 @@ def test_correctly_calls_spec_decode_sampler(k: int, batch_size: int,
     assert torch.equal(actual.draft_probs, proposal_probs)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize('k', [1, 2, 6])
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @pytest.mark.parametrize("acceptance_sampler_method",
@@ -358,7 +354,6 @@ def test_correctly_formats_output(k: int, batch_size: int,
                 i].output_token
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize('k', [1, 2])
 @pytest.mark.parametrize('batch_size', [1])
 @pytest.mark.parametrize('returns_metrics', [True, False])
@@ -456,7 +451,6 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool,
     assert args[0] == k or kwargs.get('k', -1) == k
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize('k', [0])
 @pytest.mark.parametrize('batch_size', [1, 2, 32])
 @pytest.mark.parametrize("acceptance_sampler_method",
@@ -501,7 +495,6 @@ def test_k_equals_zero(k: int, batch_size: int,
     target_worker.execute_model.assert_called_once_with(execute_model_req)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize('k', [0, 5])
 @pytest.mark.parametrize('batch_size', [0])
 @pytest.mark.parametrize("acceptance_sampler_method",

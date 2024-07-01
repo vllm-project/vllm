@@ -4,7 +4,6 @@ Run `pytest tests/samplers/test_beam_search.py`.
 """
 
 import pytest
-from vllm.utils import is_hpu
 
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
@@ -15,7 +14,6 @@ BEAM_WIDTHS = [4]
 MODELS = ["facebook/opt-125m"]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", MAX_TOKENS)

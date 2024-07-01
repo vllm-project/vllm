@@ -10,7 +10,6 @@ from vllm.sequence import ExecuteModelRequest, Logprob, SamplerOutput
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.utils import is_hpu
 from vllm.worker.worker import Worker
 
 from .utils import (assert_logprobs_dict_allclose, create_batch,
@@ -71,7 +70,6 @@ def test_assert_enough_kv_space(num_steps: int):
         seq_group_metadata.block_tables = original_block_tables
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @torch.inference_mode()
 def test_same_output_for_single_step():
     """Verify the multi step worker produces the same output as the normal
@@ -155,7 +153,6 @@ def test_same_output_for_single_step():
     assert_logprobs_dict_allclose(actual_logprobs, expected_logprobs)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @torch.inference_mode()
 def test_same_output_for_multi_step():
     """Verify the multi-step worker produces the same output as the normal
@@ -280,7 +277,6 @@ def test_same_output_for_multi_step():
                                       single_step_logprobs)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @torch.inference_mode()
 def test_draft_proposals_full_speculation_len():
     """Verify Top1Proposer correctly handles case where all sequences
@@ -334,7 +330,6 @@ def test_draft_proposals_full_speculation_len():
     assert proposals.proposal_lens.tolist() == [k for _ in range(batch_size)]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @torch.inference_mode()
 def test_draft_proposals_no_speculations():
     """Verify Top1Proposer correctly handles case where no sequences
@@ -373,7 +368,6 @@ def test_draft_proposals_no_speculations():
     assert proposals.proposal_lens.tolist() == [0 for _ in range(batch_size)]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @torch.inference_mode()
 def test_draft_proposals_mixed_k():
     """Verify Top1Proposer correctly handles case some sequences can

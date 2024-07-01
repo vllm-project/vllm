@@ -36,7 +36,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding, get_masked_input_and_mask)
 from vllm.model_executor.utils import set_random_seed
-from vllm.utils import is_hpu
 
 from .utils import DummyLoRAManager
 
@@ -179,7 +178,6 @@ def create_random_inputs(
     return inputs, index_mapping, prompt_mapping
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -274,7 +272,6 @@ def test_embeddings(dist_init, num_loras, device, vocab_size) -> None:
                               atol=atol)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @torch.inference_mode()
 # @pytest.mark.skip(
 #     reason="Fails when loras are in any slot other than the first.")
@@ -412,7 +409,6 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
                               atol=atol)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -537,7 +533,6 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
                               atol=atol)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("orientation", ["row", "column"])
@@ -649,7 +644,6 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
                               atol=atol)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("repeats", [1, 2, 3])

@@ -5,7 +5,6 @@ Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 import weakref
 
 import pytest
-from vllm.utils import is_hpu
 
 from vllm import LLM
 
@@ -26,7 +25,7 @@ def test_vllm_gc_ed():
     # because llm instance is not GC'ed.
     assert weak_llm() is None
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])

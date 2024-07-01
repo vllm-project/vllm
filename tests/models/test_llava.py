@@ -4,7 +4,6 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
-from vllm.utils import is_hpu
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_outputs_equal

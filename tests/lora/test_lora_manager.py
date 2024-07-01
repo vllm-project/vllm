@@ -17,7 +17,6 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.utils import is_hpu
 
 EMBEDDING_MODULES = {
     "embed_tokens": "input_embeddings",
@@ -27,7 +26,6 @@ EMBEDDING_MODULES = {
 EMBEDDING_PADDING_MODULES = ["lm_head"]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_from_lora_tensors(sql_lora_files):
     tensors = load_file(
         os.path.join(sql_lora_files, "adapter_model.safetensors"))
@@ -100,7 +98,6 @@ def create_packed_lora(
     return LoRAModel(lora_id, 8, loras)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_replace_submodules(dist_init, dummy_model):
     model = dummy_model
     model.supported_lora_modules = ["dense1", "layer1.dense2"]
@@ -119,7 +116,6 @@ def test_replace_submodules(dist_init, dummy_model):
                       RowParallelLinearWithLoRA)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_lora_model_manager(dist_init, dummy_model):
     model = dummy_model
     model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
@@ -166,7 +162,6 @@ def test_lora_model_manager(dist_init, dummy_model):
     assert manager.lora_index_to_id[1] == 2
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_lora_lru_cache_model_manager(dist_init, dummy_model):
     model = dummy_model
     model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
@@ -244,7 +239,6 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model):
         assert manager.pin_lora(3)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_lru_lora_model_manager(dist_init, dummy_model):
     # This tests just the LRU cache functionality, everything else is
     # tested in test_lora_model_manager
@@ -359,7 +353,6 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     assert set(manager.list_loras()) == {1}
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
                                        sql_lora_files):
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
@@ -433,7 +426,6 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         ], mapping)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
                              sql_lora_files):
     # Should remove every LoRA not specified in the request.
@@ -504,7 +496,6 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         ], mapping)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_packed_loras(dist_init, dummy_model_gate_up):
     model = dummy_model_gate_up
     model.supported_lora_modules = ["gate_up_proj"]

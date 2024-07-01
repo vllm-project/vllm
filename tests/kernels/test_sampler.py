@@ -10,7 +10,6 @@ from vllm.model_executor.layers.ops.sample import (
     sample)
 from vllm.model_executor.sampling_metadata import SamplingTensors
 from vllm.model_executor.utils import set_random_seed
-from vllm.utils import is_hpu
 
 SINGLE_SPLIT_VOCAB_SIZE = 32000  # llama/mistral/mixtral vocab size
 MULTI_SPLIT_VOCAB_SIZE = MAX_TRITON_N_COLS + 100
@@ -31,7 +30,6 @@ def _uniform_to_exponential_kernel(input, output, n: tl.constexpr):
     tl.store(output + idx, y)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_uniform_to_exponential():
     """Test that we can convert uniform to exponential without div by 0."""
     input = torch.tensor([0.0, 1.0 - torch.finfo(torch.float32).eps],
@@ -44,7 +42,6 @@ def test_uniform_to_exponential():
     assert torch.all(torch.isfinite(torch.full_like(output, 1.0) / output))
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("random_sampling", [True, False, "mixed"])
 @pytest.mark.parametrize("max_best_of", [1, 2, 3, 4, 5])
 @pytest.mark.parametrize("modify_greedy_probs", [True, False])
@@ -124,7 +121,6 @@ def test_sample_decoding_only(random_sampling, max_best_of,
         assert sampled_logprobs is None
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("random_sampling", [True, False, "mixed"])
 @pytest.mark.parametrize("max_best_of", [1, 2, 3, 4, 5])
 @pytest.mark.parametrize("modify_greedy_probs", [True, False])

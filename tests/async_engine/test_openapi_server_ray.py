@@ -3,7 +3,6 @@ import pytest
 # using Ray for overall ease of process management, parallel requests,
 # and debugging.
 import ray
-from vllm.utils import is_hpu
 
 from ..utils import RemoteOpenAIServer
 
@@ -20,8 +19,6 @@ def ray_ctx():
 
 @pytest.fixture(scope="module")
 def server(ray_ctx):
-    if is_hpu():
-        pytest.skip("Skipping test on HPU")
     return RemoteOpenAIServer([
         "--model",
         MODEL_NAME,

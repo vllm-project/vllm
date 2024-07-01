@@ -2,10 +2,8 @@ import pytest
 
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_hpu
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization

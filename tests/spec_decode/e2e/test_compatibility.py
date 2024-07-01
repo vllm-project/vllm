@@ -1,12 +1,10 @@
 import pytest
 
 from vllm import SamplingParams
-from vllm.utils import is_hpu
 
 from .conftest import get_output_from_llm_generator
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -46,7 +44,6 @@ def test_spec_decode_xfail_chunked_prefill(test_llm_generator):
                                       sampling_params)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -99,7 +96,6 @@ def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
                                       sampling_params)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("common_llm_kwargs", [{
     "model": "JackFram/llama-68m",
     "speculative_model": "JackFram/llama-68m",

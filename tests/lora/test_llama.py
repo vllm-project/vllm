@@ -5,7 +5,6 @@ import ray
 
 import vllm
 from vllm.lora.request import LoRARequest
-from vllm.utils import is_hpu
 
 from .conftest import cleanup
 
@@ -38,7 +37,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
+
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
 def test_llama_lora(sql_lora_files, tp_size, num_gpus_available):
     if num_gpus_available < tp_size:
@@ -81,7 +80,7 @@ def test_llama_lora(sql_lora_files, tp_size, num_gpus_available):
 
     print("removing lora")
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
+
 def test_llama_tensor_parallel_equality(sql_lora_files, num_gpus_available):
     if num_gpus_available < 4:
         pytest.skip("Not enough GPUs for tensor parallelism 4")
@@ -121,7 +120,6 @@ def test_llama_tensor_parallel_equality(sql_lora_files, num_gpus_available):
     assert output_tp1 == output_tp4
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_llama_lora_warmup(sql_lora_files):
     """Test that the LLM initialization works with a warmup LORA path and
     is more conservative"""

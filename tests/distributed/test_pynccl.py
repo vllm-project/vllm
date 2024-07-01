@@ -8,13 +8,13 @@ import torch.distributed
 
 from vllm.distributed.communication_op import (  # noqa
     tensor_model_parallel_all_reduce)
-from vllm.utils import update_environment_variables, is_hpu
-if not is_hpu():
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-    from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
-    from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
-                                                get_world_group, graph_capture,
-                                                init_distributed_environment)
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             get_world_group, graph_capture,
+                                             init_distributed_environment)
+from vllm.utils import update_environment_variables
+
 
 def distributed_run(fn, world_size):
     number_of_processes = world_size
@@ -65,7 +65,6 @@ def worker_fn():
     assert result == pynccl_comm.world_size
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 def test_pynccl():
@@ -95,7 +94,6 @@ def multiple_allreduce_worker_fn():
             assert result == 2
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_allreduce():
@@ -122,7 +120,6 @@ def multiple_allreduce_with_vllm_worker_fn():
             assert result == 2
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_allreduce_with_vllm():
@@ -153,7 +150,6 @@ def worker_fn_with_cudagraph():
         assert a.mean().cpu().item() == pynccl_comm.world_size**1
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 def test_pynccl_with_cudagraph():
@@ -224,7 +220,7 @@ def multiple_send_recv_worker_fn():
     else:
         assert result == 2
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
+
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_send_recv():

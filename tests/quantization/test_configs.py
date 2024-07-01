@@ -9,7 +9,7 @@ from typing import Tuple
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.utils import is_hpu
+
 
 @dataclass
 class ModelPair:
@@ -54,8 +54,7 @@ MODEL_ARG_EXPTYPES = [
 @pytest.mark.parametrize("model_arg_exptype", MODEL_ARG_EXPTYPES)
 def test_auto_gptq(model_arg_exptype: Tuple[str, None, str]) -> None:
     model_path, quantization_arg, expected_type = model_arg_exptype
-    if is_hpu() and model_path in ('TheBloke/Llama-2-7B-Chat-GPTQ', 'LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit'):
-        pytest.skip("Skipping test on HPU")
+
     try:
         model_config = ModelConfig(model_path,
                                    model_path,

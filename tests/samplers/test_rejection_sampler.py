@@ -7,14 +7,10 @@ import torch.nn.functional as F
 
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.utils import set_random_seed
-from vllm.utils import is_hpu
 
-if is_hpu():
-    DEVICES = ["hpu"]
-else:
-    DEVICES = [
-        f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-    ]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 
 
 def mock_causal_accepted_tensor(
@@ -42,7 +38,6 @@ def mock_causal_accepted_tensor(
     return accepted
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("seed", list(range(10)))
 @pytest.mark.parametrize(
     "which_tokens_accepted",
@@ -134,11 +129,10 @@ def test_correct_output_format(which_tokens_accepted: str,
         assert torch.all(output_token_ids[subsequent_mask] == -1)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("k", list(range(1, 6)))
 @pytest.mark.parametrize("vocab_size", [30_000, 50_000])
 @pytest.mark.parametrize("batch_size", list(range(1, 32)))
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
                                     device: str):
@@ -161,11 +155,10 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
                       draft_token_ids)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("above_or_below_vocab_range", ["above", "below"])
 @pytest.mark.parametrize("which_token_ids",
                          ["bonus_token_ids", "draft_token_ids"])
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
                                which_token_ids: str, device: str):
@@ -210,7 +203,6 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
                           draft_token_ids)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("draft_and_target_probs_equal", [True, False])
 @pytest.mark.parametrize("seed", list(range(5)))
 @torch.inference_mode()

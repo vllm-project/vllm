@@ -26,12 +26,9 @@ for the target model outputs.
 
 import pytest
 
-from vllm.utils import is_hpu
-
 from .conftest import run_greedy_equality_correctness_test
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -73,7 +70,6 @@ def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
                                          force_output_len=True)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -123,7 +119,6 @@ def test_ngram_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
                                          force_output_len=True)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{

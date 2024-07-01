@@ -2,12 +2,10 @@ import pytest
 import torch
 
 from vllm import SamplingParams
-from vllm.utils import is_hpu
 
 MODELS = ["facebook/opt-125m"]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_logits_processor_force_generate(

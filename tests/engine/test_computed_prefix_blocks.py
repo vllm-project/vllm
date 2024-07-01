@@ -3,10 +3,8 @@ import pytest
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_hpu
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 @pytest.mark.parametrize("block_size", [16])
 def test_computed_prefix_blocks(model: str, block_size: int):

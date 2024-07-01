@@ -10,7 +10,6 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.model_executor.utils import set_random_seed
-from vllm.utils import is_hpu
 
 MODEL = "facebook/opt-125m"
 RANDOM_SEEDS = list(range(5))
@@ -22,7 +21,6 @@ def vllm_model(vllm_runner):
         yield vllm_model
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 def test_random_sample_with_seed(
     vllm_model,

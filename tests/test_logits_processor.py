@@ -9,7 +9,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.utils import is_hpu
 from vllm.utils import is_pin_memory_available
 
 
@@ -43,17 +42,13 @@ def _prepare_test(
 
 
 RANDOM_SEEDS = list(range(128))
-if is_hpu():
-    DEVICES = ["hpu"]
-else:
-    DEVICES = [
-        f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-    ]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_logits_processors(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)

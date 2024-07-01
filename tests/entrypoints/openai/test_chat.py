@@ -13,8 +13,6 @@ import torch
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
-from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import is_hpu
 
 from ...utils import RemoteOpenAIServer
 

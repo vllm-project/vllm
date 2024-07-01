@@ -40,13 +40,11 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
-from vllm.utils import is_hpu
 
 from .conftest import (get_output_from_llm_generator,
                        run_greedy_equality_correctness_test)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -118,7 +116,6 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         assert actual_tokens.strip() == expected_tokens.strip()
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -157,7 +154,6 @@ def test_spec_decode_e2e_with_async_engine(test_llm_generator,
                                          force_output_len=True)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -212,7 +208,6 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
                                          force_output_len=True)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -264,7 +259,6 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
                                          force_output_len=True)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -311,7 +305,6 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
                                          force_output_len=False)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -356,7 +349,6 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
                                          force_output_len=True)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -401,7 +393,6 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
                                          force_output_len=True)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -449,7 +440,6 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
                                          force_output_len=True)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -503,7 +493,6 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
                                          force_output_len=True)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -553,7 +542,6 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
                                          force_output_len=True)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{

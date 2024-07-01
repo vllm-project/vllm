@@ -1,6 +1,6 @@
 import pytest
+
 from vllm.config import ModelConfig
-from vllm.utils import is_hpu
 
 MODEL_IDS_EXPECTED = [
     ("Qwen/Qwen1.5-7B", 32768),
@@ -25,7 +25,6 @@ def test_disable_sliding_window(model_id_expected):
     assert model_config.max_model_len == expected
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_get_sliding_window():
     TEST_SLIDING_WINDOW = 4096
     # Test that the sliding window is correctly computed.

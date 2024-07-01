@@ -8,7 +8,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.utils import get_open_port, is_hpu
+from vllm.utils import get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
 
@@ -27,7 +27,7 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     )
     return model_runner
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
+
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_prompt(batch_size):
     model_runner = _create_model_runner(
@@ -142,7 +142,6 @@ def test_prepare_prompt(batch_size):
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_decode_cuda_graph(batch_size):
     model_runner = _create_model_runner(
@@ -253,7 +252,6 @@ def test_prepare_decode_cuda_graph(batch_size):
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output."""
     model_runner = _create_model_runner(
@@ -298,7 +296,6 @@ def distributed_init():
     ensure_model_parallel_initialized(1, 1)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("batch_size", list(range(2, 128)))
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_hybrid_batches(batch_size, enforce_eager, distributed_init):

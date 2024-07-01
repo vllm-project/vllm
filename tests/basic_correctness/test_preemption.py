@@ -11,7 +11,6 @@ from prometheus_client import REGISTRY
 from vllm import SamplingParams
 from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
                                  ENABLE_ARTIFICIAL_PREEMPT)
-from vllm.utils import is_hpu
 
 from ..models.utils import check_outputs_equal
 
@@ -25,7 +24,6 @@ assert ENABLE_ARTIFICIAL_PREEMPT is True, (
     "tests/basic_correctness/test_preemption.py`")
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [96])
@@ -70,7 +68,6 @@ def test_chunked_prefill_recompute(
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])
@@ -122,7 +119,6 @@ def test_preemption(
     assert total_preemption == total_recorded_preemption
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])
@@ -181,7 +177,6 @@ def test_swap(
     assert total_preemption == total_recorded_preemption
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])
@@ -226,7 +221,6 @@ def test_swap_infeasible(
     assert req_outputs[0].outputs[0].finish_reason == "length"
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])

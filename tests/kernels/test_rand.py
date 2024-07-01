@@ -5,10 +5,8 @@ import torch
 
 from vllm.model_executor.layers.ops.rand import seeded_uniform
 from vllm.model_executor.utils import set_random_seed
-from vllm.utils import is_hpu
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("dtype",
                          [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("use_3d", [True, False])

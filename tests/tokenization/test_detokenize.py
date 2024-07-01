@@ -7,7 +7,6 @@ from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 from vllm.transformers_utils.detokenizer import (Detokenizer,
                                                  detokenize_incrementally)
 from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
-from vllm.utils import is_hpu
 
 TRUTH = [
     "Hello here, this is a simple test",
@@ -56,8 +55,6 @@ def _run_incremental_decode(tokenizer, all_input_ids,
 @pytest.mark.parametrize("skip_special_tokens", (True, False))
 def test_decode_streaming(tokenizer_id, truth, with_prompt,
                           skip_special_tokens):
-    if is_hpu() and tokenizer_id == "meta-llama/Llama-2-7b-hf":
-        pytest.skip("Skipping test on HPU")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
     if with_prompt:
         truth_tokens = tokenizer(truth, add_special_tokens=False)["input_ids"]
@@ -117,8 +114,6 @@ def detokenizer(tokenizer_name: str) -> Detokenizer:
 @pytest.fixture(name="complete_sequence_token_ids")
 def create_complete_sequence_token_ids(complete_sequence: str,
                                        tokenizer_name: str) -> List[int]:
-    if is_hpu() and tokenizer_name == "meta-llama/Llama-2-7b-hf":
-        pytest.skip("Skipping test on HPU")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     complete_sequence_token_ids = tokenizer(complete_sequence)["input_ids"]
     return complete_sequence_token_ids
@@ -152,8 +147,6 @@ def test_decode_sequence_logprobs(complete_sequence: str,
                                   detokenizer: Detokenizer,
                                   skip_special_tokens: bool):
     """Verify Detokenizer decodes logprobs correctly."""
-    if is_hpu() and detokenizer == "meta-llama/Llama-2-7b-hf":
-        pytest.skip("Skipping test on HPU")
     sampling_params = SamplingParams(skip_special_tokens=skip_special_tokens,
                                      logprobs=2)
 
@@ -190,8 +183,6 @@ def test_decode_prompt_logprobs(complete_sequence: str,
                                 detokenizer: Detokenizer,
                                 skip_special_tokens: bool):
     """Verify Detokenizer decodes prompt logprobs correctly."""
-    if is_hpu() and detokenizer == "meta-llama/Llama-2-7b-hf":
-        pytest.skip("Skipping test on HPU")
     sampling_params = SamplingParams(skip_special_tokens=skip_special_tokens,
                                      prompt_logprobs=1)
 

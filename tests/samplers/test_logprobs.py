@@ -4,14 +4,12 @@ import pytest
 import torch
 
 from vllm import SamplingParams
-from vllm.utils import is_hpu
 
 from ..conftest import VllmRunner
 
 MODELS = ["facebook/opt-125m"]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])

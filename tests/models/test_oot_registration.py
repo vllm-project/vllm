@@ -1,4 +1,3 @@
-import pytest
 import torch
 
 from vllm import LLM, ModelRegistry, SamplingParams

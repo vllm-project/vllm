@@ -7,7 +7,6 @@ import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
-from vllm.utils import is_hpu
 
 from .conftest import cleanup
 
@@ -58,7 +57,6 @@ def do_sample(llm: vllm.LLM,
     return generated_texts
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", [1])
 def test_quant_model_lora(tinyllama_lora_files, model, tp_size):

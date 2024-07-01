@@ -1,9 +1,7 @@
-import pytest
 from typing import List
 
 import vllm
 from vllm.lora.request import LoRARequest
-from vllm.utils import is_hpu
 
 MODEL_PATH = "google/gemma-7b"
 
@@ -30,7 +28,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_gemma_lora(gemma_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,

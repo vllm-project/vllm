@@ -10,7 +10,6 @@ import pytest
 import transformers
 
 from vllm import SamplingParams
-from vllm.utils import is_hpu
 
 MODEL = "facebook/opt-350m"
 STOP_STR = "."
@@ -24,7 +23,6 @@ def vllm_model(vllm_runner):
         yield vllm_model
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_stop_reason(vllm_model, example_prompts):
     tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL)
     stop_token_id = tokenizer.convert_tokens_to_ids(STOP_STR)
