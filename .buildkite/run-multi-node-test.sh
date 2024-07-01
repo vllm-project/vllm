@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -euo pipefail
+set -euox pipefail
 
 if [[ $# -lt 3 ]]; then
     echo "Please provide the number of nodes and GPU per node."
@@ -65,7 +65,7 @@ run_nodes() {
     done
 }
 cleanup() {
-    docker network rm docker-net
+    docker network --remove-orphans rm docker-net
 }
 trap cleanup EXIT
 start_network
