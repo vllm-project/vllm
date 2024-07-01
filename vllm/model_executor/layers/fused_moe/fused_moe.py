@@ -476,7 +476,7 @@ def fused_experts(hidden_states: torch.Tensor,
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size( # noqa: E501
+        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(  # noqa: E501
             curr_topk_ids, config['BLOCK_SIZE_M'], E)
 
         invoke_fused_moe_kernel(curr_hidden_states,
@@ -518,8 +518,9 @@ def fused_experts(hidden_states: torch.Tensor,
                       dim=1,
                       out=hidden_states[begin_chunk_idx:end_chunk_idx])
         else:
-            states_acc.append(torch.sum(intermediate_cache3.view(
-                *intermediate_cache3.shape), dim=1))
+            states_acc.append(
+                torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                          dim=1))
     if inplace:
         return hidden_states
     else:
