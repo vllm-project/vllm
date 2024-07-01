@@ -534,22 +534,22 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     mm_kwargs = self.multi_modal_input_mapper(mm_data)
                     for k, v in mm_kwargs.items():
                         multi_modal_kwargs_list[k].append(v)
-        
-                if prompt_adapter_id > 0:
-                      prompt_adapter_requests.add(
-                          seq_group_metadata.prompt_adapter_request)
 
-                  num_tokens = seq_group_metadata.\
-                                          prompt_adapter_num_virtual_tokens
-                  pm = [prompt_adapter_id
-                        ] * num_tokens + [0] * (query_len - num_tokens)
-                  prompt_adapter_index_mapping += pm
-                  prompt_adapter_prompt_mapping.extend(
-                      [prompt_adapter_id] *
-                      (query_len if seq_group_metadata.sampling_params
-                       and seq_group_metadata.sampling_params.prompt_logprobs
-                       else 1))
-                  
+                if prompt_adapter_id > 0:
+                    prompt_adapter_requests.add(
+                        seq_group_metadata.prompt_adapter_request)
+
+                    num_tokens = seq_group_metadata.\
+                                            prompt_adapter_num_virtual_tokens
+                    pm = [prompt_adapter_id
+                          ] * num_tokens + [0] * (query_len - num_tokens)
+                    prompt_adapter_index_mapping += pm
+                    prompt_adapter_prompt_mapping.extend(
+                        [prompt_adapter_id] *
+                        (query_len if seq_group_metadata.sampling_params
+                         and seq_group_metadata.sampling_params.prompt_logprobs
+                         else 1))
+
                 is_profile_run = _is_block_tables_empty(
                     seq_group_metadata.block_tables)
                 if is_profile_run:
@@ -1072,14 +1072,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         [0] * batch_size,
                     )
                     self.set_active_loras(set(), lora_mapping)
-                    
+
                 if self.prompt_adapter_config:
                     prompt_adapter_mapping = PromptAdapterMapping(
                         [-1] * batch_size,
                         [-1] * batch_size,
                     )
-                    self.set_active_prompt_adapters(set(), 
-                                           prompt_adapter_mapping)
+                    self.set_active_prompt_adapters(set(),
+                                                    prompt_adapter_mapping)
 
                 graph_runner = CUDAGraphRunner(self.model,
                                                self.attn_backend.get_name())
@@ -1187,7 +1187,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             self.set_active_prompt_adapters(
                 model_input.prompt_adapter_requests,
                 model_input.prompt_adapter_mapping)
-            
+
         if self.attn_backend.get_name() == "flashinfer":
             assert model_input.attn_metadata is not None
             assert model_input.input_tokens is not None
