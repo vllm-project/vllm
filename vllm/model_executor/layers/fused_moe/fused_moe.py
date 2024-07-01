@@ -8,9 +8,9 @@ import torch
 import triton
 import triton.language as tl
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-import vllm.envs as envs
 
 logger = init_logger(__name__)
 
