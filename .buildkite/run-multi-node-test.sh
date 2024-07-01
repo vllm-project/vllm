@@ -60,11 +60,14 @@ run_nodes() {
         if [ $node -lt $(($NUM_NODES - 1)) ]; then
             docker exec -d node$node /bin/bash -c "${COMMANDS[$node]}"
         else
-            docker exec /bin/bash -c "${COMMANDS[$node]}"
+            docker exec node$node /bin/bash -c "${COMMANDS[$node]}"
         fi
     done
 }
 cleanup() {
+    for node in $(seq 0 $(($NUM_NODES-1))); do
+        docker stop node$node
+    done
     docker network rm docker-net
 }
 trap cleanup EXIT
