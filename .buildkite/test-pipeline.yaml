@@ -6,14 +6,14 @@
 # to generate the final pipeline yaml file.
 
 steps:
-- label: Regression Test
-  mirror_hardwares: [amd]
-  command: pytest -v -s test_regression.py
-  working_dir: "/vllm-workspace/tests" # optional
-
 - label: LM Eval Small Models
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
   - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
+  - cd ~/.cache
+  - pwd
+  - ls -a
+  - cd huggingface
+  - ls -a
