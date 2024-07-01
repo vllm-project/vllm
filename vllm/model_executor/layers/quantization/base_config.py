@@ -44,8 +44,9 @@ class QuantizationConfig(ABC):
         """List of supported activation dtypes."""
         raise NotImplementedError
 
+    @classmethod
     @abstractmethod
-    def get_min_capability(self) -> int:
+    def get_min_capability(cls) -> int:
         """Minimum GPU capability to support the quantization method.
 
         E.g., 70 for Volta, 75 for Turing, 80 for Ampere.
