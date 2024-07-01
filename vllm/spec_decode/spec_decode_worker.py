@@ -120,7 +120,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                                   ngram_prompt_lookup_max)
         elif draft_worker_kwargs[
                 "model_config"].hf_config.model_type == "mlp_speculator":
+            draft_parallel_config: ParallelConfig = draft_worker_kwargs[
+                'parallel_config']
+            draft_tp = draft_parallel_config.tensor_parallel_size
+            target_tp = scorer_worker.parallel_config.tensor_parallel_size
             proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
+            proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
+                proposer_worker, draft_tp, target_tp)
             disable_bonus_tokens = False
         else:
             draft_parallel_config: ParallelConfig = draft_worker_kwargs[
