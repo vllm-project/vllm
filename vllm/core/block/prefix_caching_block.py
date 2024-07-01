@@ -801,7 +801,6 @@ class PrefixCachingBlock(Block):
         if prev_block_hash is None and not is_first_block:
             return None
 
-        assert len(self.token_ids) > 0
         self._cached_content_hash = PrefixCachingBlock.hash_block_tokens(
             is_first_block,
             prev_block_hash,

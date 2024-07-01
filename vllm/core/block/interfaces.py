@@ -172,10 +172,12 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def cow_block_if_not_appendable(self, block: Block) -> BlockId:
+        """NOTE: This should not be used besides Block"""
         pass
 
     @abstractmethod
     def promote_to_immutable_block(self, block: Block) -> BlockId:
+        """NOTE: This should not be used besides Block"""
         pass
 
     @abstractmethod
