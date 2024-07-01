@@ -296,7 +296,8 @@ class LLMEngine:
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
         self.scheduler = [
-            Scheduler(scheduler_config, cache_config, lora_config, parallel_config.pipeline_parallel_size)
+            Scheduler(scheduler_config, cache_config, lora_config,
+                      parallel_config.pipeline_parallel_size)
             for _ in range(parallel_config.pipeline_parallel_size)
         ]
 

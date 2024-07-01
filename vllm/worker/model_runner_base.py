@@ -138,7 +138,7 @@ class ModelRunnerBase(ABC, Generic[T]):
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        virtual_engine: int,
+        virtual_engine: int = 0,
     ) -> T:
         """
         Prepare the inputs to ModelRunnerBase.execute_model from an execution

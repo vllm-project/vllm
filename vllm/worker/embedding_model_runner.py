@@ -119,7 +119,7 @@ class EmbeddingModelRunner(
     def prepare_model_input(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        virtual_engine: int,
+        virtual_engine: int = 0,
     ) -> ModelInputForGPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(
