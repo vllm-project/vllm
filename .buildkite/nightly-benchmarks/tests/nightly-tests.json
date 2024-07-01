@@ -38,7 +38,7 @@
         }
     },
     {
-        "test_name": "llama8B_tp1",
+        "test_name": "llama8B_tp2",
         "qps_list": [4,8],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B",
