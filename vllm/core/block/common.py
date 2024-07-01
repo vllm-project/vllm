@@ -118,7 +118,8 @@ class CopyOnWriteTracker:
         refcount = self._refcounter.get(block_id)
         return refcount <= 1
 
-    def record_cow(self, src_block_id: BlockId, trg_block_id: BlockId) -> None:
+    def record_cow(self, src_block_id: Optional[BlockId],
+                   trg_block_id: Optional[BlockId]) -> None:
         """Records a copy-on-write operation from source to target block id
         Args:
             src_block_id (BlockId): The source block id from which to copy 
@@ -245,6 +246,16 @@ class BlockList:
         self._block_ids = []
         for block in self._blocks:
             self._add_block_id(block.block_id)
+
+    def append_token_ids(self, block_index: int, token_ids: List[int]) -> None:
+        block = self._blocks[block_index]
+        prev_block_id = block.block_id
+
+        block.append_token_ids(token_ids)
+
+        # CoW or promotion may update the internal block_id
+        if prev_block_id != block.block_id:
+            self._update_block_id(block_index, block.block_id)
 
     def append(self, new_block: Block):
         self._blocks.append(new_block)

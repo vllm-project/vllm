@@ -276,11 +276,3 @@ class DeviceAwareBlockAllocator(ABC):
         There is at most one null block per allocator.
         """
         pass
-
-    @abstractmethod
-    def cow_block_if_not_appendable(self, block: Block) -> BlockId:
-        pass
-
-    @abstractmethod
-    def promote_to_immutable_block(self, block: Block) -> BlockId:
-        pass

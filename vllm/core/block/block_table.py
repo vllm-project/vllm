@@ -150,10 +150,7 @@ class BlockTable:
         token_blocks = self._chunk_token_blocks_for_append(token_ids)
 
         for i, token_block in enumerate(token_blocks):
-            idx = first_block_idx + i
-            block = self._blocks[idx]
-            block.append_token_ids(token_block)
-            self._blocks[idx] = block  # Refresh the cached block_id
+            self._blocks.append_token_ids(first_block_idx + i, token_block)
 
         self._num_full_slots += len(token_ids)
 
@@ -298,16 +295,11 @@ class BlockTable:
             return token_ids
 
         for block in self.blocks:
-            cur_token_ids = block.token_ids
-            if cur_token_ids is not None:
-                token_ids.extend(cur_token_ids)
+            token_ids.extend(block.token_ids)
 
         return token_ids
 
     def _get_num_token_ids(self) -> int:
-        if not self._is_allocated:
-            return 0
-
         res = 0
         for block in self.blocks:
             res += len(block.token_ids)

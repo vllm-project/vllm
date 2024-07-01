@@ -323,14 +323,6 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def all_block_ids(self) -> FrozenSet[int]:
         return frozenset(self._block_ids_to_allocator.keys())
 
-    def promote_to_immutable_block(self, block: Block) -> BlockId:
-        device = Device.GPU
-        return self._allocators[device].promote_to_immutable_block(block)
-
-    def cow_block_if_not_appendable(self, block: Block) -> BlockId:
-        device = Device.GPU
-        return self._allocators[device].cow_block_if_not_appendable(block)
-
     def get_and_reset_swaps(self) -> List[Tuple[int, int]]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
