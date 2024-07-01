@@ -47,14 +47,6 @@ class ImageAsset:
     name: Literal["stop_sign", "cherry_blossom"]
 
     @cached_property
-    def pixel_values(self) -> torch.Tensor:
-        return torch.load(_IMAGE_DIR / f"{self.name}_pixel_values.pt")
-
-    @cached_property
-    def image_features(self) -> torch.Tensor:
-        return torch.load(_IMAGE_DIR / f"{self.name}_image_features.pt")
-
-    @cached_property
     def pil_image(self) -> Image.Image:
         return Image.open(_IMAGE_DIR / f"{self.name}.jpg")
 

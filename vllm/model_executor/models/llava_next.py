@@ -232,6 +232,9 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
 
+        if pixel_values is None or image_sizes is None:
+            return None
+
         if not isinstance(pixel_values, torch.Tensor):
             raise ValueError("Incorrect type of pixel values. "
                              f"Got type: {type(pixel_values)}")

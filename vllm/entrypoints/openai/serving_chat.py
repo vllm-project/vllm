@@ -26,9 +26,8 @@ from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
-from vllm.multimodal.image import ImageData
-from vllm.multimodal.utils import (async_get_and_parse_image,
-                                   get_full_image_text_prompt)
+from vllm.multimodal import ExternalMultiModalDataDict
+from vllm.multimodal.utils import get_full_image_text_prompt, ImageFetchAiohttp
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
@@ -47,7 +46,7 @@ class ConversationMessage(TypedDict):
 @dataclass(frozen=True)
 class ChatMessageParseResult:
     messages: List[ConversationMessage]
-    image_futures: List[Awaitable[ImageData]] = field(default_factory=list)
+    mm_futures: List[Awaitable[ExternalMultiModalDataDict]] = field(default_factory=list)
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -102,7 +101,7 @@ class OpenAIServingChat(OpenAIServing):
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
         texts: List[str] = []
-        image_futures: List[Awaitable[ImageData]] = []
+        mm_futures: List[Awaitable[ExternalMultiModalDataDict]] = []
 
         vlm_config: Optional[VisionLanguageConfig] = getattr(
             self.engine.engine, "vision_language_config", None)
@@ -112,39 +111,36 @@ class OpenAIServingChat(OpenAIServing):
             part_type = part["type"]
             if part_type == "text":
                 text = cast(ChatCompletionContentPartTextParam, part)["text"]
-
                 texts.append(text)
             elif part_type == "image_url":
                 if vlm_config is None:
                     raise ValueError(
                         "'image_url' input is not supported as the loaded "
                         "model is not multimodal.")
+                assert self.tokenizer is not None
+                image_url = cast(ChatCompletionContentPartImageParam,
+                                    part)["image_url"]
 
-                elif len(image_futures) == 0:
-                    assert self.tokenizer is not None
-                    image_url = cast(ChatCompletionContentPartImageParam,
-                                     part)["image_url"]
+                if image_url.get("detail", "auto") != "auto":
+                    logger.warning(
+                        "'image_url.detail' is currently not supported and "
+                        "will be ignored.")
 
-                    if image_url.get("detail", "auto") != "auto":
-                        logger.warning(
-                            "'image_url.detail' is currently not supported and "
-                            "will be ignored.")
+                async def async_get_and_parse_image(image_url: str):
+                    with await ImageFetchAiohttp.fetch_image(image_url) as image:
+                        return {"image": image}
 
-                    image_future = async_get_and_parse_image(image_url["url"])
-                    image_futures.append(image_future)
-
-                else:
-                    raise NotImplementedError(
-                        "Multiple 'image_url' input is currently not supported."
-                    )
+                mm_future = async_get_and_parse_image(image_url["url"])
+                mm_futures.append(mm_future)
 
             else:
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 
         text_prompt = "\n".join(texts)
 
-        if vlm_config is not None and len(image_futures):
-
+        if vlm_config is not None and len(mm_futures):
+            
+            assert len(mm_futures) == 1, "Multiple images is not supported."
             (image_token_prompt,
              image_token_str) = vlm_config.get_image_token_text(self.tokenizer)
 
@@ -171,7 +167,7 @@ class OpenAIServingChat(OpenAIServing):
             messages = [ConversationMessage(role=role, content=text_prompt)]
 
         return ChatMessageParseResult(messages=messages,
-                                      image_futures=image_futures)
+                                      mm_futures=mm_futures)
 
     def _parse_chat_message_content(
         self,
@@ -181,10 +177,10 @@ class OpenAIServingChat(OpenAIServing):
         content = message.get("content")
 
         if content is None:
-            return ChatMessageParseResult(messages=[], image_futures=[])
+            return ChatMessageParseResult(messages=[], mm_futures=[])
         if isinstance(content, str):
             messages = [ConversationMessage(role=role, content=content)]
-            return ChatMessageParseResult(messages=messages, image_futures=[])
+            return ChatMessageParseResult(messages=messages, mm_futures=[])
 
         return self._parse_chat_message_content_parts(role, content)
 
@@ -209,13 +205,13 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             conversation: List[ConversationMessage] = []
-            image_futures: List[Awaitable[ImageData]] = []
+            mm_futures: List[Awaitable[ExternalMultiModalDataDict]] = []
 
             for msg in request.messages:
                 chat_parsed_result = self._parse_chat_message_content(msg)
 
                 conversation.extend(chat_parsed_result.messages)
-                image_futures.extend(chat_parsed_result.image_futures)
+                mm_futures.extend(chat_parsed_result.mm_futures)
 
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
@@ -226,15 +222,14 @@ class OpenAIServingChat(OpenAIServing):
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
 
-        # Fetch image data
-        image_data: Optional[ImageData] = None
+        mm_data: Optional[ExternalMultiModalDataDict] = None
         try:
-            if len(image_futures):
-                # since we support only single image currently
-                assert len(image_futures) == 1
-                image_data = await image_futures[0]
+            if len(mm_futures):
+                # since we support only single mm data currently
+                assert len(mm_futures) == 1
+                mm_data = await mm_futures[0]
         except Exception as e:
-            logger.error("Error in loading image data: %s", e)
+            logger.error("Error in loading multi-modal data: %s", e)
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
@@ -265,8 +260,8 @@ class OpenAIServingChat(OpenAIServing):
             "prompt": prompt_text,
             "prompt_token_ids": prompt_ids,
         }
-        if image_data is not None:
-            inputs["multi_modal_data"] = image_data
+        if mm_data is not None:
+            inputs["multi_modal_data"] = mm_data
 
         is_tracing_enabled = await self.engine.is_tracing_enabled()
         trace_headers = None
