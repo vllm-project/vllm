@@ -89,8 +89,17 @@ async def patch_check_model(request) -> Optional[JSONResponse]:
 
 
 async def origin_serving_self_check_model(self, request):
-    if request.model == self.served_model:
-        return
+    # if request.model == self.served_model:
+    #     return
+    # return self.create_error_response(
+    #     message=f"The model `{request.model}` does not exist.",
+    #     err_type="NotFoundError",
+    #     status_code=HTTPStatus.NOT_FOUND)
+
+    if request.model in self.served_model_names:
+        return None
+    # if request.model in [lora.lora_name for lora in self.lora_requests]:
+    #     return None
     return self.create_error_response(
         message=f"The model `{request.model}` does not exist.",
         err_type="NotFoundError",
@@ -184,7 +193,7 @@ async def patch_get_gen_prompt(request) -> str:
 
 
 def patch_api_server():
-    print("load monkey_patch_api_request_v2")
+    # print("load monkey_patch_api_request_v4")
     from vllm.entrypoints.openai import protocol
     protocol.ChatMessage = ChatMessageEx
     protocol.ChatCompletionResponseChoice = ChatCompletionResponseChoiceEx
