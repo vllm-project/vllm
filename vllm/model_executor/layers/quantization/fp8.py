@@ -11,7 +11,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -286,25 +285,6 @@ class Fp8KVCacheMethod(BaseKVCacheMethod):
 
     def __init__(self, quant_config: Fp8Config):
         super().__init__(quant_config)
-
-    def create_weights(self, layer: torch.nn.Module):
-        layer.kv_scale = Parameter(torch.tensor(1.0), requires_grad=False)
-
-    def process_weights_after_loading(self, layer: Module) -> None:
-        # If the kv-cache dtype is auto, we enforce the kv-scale to be 1.0
-        # regardless whether the kv-scale is available in the checkpoint.
-        if layer.kv_cache_dtype != "auto":
-            kv_scale = layer.kv_scale.to("cpu").tolist()
-            if not isinstance(kv_scale, float):
-                raise ValueError("Only support per-tensor scaling factor "
-                                 "for fp8 KV cache")
-            layer._kv_scale = kv_scale
-            if layer._kv_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
-                print_warning_once(
-                    "Using KV cache scaling factor 1.0 for fp8_e4m3. This may "
-                    "cause accuracy issues. Please make sure kv-cache scaling "
-                    "factor is available in the fp8 checkpoint.")
-        del layer.kv_scale
 
 
 def all_close_1d(x: torch.Tensor) -> bool:

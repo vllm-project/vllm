@@ -188,7 +188,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
 
     def __init__(self, quant_config: CompressedTensorsConfig):
         self.validate_kv_cache_scheme(quant_config.kv_cache_scheme)
-        super().__init__(quant_config)
+        super().__init__(quant_config, needs_scale_merging=True)
 
     @staticmethod
     def validate_kv_cache_scheme(kv_cache_scheme: Optional[Dict[str, Any]]):
@@ -208,6 +208,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 "Only support per-tensor scaling factor "
                 "for compressed-tensors KV cache. "
                 f"Expected strategy: tensor, found strategy: {strategy}")
+
         is_symmetric = kv_cache_scheme.get("symmetric")
         if not is_symmetric:
             raise ValueError("Only support symmetric scaling factor "

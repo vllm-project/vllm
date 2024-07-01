@@ -17,12 +17,12 @@ def get_compressed_tensors_cache_scale(name: str) -> Optional[str]:
     :return: matching param name for KV cache scale in vLLM
     """
     remapped_scale_name = None
-    if name.endswith("input_scale") and "k_proj" in name:
-        remapped_scale_name = name.replace(".k_proj.input_scale",
-                                           ".attn.k_scale")
-    elif name.endswith("input_scale") and "v_proj" in name:
-        remapped_scale_name = name.replace(".v_proj.input_scale",
-                                           ".attn.v_scale")
+    if name.endswith("output_scale") and "k_proj" in name:
+        remapped_scale_name = name.replace("k_proj.output_scale",
+                                           "attn._k_scale")
+    elif name.endswith("output_scale") and "v_proj" in name:
+        remapped_scale_name = name.replace("v_proj.output_scale",
+                                           "attn._v_scale")
     return remapped_scale_name
 
 
