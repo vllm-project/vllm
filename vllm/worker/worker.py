@@ -48,6 +48,7 @@ class Worker(LocalOrDistributedWorkerBase):
         speculative_config: Optional[SpeculativeConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
+        model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -82,7 +83,9 @@ class Worker(LocalOrDistributedWorkerBase):
                   "mlp_speculator") else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if self.model_config.embedding_mode:
+        if model_runner_cls is not None:
+            ModelRunnerClass = model_runner_cls
+        elif self.model_config.embedding_mode:
             ModelRunnerClass = EmbeddingModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             model_config,
