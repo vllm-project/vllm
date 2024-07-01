@@ -107,9 +107,9 @@ class Medusa(nn.Module):
             outputs.append(
                 SamplerOutput(
                     outputs=None,
-                    sampled_token_probs=token_prob_list[idx].squeeze(),
-                    logprobs=token_logprob_list[idx].squeeze(),
-                    sampled_token_ids=token_id_list[idx].squeeze(),
+                    sampled_token_probs=token_prob_list[idx].squeeze(1),
+                    logprobs=token_logprob_list[idx].squeeze(1),
+                    sampled_token_ids=token_id_list[idx].squeeze(1),
                 ))
 
         return outputs
