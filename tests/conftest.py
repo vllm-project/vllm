@@ -5,8 +5,8 @@ from collections import UserList
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import (Any, Dict, List, Literal, Optional, Tuple, TypedDict,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple,
+                    TypedDict, TypeVar)
 
 import pytest
 import torch
@@ -22,9 +22,12 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalDataDict
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
+
+if TYPE_CHECKING:
+    # it will call torch.cuda.device_count()
+    from vllm.multimodal import MultiModalDataDict
 
 logger = init_logger(__name__)
 
@@ -428,7 +431,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[List[MultiModalDataDict]] = None,
+        images: Optional[List["MultiModalDataDict"]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -477,7 +480,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[List[MultiModalDataDict]] = None,
+        images: Optional[List["MultiModalDataDict"]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)
