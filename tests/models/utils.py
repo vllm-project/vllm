@@ -1,7 +1,9 @@
 import warnings
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple, Union
 
-from vllm.sequence import SampleLogprobs
+if TYPE_CHECKING:
+    # it may call torch.cuda.device_count()
+    from vllm.sequence import SampleLogprobs
 
 TokensText = Tuple[List[int], str]
 
@@ -36,7 +38,7 @@ def check_outputs_equal(
 
 TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
                                                                     float]],
-                                                          SampleLogprobs]]]
+                                                          "SampleLogprobs"]]]
 
 
 def check_logprobs_close(

@@ -1,15 +1,18 @@
 import re
-from typing import List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, List, Optional, Tuple, Type
 
 import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
-from vllm.sequence import SampleLogprobs
 from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
+
+if TYPE_CHECKING:
+    # it may call torch.cuda.device_count()
+    from vllm.sequence import SampleLogprobs
 
 pytestmark = pytest.mark.vlm
 
@@ -46,7 +49,7 @@ model_and_vl_config = [
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
-                                         Optional[SampleLogprobs]],
+                                         Optional["SampleLogprobs"]],
                       vlm_config: VisionLanguageConfig, model_id: str):
     """Sanitize vllm output to be comparable with hf output.
     The function reduces `input_ids` from 1, 32000, 32000, ..., 32000,
