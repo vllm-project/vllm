@@ -422,4 +422,5 @@ ASYNC_REQUEST_FUNCS = {
     "openai": async_request_openai_completions,
     "openai-chat": async_request_openai_chat_completions,
     "tensorrt-llm": async_request_trt_llm,
+    "scalellm": async_request_openai_completions,
 }
