@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
@@ -103,19 +103,18 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Device.CPU: cpu_block_allocator,
             Device.GPU: gpu_block_allocator,
         }
+        self.cpu_block_allocator = cpu_block_allocator
+        self.gpu_block_allocator = gpu_block_allocator
 
         self._swap_mapping: Dict[int, int] = {}
         self._null_block: Optional[Block] = None
 
-        def _block_ids_to_allocator(block_id):
-            if cpu_block_allocator.block_index_start <= block_id < cpu_block_allocator.block_index_end:  # noqa
-                return cpu_block_allocator
-            if gpu_block_allocator.block_index_start <= block_id < gpu_block_allocator.block_index_end:  # noqa
-                return gpu_block_allocator
-            raise RuntimeError(f"unrecognized {block_id=}")
-
-        self._block_ids_to_allocator: Callable[
-            [int], BlockAllocator] = _block_ids_to_allocator
+    def block_ids_to_allocator(self, block_id: int) -> BlockAllocator:
+        if self.cpu_block_allocator.block_index_start <= block_id < self.cpu_block_allocator.block_index_end:  # noqa
+            return self.cpu_block_allocator
+        if self.gpu_block_allocator.block_index_start <= block_id < self.gpu_block_allocator.block_index_end:  # noqa
+            return self.gpu_block_allocator
+        raise RuntimeError(f"unrecognized {block_id=}")
 
     def allocate_or_get_null_block(self) -> Block:
         if self._null_block is None:
@@ -167,7 +166,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             return
         block_id = block.block_id
         assert block_id is not None
-        allocator = self._block_ids_to_allocator(block_id)
+        allocator = self.block_ids_to_allocator(block_id)
         return allocator.free(block)
 
     def fork(self, last_block: Block) -> List[Block]:
@@ -185,7 +184,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         assert not isinstance(last_block, NullBlock)
         block_id = last_block.block_id
         assert block_id is not None
-        allocator = self._block_ids_to_allocator(block_id)
+        allocator = self.block_ids_to_allocator(block_id)
         return allocator.fork(last_block)
 
     def get_num_free_blocks(self, device: Device) -> int:
