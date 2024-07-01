@@ -285,7 +285,6 @@ class OpenAIServingCompletion(OpenAIServing):
                                 stop_reason=stop_reason,
                             )
                         ])
-
                     if (request.stream_options
                             and request.stream_options.include_usage):
                         if (request.stream_options.continuous_usage_stats
