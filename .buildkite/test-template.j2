@@ -10,5 +10,5 @@ steps:
     commands:
       - "echo 'Running on 4 GPUs multi-node'"
       - docker network create --subnet=192.168.10.0/24 docker-net
-      - docker run --gpus 'device=0,1' -it --network docker-net --ip 192.168.10.10 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:614aa5120303ab09be78fb1db669da198cc43b02 nvidia-smi
-      - docker run --gpus 'device=2,3' -it --network docker-net --ip 192.168.10.11 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:614aa5120303ab09be78fb1db669da198cc43b02 nvidia-smi
+      - docker run --gpus '"device=0,1"' -it --network docker-net --ip 192.168.10.10 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:614aa5120303ab09be78fb1db669da198cc43b02 nvidia-smi
+      - docker run --gpus '"device=2,3"' -it --network docker-net --ip 192.168.10.11 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:614aa5120303ab09be78fb1db669da198cc43b02 nvidia-smi
