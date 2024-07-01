@@ -34,7 +34,7 @@ start_network() {
 start_nodes() {
     for node in $(seq 0 $(($NUM_NODES-1))); do
         GPU_DEVICES="'"
-        GPU_DEVICES+='device="'
+        GPU_DEVICES+='"device='
         for node_gpu in $(seq 0 $(($NUM_GPUS - 1))); do
             DEVICE_NUM=$(($node * $NUM_GPUS + $node_gpu))
             GPU_DEVICES+=$(($DEVICE_NUM))
