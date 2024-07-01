@@ -16,4 +16,4 @@ steps:
       - docker run --gpus '"device={% for gpu in range(step.num_gpus) %}{{ node * step.num_gpus + gpu }}{% if not loop.last %},{% endif %}{% endfor %}"' -it --network docker-net --ip 192.168.10.{{ node }} public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:614aa5120303ab09be78fb1db669da198cc43b02 nvidia-smi
       {% endfor %}
   {% endif %}
-  {% else %}
+  {% endfor %}
