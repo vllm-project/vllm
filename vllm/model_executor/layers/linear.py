@@ -102,7 +102,7 @@ class LinearMethodBase(QuantizeMethodBase):
                            hidden_size: int, intermediate_size: int,
                            params_dtype: torch.dtype, **extra_weight_attrs):
         raise NotImplementedError(
-            "Moe models are not supported for this LinearMethod")
+            "Moe models are not yet supported for your LinearMethod")
 
     def apply_moe(self,
                   layer: torch.nn.Module,
@@ -111,7 +111,7 @@ class LinearMethodBase(QuantizeMethodBase):
                   top_k: int,
                   renormalize: bool = True) -> torch.Tensor:
         raise NotImplementedError(
-            "Moe models are not supported for this LinearMethod")
+            "Moe models are not yet supported for your LinearMethod")
 
 
 class UnquantizedLinearMethod(LinearMethodBase):
