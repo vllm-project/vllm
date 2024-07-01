@@ -34,6 +34,7 @@ class Attention(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        max_seq_len: Optional[int] = 4096,
     ) -> None:
         super().__init__()
         if cache_config is not None:
@@ -81,7 +82,7 @@ class Attention(nn.Module):
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params)
+                             blocksparse_params, max_seq_len)
 
     def forward(
         self,
