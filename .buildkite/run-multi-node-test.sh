@@ -68,7 +68,7 @@ cleanup() {
     docker network rm docker-net
 }
 trap cleanup EXIT
-#start_network
-#start_nodes
-#run_nodes
+start_network
+start_nodes
+run_nodes
 
