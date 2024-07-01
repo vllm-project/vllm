@@ -218,7 +218,9 @@ class OpenAIServingChat(OpenAIServing):
                 conversation.extend(chat_parsed_result.messages)
                 image_futures.extend(chat_parsed_result.image_futures)
 
-            tool_dicts = [tool.model_dump() for tool in (request.tools or [])]
+            tool_dicts = None if request.tools is None else [
+                tool.model_dump() for tool in request.tools
+            ]
 
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
