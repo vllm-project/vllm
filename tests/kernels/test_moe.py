@@ -29,7 +29,7 @@ def torch_moe(a, w1, w2, score, topk):
             topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
 
 
-@pytest.mark.parametrize("m", [512, 222, 33, 1])
+@pytest.mark.parametrize("m", [1024 * 128, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("e", [8, 64])
