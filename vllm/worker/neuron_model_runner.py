@@ -207,7 +207,12 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self,
         model_input: ModelInputForNeuron,
         kv_caches: Optional[List[torch.Tensor]] = None,
-    ) -> Optional[SamplerOutput]:
+        num_steps: int = 1,
+    ) -> Optional[List[SamplerOutput]]:
+        if num_steps > 1:
+            raise ValueError(
+                "NeuronModelRunner does not support multi-step execution.")
+
         hidden_states = self.model(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -223,7 +228,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        return output
+        return [output]
 
     @property
     def vocab_size(self) -> int:
