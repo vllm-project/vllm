@@ -99,7 +99,7 @@ class LinearMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
     def create_weights_moe(self, layer: torch.nn.Module,
-                           num_total_experts: int, hidden_size: int,
+                           num_experts: int, hidden_size: int,
                            intermediate_size: int, params_dtype: torch.dtype,
                            **extra_weight_attrs):
         raise NotImplementedError(
@@ -151,12 +151,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return F.linear(x, weight, bias)
 
     def create_weights_moe(self, layer: torch.nn.Module,
-                           num_total_experts: int, hidden_size: int,
+                           num_experts: int, hidden_size: int,
                            intermediate_size: int, params_dtype: torch.dtype,
                            **extra_weight_attrs):
 
         # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(torch.empty(num_total_experts,
+        w13_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                     2 * intermediate_size,
                                                     hidden_size,
                                                     dtype=params_dtype),
@@ -165,7 +165,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(torch.empty(num_total_experts,
+        w2_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                    hidden_size,
                                                    intermediate_size,
                                                    dtype=params_dtype),
@@ -852,7 +852,7 @@ class FusedMoELinear(torch.nn.Module):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = top_k
-        self.num_total_experts = num_experts
+        self.num_experts = num_experts
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
         self.renormalize = renormalize
@@ -866,7 +866,7 @@ class FusedMoELinear(torch.nn.Module):
 
         self.quant_method.create_weights_moe(
             layer=self,
-            num_total_experts=num_experts,
+            num_experts=num_experts,
             hidden_size=hidden_size,
             intermediate_size=self.intermediate_size_per_partition,
             params_dtype=params_dtype,

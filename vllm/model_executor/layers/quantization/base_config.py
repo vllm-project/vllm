@@ -24,7 +24,7 @@ class QuantizeMethodBase(ABC):
         raise NotImplementedError
 
     def create_weights_moe(self, layer: torch.nn.Module,
-                           num_total_experts: int, hidden_size: int,
+                           num_experts: int, hidden_size: int,
                            intermediate_size: int, params_dtype: torch.dtype,
                            **extra_weight_attrs):
         raise NotImplementedError(

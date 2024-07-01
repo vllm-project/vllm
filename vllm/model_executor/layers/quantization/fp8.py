@@ -169,7 +169,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     output_partition_sizes=output_partition_sizes,
                     **extra_weight_attrs)
 
-    def create_weights_moe(self, layer: Module, num_total_experts: int,
+    def create_weights_moe(self, layer: Module, num_experts: int,
                            hidden_size: int, intermediate_size: int,
                            params_dtype: torch.dtype, **extra_weight_attrs):
 
@@ -180,7 +180,7 @@ class Fp8LinearMethod(LinearMethodBase):
             params_dtype = torch.float8_e4m3fn
 
         # WEIGHTS
-        w13_weight = torch.nn.Parameter(torch.empty(num_total_experts,
+        w13_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                     2 * intermediate_size,
                                                     hidden_size,
                                                     dtype=params_dtype),
@@ -188,7 +188,7 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
-        w2_weight = torch.nn.Parameter(torch.empty(num_total_experts,
+        w2_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                    hidden_size,
                                                    intermediate_size,
                                                    dtype=params_dtype),
@@ -199,13 +199,13 @@ class Fp8LinearMethod(LinearMethodBase):
         # WEIGHT_SCALES
         # Allocate 2 scales for w1 and w3 respectively.
         # They will be combined to a single scale after weight loading.
-        w13_scale = torch.nn.Parameter(torch.ones(num_total_experts,
+        w13_scale = torch.nn.Parameter(torch.ones(num_experts,
                                                   2,
                                                   dtype=torch.float32),
                                        requires_grad=False)
         layer.register_parameter("w13_scale", w13_scale)
 
-        w2_scale = torch.nn.Parameter(torch.ones(num_total_experts,
+        w2_scale = torch.nn.Parameter(torch.ones(num_experts,
                                                  dtype=torch.float32),
                                       requires_grad=False)
         layer.register_parameter("w2_scale", w2_scale)
@@ -224,13 +224,13 @@ class Fp8LinearMethod(LinearMethodBase):
                     "Found static activation scheme for checkpoint that "
                     "was not serialized fp8.")
 
-            a13_scale = torch.nn.Parameter(torch.ones(num_total_experts,
+            a13_scale = torch.nn.Parameter(torch.ones(num_experts,
                                                       dtype=torch.float32),
                                            requires_grad=False)
             layer.register_parameter("a13_scale", a13_scale)
             set_weight_attrs(a13_scale, extra_weight_attrs)
 
-            a2_scale = torch.nn.Parameter(torch.ones(num_total_experts,
+            a2_scale = torch.nn.Parameter(torch.ones(num_experts,
                                                      dtype=torch.float32),
                                           requires_grad=False)
             layer.register_parameter("a2_scale", a2_scale)
@@ -309,11 +309,11 @@ class Fp8LinearMethod(LinearMethodBase):
             # Re-initialize w13_scale because we directly quantize
             # merged w13 weights and generate a single scaling factor.
             layer.w13_scale = torch.nn.Parameter(torch.ones(
-                layer.num_total_experts,
+                layer.num_experts,
                 dtype=torch.float32,
                 device=w13_weight.device),
                                                  requires_grad=False)
-            for expert in range(layer.num_total_experts):
+            for expert in range(layer.num_experts):
                 w13_weight[expert, :, :], layer.w13_scale[
                     expert] = ops.scaled_fp8_quant(
                         layer.w13_weight.data[expert, :, :])
@@ -353,7 +353,7 @@ class Fp8LinearMethod(LinearMethodBase):
             assert layer.w13_scale is not None
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_scale.max(dim=1).values
-            for expert_id in range(layer.num_total_experts):
+            for expert_id in range(layer.num_experts):
                 start = 0
                 for shard_id in range(2):
                     dq_weight = per_tensor_dequantize(
