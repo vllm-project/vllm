@@ -231,10 +231,8 @@ def run_server(args, llm_engine=None):
             "vision language models with the vLLM API server.")
 
     engine = (llm_engine
-                if llm_engine is not None
-                else AsyncLLMEngine.from_engine_args(
-                    engine_args, usage_context=UsageContext.OPENAI_API_SERVER))
-
+              if llm_engine is not None else AsyncLLMEngine.from_engine_args(
+                  engine_args, usage_context=UsageContext.OPENAI_API_SERVER))
 
     event_loop: Optional[asyncio.AbstractEventLoop]
     try:
