@@ -25,7 +25,7 @@ Lets say you have a classification problem. You want to classify sentences as po
 * Let: 0.1
 * All others: 0.1
 
-This poses a problem because if it does select one of the other possibilites, downstream processes will break. It is possible to prompt engineer this with varying success, but there is a better option.
+This poses a problem because if it does select one of the other possibilities, downstream processes will break. It is possible to prompt engineer this with varying success, but there is a better option.
 
 **Guided Decoding with Guided Choice:**
 
@@ -39,9 +39,9 @@ In this case, the LLM's output would be sampled from a restricted probability di
 * Let: 0.0 (excluded from sampling)
 * All others: 0.0 (excluded from sampling)
 
-By guiding the output towards the desired options, we can increase the accuracy and relevance of the response ensure reliability on downstream tasks.
+By guiding the output toward the desired options, we can increase the accuracy and relevance of the response and ensure reliability on downstream tasks.
 
-In this demo, we primarily use the OpenAI endpoint with the Outlines library. However, many of these concepts are applicable with the offline LLM class and/or post requests from the command line. For more information, see
+In this demo, we primarily use the OpenAI endpoint with the Outlines library. However, many of these concepts are applicable to the offline LLM class and/or POST requests from the command line. For more information, see
 * [VLLM OpenAI Documentation](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#extra-parameters)
 * [OpenAI Documentation](https://platform.openai.com/docs/api-reference/introduction)
 * [Outlines Github](https://github.com/outlines-dev/outlines), [Outlines Documentation](https://outlines-dev.github.io/outlines/reference/)
@@ -50,7 +50,7 @@ In this demo, we primarily use the OpenAI endpoint with the Outlines library. Ho
 
 ```python
 from openai import OpenAI
-model = 'http://10.72.5.190:5006/v1'
+model = 'http://0.0.0.0:5000/v1'
 
 client = OpenAI(
     api_key="EMPTY",
@@ -61,13 +61,13 @@ model_name = client.models.list().data[0].id # Grab the model name from the API
 
 ## Guided JSON <a id='guided-json'></a>
 
-Outlines can make any open source model return a JSON object that follows a structure that is specified by the user. This is useful whenever we want the output of the model to be processed by code downstream: code does not understand natural language but rather the structured language it has been programmed to understand. 
+Outlines can make any open-source model return a JSON object that follows a structure that is specified by the user. This is useful whenever we want the output of the model to be processed by code downstream: code does not understand natural language but rather the structured language it has been programmed to understand. 
 
 Source: [Outlines Reference](https://outlines-dev.github.io/outlines/reference/json/)
 
 JSON Schemas: [JSON Schema](https://json-schema.org/learn/getting-started-step-by-step)
 
-To start, we need to specify the JSON schema. This may be done with the `pydantic` package and the `BaseModel`. Here, we are able to simply define the variables in the JSON as well as their types. `pydantic` converts this class into the schema that the LLM may use.
+To start, we need to specify the JSON schema. This may be done with the `pydantic` package and the `BaseModel`. Here, we are able to define the variables in the JSON as well as their types. `pydantic` converts this class into the schema that the LLM may use.
 
 
 ```python
@@ -102,7 +102,7 @@ print(json.dumps(user_schema, indent=4))
     }
     
 
-Using this schema, we may construct the model prompt. Here, we give the model our instruction, the schema, and the sentence. Note that while outlines does force the output to conform to the JSON schema, it is still useful to tell the model what that schema actually is. Remember, at their core, LLMs are next-token predictors, they do well when the tokens you want are easy to understand with the information given.
+Using this schema, we may construct the model prompt. Here, we give the model our instruction, the schema, and the sentence. Note that while outlines does force the output to conform to the JSON schema, it is still useful to tell the model what that schema is. Remember, at their core, LLMs are next-token predictors, they do well when the tokens you want are easy to understand with the information given.
 
 Using this prompt, we construct the messages object and call the LLM using the client object from earlier. Note that we include the `user_schema` as part of the `guided_json` in the `extra_body`. You may do a similar operation with curl or offline LLM.
 
@@ -159,11 +159,11 @@ Regular expressions (regex) provide a powerful way to match and validate pattern
 
 Source: [Outlines Reference](https://outlines-dev.github.io/outlines/reference/regex/)
 
-**Note** The backend cannot currently support all types of regex characters. Some characters such as `^`, `\A` and `$` are not supported and will return an error. In general, it seems like only single line outputs work.
+**Note** The backend cannot currently support all types of regex characters. Some characters such as `^`, `\A`, and `$` are not supported and will return an error. In general, it seems like only single-line outputs work.
 
 
 ```python
-# regex = r"((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)" # More complex example which includes full possible range.
+# regex = r"((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)" # More complex example which includes the full possible range.
 regex = r'\d\.\d\.\d\.\d'
 prompt = 'What is the IP address of the Google DNS servers?'
 messages = [{"role": "user", "content": prompt}]
@@ -207,7 +207,7 @@ In some cases, you may want to limit the output of the language model to a speci
 
 Source: [Outlines Reference](https://outlines-dev.github.io/outlines/reference/choices/)
 
-Let's consider the example from the intro. We have a bunch of sentences that we want to classify as positive or negative. Without guided decoding, the model gives a long response that would be nearly impossible to parse. With guided decoding, the model gives a single word answer that is easy to use in downstream tasks.
+Let's consider the example from the intro. We have a bunch of sentences that we want to classify as positive or negative. Without guided decoding, the model gives a long response that would be nearly impossible to parse. With guided decoding, the model provides a single-word answer that is easy to use in downstream tasks.
 
 
 ```python
@@ -247,7 +247,7 @@ Guided Grammar is a guided decoding technique that allows you to constrain the o
 
 By specifying a guided grammar, you can influence the LLM's output to generate text that meets specific grammatical requirements, such as sentence structure, part-of-speech tags, or even domain-specific terminology. This can be particularly useful in applications where the output needs to conform to specific formatting or stylistic guidelines, such as generating code, writing reports, or creating content that meets specific regulatory requirements.
 
-For example, you might use guided grammar to ensure that an LLM generates sentences with a specific subject-verb-object word order, or to restrict the output to a specific domain-specific vocabulary. By guiding the output towards a specific grammatical structure, you can increase the accuracy, relevance, and overall quality of the response.
+For example, you might use guided grammar to ensure that an LLM generates sentences with a specific subject-verb-object word order or to restrict the output to a specific domain-specific vocabulary. By guiding the output towards a specific grammatical structure, you can increase the accuracy, relevance, and overall quality of the response.
 
 Source: [Outlines Reference](https://outlines-dev.github.io/outlines/reference/cfg/)
 
