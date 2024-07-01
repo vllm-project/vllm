@@ -72,6 +72,12 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
+        # TODO: there might be a more elegant way to do that
+        # for now, just copy the score attribute over
+        # ideally, 'score' should be an attribute of the beam
+        if outputs.score:
+            seq_group.score = outputs.score
+
         # Process samples
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)

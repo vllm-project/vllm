@@ -1154,6 +1154,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             sampling_metadata=model_input.sampling_metadata,
         )
 
+        # hidden_states: [sequence_length, hidden_dimension]
+        # we generate a single score for each sequence
+        score = self.model.forward_with_aux_head(hidden_states)
+
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
             assert model_input.sampling_metadata is not None
@@ -1164,6 +1168,17 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_states = hidden_states[:len(indices)]
 
             output.hidden_states = hidden_states
+
+        # TODO: needs more testing
+        # Checks for each sequence group, if we are currently processing the
+        # prompt and saves the score if that's the case. The score is an attribute
+        # of the CompletionSequenceGroupOutput i.e. of a single beam in beam search
+        # Note: this limits us for now to doing score prediction based on the
+        # last hidden state in the prompt
+        # pdb.set_trace()
+        for seq_group, out in zip(model_input.sampling_metadata.seq_groups, output.outputs):
+            if seq_group.is_prompt:
+                out.score = score.to('cpu').item()
 
         return [output]
 

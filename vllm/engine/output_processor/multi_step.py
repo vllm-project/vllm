@@ -76,6 +76,13 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
 
+        # We have a single sequence per sequence group, with potentially
+        # multiple predicted tokens, we try to find the 'token' position
+        # for which the score has been generated as well
+        for output in outputs:
+            if output.score:
+                seq.score = output.score
+
         # Since there's only one sequence per sequence group, we can take the
         # first sample.
         samples = [output.samples[0] for output in outputs]

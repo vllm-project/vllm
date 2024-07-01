@@ -399,6 +399,7 @@ class SequenceGroup:
         sampling_params: Optional[SamplingParams] = None,
         lora_request: Optional[LoRARequest] = None,
         embeddings: Optional[List[float]] = None,
+        score: Optional[float] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Dict[str, str]] = None,
@@ -415,6 +416,7 @@ class SequenceGroup:
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
         self.embeddings = embeddings
+        self.score = score
         self.pooling_params = pooling_params
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
@@ -567,7 +569,8 @@ class SequenceGroup:
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "
                 f"sampling_params={self.sampling_params}, "
-                f"num_seqs={len(self.seqs_dict)})")
+                f"num_seqs={len(self.seqs_dict)}, "
+                f"score={self.score})")
 
 
 class SequenceGroupMetadata:
@@ -710,14 +713,17 @@ class CompletionSequenceGroupOutput(SequenceGroupOutput):
         self,
         samples: List[SequenceOutput],
         prompt_logprobs: Optional[PromptLogprobs],
+        score: Optional[float] = None,
     ) -> None:
         self.samples = samples
+        self.score = score
         # Prompt logprob for each prompt query token.
         self.prompt_logprobs = prompt_logprobs
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "
-                f"prompt_logprobs={self.prompt_logprobs})")
+                f"prompt_logprobs={self.prompt_logprobs}, "
+                f"score={self.score})")
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, CompletionSequenceGroupOutput):

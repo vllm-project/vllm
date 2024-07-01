@@ -86,6 +86,7 @@ class RequestOutput:
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
+        score: float = None,
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
@@ -97,6 +98,7 @@ class RequestOutput:
         self.finished = finished
         self.metrics = metrics
         self.lora_request = lora_request
+        self.score = score
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
@@ -137,6 +139,7 @@ class RequestOutput:
         prompt = seq_group.prompt
         prompt_token_ids = seq_group.prompt_token_ids
         prompt_logprobs = seq_group.prompt_logprobs
+        score = seq_group.score
         finished = seq_group.is_finished()
         finished_time = time.time() if finished else None
         seq_group.set_finished_time(finished_time)
@@ -146,6 +149,7 @@ class RequestOutput:
                    prompt_logprobs,
                    outputs,
                    finished,
+                   score, # TODO
                    seq_group.metrics,
                    lora_request=seq_group.lora_request)
 
@@ -155,6 +159,7 @@ class RequestOutput:
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
                 f"outputs={self.outputs}, "
+                f"score={self.score}, "
                 f"finished={self.finished}, "
                 f"metrics={self.metrics}, "
                 f"lora_request={self.lora_request})")
