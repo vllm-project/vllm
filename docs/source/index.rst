@@ -84,6 +84,7 @@ Documentation
    serving/usage_stats
    serving/integrations
    serving/tensorizer
+   serving/faq
 
 .. toctree::
    :maxdepth: 1
