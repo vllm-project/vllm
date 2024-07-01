@@ -39,7 +39,7 @@ def test_metric_counter_prompt_tokens(
         vllm_prompt_token_count = sum(prompt_token_counts)
 
         _ = vllm_model.generate_greedy(example_prompts, max_tokens)
-        stat_logger = vllm_model.model.llm_engine.stat_logger
+        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
         metric_count = stat_logger.metrics.counter_prompt_tokens.labels(
             **stat_logger.labels)._value.get()
 
@@ -64,7 +64,7 @@ def test_metric_counter_generation_tokens(
                      gpu_memory_utilization=0.4) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         tokenizer = vllm_model.model.get_tokenizer()
-        stat_logger = vllm_model.model.llm_engine.stat_logger
+        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
         metric_count = stat_logger.metrics.counter_generation_tokens.labels(
             **stat_logger.labels)._value.get()
         vllm_generation_count = 0
@@ -92,7 +92,7 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
                      disable_log_stats=False,
                      gpu_memory_utilization=0.3,
                      served_model_name=served_model_name) as vllm_model:
-        stat_logger = vllm_model.model.llm_engine.stat_logger
+        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
         metrics_tag_content = stat_logger.labels["model_name"]
 
     if served_model_name is None or served_model_name == []:
@@ -172,10 +172,10 @@ def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
                    num_requests: int) -> None:
     if disable_log_stats:
         with pytest.raises(AttributeError):
-            _ = engine.stat_logger
+            _ = engine.stat_loggers
     else:
-        assert (engine.stat_logger
-                is not None), "engine.stat_logger should be set"
+        assert (engine.stat_loggers
+                is not None), "engine.stat_loggers should be set"
         # Ensure the count bucket of request-level histogram metrics matches
         # the number of requests as a simple sanity check to ensure metrics are
         # generated

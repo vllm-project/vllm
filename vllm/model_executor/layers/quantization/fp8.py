@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     pack_fp8_to_int32)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import print_warning_once
+from vllm.utils import get_device_capability_stateless, print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 
 
 def cutlass_fp8_supported() -> bool:
-    capability = torch.cuda.get_device_capability()
+    capability = get_device_capability_stateless()
     capability = capability[0] * 10 + capability[1]
 
     return ops.cutlass_scaled_mm_supports_fp8(capability)
@@ -122,13 +122,12 @@ class Fp8LinearMethod(LinearMethodBase):
         scale = Parameter(torch.empty(len(output_partition_sizes),
                                       dtype=torch.float32),
                           requires_grad=False)
+        scale[:] = torch.finfo(torch.float8_e4m3fn).min
         layer.register_parameter(scale_name, scale)
-        set_weight_attrs(
-            scale, {
-                **extra_weight_attrs,
-                "fp8_scales_shard_indexer":
-                self.scales_shard_indexer,
-            })
+        set_weight_attrs(scale, {
+            **extra_weight_attrs,
+            "needs_scalar_to_array": True,
+        })
 
     def create_weights(
         self,
@@ -183,6 +182,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     output_partition_sizes=output_partition_sizes,
                     **extra_weight_attrs)
 
+<<<<<<< HEAD
         # For GPUs without FP8 hardware support, we use Marlin for fast
         # fused dequantization
         if self.use_marlin:
@@ -258,6 +258,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
         layer.workspace = workspace
 
+=======
+>>>>>>> upstream-main
     def process_weights_after_loading(self, layer: Module) -> None:
         if (not hasattr(layer, "process_after_load")
                 or not layer.process_after_load):
@@ -281,15 +283,27 @@ class Fp8LinearMethod(LinearMethodBase):
             # WEIGHT_SCALE / WEIGHT
             #   Loop over logical weights, requantizing with single scale.
             max_w_scale = layer.weight_scale.max()
-            start = 0
-            for idx, logical_width in enumerate(layer.logical_widths):
-                end = start + logical_width
-                weight_dq = per_tensor_dequantize(layer.weight[start:end, :],
-                                                  layer.weight_scale[idx])
 
-                layer.weight[start:end, :] = per_tensor_quantize(
-                    weight_dq, layer.weight_scale.max())
-                start = end
+            # QKV / MLP is fused in the on disk checkpoint if any of the
+            # weight scales are still set to the default since we initialize
+            # N weight scales for N shards but we only load 1 weight scale
+            # from disk in this case. As a result, we skip dequant -> requant
+            # since we already have quantized QKV together.
+            # Sample Model with fused checkpoint:
+            #   * nm-testing/Phi-3-mini-128k-instruct-FP8
+            unfused_module_in_checkpoint = (
+                layer.weight_scale[-1] > torch.finfo(torch.float8_e4m3fn).min)
+
+            if unfused_module_in_checkpoint:
+                start = 0
+                for idx, logical_width in enumerate(layer.logical_widths):
+                    end = start + logical_width
+                    weight_dq = per_tensor_dequantize(
+                        layer.weight[start:end, :], layer.weight_scale[idx])
+
+                    layer.weight[start:end, :] = per_tensor_quantize(
+                        weight_dq, layer.weight_scale.max())
+                    start = end
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
 
             # WEIGHT
@@ -303,10 +317,6 @@ class Fp8LinearMethod(LinearMethodBase):
             if self.quant_config.activation_scheme == "dynamic":
                 layer.input_scale = None
             elif self.quant_config.activation_scheme == "static":
-                if not all_close_1d(layer.input_scale):
-                    raise ValueError(
-                        "All the input_scales for the logical weights of a "
-                        f"layer must be equal. But got {layer.input_scale}")
                 layer.input_scale = Parameter(layer.input_scale.max(),
                                               requires_grad=False)
             else:
@@ -416,11 +426,6 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
                     "cause accuracy issues. Please make sure kv-cache scaling "
                     "factor is available in the fp8 checkpoint.")
         del layer.kv_scale
-
-
-def all_close_1d(x: torch.Tensor) -> bool:
-    assert len(x.shape) == 1
-    return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
 
 
 def per_tensor_quantize(tensor: torch.Tensor,
