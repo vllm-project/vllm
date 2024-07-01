@@ -3,6 +3,7 @@ import subprocess
 import sys
 import time
 import warnings
+from argparse import ArgumentParser
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List
@@ -100,7 +101,9 @@ class RemoteOpenAIServer:
 
             cli_args = cli_args + ["--port", str(get_open_port())]
 
-        parser = make_arg_parser()
+        parser = ArgumentParser(
+            description="vLLM's remote OpenAI server.")
+        parser = make_arg_parser(parser)
         args = parser.parse_args(cli_args)
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
