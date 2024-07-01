@@ -233,7 +233,7 @@ class _AsyncLLMEngine(LLMEngine):
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
                 finished_requests_ids=self.scheduler.
-                flush_finished_requests_ids())
+                get_and_reset_finished_requests_ids())
             output = await self.model_executor.execute_model_async(
                 execute_model_req)
         else:

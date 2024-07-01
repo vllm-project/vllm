@@ -367,7 +367,7 @@ class Scheduler:
     def get_num_unfinished_seq_groups(self) -> int:
         return len(self.waiting) + len(self.running) + len(self.swapped)
 
-    def flush_finished_requests_ids(self) -> List[str]:
+    def get_and_reset_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""
         finished_requests_ids = self.finished_requests_ids
         self.finished_requests_ids = list()
