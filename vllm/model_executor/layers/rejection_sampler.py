@@ -1,5 +1,5 @@
 from functools import cached_property
-from typing import Tuple
+from typing import Tuple, List, Optional
 
 import torch
 import torch.jit
@@ -36,6 +36,7 @@ class RejectionSampler(SpecDecodeBaseSampler):
         bonus_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
+        generators: List[Optional[torch.Generator]],
     ) -> torch.Tensor:
         """Sample token ids using rejection sampling. This accepts or rejects
         tokens proposed by the draft model using the probability of each token
@@ -82,6 +83,7 @@ class RejectionSampler(SpecDecodeBaseSampler):
                 target_probs,
                 draft_probs,
                 draft_token_ids,
+                generators,
             ))
 
         output_token_ids = self._create_output(
@@ -98,6 +100,7 @@ class RejectionSampler(SpecDecodeBaseSampler):
             target_probs: torch.Tensor,  # [batch_size, k, vocab_size]
             draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
             draft_token_ids: torch.Tensor,  # [batch_size, k]
+            generators: List[Optional[torch.Generator]],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Perform modified rejection sampling on each sequence.
 
@@ -114,14 +117,15 @@ class RejectionSampler(SpecDecodeBaseSampler):
 
         # shape [batch_size, k]
         accepted = self._get_accepted(target_probs, draft_probs,
-                                      draft_token_ids)
+                                      draft_token_ids, generators)
 
         recovered_probs = self._get_recovered_probs(
             target_probs, draft_probs).reshape(batch_size * k, vocab_size)
 
         # NOTE: the recovered_probs are overwritten by this method.
         recovered_token_ids = _multinomial(recovered_probs,
-                                           num_samples=1).reshape(
+                                           num_samples=1,
+                                           generators=generators).reshape(
                                                batch_size, k)
         return accepted, recovered_token_ids
 
@@ -130,6 +134,7 @@ class RejectionSampler(SpecDecodeBaseSampler):
             target_probs: torch.Tensor,  # [batch_size, k, vocab_size]
             draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
             draft_token_ids: torch.Tensor,  # [batch_size, k]
+            generators: List[Optional[torch.Generator]],
     ) -> torch.Tensor:
         r"""Create bool matrix over the proposed draft tokens. If
         True, then a token can be accepted, else it should be
@@ -164,10 +169,18 @@ class RejectionSampler(SpecDecodeBaseSampler):
         selected_target_probs = target_probs[batch_indices, probs_indicies,
                                              draft_token_ids]
 
-        uniform_rand = torch.rand(batch_size,
-                                  k,
-                                  dtype=self.probs_dtype,
-                                  device=target_probs.device)
+
+        if any(generator is not None for generator in generators):
+            uniform_rand = torch.empty(batch_size, k, dtype=self.probs_dtype, device=target_probs.device)
+            for i, generator in enumerate(generators):
+                uniform_rand[i,:] = torch.rand(1, k, dtype=self.probs_dtype, device=target_probs.device, generator=generator)
+        else:
+
+            uniform_rand = torch.rand(batch_size,
+                                      k,
+                                      dtype=self.probs_dtype,
+                                      device=target_probs.device)
+
         capped_ratio = torch.minimum(
             selected_target_probs / selected_draft_probs,
             torch.full((1, ), 1, device=target_probs.device))
@@ -250,12 +263,21 @@ class RejectionSampler(SpecDecodeBaseSampler):
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
+    generators: List[Optional[torch.Generator]],
 ) -> torch.Tensor:
+
     if num_samples > 1:
         # This is equivalent to torch.repeat_interleaved (which also
         # forces a GPU<->CPU sync).
         probs = probs[:, None, :].expand(probs.shape[0], num_samples,
                                          probs.shape[1]).contiguous().view(
                                              -1, probs.shape[1])
-    q = torch.empty_like(probs).exponential_(1.0)
+
+    q = torch.empty_like(probs)
+    if any(generator is not None for generator in generators):
+        for i, generator in enumerate(generators):
+            q[i].exponential_(1.0, generator=generator)
+    else:
+        q.exponential_(1.0)
+
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)

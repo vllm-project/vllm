@@ -506,11 +506,20 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
+        # Get sequence group state
+        generators = []
+        for seq_group_metadata in seq_group_metadata_list:
+            if seq_group_metadata.state is not None and seq_group_metadata.state.generator is not None:
+                generators.append(seq_group_metadata.state.generator)
+            else:
+                generators.append(None)
+
         accepted_token_ids = self.spec_decode_sampler(
             target_probs=proposal_verifier_probs,
             bonus_token_ids=bonus_token_ids,
             draft_probs=proposal_probs,
             draft_token_ids=proposal_token_ids,
+            generators=generators,
         )
 
         # Append output tokens from non-speculative sequences to
