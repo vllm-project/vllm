@@ -854,7 +854,7 @@ class HabanaModelRunner:
             (input_tokens, input_positions, attn_metadata, sampling_metadata,
             lora_requests, lora_mapping, multi_modal_input
             ) = self.prepare_input_tensors(seq_group_metadata_list)
-            is_prompt = attn_metadata.prefill_metadata is not None
+            is_prompt = attn_metadata.is_prompt
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
