@@ -94,7 +94,6 @@ def add_lora(y: torch.Tensor,
                              device=x.device)
     sgmv(  # LoRA A shrink
         buffer, x, wa_t_all, indices, ranks, repeats, max_repeats)
-    torch.cuda.synchronize()
     sgmv(  # LoRA B expand
         y, buffer, wb_t_all, indices, ranks, repeats, max_repeats,
         out_col_offset, scale)
