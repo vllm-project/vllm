@@ -20,7 +20,6 @@ _DEFAULT_LAST_ACCESSED_TIME = -1
 
 
 class PrefixCachingBlockAllocator(BlockAllocator):
-    refcounter: RefCounter
     """A block allocator that implements prefix caching.
 
     The PrefixCachingBlockAllocator maintains a cache of blocks based on their
@@ -69,10 +68,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # We share the refcounter between allocators. This allows us to promote
         # blocks originally allocated in the hashless allocator to immutable
         # blocks.
-        self.refcounter = self._hashless_allocator.refcounter
+        self._refcounter: RefCounter = self._hashless_allocator._refcounter
 
         self._cow_tracker = CopyOnWriteTracker(
-            refcounter=self.refcounter.as_readonly(),
+            refcounter=self._refcounter.as_readonly(),
             allocator=self,
         )
 
@@ -173,12 +172,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block_id, content_hash_to_evict = self.evictor.evict()
 
             _block_id = self._cached_blocks[content_hash_to_evict]
-            assert self.refcounter.get(_block_id) == 0
+            assert self._refcounter.get(_block_id) == 0
             assert _block_id == block_id
 
             self._cached_blocks.pop(content_hash_to_evict)
 
-            self.refcounter.incr(block_id)
+            self._refcounter.incr(block_id)
 
             # Now this block is pop from evictor and ready to write
             # with new content which most probably different with
@@ -211,7 +210,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # computed block which shared with block now
         block.computed = True
 
-        refcount = self.refcounter.incr(block_id)
+        refcount = self._refcounter.incr(block_id)
         if refcount == 1:
             # if block get referred, then it shall not be in evictor
             # and put it into _blocks for tracking
@@ -242,17 +241,17 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # However we need to release the same content block, so that
         # physical block could get reused.
         if block.block_id != block_id or block.content_hash is None:
-            refcount = self.refcounter.get(block_id)
+            refcount = self._refcounter.get(block_id)
             # We have fork case where block would get more than one ref,
             # so we cannot free it from tracking if ref cnt large than 1
             assert block.block_id is not None
-            refcount = self.refcounter.get(block.block_id)
+            refcount = self._refcounter.get(block.block_id)
             if refcount == 1:
                 del self._blocks[block.block_id]
 
             return self._hashless_allocator.free(block)
 
-        refcount = self.refcounter.decr(block_id)
+        refcount = self._refcounter.decr(block_id)
 
         # If no longer used, add the block to the evictor.
         if refcount == 0:
@@ -279,7 +278,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         prev_block = None
         for block in source_blocks:
             assert block.block_id is not None
-            refcount = self.refcounter.incr(block.block_id)
+            refcount = self._refcounter.incr(block.block_id)
             assert refcount != 1, "can't fork free'd block"
 
             forked_blocks.append(
@@ -341,7 +340,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """
         assert block.content_hash is not None
         assert block.block_id is not None
-        assert self.refcounter.get(block.block_id) > 0
+        assert self._refcounter.get(block.block_id) > 0
 
         # If the content hash does not have a corresponding cached block,
         # set this block as the cached block.

@@ -9,7 +9,6 @@ Refcount = int
 
 
 class NaiveBlockAllocator(BlockAllocator):
-    refcounter: RefCounter
     """A simple block allocator that manages blocks of memory without prefix
     caching.
 
@@ -41,13 +40,14 @@ class NaiveBlockAllocator(BlockAllocator):
         self._free_block_indices = list(
             range(block_index_start, block_index_end))[::-1]
 
-        self.refcounter = RefCounter(block_index_start=block_index_start,
-                                     block_index_end=block_index_end)
+        self._refcounter: RefCounter = RefCounter(
+            block_index_start=block_index_start,
+            block_index_end=block_index_end)
         self._create_block = create_block
         self._block_size = block_size
 
         self._cow_tracker = CopyOnWriteTracker(
-            refcounter=self.refcounter.as_readonly(),
+            refcounter=self._refcounter.as_readonly(),
             allocator=self,
         )
 
@@ -119,7 +119,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
             # Increment refcount for each block.
             assert block.block_id is not None
-            refcount = self.refcounter.incr(block.block_id)
+            refcount = self._refcounter.incr(block.block_id)
             assert refcount != 1, "can't fork free'd block"
 
             forked_blocks.append(
@@ -145,11 +145,11 @@ class NaiveBlockAllocator(BlockAllocator):
             raise BlockAllocator.NoFreeBlocksError()
 
         block_id = self._free_block_indices.pop()
-        self.refcounter.incr(block_id)
+        self._refcounter.incr(block_id)
         return block_id
 
     def _free_block_id(self, block_id: BlockId) -> None:
-        refcount = self.refcounter.decr(block_id)
+        refcount = self._refcounter.decr(block_id)
         if refcount == 0:
             self._free_block_indices.append(block_id)
 
