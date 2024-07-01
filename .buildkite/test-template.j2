@@ -56,8 +56,8 @@ steps:
     depends_on: image-build
 
   {% for step in steps %}
-  {% if step.gpu == "a100" %}
   - label: "{{ step.label }}"
+    priority: 10000
     agents:
       queue: a100-queue
     soft_fail: {{ step.soft_fail or false }}
@@ -75,7 +75,7 @@ steps:
         podSpec:
           priorityClassName: ci
           containers:
-          - image: {{ docker_image }}
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:f17f03744ebabed187634baec601ef35094ae14f
             command: ["bash"]
             args:
             - '-c'
@@ -108,5 +108,4 @@ steps:
             hostPath:
               path: {{ hf_home }}
               type: Directory
-  {% endif %}
   {% endfor %}
