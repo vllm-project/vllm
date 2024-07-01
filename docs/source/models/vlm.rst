@@ -52,6 +52,7 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
 
 .. code-block:: python
 
+    # Refer to the HuggingFace repo for the correct format to use
     prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     # Load the image using PIL.Image
@@ -114,6 +115,8 @@ To consume the server, you can use the OpenAI client like in the example below:
         messages=[{
             "role": "user",
             "content": [
+                # NOTE: The prompt formatting with the image token `<image>` is not needed
+                # since the prompt will be processed automatically by the API server.
                 {"type": "text", "text": "What's in this image?"},
                 {
                     "type": "image_url",
