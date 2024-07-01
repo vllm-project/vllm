@@ -52,9 +52,6 @@ steps:
   {% endif %}
   {% endfor %}
 
-  - block: "Run A100 tests"
-    depends_on: image-build
-
   {% for step in steps %}
   {% if step.gpu == "a100" %}
   - label: "{{ step.label }}"
