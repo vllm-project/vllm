@@ -21,6 +21,25 @@ steps:
           limit: 5
   - wait
 
+  - block: "Run AMD tests"
+    depends_on: ~
+
+  - group: "AMD Tests"
+    depends_on: ~
+    steps:
+    {% for step in steps %}
+    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
+      - label: "AMD: {{ step.label }}"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        soft_fail: true
+    {% endif %}
+    {% endfor %}
+
   - label: "Neuron Test"
     depends_on: ~
     agents:
@@ -41,8 +60,12 @@ steps:
     command: bash .buildkite/run-xpu-test.sh
 
   {% for step in steps %}
-  {% if env["BUILDKITE_PIPELINE_SLUG"] == "ci-aws" or (env["BUILDKITE_PIPELINE_SLUG"] == "fastcheck" and step.fast_check|default(false)) %}
   {% if step.gpu != "a100" %}
+  {% if step.fast_check != "true" %}
+  - block: "Run {{ step.label }}"
+    depends_on: image_build
+  {% endif %}
+
   - label: "{{ step.label }}"
     agents:
       {% if step.label == "Documentation Build" %}
@@ -86,7 +109,6 @@ steps:
           volumes:
             - /dev/shm:/dev/shm
             - {{ hf_home }}:{{ hf_home }}
-  {% endif %}
   {% endif %}
   {% endfor %}
 
@@ -147,27 +169,5 @@ steps:
             hostPath:
               path: {{ hf_home }}
               type: Directory
-  
-  {% if env["BUILDKITE_PIPELINE_SLUG"] == "fastcheck" %}
-  - block: "Run AMD tests"
-    depends_on: ~
-  {% endif %}
-
-  - group: "AMD Tests"
-    steps:
-    {% for step in steps %}
-    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
-      - label: "AMD: {{ step.label }}"
-        agents:
-          queue: amd
-        command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
-        env:
-          DOCKER_BUILDKIT: "1"
-        priority: 100
-        soft_fail: true
-    {% endif %}
-    {% endfor %}
-    {% if env["BUILDKITE_PIPELINE_SLUG"] != "fastcheck" %}depends_on: ~{% endif %}
-
   {% endif %}
   {% endfor %}
