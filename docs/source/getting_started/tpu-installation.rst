@@ -73,3 +73,21 @@ Next, build vLLM from source. This will only take a few seconds:
 .. code-block:: console
 
     $ VLLM_TARGET_DEVICE="tpu" python setup.py develop
+
+
+.. tip::
+
+    If you encounter the following error:
+
+    .. code-block:: console
+
+        from torch._C import *  # noqa: F403
+        ImportError: libopenblas.so.0: cannot open shared object file: No such file or directory
+
+
+    You can install OpenBLAS with the following command:
+
+    .. code-block:: console
+
+        $ sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
+

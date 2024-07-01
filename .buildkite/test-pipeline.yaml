@@ -1,7 +1,10 @@
 # In this file, you can add more tests to run either by adding a new step or
 # adding a new command to an existing step. See different options here for examples.
-# This script will be feed into Jinja template in `test-template.j2` to generate
-# the final pipeline yaml file.
+
+# This script will be feed into Jinja template in `test-template-aws.j2` at
+# https://github.com/vllm-project/buildkite-ci/blob/main/scripts/test-template-aws.j2 
+# to generate the final pipeline yaml file.
+
 
 steps:
 - label: Regression Test
@@ -24,38 +27,52 @@ steps:
 
 - label: Core Test
   mirror_hardwares: [amd]
-  command: pytest -v -s core
+  commands: 
+  - pytest -v -s core
+  - pytest -v -s distributed/test_parallel_state.py
 
 - label: Distributed Comm Ops Test
   #mirror_hardwares: [amd]
-  command: pytest -v -s distributed/test_comm_ops.py
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  commands:
+  - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s distributed/test_shm_broadcast.py
 
-- label: Distributed Tests
+- label: Distributed Tests (2 GPUs)
   mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   commands:
+  - bash ../.buildkite/download-images.sh
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - TEST_DIST_MODEL=llava-hf/llava-1.5-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_multimodal_broadcast.py
+  - TEST_DIST_MODEL=microsoft/Phi-3-vision-128k-instruct DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_multimodal_broadcast.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
-  - pytest -v -s spec_decode/e2e/test_integration_dist.py
+  - TEST_DIST_MODEL=llava-hf/llava-1.5-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_multimodal_broadcast.py
+  - TEST_DIST_MODEL=microsoft/Phi-3-vision-128k-instruct DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_multimodal_broadcast.py
+  - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
-- label: Distributed Tests (Multiple Groups)
+- label: Distributed Tests (4 GPUs)
   #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   commands:
   - pytest -v -s distributed/test_pynccl.py
+  # We want to test that models which use 2 GPUs work with 4 GPUs, which is why we duplicate them here.
+  # See https://github.com/vllm-project/vllm/pull/5473#issuecomment-2166601837 for context.
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
+  - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
 - label: Engine Test
   mirror_hardwares: [amd]
@@ -65,8 +82,8 @@ steps:
   mirror_hardwares: [amd]
 
   commands:
-  - pytest -v -s entrypoints -m llm
-  - pytest -v -s entrypoints -m openai
+  - pytest -v -s entrypoints/llm
+  - pytest -v -s entrypoints/openai
 
 - label: Examples Test
   working_dir: "/vllm-workspace/examples"
@@ -96,13 +113,13 @@ steps:
 - label: Models Test
   #mirror_hardwares: [amd]
   commands:
-    - pytest -v -s models -m \"not llava\"
+    - pytest -v -s models -m \"not vlm\"
 
-- label: Llava Test
+- label: Vision Language Models Test
   mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models -m llava
+    - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test
   mirror_hardwares: [amd]
@@ -141,6 +158,9 @@ steps:
   num_gpus: 4
   # This test runs llama 13B, so it is required to run on 4 GPUs.
   commands:
+    # FIXIT: find out which code initialize cuda before running the test
+    # before the fix, we need to use spawn to test it
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -x lora/test_long_context.py
 
 - label: Tensorizer Test
@@ -155,6 +175,15 @@ steps:
   #mirror_hardwares: [amd]
   command: pytest -v -s quantization
 
+- label: Tracing Test
+  commands: 
+    - "pip install \
+        opentelemetry-sdk \
+        opentelemetry-api \
+        opentelemetry-exporter-otlp \
+        opentelemetry-semantic-conventions-ai"
+    - pytest -v -s tracing
+
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"
   mirror_hardwares: [amd]
@@ -162,9 +191,39 @@ steps:
   - pip install aiohttp
   - bash run-benchmarks.sh
 
+- label: LM Eval Small Models
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+  - pip install lm-eval
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh -c configs/models-small.txt -t 1
+
+- label: LM Eval Large Models
+  gpu: a100
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+  - pip install lm-eval
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh -c configs/models-large.txt -t 4
+
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
   no_gpu: True
   commands:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
+
+- label: Distributed Tests (A100)
+  gpu: a100
+  num_gpus: 4
+  commands: 
+  # NOTE: don't test llama model here, it seems hf implementation is buggy
+  # see https://github.com/vllm-project/vllm/pull/5689 for details
+  - pytest -v -s distributed/test_custom_all_reduce.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
+  - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.5/flashinfer-0.0.5+cu121torch2.3-cp310-cp310-linux_x86_64.whl
+  - VLLM_ATTENTION_BACKEND=FLASHINFER TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - VLLM_ATTENTION_BACKEND=FLASHINFER TEST_DIST_MODEL=meta-llama/Meta-Llama-3-8B DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - pytest -v -s -x lora/test_mixtral.py

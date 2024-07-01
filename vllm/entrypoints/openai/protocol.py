@@ -241,15 +241,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         logits_processors = None
         if self.logit_bias:
+            logit_bias: Dict[int, float] = {}
+            try:
+                for token_id, bias in self.logit_bias.items():
+                    # Convert token_id to integer before we add to LLMEngine
+                    # Clamp the bias between -100 and 100 per OpenAI API spec
+                    logit_bias[int(token_id)] = min(100, max(-100, bias))
+            except ValueError as exc:
+                raise ValueError(f"Found token_id `{token_id}` in logit_bias "
+                                 f"but token_id must be an integer or string "
+                                 f"representing an integer") from exc
 
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
-                assert self.logit_bias is not None
-                for token_id, bias in self.logit_bias.items():
-                    # Clamp the bias between -100 and 100 per OpenAI API spec
-                    bias = min(100, max(-100, bias))
-                    logits[int(token_id)] += bias
+                for token_id, bias in logit_bias.items():
+                    logits[token_id] += bias
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
@@ -461,15 +468,22 @@ class CompletionRequest(OpenAIBaseModel):
 
         logits_processors = None
         if self.logit_bias:
+            logit_bias: Dict[int, float] = {}
+            try:
+                for token_id, bias in self.logit_bias.items():
+                    # Convert token_id to integer
+                    # Clamp the bias between -100 and 100 per OpenAI API spec
+                    logit_bias[int(token_id)] = min(100, max(-100, bias))
+            except ValueError as exc:
+                raise ValueError(f"Found token_id `{token_id}` in logit_bias "
+                                 f"but token_id must be an integer or string "
+                                 f"representing an integer") from exc
 
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
-                assert self.logit_bias is not None
-                for token_id, bias in self.logit_bias.items():
-                    # Clamp the bias between -100 and 100 per OpenAI API spec
-                    bias = min(100, max(-100, bias))
-                    logits[int(token_id)] += bias
+                for token_id, bias in logit_bias.items():
+                    logits[token_id] += bias
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
@@ -608,7 +622,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
 class EmbeddingResponseData(BaseModel):
     index: int
     object: str = "embedding"
-    embedding: List[float]
+    embedding: Union[List[float], str]
 
 
 class EmbeddingResponse(BaseModel):
@@ -741,3 +755,24 @@ class BatchRequestOutput(OpenAIBaseModel):
     # For requests that failed with a non-HTTP error, this will contain more
     # information on the cause of the failure.
     error: Optional[Any]
+
+
+class TokenizeRequest(OpenAIBaseModel):
+    model: str
+    prompt: str
+    add_special_tokens: bool = Field(default=True)
+
+
+class TokenizeResponse(OpenAIBaseModel):
+    tokens: List[int]
+    count: int
+    max_model_len: int
+
+
+class DetokenizeRequest(OpenAIBaseModel):
+    model: str
+    tokens: List[int]
+
+
+class DetokenizeResponse(OpenAIBaseModel):
+    prompt: str
