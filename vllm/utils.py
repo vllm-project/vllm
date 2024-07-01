@@ -517,7 +517,7 @@ def create_kv_caches_with_random(
                                 dtype=torch_dtype,
                                 device=device)
         cache_dtype = str(cache_dtype)
-        if cache_dtype in ["auto", "half", "float16", "torch.float16", "torch.bfloat16", "torch.float32"]:
+        if cache_dtype in ["auto", "half", "torch.float16", "torch.bfloat16", "torch.float32"]:
             key_cache.uniform_(-scale, scale)
         elif cache_dtype == 'fp8':
             _generate_random_fp8(key_cache, -scale, scale)
