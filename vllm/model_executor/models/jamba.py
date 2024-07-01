@@ -679,9 +679,11 @@ class JambaForCausalLM(nn.Module):
             self._prepare_mamba_cache()
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
+            # We get here only on Prefill/Eager mode runs
             assert all(
                 key in kwargs
                 for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
+
             request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
             batch_size = input_ids.shape[0]
             if attn_metadata.prefill_metadata:
@@ -694,7 +696,7 @@ class JambaForCausalLM(nn.Module):
             finished_requests_ids = kwargs["finished_requests_ids"]
             self._release_mamba_cache(finished_requests_ids)
         else:
-            ## CUDA graph capturing runs
+            # CUDA graph capturing runs
             current_seqlen_agnostic_cache, indices = (
                 kwargs["seqlen_agnostic_capture_inputs"],
                 [],
@@ -705,6 +707,7 @@ class JambaForCausalLM(nn.Module):
                                    attn_metadata,
                                    current_seqlen_agnostic_cache[0],
                                    current_seqlen_agnostic_cache[1])
+
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             self._copy_mamba_cache_by_indices(self.current_indices,
                                               current_seqlen_agnostic_cache)

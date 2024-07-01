@@ -1039,6 +1039,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     graph_capture_context.stream
                 }
                 if self.has_seqlen_agnostic:
+                    # Only used by Mamba-based models CUDA graph atm (Jamba).
                     capture_inputs.update({
                         "seqlen_agnostic_capture_inputs":
                         self.model.get_seqlen_agnostic_capture_inputs(
