@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import is_tpu
+from vllm.utils import get_device_capability_stateless, is_tpu
 
 logger = init_logger(__name__)
 
@@ -46,7 +46,7 @@ def _get_quantization_config(
     """Get the quantization config."""
     if model_config.quantization is not None:
         quant_config = get_quant_config(model_config, load_config)
-        capability = torch.cuda.get_device_capability()
+        capability = get_device_capability_stateless()
         capability = capability[0] * 10 + capability[1]
         if capability < quant_config.get_min_capability():
             raise ValueError(

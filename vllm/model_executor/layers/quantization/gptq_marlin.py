@@ -11,6 +11,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.utils import get_device_capability_stateless
 
 logger = init_logger(__name__)
 
@@ -165,7 +166,7 @@ class GPTQMarlinConfig(QuantizationConfig):
             return False
 
         # If the capability of the device is too low, cannot convert.
-        major, minor = torch.cuda.get_device_capability()
+        major, minor = get_device_capability_stateless()
         device_capability = major * 10 + minor
         if device_capability < cls.get_min_capability():
             return False
