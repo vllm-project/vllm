@@ -102,14 +102,12 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
         return llm_inputs
 
     model_config = ctx.model_config
-    multimodal_config = ctx.get_multimodal_config()
     hf_config = ctx.get_hf_config(LlavaConfig)
     vision_config = hf_config.vision_config
 
     if isinstance(vision_config, CLIPVisionConfig):
         return input_processor_for_clip(
             model_config,
-            multimodal_config,
             vision_config,
             llm_inputs,
             image_token_id=hf_config.image_token_index,

@@ -86,7 +86,6 @@ def dummy_feature_data_for_clip(
 
 def input_processor_for_clip(
     model_config: ModelConfig,
-    multimodal_config: VisionLanguageConfig,
     hf_config: CLIPVisionConfig,
     llm_inputs: LLMInputs,
     *,
