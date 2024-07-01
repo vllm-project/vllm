@@ -62,15 +62,21 @@ class Gemm:
         self.hipb_sols = sols
 
     def check_gemm_ref(self, libtype, solidx):
-        ref = F.linear(self.inp.to(torch.float32),
-                       self.weights.to(torch.float32)).to(self.outdtype)
+        if self.indtype == torch.float8_e4m3fnuz:
+            ref, _ = torch._scaled_mm(self.inp,
+                                      self.weights.t(),
+                                      out_dtype=self.outdtype)
+        else:
+            ref = F.linear(self.inp, self.weights)
         if libtype == 'hipblaslt':
             c = hipbsolidxgemm.hipb_mm(self.inp, self.weights.t(), solidx,
                                        self.outdtype)
         elif libtype == 'rocblas':
             c = rocsolidxgemm.rocb_mm(self.inp, self.weights.t(), solidx)
-        if torch.allclose(c, ref, atol=self.atol, rtol=self.rtol):
-            #print('>>>',libtype,'Solidx',solidx,'passed reference test')
+        if torch.allclose(c.to(torch.float32),
+                          ref.to(torch.float32),
+                          atol=self.atol,
+                          rtol=self.rtol):
             return True
 
         print('>>>',
@@ -263,7 +269,8 @@ class GemmTuner:
 
     def find_best_sols(self):
         df = self.gemm_problems
-        soldf = pd.DataFrame()
+        soldf = pd.DataFrame(
+            columns=['libtype', 'solidx', 'soltimems', 'indtype', 'outdtype'])
         for i in range(len(df)):
             ds = df.loc[i, :]
             gemmobj = Gemm(ds['M'],
@@ -279,7 +286,8 @@ class GemmTuner:
         soldf['indtype'] = self.indtype
         soldf['outdtype'] = self.outdtype
         finaldf = pd.concat([self.gemm_problems, soldf], axis=1)
-        finaldf = pd.concat([finaldf, self.gdf])
-        finaldf['solidx'] = finaldf['solidx'].astype('int64')
+        if self.gdf is not None:
+            finaldf = pd.concat([finaldf, self.gdf])
+        finaldf['solidx'] = finaldf['solidx'].convert_dtypes('int64')
         finaldf.to_csv(self.tuned_file, index=False)
         print(finaldf)
