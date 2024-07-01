@@ -427,7 +427,7 @@ class TestPrefixCachingBlockAllocator:
         block = allocator.allocate_immutable(prev_block=None,
                                              token_ids=token_ids)
 
-        assert allocator.refcounter.get(block.block_id) == 1
+        assert allocator._refcounter.get(block.block_id) == 1
         m = allocator.allocate_mutable(prev_block=None)
 
         block_id = m.block_id
@@ -439,7 +439,7 @@ class TestPrefixCachingBlockAllocator:
         # And first immutable block's ref get increased by 1
         assert m.block_id == block.block_id
         assert block_id in allocator._hashless_allocator._free_block_indices
-        assert allocator.refcounter.get(block.block_id) == 2
+        assert allocator._refcounter.get(block.block_id) == 2
 
     # Test case when eviction and allocation are mixed,
     # make sure they work as expected
@@ -464,7 +464,7 @@ class TestPrefixCachingBlockAllocator:
         assert len(allocator._blocks.keys()) == 0
         assert len(allocator._cached_blocks.values()) == 0
         assert len(allocator.evictor.free_table.keys()) == 0
-        assert allocator.refcounter._refcounts == zero_ref
+        assert allocator._refcounter._refcounts == zero_ref
 
         # Allocate immutable chains with only one block residuled in
         new_block = []
@@ -487,7 +487,7 @@ class TestPrefixCachingBlockAllocator:
             allocator._cached_blocks.values())) == all_blocks_list
         assert sorted(list(
             allocator.evictor.free_table.keys())) == all_blocks_list
-        assert allocator.refcounter._refcounts == zero_ref
+        assert allocator._refcounter._refcounts == zero_ref
 
         # Allocate a mutable block, and the first block shall be evicted
         # and set its content hash into None, ref to 1
@@ -496,7 +496,7 @@ class TestPrefixCachingBlockAllocator:
         assert mutable.block_id == 0
         assert mutable.content_hash is None
         assert 0 in allocator._blocks
-        assert allocator.refcounter.get(0) == 1
+        assert allocator._refcounter.get(0) == 1
         assert 0 not in allocator._cached_blocks
         assert 0 not in allocator.evictor
 
@@ -505,7 +505,7 @@ class TestPrefixCachingBlockAllocator:
         allocator.free(mutable)
 
         assert len(allocator._blocks.keys()) == 0
-        assert allocator.refcounter._refcounts == zero_ref
+        assert allocator._refcounter._refcounts == zero_ref
         assert 0 not in allocator._cached_blocks
         assert 0 not in allocator.evictor
         assert 0 in allocator._hashless_allocator._free_block_indices
@@ -520,14 +520,14 @@ class TestPrefixCachingBlockAllocator:
         assert len(allocator._hashless_allocator._free_block_indices) == 0
         assert 0 in allocator._blocks
         assert 0 in allocator._cached_blocks.values()
-        assert allocator.refcounter.get(0) == 1
+        assert allocator._refcounter.get(0) == 1
         assert 0 not in allocator.evictor
 
         # allocate mutable block again, it shall be popped from evictor
         mutable = allocator.allocate_mutable(prev_block=None)
         assert len(allocator._hashless_allocator._free_block_indices) == 0
         assert mutable.block_id not in allocator.evictor.free_table
-        assert allocator.refcounter.get(mutable.block_id) == 1
+        assert allocator._refcounter.get(mutable.block_id) == 1
 
     # Test case where two last accessed times are equal
     @staticmethod
