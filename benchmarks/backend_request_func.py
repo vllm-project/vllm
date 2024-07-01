@@ -265,6 +265,9 @@ async def async_request_openai_completions(
                         else:
                             data = json.loads(chunk)
 
+                            # NOTE: Some completion API might have a last
+                            # usage summary response without a token so we
+                            # want to check a token was generated
                             if data["choices"][0]["text"]:
                                 timestamp = time.perf_counter()
                                 # First token
@@ -273,12 +276,8 @@ async def async_request_openai_completions(
                                     output.ttft = ttft
 
                                 # Decoding phase
-                                # NOTE: Some completion API might have a last
-                                # usage summary response without a token so we
-                                # do not want to include as inter-token-latency
-                                elif data.get("usage", None) is None:
-                                    output.itl.append(timestamp -
-                                                      most_recent_timestamp)
+                                output.itl.append(timestamp -
+                                                  most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
                                 generated_text += data["choices"][0]["text"]

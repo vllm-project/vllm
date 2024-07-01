@@ -244,6 +244,10 @@ def _is_cpu() -> bool:
     return VLLM_TARGET_DEVICE == "cpu"
 
 
+def _is_openvino() -> bool:
+    return VLLM_TARGET_DEVICE == "openvino"
+
+
 def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
@@ -365,6 +369,8 @@ def get_vllm_version() -> str:
         if gaudi_sw_version != MAIN_CUDA_VERSION:
             gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
             version += f"+gaudi{gaudi_sw_version}"
+    elif _is_openvino():
+        version += "+openvino"
     elif _is_tpu():
         version += "+tpu"
     elif _is_cpu():
@@ -418,6 +424,8 @@ def get_requirements() -> List[str]:
         requirements = _read_requirements("requirements-neuron.txt")
     elif _is_hpu():
         requirements = _read_requirements("requirements-hpu.txt")
+    elif _is_openvino():
+        requirements = _read_requirements("requirements-openvino.txt")
     elif _is_tpu():
         requirements = _read_requirements("requirements-tpu.txt")
     elif _is_cpu():
@@ -426,7 +434,8 @@ def get_requirements() -> List[str]:
         requirements = _read_requirements("requirements-xpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, or CPU.")
+            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
+            "OpenVINO, or CPU.")
     return requirements
 
 

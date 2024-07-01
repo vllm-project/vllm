@@ -8,9 +8,25 @@ import torch
 from tests.quantization.utils import is_quant_method_supported
 from vllm._custom_ops import scaled_fp8_quant
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-from vllm.utils import is_hpu
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
+MODELS = [
+    "neuralmagic/Meta-Llama-3-8B-Instruct-FP8",
+    "nm-testing/Phi-3-mini-128k-instruct-FP8",
+]
+
+
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
+                    reason="FP8 is not supported on this GPU type.")
+@pytest.mark.parametrize("model", MODELS)
+def test_model_load_and_run(vllm_runner, model: str):
+    with vllm_runner(model) as llm:
+        # note: this does not test accuracy, just that we can run through
+        # see lm-eval tests for accuracy
+        outputs = llm.generate_greedy(prompts=["Hello my name is"],
+                                      max_tokens=10)
+        print(outputs[0][1])
+
+
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="FP8 is not supported on this GPU type.")
 def test_load_fp16_model(vllm_runner) -> None:
