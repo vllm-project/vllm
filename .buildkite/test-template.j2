@@ -29,7 +29,7 @@ steps:
           limit: 5
     plugins:
       - docker#v5.2.0:
-          image: 
+          image: {{ docker_image }}
           always-pull: true
           propagate-environment: true
           {% if not step.no_gpu %}
