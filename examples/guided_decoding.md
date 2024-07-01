@@ -17,15 +17,17 @@ These guided decoding options can help you unlock the full potential of LLMs and
 
 ## Guided Decoding Theory ##
 
-Let's say you have a classification problem. You want to classify sentences as positive or negative. You ask the question: "What connotation does this sentence have?" The LLM generates token probabilities of:
+Let's say you have a classification problem where you want to classify sentences as positive or negative. You ask the question: "What connotation does this sentence have?" The LLM generates token probabilities for all possible first words of its response, ex. see the 5 below:
 
-* Positive: 0.5
-* Negative: 0.1
-* Sure: 0.2
-* Let: 0.1
-* All others: 0.1
+| Token | Probability |
+| --- | --- |
+| Positive | 0.5 |
+| Negative | 0.1 |
+| Sure | 0.2 |
+| Let | 0.1 |
+| All others | 0.1 |
 
-This poses a problem because if it does select one of the other possibilities, downstream processes will break. It is possible to prompt engineer this with varying success, but there is a better option.
+This poses a problem because if it does select one of the other possibilities besides Positive or Negative, downstream processes may break, leading to poor performance. It is possible to apply prompt engineering with varying degrees of success, but there is a better option.
 
 **Guided Decoding with Guided Choice:**
 
@@ -33,13 +35,15 @@ By applying guided decoding with guided choice, we can adjust the sampling proce
 
 In this case, the LLM's output would be sampled from a restricted probability distribution, where:
 
-* Positive: 0.83 (rescaled from 0.5)
-* Negative: 0.17 (rescaled from 0.1)
-* Sure: 0.0 (excluded from sampling)
-* Let: 0.0 (excluded from sampling)
-* All others: 0.0 (excluded from sampling)
+| Token | Probability |
+| --- | --- |
+| Positive | 0.83 (rescaled from 0.5) |
+| Negative | 0.17 (rescaled from 0.1) |
+| Sure | 0.0 (excluded from sampling) |
+| Let | 0.0 (excluded from sampling) |
+| All others | 0.0 (excluded from sampling) |
 
-By guiding the output toward the desired options, we can increase the accuracy and relevance of the response and ensure reliability on downstream tasks.
+By guiding the output toward the desired options, we can increase the accuracy and relevance of the response and ensure the reliability of downstream tasks.
 
 In this demo, we primarily use the OpenAI endpoint with the Outlines library. However, many of these concepts are applicable to the offline LLM class and/or POST requests from the command line. For more information, see
 * [VLLM OpenAI Documentation](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#extra-parameters)
@@ -61,13 +65,13 @@ model_name = client.models.list().data[0].id # Grab the model name from the API
 
 ## Guided JSON <a id='guided-json'></a>
 
-Outlines can make any open-source model return a JSON object that follows a structure that is specified by the user. This is useful whenever we want the output of the model to be processed by code downstream: code does not understand natural language but rather the structured language it has been programmed to understand. 
+Outlines can make any open-source model return a JSON object that follows a structure that is specified by the user. This is useful whenever we want the output of the model to be processed by code downstream.
 
 Source: [Outlines Reference](https://outlines-dev.github.io/outlines/reference/json/)
 
 JSON Schemas: [JSON Schema](https://json-schema.org/learn/getting-started-step-by-step)
 
-To start, we need to specify the JSON schema. This may be done with the `pydantic` package and the `BaseModel`. Here, we are able to define the variables in the JSON as well as their types. `pydantic` converts this class into the schema that the LLM may use.
+To start, we need to specify the JSON schema. This may be done with the `pydantic` package and the `BaseModel`. Here, we can define the variables in a class as well as their types. `pydantic` converts this class into the schema that the LLM may use.
 
 
 ```python
@@ -102,7 +106,7 @@ print(json.dumps(user_schema, indent=4))
     }
     
 
-Using this schema, we may construct the model prompt. Here, we give the model our instruction, the schema, and the sentence. Note that while Outlines does force the output to conform to the JSON schema, it is still useful to tell the model what that schema is. Remember, at their core, LLMs are next-token predictors, they do well when the tokens you want are easy to understand with the information given.
+Using this schema, we may construct the model prompt. Here, we give the model our instruction, the schema, and the sentence. Note that while Outlines does force the output to conform to the JSON schema, it is still useful to provide the schema to the model. Remember, at their core, LLMs are next-token predictors; they do well when the tokens you want are easy to predict with the information given.
 
 Using this prompt, we construct the messages object and call the LLM using the client object from earlier. Note that we include the `user_schema` as part of the `guided_json` in the `extra_body`. You may do a similar operation with curl or offline LLM.
 
@@ -152,7 +156,7 @@ print(output.choices[0].message.content)
     {"name": "John", "age": 30}
     
 
-Note that without the guided decoding, the LLM included an extra "User" portion in the response. This would cause problems with downstream tasks. Meanwhile, the guided decoding outputted a JSON that is easily parsed without error.
+Note that without the guided decoding, the LLM included an extra "User" portion in the response. This would cause problems with downstream tasks. Meanwhile, the guided decoding generated a JSON that is easily parsed without error.
 
 ## Guided Regex <a id='guided-regex'></a>
 Regular expressions (regex) provide a powerful way to match and validate patterns in text. Guided Regex allows you to specify a regex pattern as a guiding mechanism, constraining the generated text to match the defined pattern. By providing a regex pattern, you can control the output of the language model and generate text that conforms to specific formats, such as dates, times, phone numbers, or other structured data.
@@ -207,7 +211,7 @@ In some cases, you may want to limit the output of the language model to a speci
 
 Source: [Outlines Reference](https://outlines-dev.github.io/outlines/reference/choices/)
 
-Let's consider the example from the intro. We have a bunch of sentences that we want to classify as positive or negative. Without guided decoding, the model gives a long response that would be nearly impossible to parse. With guided decoding, the model provides a single-word answer that is easy to use in downstream tasks.
+Let's consider the example from the intro. We have a dataset composed of sentences that we want to classify as positive or negative. Without guided decoding, the model gives a long response that would be nearly impossible to parse. With guided decoding, the model provides a single-word answer that is easy to use in downstream tasks.
 
 
 ```python
