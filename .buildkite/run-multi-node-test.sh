@@ -65,7 +65,7 @@ run_nodes() {
     done
 }
 cleanup() {
-    docker network --remove-orphans rm docker-net
+    docker network rm docker-net
 }
 trap cleanup EXIT
 start_network
