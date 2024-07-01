@@ -43,7 +43,6 @@ def reset_params_cache():
     """At the beginning of the prefilling stage, we need  clear the
     cache explicitly
     """
-    #TODO release gpu memory
     _PARAMS_CACHE.clear()
     torch.cuda.empty_cache()
 
