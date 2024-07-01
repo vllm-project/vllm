@@ -9,18 +9,14 @@ from torch.nn.functional import scaled_dot_product_attention
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
-from vllm.utils import is_cpu
 
-if is_cpu():
-    try:
-        from vllm._ipex_ops import ipex_ops
-        from vllm.attention.ops.ipex_attn import PagedAttention
-        use_ipex = True
-    except ImportError:
-        from vllm.attention.ops.paged_attn import PagedAttention
-        use_ipex = False
-else:
+try:
+    from vllm._ipex_ops import ipex_ops
+    from vllm.attention.ops.ipex_attn import PagedAttention
+    use_ipex = True
+except ImportError:
     from vllm.attention.ops.paged_attn import PagedAttention
+    use_ipex = False
 
 
 class TorchSDPABackend(AttentionBackend):

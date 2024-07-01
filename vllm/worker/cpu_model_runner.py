@@ -205,10 +205,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
         max_seqlen = max(seq_lens)
-        tmp = [0]
-        tmp.extend(seq_lens)
-        seqlen = torch.tensor(tmp)
-        seqlen_q = torch.cumsum(seqlen, dim=0).to("cpu")
+        seqlen = torch.tensor([0] + seq_lens)
+        seqlen_q = torch.cumsum(seqlen, dim=0)
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
