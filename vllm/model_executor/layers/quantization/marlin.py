@@ -124,7 +124,7 @@ class MarlinLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        del output_size  # Unused.
+        del input_size, output_size  # Unused.
 
         if params_dtype != torch.float16:
             raise ValueError(

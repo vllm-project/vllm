@@ -29,6 +29,7 @@ BITBLAS_DATABASE_PATH = bitblas.cache.get_database_path()
 BITBLAS_SUPPORTED_NUM_BITS = [1, 2, 4, 8]
 BITBLAS_SUPPORTED_SYM = [False, True]
 
+
 class BitBLASConfig(QuantizationConfig):
     """Config class for BitBLAS.
 
@@ -37,7 +38,7 @@ class BitBLASConfig(QuantizationConfig):
     TORCH_DTYPE = torch.float16
     STORAGE_DTYPE = "int8"  # assume int8 storage
     TORCH_STORAGE_DTYPE = getattr(torch, STORAGE_DTYPE)
-    ZEROS_TYPE = "quantized"  # "original" or "rescale" or "quantized", the gptq_bitblas prefer "quantized"
+    ZEROS_MODE = "quantized"  # "original" or "rescale" or "quantized", the gptq_bitblas prefer "quantized"
 
     def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
                  is_sym: bool) -> None:
@@ -73,7 +74,7 @@ class BitBLASConfig(QuantizationConfig):
         self.nbits = weight_bits
 
         # Zeros type for the quantized weights.
-        self.zeros_type = self.ZEROS_TYPE
+        self.zeros_mode = self.ZEROS_MODE
 
     def __repr__(self) -> str:
         return (f"BitBLASConfig(weight_bits={self.weight_bits}, "
@@ -99,8 +100,11 @@ class BitBLASConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "BitBLASConfig":
+        weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
-        return cls(group_size)
+        desc_act = cls.get_from_keys(config, ["desc_act"])
+        is_sym = cls.get_from_keys(config, ["sym"])
+        return cls(weight_bits, group_size, desc_act, is_sym)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -108,7 +112,7 @@ class BitBLASConfig(QuantizationConfig):
         # compat: autogptq >=0.8.0 use checkpoint_format: str
         # compat: autogptq <=0.7.1 is_bitblas_format: bool
         is_bitblas_format = (hf_quant_cfg.get("checkpoint_format") == "bitblas"
-                            or hf_quant_cfg.get("is_bitblas_format", False))
+                             or hf_quant_cfg.get("is_bitblas_format", False))
 
         is_valid_user_quant = (user_quant is None or user_quant == "gptq"
                                or user_quant == "bitblas")
@@ -139,19 +143,26 @@ class BitBLASLinearMethod(LinearMethodBase):
     """
     OPT_FEATURES = [1, 16, 32, 64, 128, 256, 512]
     ENABLE_TUNING = True
+    BITBLAS_DTYPES = {
+        torch.float32: "float32",
+        torch.float16: "float16",
+        torch.half: "float16",
+        torch.int8: "int8",
+    }
 
     def __init__(self, quant_config: BitBLASConfig):
         self.quant_config = quant_config
 
     def create_weights(
         self,
+        layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: int,
+        output_partition_sizes: List[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
-    ) -> Dict[str, Any]:
+    ):
         """Creates quantized weights for use in linear operations.
 
         The function initializes and returns a dictionary containing quantized weights, scales, and zeros
@@ -179,19 +190,17 @@ class BitBLASLinearMethod(LinearMethodBase):
 
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
-        if (
-            self.quant_config.group_size != -1
-            and input_size_per_partition % self.quant_config.group_size != 0
-        ):
+        if (self.quant_config.group_size != -1 and
+                input_size_per_partition % self.quant_config.group_size != 0):
             raise ValueError(
                 f"Input size per partition ({input_size_per_partition}) must be divisible by "
-                f"group size ({self.quant_config.group_size})."
-            )
+                f"group size ({self.quant_config.group_size}).")
 
         # Initialize or retrieve the BitBLAS matrix multiplication operator.
         self._configure_bitblas_matmul(
             input_size_per_partition,
             output_size_per_partition,
+            params_dtype=params_dtype,
             enable_tuning=self.ENABLE_TUNING,
             bias=False,
             layout="nt",
@@ -211,25 +220,26 @@ class BitBLASLinearMethod(LinearMethodBase):
         set_weight_attrs(
             qweight,
             {
-                "input_dim": 1,
-                "output_dim": 0,
-                "packed_dim": 1,
-                "bitblas_tile_size": (
-                    self.bitblas_matmul.retrieve_weight_shape()[-2]
-                    if self.quant_config.weight_propagation
-                    else None
-                ),
-                "pack_factor": self.quant_config.pack_factor,
-                "weight_propagation": self.quant_config.weight_propagation,
+                "input_dim":
+                1,
+                "output_dim":
+                0,
+                "packed_dim":
+                1,
+                "bitblas_tile_size":
+                (self.bitblas_matmul.retrieve_weight_shape()[-2] if
+                 self.bitblas_matmul.transform_weight is not None else None),
+                "pack_factor":
+                self.quant_config.pack_factor,
+                "weight_propagation":
+                self.bitblas_matmul.transform_weight is not None,
             },
         )
 
         # Compute the number of input groups for channel-wise quantization.
-        input_groups = (
-            1
-            if self.quant_config.group_size == -1
-            else input_size_per_partition // self.quant_config.group_size
-        )
+        input_groups = (1 if self.quant_config.group_size == -1 else
+                        input_size_per_partition //
+                        self.quant_config.group_size)
 
         # Initialize scales and zeros for the quantized weights.
         scales = Parameter(
@@ -241,8 +251,11 @@ class BitBLASLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        set_weight_attrs(scales, {"input_dim": None if input_groups == 1 else 1, "output_dim": 0})
-        if self.quant_config.zeros_type == "quantized":
+        set_weight_attrs(scales, {
+            "input_dim": None if input_groups == 1 else 1,
+            "output_dim": 0
+        })
+        if self.quant_config.zeros_mode == "quantized":
             zeros = Parameter(
                 torch.empty(
                     input_groups,
@@ -265,20 +278,30 @@ class BitBLASLinearMethod(LinearMethodBase):
             )
         else:
             zeros = Parameter(
-                torch.empty(output_size_per_partition, input_groups,
+                torch.empty(output_size_per_partition,
+                            input_groups,
                             device="cuda",
                             dtype=params_dtype),
                 requires_grad=False,
             )
             # Set attributes to indicate how scales and zeros are applied.
-            set_weight_attrs(scales, {"input_dim": None if input_groups == 1 else 1, "output_dim": 0})
+            set_weight_attrs(scales, {
+                "input_dim": None if input_groups == 1 else 1,
+                "output_dim": 0
+            })
 
-        return {"qweight": qweight, "scales": scales, "zeros": zeros}   
-    
+        layer.register_parameter("qweight", qweight)
+        set_weight_attrs(qweight, extra_weight_attrs)
+        layer.register_parameter("scales", scales)
+        set_weight_attrs(scales, extra_weight_attrs)
+        layer.register_parameter("zeros", zeros)
+        set_weight_attrs(zeros, extra_weight_attrs)
+
     def _configure_bitblas_matmul(
         self,
         infeatures,
         outfeatures,
+        params_dtype,
         enable_tuning,
         bias,
         layout,
@@ -286,7 +309,7 @@ class BitBLASLinearMethod(LinearMethodBase):
     ):
         from bitblas import MatmulConfig
 
-        bitblas_dtype = self.BITBLAS_DTYPES[self.TORCH_DTYPE]
+        bitblas_dtype = self.BITBLAS_DTYPES[params_dtype]
 
         W_dtype = f"uint{bits}"
 
@@ -298,63 +321,56 @@ class BitBLASLinearMethod(LinearMethodBase):
             W_dtype=W_dtype,
             out_dtype=bitblas_dtype,
             accum_dtype="int32" if bitblas_dtype == "int8" else bitblas_dtype,
-            storage_dtype=self.STORAGE_DTYPE,
+            storage_dtype=self.quant_config.STORAGE_DTYPE,
             with_scaling=True,
             with_zeros=True,
-            group_size=self.group_size,
+            group_size=self.quant_config.group_size,
             with_bias=bias,
             layout=layout,
-            zeros_mode=self.zeros_mode,
+            zeros_mode=self.quant_config.zeros_mode,
         )
         self.bitblas_matmul = self._get_or_create_bitblas_operator(
-            matmul_config, enable_tuning
-        )
+            matmul_config, enable_tuning)
 
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
         from bitblas import Matmul
         from bitblas.cache import global_operator_cache
 
         if global_operator_cache.size() == 0:
-            global_operator_cache.load_from_database(
-                BITBLAS_DATABASE_PATH, BITBLAS_TARGET
-            )
+            global_operator_cache.load_from_database(BITBLAS_DATABASE_PATH,
+                                                     BITBLAS_TARGET)
 
         bitblas_matmul = global_operator_cache.get(config)
         if bitblas_matmul is None:
-            bitblas_matmul = Matmul(config, target=self.target)
+            bitblas_matmul = Matmul(config, target=BITBLAS_TARGET)
             if enable_tuning:
                 bitblas_matmul.hardware_aware_finetune(topk=20)
                 global_operator_cache.add(config, bitblas_matmul)
                 global_operator_cache.save_into_database(
-                    BITBLAS_DATABASE_PATH, BITBLAS_TARGET
-                )
-                print(
+                    BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
+                logger.info(
                     "BitBLAS Tuning done, appended operator to global_operator_cache."
                 )
             else:
-                print("BitBLAS Operator created.")
+                logger.info(f"BitBLAS Operator {config} created.")
         else:
-            print("BitBLAS Operator found in global_operator_cache.")
+            logger.info(
+                f"BitBLAS Operator {config} found in global_operator_cache.")
         return bitblas_matmul
-   
+
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight = layer.B
-        scales = layer.s
-        workspace = layer.workspace
+        qweight = layer.qweight
+        scales = layer.scales
+        qzeros = layer.zeros
 
         x_2d = x.view(-1, x.shape[-1])
 
-        size_m = x_2d.shape[0]
-        size_k = x_2d.shape[1]
-        size_n = scales.shape[1]
-
-        output_2d = ops.marlin_gemm(x_2d, qweight, scales, workspace, size_m,
-                                    size_n, size_k)
+        output_2d = self.bitblas_matmul(x_2d, qweight, scales, qzeros)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 

@@ -17,7 +17,6 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 
 logger = init_logger(__name__)
 
-
 try:
     import bitblas
 except ImportError as e:
@@ -37,7 +36,7 @@ GPTQ_BITBLAS_SUPPORTED_NUM_BITS = [1, 2, 4, 8]
 GPTQ_BITBLAS_SUPPORTED_SYM = [False, True]
 
 
-def unpack_qzeros(qzeros, bits):
+def unpack_qzeros(qzeros, bits) -> torch.Tensor:
     qzeros = qzeros.view(torch.int32)
     elems_per_int32 = 32 // bits
     unpacked_zeros = torch.zeros(
@@ -49,24 +48,25 @@ def unpack_qzeros(qzeros, bits):
 
     for col in range(unpacked_zeros.shape[1]):
         i = col % elems_per_int32
-        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i)) & 0xF
+        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >>
+                                  (bits * i)) & 0xF
 
     return unpacked_zeros + 1
-
 
 
 class GPTQBitBLASConfig(QuantizationConfig):
     """Config class for GPTQ BitBLAS"""
 
     TORCH_DTYPE = torch.float16
-    GPTQ_CKPT_STORAGE_DTYPE = "int32"  # GPTQ Default Checkpoints use int32 as storage dtype
-    GPTQ_BITBLAS_STORAGE_DTYPE = "int8"  # BitBLAS uses int8 as storage dtype    
+    GPTQ_CKPT_STORAGE_DTYPE = (
+        "int32"  # GPTQ Default Checkpoints use int32 as storage dtype
+    )
+    GPTQ_BITBLAS_STORAGE_DTYPE = "int8"  # BitBLAS uses int8 as storage dtype
     TORCH_BITBLAS_STORAGE_DTYPE = getattr(torch, GPTQ_BITBLAS_STORAGE_DTYPE)
     ZEROS_MODE = "quantized"  # "original" or "rescale" or "quantized", the gptq_bitblas prefer "quantized"
 
-    def __init__(
-        self, weight_bits: int, group_size: int, desc_act: bool, is_sym: bool
-    ) -> None:
+    def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
+                 is_sym: bool) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
@@ -82,19 +82,17 @@ class GPTQBitBLASConfig(QuantizationConfig):
             raise ValueError(
                 f"BitBLAS does not support weight_bits = {self.weight_bits}. "
                 f"Only weight_bits = {GPTQ_BITBLAS_SUPPORTED_NUM_BITS} "
-                "are supported."
-            )
+                "are supported.")
 
         if self.is_sym not in GPTQ_BITBLAS_SUPPORTED_SYM:
             raise ValueError(
                 f"BitBLAS does not support is_sym = {self.is_sym}. "
-                f"Only sym = {GPTQ_BITBLAS_SUPPORTED_SYM} are supported."
-            )
+                f"Only sym = {GPTQ_BITBLAS_SUPPORTED_SYM} are supported.")
 
-        
         self.storage_dtype = self.GPTQ_BITBLAS_STORAGE_DTYPE
 
-        storage_nbit = int("".join(c for c in self.GPTQ_CKPT_STORAGE_DTYPE if c.isdigit()))
+        storage_nbit = int("".join(c for c in self.GPTQ_CKPT_STORAGE_DTYPE
+                                   if c.isdigit()))
 
         # 4 Bits packed into 32 bit datatype.
         self.pack_factor = storage_nbit // weight_bits
@@ -104,11 +102,9 @@ class GPTQBitBLASConfig(QuantizationConfig):
         self.zeros_mode = self.ZEROS_MODE
 
     def __repr__(self) -> str:
-        return (
-            f"GPTQBitBLASConfig(weight_bits={self.weight_bits}, "
-            f"group_size={self.group_size}, "
-            f"desc_act={self.desc_act})"
-        )
+        return (f"GPTQBitBLASConfig(weight_bits={self.weight_bits}, "
+                f"group_size={self.group_size}, "
+                f"desc_act={self.desc_act})")
 
     @classmethod
     def get_name(cls) -> str:
@@ -135,31 +131,28 @@ class GPTQBitBLASConfig(QuantizationConfig):
         return cls(weight_bits, group_size, desc_act, is_sym)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
         can_convert = cls.is_bitblas_compatible(hf_quant_cfg)
 
         is_valid_user_quant = user_quant is None or user_quant == "bitblas"
 
         if can_convert and is_valid_user_quant:
-            msg = (
-                "The model is convertible to {} during runtime."
-                " Using {} kernel.".format(cls.get_name(), cls.get_name())
-            )
+            msg = ("The model is convertible to {} during runtime."
+                   " Using {} kernel.".format(cls.get_name(), cls.get_name()))
             logger.info(msg)
             return cls.get_name()
 
         if can_convert and user_quant == "gptq":
-            logger.info(
-                "Detected that the model can run with gptq_bitblas"
-                ", however you specified quantization=gptq explicitly,"
-                " so forcing gptq. Use quantization=gptq_bitblas for"
-                " faster inference"
-            )
+            logger.info("Detected that the model can run with gptq_bitblas"
+                        ", however you specified quantization=gptq explicitly,"
+                        " so forcing gptq. Use quantization=gptq_bitblas for"
+                        " faster inference")
         return None
 
     def get_quant_method(
-        self, layer: torch.nn.Module
-    ) -> Optional["GPTQBitBLASLinearMethod"]:
+            self,
+            layer: torch.nn.Module) -> Optional["GPTQBitBLASLinearMethod"]:
         if isinstance(layer, LinearBase):
             return GPTQBitBLASLinearMethod(self)
         return None
@@ -186,10 +179,8 @@ class GPTQBitBLASConfig(QuantizationConfig):
             return False
 
         # Otherwise, can convert if model satisfies bitblas constraints.
-        return (
-            num_bits in GPTQ_BITBLAS_SUPPORTED_NUM_BITS
-            and sym in GPTQ_BITBLAS_SUPPORTED_SYM
-        )
+        return (num_bits in GPTQ_BITBLAS_SUPPORTED_NUM_BITS
+                and sym in GPTQ_BITBLAS_SUPPORTED_SYM)
 
 
 class GPTQBitBLASState(Enum):
@@ -260,8 +251,7 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
         if input_size_per_partition % group_size != 0:
             raise ValueError(
                 f"Input size per partition ({input_size_per_partition}) must be divisible by "
-                f"group size ({self.quant_config.group_size})."
-            )
+                f"group size ({self.quant_config.group_size}).")
 
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
@@ -311,7 +301,10 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
         # Ignore warning from fused linear layers such as QKVParallelLinear.
         set_weight_attrs(
             g_idx,
-            {**extra_weight_attrs, "input_dim": 0, "ignore_warning": True},
+            {
+                **extra_weight_attrs, "input_dim": 0,
+                "ignore_warning": True
+            },
         )
 
         g_idx_sort_indices = torch.empty(
@@ -399,17 +392,15 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
             zeros_mode=self.quant_config.zeros_mode,
         )
         self.bitblas_matmul = self._get_or_create_bitblas_operator(
-            matmul_config, enable_tuning
-        )
+            matmul_config, enable_tuning)
 
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
         from bitblas import Matmul
         from bitblas.cache import global_operator_cache
 
         if global_operator_cache.size() == 0:
-            global_operator_cache.load_from_database(
-                BITBLAS_DATABASE_PATH, BITBLAS_TARGET
-            )
+            global_operator_cache.load_from_database(BITBLAS_DATABASE_PATH,
+                                                     BITBLAS_TARGET)
 
         bitblas_matmul = global_operator_cache.get(config)
         if bitblas_matmul is None:
@@ -418,42 +409,46 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
                 bitblas_matmul.hardware_aware_finetune(topk=20)
                 global_operator_cache.add(config, bitblas_matmul)
                 global_operator_cache.save_into_database(
-                    BITBLAS_DATABASE_PATH, BITBLAS_TARGET
-                )
-                print(
+                    BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
+                logger.info(
                     "BitBLAS Tuning done, appended operator to global_operator_cache."
                 )
             else:
-                print(f"BitBLAS Operator {config} created.")
+                logger.info(f"BitBLAS Operator {config} created.")
         else:
-            print(f"BitBLAS Operator {config} found in global_operator_cache.")
+            logger.info(
+                f"BitBLAS Operator {config} found in global_operator_cache.")
         return bitblas_matmul
-    
-    def repack_bitblas_from_gptq(self, b_q_weight: torch.Tensor, scales: torch.Tensor, qzeros: torch.Tensor):
+
+    def repack_bitblas_from_gptq(self, b_q_weight: torch.Tensor,
+                                 scales: torch.Tensor, qzeros: torch.Tensor):
         from bitblas.quantization.utils import general_compress
 
         # qweight in gptq old quant linear stored with (outfeatures, infeatures), should be transposed.
-        qweight = b_q_weight.T.contiguous().view(self.quant_config.TORCH_BITBLAS_STORAGE_DTYPE)
+        qweight = b_q_weight.T.contiguous().view(
+            self.quant_config.TORCH_BITBLAS_STORAGE_DTYPE)
         if self.bitblas_matmul.weight_transform is not None:
-            qweight = self.bitblas_matmul.weight_transform(qweight.cpu()).cuda()
+            qweight = self.bitblas_matmul.weight_transform(
+                qweight.cpu()).cuda()
         # scales in gptq old quant linear stored with (infeatures // group_size, outfeatures), should be transposed.
         scales = scales.T.contiguous()
         # qzeros should be de-quantized to int zeros.
-        intzeros = unpack_qzeros(qzeros, self.quant_config.weight_bits).T.contiguous()
-        zeros = None
+        intzeros = unpack_qzeros(qzeros,
+                                 self.quant_config.weight_bits).T.contiguous()
+        zeros: Optional[torch.Tensor] = None
         if self.bitblas_matmul.config.zeros_mode == "original":
             zeros = intzeros.to(torch.float16).contiguous()
         elif self.bitblas_matmul.config.zeros_mode == "rescale":
+            assert zeros is not None, "zeros should not be None"
             zeros[:, :] = intzeros.to(torch.float16)[:, :] * scales[:, :]
         elif self.bitblas_matmul.config.zeros_mode == "quantized":
-            zeros = (
-                torch.Tensor(
-                    general_compress(intzeros.T.contiguous().cpu().numpy(), self.quant_config.weight_bits)
-                )
-                .to(qweight.device)
-                .to(self.quant_config.TORCH_BITBLAS_STORAGE_DTYPE)
-                .contiguous()
-            )
+            zeros = (torch.Tensor(
+                general_compress(
+                    intzeros.T.contiguous().cpu().numpy(),
+                    self.quant_config.weight_bits,
+                )).to(qweight.device).to(
+                    self.quant_config.TORCH_BITBLAS_STORAGE_DTYPE).contiguous(
+                    ))
         else:
             raise ValueError(
                 f"Unsupported zeros type: {self.bitblas_matmul.config.zeros_mode}"
@@ -469,7 +464,7 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
 
         part_size_n = layer.output_size_per_partition
-        out_shape = x.shape[:-1] + (part_size_n,)
+        out_shape = x.shape[:-1] + (part_size_n, )
 
         if layer.bitblas_state == GPTQBitBLASState.REPACK:
             layer.bitblas_state = GPTQBitBLASState.READY
@@ -479,20 +474,24 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
             def replace_tensor(name, new_t):
                 # It is important to use copy_() here since it ensures
                 # the same buffer is reused
-                getattr(layer, name).copy_(new_t.view(getattr(layer, name).dtype).view(getattr(layer, name).shape))
+                getattr(layer, name).copy_(
+                    new_t.view(getattr(layer, name).dtype).view(
+                        getattr(layer, name).shape))
                 del new_t
 
             # Repack weights
-            bitblas_qweight, bitblas_scales, bitblas_qzeros = self.repack_bitblas_from_gptq(
-                layer.qweight,
-                layer.scales,
-                layer.qzeros,
-            )
+            bitblas_qweight, bitblas_scales, bitblas_qzeros = (
+                self.repack_bitblas_from_gptq(
+                    layer.qweight,
+                    layer.scales,
+                    layer.qzeros,
+                ))
             replace_tensor("qweight", bitblas_qweight)
             replace_tensor("scales", bitblas_scales)
             replace_tensor("qzeros", bitblas_qzeros)
 
-        output = self.bitblas_matmul(x, layer.qweight, layer.scales, layer.qzeros)
+        output = self.bitblas_matmul(x, layer.qweight, layer.scales,
+                                     layer.qzeros)
 
         if bias is not None:
             output.add_(bias)  # In-place add
