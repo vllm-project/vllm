@@ -4,7 +4,6 @@ import subprocess
 from PIL import Image
 
 from vllm import LLM, SamplingParams
-from vllm.multimodal.image import ImagePixelData
 
 
 def run_phi3v():
@@ -17,7 +16,6 @@ def run_phi3v():
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
-        image_input_type="pixel_values",
         image_token_id=32044,
         image_input_shape="1,3,1008,1344",
         image_feature_size=1921,
@@ -35,7 +33,9 @@ def run_phi3v():
     outputs = llm.generate(
         {
             "prompt": prompt,
-            "multi_modal_data": ImagePixelData(image),
+            "multi_modal_data": {
+                "image": image
+            },
         },
         sampling_params=sampling_params)
     for o in outputs:

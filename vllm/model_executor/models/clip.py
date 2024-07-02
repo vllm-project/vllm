@@ -12,7 +12,6 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SequenceData
 
 
@@ -49,7 +48,7 @@ def dummy_seq_data_for_clip(
     return SequenceData(token_ids)
 
 
-def dummy_pixel_data_for_clip(
+def dummy_image_for_clip(
     hf_config: CLIPVisionConfig,
     *,
     image_width_override: Optional[int] = None,
@@ -62,22 +61,7 @@ def dummy_pixel_data_for_clip(
         height = image_height_override
 
     image = Image.new("RGB", (width, height), color=0)
-    return ImagePixelData(image)
-
-
-def dummy_feature_data_for_clip(
-    hf_config: CLIPVisionConfig,
-    *,
-    image_feature_size_override: Optional[int] = None,
-):
-    if image_feature_size_override is None:
-        image_feature_size = get_clip_image_feature_size(hf_config)
-    else:
-        image_feature_size = image_feature_size_override
-
-    values = torch.zeros((1, image_feature_size, hf_config.hidden_size),
-                         dtype=torch.float16)
-    return ImageFeatureData(values)
+    return {"image": image}
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa

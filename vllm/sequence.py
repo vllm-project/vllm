@@ -14,7 +14,7 @@ from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
-    from vllm.multimodal import MultiModalData
+    from vllm.multimodal import MultiModalDataDict
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -280,8 +280,8 @@ class Sequence:
         return self.inputs["prompt_token_ids"]
 
     @property
-    def multi_modal_data(self) -> Optional["MultiModalData"]:
-        return self.inputs.get("multi_modal_data")
+    def multi_modal_data(self) -> "MultiModalDataDict":
+        return self.inputs.get("multi_modal_data") or {}
 
     @property
     def lora_int_id(self) -> int:
@@ -457,7 +457,7 @@ class SequenceGroup:
         return next(iter(self.seqs_dict.values())).prompt_token_ids
 
     @property
-    def multi_modal_data(self) -> Optional["MultiModalData"]:
+    def multi_modal_data(self) -> Optional["MultiModalDataDict"]:
         # All sequences in the group should have the same multi-modal data.
         # We use the multi-modal data of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).multi_modal_data
@@ -639,7 +639,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
-        multi_modal_data: Optional["MultiModalData"] = None,
+        multi_modal_data: Optional["MultiModalDataDict"] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
     ) -> None:
