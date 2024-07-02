@@ -161,7 +161,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             input_positions.extend(list(range(computed_len, seq_len)))
 
             mm_data = seq_group_metadata.multi_modal_data
-            if mm_data is not None:
+            if mm_data:
                 mm_kwargs = self.multi_modal_input_mapper(mm_data)
                 multi_modal_inputs_list.append(mm_kwargs)
 

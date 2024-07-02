@@ -272,7 +272,7 @@ class OpenAIServingChat(OpenAIServing):
             "prompt": prompt_text,
             "prompt_token_ids": prompt_ids,
         }
-        if mm_data is not None:
+        if mm_data:
             inputs["multi_modal_data"] = mm_data
 
         is_tracing_enabled = await self.engine.is_tracing_enabled()
