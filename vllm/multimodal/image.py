@@ -65,6 +65,7 @@ def repeat_and_pad_image_tokens(
             ))
 
         image_token_count = prompt.count(image_token_str)
+        # This is an arbitrary number to distinguish between the two cases
         if image_token_count > 16:
             logger.warning(
                 "Please follow the prompt format that is "
