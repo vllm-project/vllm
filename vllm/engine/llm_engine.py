@@ -846,6 +846,8 @@ class LLMEngine:
                 "as performance will be severely degraded otherwise.")
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             0].schedule()
+        finished_requests_ids = self.scheduler[
+            0].get_and_reset_finished_requests_ids()
 
         if not scheduler_outputs.is_empty():
             execute_model_req = ExecuteModelRequest(
@@ -855,7 +857,7 @@ class LLMEngine:
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-            )
+                finished_requests_ids=finished_requests_ids)
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
         else:
