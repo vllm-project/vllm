@@ -596,7 +596,7 @@ class Scheduler:
         )
 
     def _get_prompt_limit(self, seq_group: SequenceGroup) -> int:
-        if self.scheduler_config.chunked_prefill_enabled:
+        if not self.scheduler_config.chunked_prefill_enabled:
             prompt_limit = self.scheduler_config.max_model_len
         else:
             prompt_limit = min(self.scheduler_config.max_model_len,
