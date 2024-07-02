@@ -34,7 +34,7 @@ def test_clip_image_processor(image_assets, dtype, size_factor):
         )
         vllm_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
-            {"image": asset.pil_image},
+            {"image": image},
         )
 
         assert hf_result.keys() == vllm_result.keys()
@@ -73,7 +73,7 @@ def test_llava_next_image_processor(image_assets, dtype, size_factor):
         )
         vllm_result = MULTIMODAL_REGISTRY.map_input(
             model_config,
-            {"image": asset.pil_image},
+            {"image": image},
         )
 
         assert hf_result.keys() == vllm_result.keys()
