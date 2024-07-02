@@ -83,36 +83,3 @@ def test_llava_next_image_processor(image_assets, dtype, size_factor):
 
             assert hf_arr.shape == vllm_arr.shape, f"Failed for key={key}"
             assert np.allclose(hf_arr, vllm_arr), f"Failed for key={key}"
-
-
-@pytest.mark.xfail(
-    reason="Example image pixels were not processed using HuggingFace")
-@pytest.mark.parametrize("dtype", ["float"])
-def test_image_pixel_types(image_assets, dtype):
-    MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
-
-    model_config = ModelConfig(
-        model=MODEL_NAME,
-        tokenizer=MODEL_NAME,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype=dtype,
-        revision=None,
-    )
-    for asset in image_assets:
-        image_result = MULTIMODAL_REGISTRY.map_input(
-            model_config,
-            {"image": asset.pil_image},
-        )
-        tensor_result = MULTIMODAL_REGISTRY.map_input(
-            model_config,
-            {"image": asset.pil_image},
-        )
-
-        assert image_result.keys() == tensor_result.keys()
-        for key, image_arr in image_result.items():
-            tensor_arr: np.ndarray = tensor_result[key].numpy()
-
-            assert image_arr.shape == tensor_arr.shape, f"Failed for key={key}"
-            assert np.allclose(image_arr, tensor_arr), f"Failed for key={key}"
