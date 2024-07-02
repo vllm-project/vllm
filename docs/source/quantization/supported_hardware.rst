@@ -11,7 +11,7 @@ Implementation  Volta   Turing   Ampere   Ada    Hopper  AMD GPU  Intel GPU  x86
 AQLM            ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
 AWQ             ❌      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
 DeepSpeedFP     ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
-FP8             ❌      ❌       ❌       ✅     ✅      ❌        ❌         ❌       ❌              ❌
+FP8             ❌      ❌       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
 Marlin          ❌      ❌       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
 GPTQ            ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
 SqueezeLLM      ✅      ✅       ✅       ✅     ✅      ❌        ❌         ❌       ❌              ❌
