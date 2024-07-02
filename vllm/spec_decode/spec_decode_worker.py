@@ -1,3 +1,4 @@
+import copy
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -20,7 +21,8 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
-from vllm.spec_decode.multi_step_worker import MultiStepWorker
+from vllm.spec_decode.multi_step_worker import (CPUMultiStepWorker,
+                                                MultiStepWorker)
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
@@ -65,7 +67,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         typical_acceptance_sampler_posterior_threshold=speculative_config.
         typical_acceptance_sampler_posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
-        typical_acceptance_sampler_posterior_alpha)
+        typical_acceptance_sampler_posterior_alpha,
+        cpu_draft_worker=speculative_config.cpu_draft_worker)
 
     return spec_decode_worker
 
@@ -105,6 +108,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: float,
         typical_acceptance_sampler_posterior_alpha: float,
+        cpu_draft_worker: Optional[bool],
     ) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
@@ -128,9 +132,29 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
-            if draft_tp == 1:
-                draft_worker_kwargs["model_runner_cls"] = TP1DraftModelRunner
-            proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+            # if draft_tp == 1:
+            #     draft_worker_kwargs["model_runner_cls"] = TP1DraftModelRunner
+            if cpu_draft_worker:
+                cpu_draft_worker_kwargs = copy.deepcopy(draft_worker_kwargs)
+                from vllm.executor.cpu_executor import (
+                    _verify_and_get_cache_config, _verify_and_get_model_config,
+                    _verify_and_get_scheduler_config)
+                cpu_draft_worker_kwargs[
+                    "cache_config"] = _verify_and_get_cache_config(
+                        cpu_draft_worker_kwargs["cache_config"])
+                cpu_draft_worker_kwargs[
+                    "model_config"] = _verify_and_get_model_config(
+                        cpu_draft_worker_kwargs["model_config"])
+                cpu_draft_worker_kwargs[
+                    "scheduler_config"] = _verify_and_get_scheduler_config(
+                        cpu_draft_worker_kwargs["scheduler_config"])
+
+                cpu_draft_worker_kwargs["device_config"].device = torch.device(
+                    "cpu")
+                cpu_draft_worker_kwargs["device_config"].device_type = "cpu"
+                proposer_worker = CPUMultiStepWorker(**cpu_draft_worker_kwargs)
+            else:
+                proposer_worker = MultiStepWorker(**draft_worker_kwargs)
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
 
@@ -205,8 +229,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         # The scorer worker model is initialized first in case the proposer
         # model has a smaller TP degree than the target worker.
-        self.scorer_worker.init_device()
         self.proposer_worker.init_device()
+        self.scorer_worker.init_device()
 
         # NOTE(cade): load_model is not part of the WorkerBase interface.
         self.scorer_worker.load_model()
@@ -248,7 +272,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
          ) = True
         self.proposer_worker.set_include_gpu_probs_tensor()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(
+            self) -> Tuple[int, int, Optional[int], Optional[int]]:
         """Determine the number of cache blocks to use.
 
         This is done by profiling the scorer model (which is typically the
@@ -264,19 +289,38 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer_cache_block_size_bytes = (
             self.proposer_worker.get_cache_block_size_bytes())
 
-        new_num_gpu_blocks = split_num_cache_blocks_evenly(
-            scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
-            num_gpu_blocks)
-        return new_num_gpu_blocks, num_cpu_blocks
+        draft_num_gpu_blocks = None
+        draft_num_cpu_blocks = None
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+        if self.proposer_worker.device_config.device.type == "cpu":
+            draft_num_gpu_blocks, draft_num_cpu_blocks = (
+                self.proposer_worker.determine_num_available_blocks())
+        else:
+            num_gpu_blocks = split_num_cache_blocks_evenly(
+                scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
+                num_gpu_blocks)
+
+        return num_gpu_blocks, num_cpu_blocks, draft_num_gpu_blocks, \
+                draft_num_cpu_blocks
+
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
+                         num_cpu_blocks: int,
+                         draft_num_gpu_blocks=None,
+                         draft_num_cpu_blocks=None) -> None:
         """Initialize the cache engine of the scorer and proposer workers.
         """
         self.scorer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                             num_cpu_blocks=num_cpu_blocks)
-        self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
-                                              num_cpu_blocks=num_cpu_blocks)
+
+        if draft_num_gpu_blocks is None:
+            draft_num_gpu_blocks = num_gpu_blocks
+        if draft_num_cpu_blocks is None:
+            draft_num_cpu_blocks = num_cpu_blocks
+
+        self.proposer_worker.initialize_cache(
+            num_gpu_blocks=draft_num_gpu_blocks,
+            num_cpu_blocks=draft_num_cpu_blocks)
 
     @torch.inference_mode()
     def execute_model(

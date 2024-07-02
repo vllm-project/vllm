@@ -416,6 +416,7 @@ if _is_cuda() or _is_hip():
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
+    ext_modules.append(CMakeExtension(name="vllm._C_cpu"))
 
     if _install_punica():
         ext_modules.append(CMakeExtension(name="vllm._punica_C"))
