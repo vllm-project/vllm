@@ -5,9 +5,6 @@ from PIL import Image
 
 from vllm import LLM, SamplingParams
 
-# The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
-# You can use `.buildkite/download-images.sh` to download them
-
 
 def run_llava_next():
     llm = LLM(

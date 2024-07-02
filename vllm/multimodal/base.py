@@ -15,24 +15,6 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-
-class MultiModalData:
-    """
-    Base class that contains multi-modal data.
-
-    To add a new modality, add a new file under ``multimodal`` directory.
-
-    In this new file, subclass :class:`~MultiModalData` and
-    :class:`~MultiModalPlugin`.
-
-    Finally, register the new plugin to
-    :const:`vllm.multimodal.MULTIMODAL_REGISTRY`.
-    This enables models to call :meth:`MultiModalRegistry.map_input` for
-    the new modality.
-    """
-    pass
-
-
 BatchedTensors = Union[torch.Tensor, List[torch.Tensor]]
 """
 If each input tensor in the batch has the same size, this is a single batched
