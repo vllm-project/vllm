@@ -7,6 +7,7 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
 import torch
 from transformers import PretrainedConfig, PreTrainedTokenizerBase
 
+from vllm.distributed import get_current_tp_rank_partition_size
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -249,11 +250,13 @@ class ModelConfig:
         total_num_attention_heads = getattr(self.hf_text_config,
                                             "num_attention_heads", 0)
         tensor_parallel_size = parallel_config.tensor_parallel_size
-        if total_num_attention_heads % tensor_parallel_size != 0:
+        if (total_num_attention_heads % tensor_parallel_size != 0
+                and self.quantization is not None):
             raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
+                f"Total number of attention heads "
+                f"({total_num_attention_heads})"
                 " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size}).")
+                f"({tensor_parallel_size}) when quantization is used.")
 
         total_num_hidden_layers = getattr(self.hf_text_config,
                                           "num_hidden_layers", 0)
@@ -352,20 +355,29 @@ class ModelConfig:
         # equal to the number of attention heads.
         return self.hf_text_config.num_attention_heads
 
-    def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
+    def get_num_kv_heads(self,
+                         parallel_config: "ParallelConfig",
+                         tp_rank: int = 0) -> int:
         """Returns the number of KV heads per GPU."""
         total_num_kv_heads = self.get_total_num_kv_heads()
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
-        return max(1,
-                   total_num_kv_heads // parallel_config.tensor_parallel_size)
+        result = get_current_tp_rank_partition_size(
+            total_num_kv_heads, tp_rank, parallel_config.tensor_parallel_size)
+        return max(1, result)
 
     def get_num_attention_heads(self,
-                                parallel_config: "ParallelConfig") -> int:
-        num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
-        return num_heads // parallel_config.tensor_parallel_size
+                                parallel_config: "ParallelConfig",
+                                tp_rank: int = 0) -> int:
+        num_total_kv_heads = self.get_total_num_kv_heads()
+        num_kv_heads = self.get_num_kv_heads(parallel_config, tp_rank)
+        num_total_attention_heads = self.hf_text_config.num_attention_heads
+        num_heads_per_kv_head = num_total_attention_heads // num_total_kv_heads
+        # For GQA attention we make sure the whole attention head group is
+        # together on the same GPU.
+        return num_kv_heads * num_heads_per_kv_head
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
@@ -709,7 +721,7 @@ class SchedulerConfig:
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
         embedding_mode: Whether the running model is for embedding.
-        preemption_mode: Whether to perform preemption by swapping or 
+        preemption_mode: Whether to perform preemption by swapping or
             recomputation. If not specified, we determine the mode as follows:
             We use recomputation by default since it incurs lower overhead than
             swapping. However, when the sequence group has multiple sequences
@@ -1261,7 +1273,7 @@ class VisionLanguageConfig:
     # VisionLanguageConfig class.
     def get_image_token_text(
             self, tokenizer: PreTrainedTokenizerBase) -> Tuple[str, str]:
-        """Get the image token placeholder text to be inserted into the 
+        """Get the image token placeholder text to be inserted into the
         text prompt and the string representation of the image token id.
         """
         image_token_str = tokenizer.decode(self.image_token_id)

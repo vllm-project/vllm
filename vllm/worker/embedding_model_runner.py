@@ -40,6 +40,7 @@ class EmbeddingModelRunner(
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        tp_rank: int = 0,
     ):
         super().__init__(model_config,
                          parallel_config,
@@ -50,7 +51,8 @@ class EmbeddingModelRunner(
                          lora_config=lora_config,
                          kv_cache_dtype=kv_cache_dtype,
                          is_driver_worker=is_driver_worker,
-                         vision_language_config=vision_language_config)
+                         vision_language_config=vision_language_config,
+                         tp_rank=tp_rank)
 
     @torch.inference_mode()
     def execute_model(

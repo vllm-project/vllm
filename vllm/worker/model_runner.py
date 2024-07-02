@@ -160,6 +160,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
         return_hidden_states: bool = False,
+        tp_rank: int = 0,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -175,6 +176,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
 
+        self.tp_rank = tp_rank
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
@@ -192,11 +194,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
         num_attn_heads = self.model_config.get_num_attention_heads(
-            self.parallel_config)
+            self.parallel_config, self.tp_rank)
         self.attn_backend = get_attn_backend(
             num_attn_heads,
             self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_num_kv_heads(self.parallel_config,
+                                               self.tp_rank),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
@@ -688,9 +691,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 paged_kv_indices=paged_kv_indices_tensor,
                 paged_kv_last_page_len=paged_kv_last_page_len_tensor,
                 num_qo_heads=self.model_config.get_num_attention_heads(
-                    self.parallel_config),
+                    self.parallel_config, self.tp_rank),
                 num_kv_heads=self.model_config.get_num_kv_heads(
-                    self.parallel_config),
+                    self.parallel_config, self.tp_rank),
                 head_dim=self.model_config.get_head_size(),
                 page_size=self.block_size,
                 seq_start_loc=seq_start_loc,

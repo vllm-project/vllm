@@ -7,7 +7,7 @@ It takes over the control of the distributed environment from PyTorch.
 The typical workflow is:
 
 - call `init_distributed_environment` to initialize the distributed environment.
-- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to 
+- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to
  initialize the model parallel groups.
 
 - any code dealing with the distributed stuff
@@ -272,7 +272,7 @@ class GroupCoordinator:
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """
-        NOTE: This operation will be applied in-place or out-of-place. 
+        NOTE: This operation will be applied in-place or out-of-place.
         Always assume this function modifies its input, but use the return
         value as the output.
         """
@@ -1041,3 +1041,35 @@ def is_in_the_same_node(pg: ProcessGroup):
     torch.distributed.all_reduce(is_in_the_same_node, group=pg)
 
     return is_in_the_same_node.sum().item() == world_size
+
+
+def get_current_tp_rank_partition_offset(total_size: int,
+                                         tp_rank: Optional[int] = None,
+                                         tp_size: Optional[int] = None,
+                                         multiple_of: int = 1) -> int:
+    if tp_rank is None:
+        tp_rank = get_tensor_model_parallel_rank()
+
+    if tp_size is None:
+        tp_size = get_tensor_model_parallel_world_size()
+
+    assert total_size % multiple_of == 0
+    total_size = total_size // multiple_of
+    return ((total_size // tp_size) * tp_rank +
+            min(total_size % tp_size, tp_rank)) * multiple_of
+
+
+def get_current_tp_rank_partition_size(total_size: int,
+                                       tp_rank: Optional[int] = None,
+                                       tp_size: Optional[int] = None,
+                                       multiple_of: int = 1) -> int:
+    if tp_rank is None:
+        tp_rank = get_tensor_model_parallel_rank()
+
+    if tp_size is None:
+        tp_size = get_tensor_model_parallel_world_size()
+
+    assert total_size % multiple_of == 0
+    total_size = total_size // multiple_of
+    return ((total_size // tp_size) +
+            (total_size % tp_size > tp_rank)) * multiple_of
