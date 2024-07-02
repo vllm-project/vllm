@@ -146,7 +146,7 @@ class HpuModelAdapter():
         kwargs = kwargs.copy()
         selected_token_indices = kwargs.pop('selected_token_indices')
         if 'warmup_mode' in kwargs:
-            kwargs.pop('warmup_mode') # required for PT eager
+            kwargs.pop('warmup_mode')
         input_ids = kwargs['input_ids']
         kwargs['attn_metadata'] = self._set_attn_bias(kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1), input_ids.device, torch.bfloat16)
         hidden_states = self.model(*args, **kwargs)
@@ -954,7 +954,8 @@ class HabanaModelRunner:
         seqs = [self.create_dummy_seq_group_metadata(i, seq_len, is_prompt) for i in range(batch_size)]
         torch.hpu.synchronize()
         for _ in range(times):
-            self.execute_model(seqs, kv_caches, warmup_mode=True)
+            # FIXME: warmup_mode causes OOM on 70b. Disabling for now
+            self.execute_model(seqs, kv_caches, warmup_mode=False)
             torch.hpu.synchronize()
         self.profiler.end()
         gc.collect()
