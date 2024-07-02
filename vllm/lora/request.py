@@ -1,13 +1,15 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from vllm.adapter_commons.request import AdapterRequest
+
 
 @dataclass
-class LoRARequest:
+class LoRARequest(AdapterRequest):
     """
     Request for a LoRA adapter.
 
-    Note that this class should be be used internally. For online
+    Note that this class should be used internally. For online
     serving, it is recommended to not allow users to use this class but
     instead provide another layer of abstraction to prevent users from
     accessing unauthorized LoRA adapters.
@@ -20,15 +22,16 @@ class LoRARequest:
     lora_int_id: int
     lora_local_path: str
     long_lora_max_len: Optional[int] = None
+    __hash__ = AdapterRequest.__hash__
 
-    def __post_init__(self):
-        if self.lora_int_id < 1:
-            raise ValueError(
-                f"lora_int_id must be > 0, got {self.lora_int_id}")
-
-    def __eq__(self, value: object) -> bool:
-        return isinstance(
-            value, LoRARequest) and self.lora_int_id == value.lora_int_id
-
-    def __hash__(self) -> int:
+    @property
+    def adapter_id(self):
         return self.lora_int_id
+
+    @property
+    def name(self):
+        return self.lora_name
+
+    @property
+    def local_path(self):
+        return self.lora_local_path

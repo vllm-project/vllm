@@ -6,8 +6,8 @@ import torch.nn as nn
 
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         ModelConfig, ParallelConfig, PromptAdapterConfig,
+                         SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -82,6 +82,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         kv_cache_dtype: Optional[str] = "auto",
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         *args,
         **kwargs,
@@ -93,6 +94,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.load_config = load_config
         self.cache_config = cache_config
         self.vision_language_config = vision_language_config
+        self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
 
         self.sliding_window = model_config.get_sliding_window()

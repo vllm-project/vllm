@@ -3,8 +3,8 @@ from typing import List, Optional
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         ModelConfig, ParallelConfig, PromptAdapterConfig,
+                         SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
@@ -47,6 +47,7 @@ class TP1DraftModelRunner(ModelRunner):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         return_hidden_states: bool = False,
     ):
         if return_hidden_states:
@@ -65,6 +66,7 @@ class TP1DraftModelRunner(ModelRunner):
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
+            prompt_adapter_config=prompt_adapter_config,
             return_hidden_states=return_hidden_states,
         )
 
@@ -129,6 +131,13 @@ class TP1DraftModelRunner(ModelRunner):
             assert model_input.lora_mapping is not None
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
+
+        if self.prompt_adapter_config:
+            assert model_input.prompt_adapter_requests is not None
+            assert model_input.prompt_adapter_mapping is not None
+            self.set_active_prompt_adapters(
+                model_input.prompt_adapter_requests,
+                model_input.prompt_adapter_mapping)
 
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
