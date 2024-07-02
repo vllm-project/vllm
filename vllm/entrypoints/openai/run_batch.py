@@ -1,7 +1,8 @@
 import asyncio
 from io import StringIO
 from typing import Awaitable, List
-
+from asyncio import Semaphore
+from tqdm.asyncio import tqdm
 import aiohttp
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
@@ -100,6 +101,28 @@ async def run_request(chat_serving: OpenAIServingChat,
 
     return batch_output
 
+MAX_CONCURRENT_REQUESTS = 10000
+
+async def process_requests(input_file: str, openai_serving_chat):
+    sem = Semaphore(MAX_CONCURRENT_REQUESTS)
+    
+    async def run_request_with_semaphore(request):
+        async with sem:
+            
+            return await run_request(openai_serving_chat, request)
+    
+    response_futures: List[Awaitable[BatchRequestOutput]] = []
+    
+    # Read file contents asynchronously
+    file_contents = (await read_file(input_file)).strip().split("\n")
+    total_lines = len(file_contents)
+    
+    for request_json in tqdm(file_contents, total=total_lines, desc="Processing requests"):
+        request = BatchRequestInput.model_validate_json(request_json.strip())
+        response_futures.append(run_request_with_semaphore(request))
+    
+    responses = await tqdm.gather(*response_futures, desc="Gathering responses")
+    return responses
 
 async def main(args):
     if args.served_model_name is not None:
@@ -122,12 +145,7 @@ async def main(args):
     )
 
     # Submit all requests in the file to the engine "concurrently".
-    response_futures: List[Awaitable[BatchRequestOutput]] = []
-    for request_json in (await read_file(args.input_file)).strip().split("\n"):
-        request = BatchRequestInput.model_validate_json(request_json)
-        response_futures.append(run_request(openai_serving_chat, request))
-
-    responses = await asyncio.gather(*response_futures)
+    responses = await process_requests(args.input_file, openai_serving_chat)
 
     output_buffer = StringIO()
     for response in responses:
