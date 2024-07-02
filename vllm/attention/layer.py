@@ -84,9 +84,17 @@ class Attention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        is_prompt,
+        block_tables,
+        num_prefills,
+        num_prefill_tokens,
+        num_decode_tokens,
+        slot_mapping,
+        seq_lens,
+        seq_lens_tensor=None,
+        max_decode_seq_len=None,
     ) -> torch.Tensor:
-        return self.impl.forward(query, key, value, kv_cache, attn_metadata,
+        return self.impl.forward(query, key, value, kv_cache, is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens,seq_lens_tensor,max_decode_seq_len,
                                  self._kv_scale)
 
     def extra_repr(self) -> str:

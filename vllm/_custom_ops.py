@@ -1,7 +1,7 @@
 from typing import Optional, Tuple, Type
 
 import torch
-
+import intel_extension_for_pytorch as ipex
 try:
     from vllm._C import cache_ops as vllm_cache_ops
     from vllm._C import ops as vllm_ops
@@ -98,9 +98,23 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    vllm_ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache,
-                              is_neox)
 
+    # vllm_ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache,
+    #                           is_neox)
+
+    rotary_dim = cos_sin_cache.size(1)
+    query = query.view(*query.shape[:-1], -1, head_size)
+    key = key.view(*key.shape[:-1], -1, head_size)
+
+    query_rot = query[..., :rotary_dim]
+    key_rot = key[..., :rotary_dim]
+
+    cos_sin = cos_sin_cache[positions.long()]
+    cos, sin = cos_sin.chunk(2, dim=-1)
+    cos = cos.repeat(1, 2)
+    sin = sin.repeat(1, 2)
+
+    ipex.llm.functional.rotary_embedding(query_rot, key_rot, sin, cos, rotary_dim, is_neox)
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
                              key: torch.Tensor, head_size: int,

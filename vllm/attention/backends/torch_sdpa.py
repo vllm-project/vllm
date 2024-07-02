@@ -143,8 +143,17 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: TorchSDPAMetadata,  # type: ignore
+        is_prompt,
+        block_tables,
+        num_prefills,
+        num_prefill_tokens,
+        num_decode_tokens,
+        slot_mapping,
+        seq_lens,
+        seq_lens_tensor=None,
+        max_decode_seq_len=None,
         kv_scale: float = 1.0,
+        attn_bias=None,
     ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
 
@@ -169,29 +178,29 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 kv_cache, self.num_kv_heads, self.head_size)
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
-                                                attn_metadata.slot_mapping,
+                                                slot_mapping,
                                                 self.kv_cache_dtype, kv_scale)
 
-        if attn_metadata.is_prompt:
-            assert attn_metadata.seq_lens is not None
-            if (kv_cache is None or attn_metadata.block_tables.numel() == 0):
+        if is_prompt:
+            assert seq_lens is not None
+            if (kv_cache is None or block_tables.numel() == 0):
                 if self.num_kv_heads != self.num_heads:
                     key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
                     value = value.repeat_interleave(self.num_queries_per_kv,
                                                     dim=1)
 
-                if attn_metadata.attn_bias is None:
+                if attn_bias is None:
                     if self.alibi_slopes is not None:
                         att_masks = _make_alibi_bias(
                             self.alibi_slopes, query.dtype,
                             attn_metadata.seq_lens)  # type: ignore
                     elif self.sliding_window is not None:
                         att_masks = _make_sliding_window_bias(
-                            attn_metadata.seq_lens, self.sliding_window,
+                            seq_lens, self.sliding_window,
                             query.dtype)  # type: ignore
                     else:
-                        att_masks = [None] * len(attn_metadata.seq_lens)
-                    attn_metadata.attn_bias = att_masks
+                        att_masks = [None] * len(seq_lens)
+                    attn_bias = att_masks
 
                 query = query.movedim(0, query.dim() - 2)
                 key = key.movedim(0, key.dim() - 2)
@@ -201,8 +210,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 output = torch.empty(
                     (num_tokens, self.num_heads, self.head_size),
                     dtype=query.dtype)
-                for seq_len, mask in zip(attn_metadata.seq_lens,
-                                         attn_metadata.attn_bias):
+                for seq_len, mask in zip(seq_lens,
+                                         attn_bias):
                     end = start + seq_len
                     sub_out = scaled_dot_product_attention(
                         query[None, :, start:end, :],
@@ -226,9 +235,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 query,
                 key_cache,
                 value_cache,
-                attn_metadata.block_tables,
-                attn_metadata.seq_lens_tensor,
-                attn_metadata.max_decode_seq_len,
+                block_tables,
+                seq_lens_tensor,
+                max_decode_seq_len,
                 self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,

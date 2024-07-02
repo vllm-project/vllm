@@ -229,12 +229,20 @@ class MixtralAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        is_prompt,
+        block_tables,
+        num_prefills,
+        num_prefill_tokens,
+        num_decode_tokens,
+        slot_mapping,
+        seq_lens,
+        seq_lens_tensor=None,
+        max_decode_seq_len=None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens,seq_lens_tensor,max_decode_seq_len)
         # move self.o_proj to MixtralDecoderLayer to enable linear+add fusion when tp_size <=1
         # output, _ = self.o_proj(attn_output)
         return attn_output
@@ -271,8 +279,16 @@ class MixtralDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
+        is_prompt,
+        block_tables,
+        num_prefills,
+        num_prefill_tokens,
+        num_decode_tokens,
+        slot_mapping,
+        seq_lens,
+        seq_lens_tensor=None,
+        max_decode_seq_len=None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -285,7 +301,15 @@ class MixtralDecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
+            is_prompt=is_prompt,
+            block_tables=block_tables,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
+            num_decode_tokens=num_decode_tokens,
+            slot_mapping=slot_mapping,
+            seq_lens=seq_lens,
+            seq_lens_tensor=seq_lens_tensor,
+            max_decode_seq_len=max_decode_seq_len,
         )
 
         if self.self_attn.o_proj.tp_size <=1 and not hasattr(self, "ipex_fusion") and hasattr(self.self_attn.o_proj, "ipex_qlinear"):
@@ -334,15 +358,34 @@ class MixtralModel(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        is_prompt,
+        block_tables,
+        num_prefills,
+        num_prefill_tokens,
+        num_decode_tokens,
+        slot_mapping,
+        seq_lens,
+        seq_lens_tensor=None,
+        max_decode_seq_len=None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states,
-                                            kv_caches[i], attn_metadata,
-                                            residual)
+            hidden_states, residual = layer(positions, 
+                                            hidden_states,
+                                            kv_caches[i], 
+                                            residual,
+                                            is_prompt,
+                                            block_tables,
+                                            num_prefills,
+                                            num_prefill_tokens,
+                                            num_decode_tokens,
+                                            slot_mapping,
+                                            seq_lens,
+                                            seq_lens_tensor,
+                                            max_decode_seq_len,
+                                            )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -363,6 +406,50 @@ class MixtralForCausalLM(nn.Module):
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.trace_first = None
+        self.trace_next = None
+    @torch.no_grad
+    def enable_jit(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        is_prompt,
+        block_tables,
+        num_prefills,
+        num_prefill_tokens,
+        num_decode_tokens,
+        slot_mapping,
+        seq_lens,
+        seq_lens_tensor=None,
+        max_decode_seq_len=None,
+    ) -> torch.Tensor:
+
+        if is_prompt:
+                self.model(input_ids, positions, kv_caches, is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens,seq_lens_tensor,max_decode_seq_len)
+                example_input = (
+                    input_ids,
+                    positions,
+                    kv_caches,
+                    is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens
+                )
+                self.trace_first = torch.jit.trace(self.model, example_input, check_trace=False, strict=False)
+                self.trace_first = torch.jit.freeze(self.trace_first)
+                self.trace_first(*example_input)
+                self.trace_first(*example_input)
+        else:
+                example_input = (
+                    input_ids,
+                    positions,
+                    kv_caches,
+                    is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens,seq_lens_tensor,max_decode_seq_len
+                )
+                self.trace_next = torch.jit.trace(
+                    self.model, example_input, check_trace=False, strict=False
+                )
+                self.trace_next = torch.jit.freeze(self.trace_next)
+                self.trace_next(*example_input)
+                self.trace_next(*example_input)
 
     def forward(
         self,
@@ -371,8 +458,37 @@ class MixtralForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata)
+        is_prompt=torch.tensor(attn_metadata.is_prompt)
+        block_tables=attn_metadata.block_tables
+        num_prefills=torch.tensor(attn_metadata.num_prefills)
+        num_prefill_tokens=torch.tensor(attn_metadata.num_prefill_tokens)
+        num_decode_tokens=torch.tensor(attn_metadata.num_decode_tokens)
+        slot_mapping = attn_metadata.slot_mapping
+        seq_lens=torch.tensor(attn_metadata.seq_lens)
+        seq_lens_tensor=attn_metadata.seq_lens_tensor if attn_metadata.seq_lens_tensor is not None else None
+        max_decode_seq_len=torch.tensor(attn_metadata.max_decode_seq_len) if attn_metadata.max_decode_seq_len is not None else None
+        attn_bias = attn_metadata.attn_bias
+        if kv_caches[0] is not None:
+            if attn_metadata.is_prompt:
+                if self.trace_first is None:
+                    self.enable_jit(input_ids, positions, kv_caches, is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens)
+                hidden_states = self.trace_first(
+                    input_ids,
+                    positions,
+                    kv_caches,
+                    is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens
+                )
+            else:
+                if self.trace_next is None:
+                    self.enable_jit(input_ids, positions, kv_caches, is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens,seq_lens_tensor,max_decode_seq_len)
+                hidden_states = self.trace_next(
+                    input_ids,
+                    positions,
+                    kv_caches,
+                    is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens,seq_lens_tensor,max_decode_seq_len
+                )
+        else:
+            hidden_states = self.model(input_ids, positions, kv_caches, is_prompt, block_tables,num_prefills,num_prefill_tokens,num_decode_tokens,slot_mapping,seq_lens,seq_lens_tensor,max_decode_seq_len)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
