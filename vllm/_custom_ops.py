@@ -166,6 +166,13 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+# prepare_inputs
+def advance_step(input_tokens: torch.Tensor, input_positions: torch.Tensor,
+                 context_lens: torch.Tensor, seq_lens: torch.Tensor) -> None:
+    return torch.ops._C.advance_step(input_tokens, input_positions,
+                                     context_lens, seq_lens)
+
+
 # quantization ops
 # awq
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,

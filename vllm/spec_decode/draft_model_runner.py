@@ -13,6 +13,8 @@ from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
 
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 
+from vllm import _custom_ops as ops
+
 logger = init_logger(__name__)
 
 
@@ -122,11 +124,6 @@ class TP1DraftModelRunner(ModelRunner):
 
         return self.prepare_model_input(self.cached_seq_group_metadata_list)
 
-    def gpu_advance_step(self,
-                         model_input: ModelInputForGPUWithSamplingMetadata,
-                         last_output: SamplerOutput) -> None:
-        pass
-
     def advance_step(self, model_input: ModelInputForGPUWithSamplingMetadata,
                      last_output: SamplerOutput) -> None:
         num_prefills = 0
@@ -140,7 +137,7 @@ class TP1DraftModelRunner(ModelRunner):
         seq_lens_tensor = attn_metadata.seq_lens_tensor
         slot_mapping_tensor = model_input.attn_metadata.slot_mapping
         
-        self.gpu_advance_step()
+        ops.advance_step(context_lens=context_lens_tensor, seq_lens=seq_lens_tensor)
 
         attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=num_prefills,

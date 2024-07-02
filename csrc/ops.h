@@ -52,6 +52,9 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
+void advance_step(torch::Tensor& input_tokens, torch::Tensor& input_positions,
+                  torch::Tensor& context_lens, torch::Tensor& seq_lens);
+
 #ifndef USE_ROCM
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
