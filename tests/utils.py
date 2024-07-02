@@ -101,8 +101,7 @@ class RemoteOpenAIServer:
 
             cli_args = cli_args + ["--port", str(get_open_port())]
 
-        parser = ArgumentParser(
-            description="vLLM's remote OpenAI server.")
+        parser = ArgumentParser(description="vLLM's remote OpenAI server.")
         parser = make_arg_parser(parser)
         args = parser.parse_args(cli_args)
         self.host = str(args.host or 'localhost')
