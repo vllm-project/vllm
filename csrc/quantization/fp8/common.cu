@@ -134,8 +134,6 @@ template <typename Tout, typename Tin, int Vec_size>
 __global__ void convert_fp8_kernel(const Tin* __restrict__ src_data,
                                    Tout* __restrict__ dst_data,
                                    const float* scale, size_t N) {
-  const int64_t block_idx = blockIdx.x;
-
   using V_in_vec = typename Vec<Tin, Vec_size>::Type;
   using V_out_vec = typename Vec<Tout, Vec_size>::Type;
   auto dst_data_vec = reinterpret_cast<V_out_vec*>(dst_data);
