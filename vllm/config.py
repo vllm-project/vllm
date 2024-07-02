@@ -1375,19 +1375,20 @@ def _get_and_verify_max_len(
                     "Disabling sliding window is not supported for models "
                     "model_max_length in the config. Please raise an issue "
                     "so we can investigate.")
-            pass
         else:
-            logger.warning(
-                "User-specified max_model_len (%s) is greater than the "
-                "derived max_model_len (%s=%s or model_max_length=%s in "
-                "model's config.json). This may lead to incorrect model "
-                "outputs or CUDA errors. Make sure the value is correct "
-                "and within the model context size.",
-                max_model_len,
-                max_len_key,
-                derived_max_model_len,
-                model_max_length
-            )
+            msg = (
+                f"User-specified max_model_len ({max_model_len}) is greater "
+                f"than the derived max_model_len ({max_len_key}="
+                f"{derived_max_model_len} or model_max_length="
+                f"{model_max_length} in model's config.json). This may lead "
+                "to incorrect model outputs or CUDA errors.")
+            if envs.VLLM_ALLOW_LONG_MAX_MODEL_LEN:
+                logger.warning(
+                    "%s Make sure the value is correct and within the "
+                    "model context size.", msg)
+            else:
+                raise ValueError(f"{msg} To enable this, set the env var "
+                                 "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
     return int(max_model_len)
 
 
