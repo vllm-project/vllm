@@ -31,11 +31,10 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
+from vllm.distributed import (get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -93,28 +92,23 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.config = config
-        self.rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.n_routed_experts = config.num_experts
-        self.top_k = config.num_experts_per_tok
-        if self.tp_size > self.n_routed_experts:
+
+        if self.tp_size > config.num_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {self.n_routed_experts}.")
+                f"the number of experts {config.num_experts}.")
 
-        self.experts = nn.ModuleList([
-            Qwen2MoeMLP(hidden_size=config.hidden_size,
-                        intermediate_size=config.moe_intermediate_size,
-                        hidden_act=config.hidden_act,
-                        quant_config=quant_config,
-                        reduce_results=False)
-            for idx in range(self.n_routed_experts)
-        ])
-        self.pack_params()
+        self.experts = FusedMoE(num_experts=config.num_experts,
+                                top_k=config.num_experts_per_tok,
+                                hidden_size=config.hidden_size,
+                                intermediate_size=config.moe_intermediate_size,
+                                reduce_results=False,
+                                renormalize=config.norm_topk_prob,
+                                quant_config=quant_config)
 
         self.gate = ReplicatedLinear(config.hidden_size,
-                                     self.n_routed_experts,
+                                     config.num_experts,
                                      bias=False,
                                      quant_config=None)
         if config.shared_expert_intermediate_size > 0:
@@ -131,25 +125,6 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                                                   1,
                                                   bias=False)
 
-    def pack_params(self):
-        w1 = []
-        w2 = []
-        for expert in self.experts:
-            w1.append(expert.gate_up_proj.weight)
-            w2.append(expert.down_proj.weight)
-        self.w1 = torch._utils._flatten_dense_tensors(w1)
-        w1s = torch._utils._unflatten_dense_tensors(self.w1, w1)
-        for data, param in zip(w1s, w1):
-            param.data = data
-        self.w1 = self.w1.view(len(w1), *w1s[0].shape)
-
-        self.w2 = torch._utils._flatten_dense_tensors(w2)
-        w2s = torch._utils._unflatten_dense_tensors(self.w2, w2)
-        for data, param in zip(w2s, w2):
-            param.data = data
-
-        self.w2 = self.w2.view(len(w2), *w2s[0].shape)
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -162,18 +137,13 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = fused_moe(hidden_states,
-                                        self.w1,
-                                        self.w2,
-                                        router_logits,
-                                        self.top_k,
-                                        renormalize=self.config.norm_topk_prob,
-                                        inplace=True)
-
+        final_hidden_states = self.experts(hidden_states=hidden_states,
+                                           router_logits=router_logits)
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
-        final_hidden_states = tensor_model_parallel_all_reduce(
-            final_hidden_states)
+        if self.tp_size > 1:
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -284,7 +254,12 @@ class Qwen2MoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
         )
-        if (layer_idx not in config.mlp_only_layers) and (
+
+        # Note: Qwen/Qwen2-57B-A14B-Instruct does not have
+        # `mlp_only_layers` in the config.
+        mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
+                           config.mlp_only_layers)
+        if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = Qwen2MoeSparseMoeBlock(config=config,
@@ -427,20 +402,35 @@ class Qwen2MoeForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        expert_params_mapping = [
+            # These are the weights for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.w13_weight" if weight_name in ["gate_proj", "up_proj"]
+             else "experts.w2_weight",
+             f"experts.{expert_id}.{weight_name}.weight", expert_id, shard_id)
+            for expert_id in range(self.config.num_experts) for shard_id,
+            weight_name in enumerate(["gate_proj", "down_proj", "up_proj"])
+        ]
+
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
+                    continue
+                # We have mlp.experts[0].gate_proj in the checkpoint.
+                # Since we handle the experts below in expert_params_mapping,
+                # we need to skip here BEFORE we update the name, otherwise
+                # name will be updated to mlp.experts[0].gate_up_proj, which
+                # will then be updated below in expert_params_mapping
+                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
+                if "mlp.experts" in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Skip experts that are not assigned to this worker.
-                if (("mlp.experts." in name or "mlp.shared_expert." in name)
-                        and name not in params_dict):
                     continue
                 if name not in params_dict:
                     continue
@@ -450,17 +440,27 @@ class Qwen2MoeForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Skip experts that are not assigned to this worker.
-                if (("mlp.experts." in name or "mlp.shared_expert." in name)
-                        and name not in params_dict):
-                    continue
-                if name not in params_dict:
-                    continue
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param,
+                                  loaded_weight,
+                                  weight_name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id)
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if name not in params_dict:
+                        continue
 
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
