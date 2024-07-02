@@ -1,5 +1,7 @@
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
+from vllm.transformers_utils.configs.deepseek_vl import (
+    DeepSeekMultiModalityConfig)
 # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.
@@ -15,4 +17,5 @@ __all__ = [
     "RWConfig",
     "JAISConfig",
     "MLPSpeculatorConfig",
+    "DeepSeekMultiModalityConfig",
 ]
