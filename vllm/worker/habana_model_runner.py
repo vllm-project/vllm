@@ -1232,4 +1232,5 @@ class HabanaProfilerCounterHelper():
                 'const_gpu_memory_utilization'] = \
                     cache_config.gpu_memory_utilization
             counters['const_block_size'] = cache_config.block_size
-            self.logged_once = Tru
+            self.logged_once = True
+        return counters
