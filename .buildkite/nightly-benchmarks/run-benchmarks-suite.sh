@@ -54,7 +54,7 @@ wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
   timeout 1200 bash -c '
-    until curl localhost:8000/v1/completions; do
+    until curl -X POST localhost:8000/v1/completions; do
       sleep 1
     done' && return 0 || return 1
 }
@@ -74,7 +74,11 @@ kill_gpu_processes() {
   fi
 
   # waiting for GPU processes to be fully killed
-  sleep 10
+  # loop while nvidia-smi returns any processes
+  while [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)" ]; do
+    sleep 1
+    echo "Waiting for GPU processes to be killed"
+  done
 
   # remove vllm config file
   rm -rf ~/.config/vllm
@@ -269,6 +273,7 @@ run_serving_tests() {
     echo "Running test case $test_name"
     echo "Server command: $server_command"
     eval "$server_command" &
+    server_pid=$!
 
     # wait until the server is alive
     wait_for_server
@@ -318,6 +323,7 @@ run_serving_tests() {
     done
 
     # clean up
+    kill -9 $server_pid
     kill_gpu_processes
   done
 }
