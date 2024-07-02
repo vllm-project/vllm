@@ -41,6 +41,11 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
     )
 
 .. important::
+    Currently, you have to specify ``image_feature_size`` to support memory profiling.
+    To avoid OOM during runtime, you should set this to the maximum value supported by the model.
+    The calculation of feature size is specific to the model. For more details, please refer to
+    the function :code:`get_<model_name>_image_feature_size` inside the corresponding model file.
+
     We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
 
 
@@ -100,6 +105,11 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
         --chat-template template_llava.jinja
 
 .. important::
+    Currently, you have to specify ``image_feature_size`` to support memory profiling.
+    To avoid OOM during runtime, you should set this to the maximum value supported by the model.
+    The calculation of feature size is specific to the model. For more details, please refer to
+    the function :code:`get_<model_name>_image_feature_size` inside the corresponding model file.
+
     We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
 
 To consume the server, you can use the OpenAI client like in the example below:
