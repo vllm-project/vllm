@@ -84,6 +84,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
     lora_requests: Optional[Set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+    request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
+    finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
@@ -94,6 +96,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
             "virtual_engine": self.virtual_engine,
+            "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
+            "finished_requests_ids": self.finished_requests_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         return tensor_dict
@@ -128,6 +132,8 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
             "virtual_engine": self.virtual_engine,
+            "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
+            "finished_requests_ids": self.finished_requests_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -191,6 +197,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         ]
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
+
+        self.has_seqlen_agnostic = model_config.contains_seqlen_agnostic_layers(
+            parallel_config)
+
         # When using CUDA graph, the input block tables must be padded to
         # max_seq_len_to_capture. However, creating the block table in
         # Python can be expensive. To optimize this, we cache the block table
@@ -317,6 +327,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        finished_requests_ids: Optional[List[str]] = None
     ) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -347,6 +358,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         block_tables: List[List[int]] = []
         multi_modal_kwargs_list: Dict[str,
                                       List[torch.Tensor]] = defaultdict(list)
+        request_ids_to_seq_ids: Dict[str, List[int]] = defaultdict(list)
         decode_only = True
         num_prefills = 0
         num_prefill_tokens = 0
@@ -738,7 +750,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             k: torch.cat(v, dim=0).to(self.device)
             for k, v in multi_modal_kwargs_list.items()
         }
-
+        request_ids_to_seq_ids = {
+            seq_group_metadata.request_id:
+            list(seq_group_metadata.seq_data.keys())
+            for seq_group_metadata in seq_group_metadata_list
+        }
         return self._model_input_cls(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
@@ -748,7 +764,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             lora_mapping=lora_mapping,
             lora_requests=lora_requests,
             multi_modal_kwargs=multi_modal_kwargs,
-        )
+            request_ids_to_seq_ids=request_ids_to_seq_ids,
+            finished_requests_ids=finished_requests_ids)
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -821,7 +838,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        model_input = self.prepare_model_input(seqs)
+        finished_requests_ids = [seq.request_id for seq in seqs]
+        model_input = self.prepare_model_input(
+            seqs, finished_requests_ids=finished_requests_ids)
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = self.model.make_empty_intermediate_tensors(
@@ -1033,21 +1052,37 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         graph_runner.flashinfer_decode_wrapper = \
                             decode_wrapper
 
-                    graph_runner.capture(
+                    capture_inputs = {
+                        "input_ids":
                         input_tokens[:batch_size],
+                        "positions":
                         input_positions[:batch_size],
+                        "hidden_or_intermediate_states":
                         hidden_or_intermediate_states[
                             virtual_engine]  # type: ignore
                         [:batch_size]
                         if hidden_or_intermediate_states[virtual_engine]
                         is not None else None,
+                        "intermediate_inputs":
                         intermediate_inputs[:batch_size]
                         if intermediate_inputs is not None else None,
+                        "kv_caches":
                         kv_caches[virtual_engine],
+                        "attn_metadata":
                         attn_metadata,
-                        memory_pool=self.graph_memory_pool,
-                        stream=graph_capture_context.stream,
-                    )
+                        "memory_pool":
+                        self.graph_memory_pool,
+                        "stream":
+                        graph_capture_context.stream
+                    }
+                    if self.has_seqlen_agnostic:
+                        # Only used by Mamba-based models CUDA graph atm (Jamba)
+                        capture_inputs.update({
+                            "seqlen_agnostic_capture_inputs":
+                            self.model.get_seqlen_agnostic_capture_inputs(
+                                batch_size)
+                        })
+                    graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
@@ -1084,6 +1119,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1099,7 +1135,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         If cuda graph is required, this API automatically pads inputs.
         """
         model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list)
+            seq_group_metadata_list, finished_requests_ids)
         sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
                                                      model_input.seq_lens,
                                                      model_input.query_lens,
@@ -1175,6 +1211,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_executable = self.model
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+        seqlen_agnostic_kwargs = {
+            "finished_requests_ids": model_input.finished_requests_ids,
+            "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
+        } if self.has_seqlen_agnostic else {}
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -1182,7 +1222,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             attn_metadata=model_input.attn_metadata,
             intermediate_tensors=intermediate_tensors,
             **multi_modal_kwargs,
-        )
+            **seqlen_agnostic_kwargs)
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
@@ -1305,6 +1345,7 @@ class CUDAGraphRunner:
                 "positions": positions,
                 "kv_caches": kv_caches,
                 "slot_mapping": attn_metadata.slot_mapping,
+                **kwargs,
             }
         else:
             self.input_buffers = {
@@ -1315,6 +1356,7 @@ class CUDAGraphRunner:
                 "seq_lens_tensor":
                 attn_metadata.decode_metadata.seq_lens_tensor,
                 "block_tables": attn_metadata.decode_metadata.block_tables,
+                **kwargs,
             }
         if intermediate_inputs is not None:
             self.input_buffers.update(intermediate_inputs.tensors)
@@ -1349,13 +1391,18 @@ class CUDAGraphRunner:
                 non_blocking=True)
             self.input_buffers["block_tables"].copy_(
                 attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        if "seqlen_agnostic_capture_inputs" in self.input_buffers:
+            self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
+                                                      **kwargs)
         if intermediate_tensors is not None:
             for key in intermediate_tensors.tensors:
                 self.input_buffers[key].copy_(intermediate_tensors[key],
                                               non_blocking=True)
         # Run the graph.
         self.graph.replay()
-
+        if "seqlen_agnostic_capture_inputs" in self.input_buffers:
+            self.model.copy_outputs_after_cuda_graphs(self.input_buffers,
+                                                      **kwargs)
         # Return the output tensor.
         if get_pp_group().is_last_rank:
             return self.output_buffers["hidden_states"]

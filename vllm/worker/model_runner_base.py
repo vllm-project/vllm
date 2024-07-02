@@ -139,6 +139,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> T:
         """
         Prepare the inputs to ModelRunnerBase.execute_model from an execution

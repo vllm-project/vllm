@@ -33,7 +33,9 @@ class CacheEngine:
         self.device_config = device_config
 
         self.head_size = model_config.get_head_size()
-        self.num_layers = model_config.get_num_layers(parallel_config)
+        # Models like Jamba, have mixed typed layers, E.g Mamba
+        self.num_attention_layers = model_config.get_num_attention_layers(
+            parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
 
         self.block_size = cache_config.block_size
@@ -75,7 +77,7 @@ class CacheEngine:
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
-        for _ in range(self.num_layers):
+        for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
@@ -87,12 +89,12 @@ class CacheEngine:
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
-        for i in range(self.num_layers):
+        for i in range(self.num_attention_layers):
             self.attn_backend.swap_blocks(self.cpu_cache[i], self.gpu_cache[i],
                                           src_to_dst)
 
     def swap_out(self, src_to_dst: torch.Tensor) -> None:
-        for i in range(self.num_layers):
+        for i in range(self.num_attention_layers):
             self.attn_backend.swap_blocks(self.gpu_cache[i], self.cpu_cache[i],
                                           src_to_dst)
 
@@ -107,11 +109,12 @@ class CacheEngine:
     ) -> int:
         head_size = model_config.get_head_size()
         num_heads = model_config.get_num_kv_heads(parallel_config)
-        num_layers = model_config.get_num_layers(parallel_config)
+        num_attention_layers = model_config.get_num_attention_layers(
+            parallel_config)
 
         key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block
-        total = num_layers * (key_cache_block + value_cache_block)
+        total = num_attention_layers * (key_cache_block + value_cache_block)
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
