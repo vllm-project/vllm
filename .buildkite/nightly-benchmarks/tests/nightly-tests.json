@@ -26,10 +26,7 @@
             "max_batch_size": 256,
             "max_input_len": 10000,
             "max_output_len": 10000,
-            "trt_llm_version": "r24.04",
-            "qformat": "fp8",
-            "kv_cache_dtype": "fp8",
-            "calib_size": 512
+            "trt_llm_version": "r24.04"
         },
         "trt_client_parameters": {
             "endpoint": "/v2/models/ensemble/generate_stream"
