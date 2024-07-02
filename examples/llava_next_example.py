@@ -5,10 +5,8 @@ from PIL import Image
 
 from vllm import LLM, SamplingParams
 
-# Dynamic image input is currently not supported and therefore
-# a fixed image input shape and its corresponding feature size is required.
-# See https://github.com/vllm-project/vllm/pull/4199 for the complete
-# configuration matrix.
+# The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
+# You can use `.buildkite/download-images.sh` to download them
 
 
 def run_llava_next():
@@ -16,7 +14,7 @@ def run_llava_next():
         model="llava-hf/llava-v1.6-mistral-7b-hf",
         image_token_id=32000,
         image_input_shape="1,3,336,336",
-        image_feature_size=1176,
+        image_feature_size=1176,  # The value does not matter
     )
 
     prompt = "[INST] <image>\nWhat is shown in this image? [/INST]"

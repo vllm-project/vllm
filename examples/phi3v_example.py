@@ -5,6 +5,9 @@ from PIL import Image
 
 from vllm import LLM, SamplingParams
 
+# The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
+# You can use `.buildkite/download-images.sh` to download them
+
 
 def run_phi3v():
     model_path = "microsoft/Phi-3-vision-128k-instruct"
@@ -18,7 +21,7 @@ def run_phi3v():
         trust_remote_code=True,
         image_token_id=32044,
         image_input_shape="1,3,1008,1344",
-        image_feature_size=1921,
+        image_feature_size=1921,  # The value does not matter
         max_num_seqs=5,
     )
 

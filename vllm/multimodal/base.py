@@ -65,7 +65,7 @@ class MultiModalInputs(_MultiModalInputsBase):
     ) -> BatchedTensors:
         # Avoid initializing CUDA too early
         import torch
-        
+
         unbatched_shape = tensors[0].shape[1:]
 
         for tensor in tensors:
