@@ -46,7 +46,7 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
     We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
 
 
-To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
+To pass an image to the model, note the following in :class:`vllm.inputs.PromptInputs`:
 
 * ``prompt``: The prompt should have a number of ``<image>`` tokens equal to ``image_feature_size``.
 * ``multi_modal_data``: This should be an instance of :class:`~vllm.multimodal.image.ImagePixelData` or :class:`~vllm.multimodal.image.ImageFeatureData`.

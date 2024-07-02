@@ -1,7 +1,7 @@
 import time
 from contextlib import contextmanager
-from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List, Mapping,
-                    Optional)
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
+                    Mapping, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Type, TypeVar, Union
 
