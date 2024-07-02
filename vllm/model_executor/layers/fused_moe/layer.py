@@ -2,6 +2,7 @@ from abc import abstractmethod
 from typing import Optional
 
 import torch
+
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -59,10 +60,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
 
     def apply(self,
               layer: torch.nn.Module,
-                  x: torch.Tensor,
-                  router_logits: torch.Tensor,
-                  top_k: int,
-                  renormalize: bool = True) -> torch.Tensor:
+              x: torch.Tensor,
+              router_logits: torch.Tensor,
+              top_k: int,
+              renormalize: bool = True) -> torch.Tensor:
 
         return fused_moe(x,
                          layer.w13_weight,
