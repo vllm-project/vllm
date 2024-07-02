@@ -1,8 +1,8 @@
 import codecs
 import time
 from dataclasses import dataclass, field
-from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
-                    List, Optional)
+from typing import (TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator,
+                    Awaitable, Dict, Iterable, List, Optional)
 from typing import Sequence as GenericSequence
 from typing import TypedDict, Union, cast, final
 
@@ -26,9 +26,12 @@ from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
-from vllm.multimodal.image import ImagePixelData
-from vllm.multimodal.utils import (async_get_and_parse_image,
-                                   get_full_image_text_prompt)
+
+if TYPE_CHECKING:
+    from vllm.multimodal.image import ImagePixelData
+else:
+    # avoid calling `torch.cuda.device_count()`
+    ImagePixelData = Any
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
@@ -102,6 +105,10 @@ class OpenAIServingChat(OpenAIServing):
         role: str,
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
+
+        # lazy import to avoid calling `torch.cuda.device_count()`
+        from vllm.multimodal.utils import (async_get_and_parse_image,
+                                           get_full_image_text_prompt)
         texts: List[str] = []
         image_futures: List[Awaitable[ImagePixelData]] = []
 
