@@ -638,11 +638,23 @@ class FunctionCall(OpenAIBaseModel):
     name: str
     arguments: str | Dict
 
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "arguments": self.arguments
+        }
 
 class ToolCall(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
     type: Literal["function"] = "function"
     function: FunctionCall
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "type": self.type,
+            "function": self.function.to_dict()
+        }
 
 
 class ChatMessage(OpenAIBaseModel):
