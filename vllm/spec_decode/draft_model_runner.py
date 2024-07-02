@@ -11,6 +11,8 @@ from vllm.sequence import (IntermediateTensors, SamplerOutput,
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
 
+from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+
 logger = init_logger(__name__)
 
 
@@ -115,7 +117,47 @@ class TP1DraftModelRunner(ModelRunner):
                 seq.append_token_id(token_id, token_logprob.logprob)
                 seq.update_num_computed_tokens(1)
 
+                print("appended seq_id = {} token_id = {}".format(
+                    seq_output.parent_seq_id, token_id))
+
         return self.prepare_model_input(self.cached_seq_group_metadata_list)
+
+    def gpu_advance_step(self,
+                         model_input: ModelInputForGPUWithSamplingMetadata,
+                         last_output: SamplerOutput) -> None:
+        pass
+
+    def advance_step(self, model_input: ModelInputForGPUWithSamplingMetadata,
+                     last_output: SamplerOutput) -> None:
+        num_prefills = 0
+        num_prefill_tokens = 0
+        use_captured_graph = False
+
+        attn_metadata = model_input.attn_metadata
+        assert isinstance(attn_metadata, FlashAttentionMetadata)
+        
+        context_lens_tensor = attn_metadata.context_lens_tensor
+        seq_lens_tensor = attn_metadata.seq_lens_tensor
+        slot_mapping_tensor = model_input.attn_metadata.slot_mapping
+        
+        self.gpu_advance_step()
+
+        attn_metadata = self.attn_backend.make_metadata(
+                num_prefills=num_prefills,
+                slot_mapping=slot_mapping_tensor,
+                num_prefill_tokens=num_prefill_tokens,
+                num_decode_tokens=num_decode_tokens,
+                seq_lens=seq_lens,
+                seq_lens_tensor=seq_lens_tensor,
+                max_query_len=max_query_len,
+                max_prefill_seq_len=max_prefill_seq_len,
+                max_decode_seq_len=max_decode_seq_len,
+                query_start_loc=query_start_loc,
+                seq_start_loc=seq_start_loc,
+                context_lens_tensor=context_lens_tensor,
+                block_tables=block_tables,
+                use_cuda_graph=use_captured_graph,
+            )
 
     @torch.inference_mode()
     def execute_model(
