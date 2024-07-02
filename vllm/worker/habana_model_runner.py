@@ -10,7 +10,8 @@ import operator
 import os
 import time
 from enum import IntEnum
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Any
+from typing import (Any, Callable, Dict, List, NamedTuple, Optional, Set,
+                    Tuple, Union)
 
 import habana_frameworks.torch as htorch
 import torch
@@ -171,7 +172,7 @@ class HpuModelAdapter():
 
 
 class PreparePromptMetadata(NamedTuple):
-    input_tokens: List[List[int]]
+    input_tokens: torch.Tensor
     input_positions: List[List[int]]
     attn_metadata: Optional[AttentionMetadata]
     seq_lens: List[int]
@@ -199,11 +200,11 @@ class PreparePromptMetadata(NamedTuple):
 
 
 class PrepareDecodeMetadata(NamedTuple):
-    input_tokens: List[List[int]]
+    input_tokens: torch.Tensor
     input_positions: List[List[int]]
     attn_metadata: Optional[AttentionMetadata]
-    lora_index_mapping: List[int]
-    lora_prompt_mapping: List[int]
+    lora_index_mapping: List[List[int]]
+    lora_prompt_mapping: List[List[int]]
     lora_requests: Set[LoRARequest]
     slot_mapping: List[List[int]]
 
@@ -603,8 +604,8 @@ class HabanaModelRunner:
         slot_mapping: List[List[int]] = []
         seq_lens: List[int] = []
         block_tables: List[List[int]] = []
-        lora_index_mapping: List[int] = []
-        lora_prompt_mapping: List[int] = []
+        lora_index_mapping: List[List[int]] = []
+        lora_prompt_mapping: List[List[int]] = []
         lora_requests: Set[LoRARequest] = set()
 
         if len(seq_group_metadata_list) == 0:
@@ -903,6 +904,7 @@ class HabanaModelRunner:
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         if self.is_driver_worker:
+            assert seq_group_metadata_list is not None
             event_start = self.profiler.get_timestamp_us()
             is_prompt = seq_group_metadata_list[0].is_prompt
             base_event_name = 'prompt' if is_prompt else 'decode'
@@ -917,6 +919,7 @@ class HabanaModelRunner:
             seq_group_metadata_list.extend(seq_group_metadata_list[0]
                                            for _ in range(batch_size_padding))
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
+            assert seq_group_metadata_list is not None
             (input_tokens, input_positions, attn_metadata, sampling_metadata,
              lora_requests, lora_mapping, multi_modal_input
              ) = self.prepare_input_tensors(seq_group_metadata_list)
@@ -1072,7 +1075,8 @@ class HabanaModelRunner:
         idx = 0
         phase = f'Graph/{"Prompt" if is_prompt else "Decode"}'
         num_candidates = len(buckets)
-
+        ordering : Union[Callable[[Any], Tuple[Any, Any]], \
+            Callable[[Any], Tuple[Any, Any, Any]]]
         if strategy == 'min_tokens':
             ordering = lambda b: (b[0] * b[1], b[1], b[0])
         elif strategy == 'max_bs':
