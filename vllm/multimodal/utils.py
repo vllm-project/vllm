@@ -8,7 +8,7 @@ from PIL import Image
 
 from vllm.config import ModelConfig
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
-from vllm.vllm.multimodal.base import MultiModalDataDict
+from vllm.multimodal.base import MultiModalDataDict
 
 
 class ImageFetchAiohttp:
