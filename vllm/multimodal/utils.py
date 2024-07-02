@@ -8,6 +8,7 @@ from PIL import Image
 
 from vllm.config import ModelConfig
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
+from vllm.vllm.multimodal.base import MultiModalDataDict
 
 
 class ImageFetchAiohttp:
@@ -86,3 +87,8 @@ def get_full_image_text_prompt(image_prompt: str, text_prompt: str,
         raise ValueError(
             f"Unsupported model type: {config.hf_config.model_type}")
     return full_prompt
+
+
+async def async_get_and_parse_image(image_url: str) -> MultiModalDataDict:
+    image = await ImageFetchAiohttp.fetch_image(image_url)
+    return {"image": image}

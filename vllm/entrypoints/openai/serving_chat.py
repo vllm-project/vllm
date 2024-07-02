@@ -27,7 +27,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.multimodal import MultiModalDataDict
-from vllm.multimodal.utils import ImageFetchAiohttp, get_full_image_text_prompt
+from vllm.multimodal.utils import (async_get_and_parse_image,
+                                   get_full_image_text_prompt)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
@@ -127,10 +128,6 @@ class OpenAIServingChat(OpenAIServing):
                         "'image_url.detail' is currently not supported and "
                         "will be ignored.")
 
-                async def async_get_and_parse_image(image_url: str):
-                    image = await ImageFetchAiohttp.fetch_image(image_url)
-                    return {"image": image}
-
                 mm_future = async_get_and_parse_image(image_url["url"])
                 mm_futures.append(mm_future)
 
@@ -141,7 +138,9 @@ class OpenAIServingChat(OpenAIServing):
 
         if vlm_config is not None and len(mm_futures):
 
-            assert len(mm_futures) == 1, "Multiple images is not supported."
+            assert len(
+                mm_futures
+            ) == 1, "Multiple 'image_url' input is currently not supported."
             (image_token_prompt,
              image_token_str) = vlm_config.get_image_token_text(self.tokenizer)
 

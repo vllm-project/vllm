@@ -110,6 +110,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
         self.config = config
         self.vlm_config = vlm_config
 
+        # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = CLIPVisionModel(config.vision_config)
 
         self.multi_modal_projector = LlavaMultiModalProjector(
