@@ -44,7 +44,7 @@ from transformers.image_processing_utils import (BaseImageProcessor,
 from transformers.image_utils import to_numpy_array
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -53,12 +53,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import get_dummy_image_data
-from vllm.sequence import SamplerOutput
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalData
+from vllm.multimodal.base import VisionLanguageModelBase
+from vllm.multimodal.image import ImageFeatureData, ImagePixelData
+from vllm.sequence import SamplerOutput, SequenceData
 from vllm.transformers_utils.configs import DeepSeekMultiModalityConfig
-
-from .vlm_base import VisionLanguageModelBase
 
 ImageType = Union[np.ndarray, torch.Tensor, Image.Image]
 IMAGENET_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -66,6 +65,51 @@ IMAGENET_STD = (0.26862954, 0.26130258, 0.27577711)
 IMAGENET_INCEPTION_MEAN = (0.5, 0.5, 0.5)
 IMAGENET_INCEPTION_STD = (0.5, 0.5, 0.5)
 LayerType = Union[str, Callable, Type[torch.nn.Module]]
+
+
+def _get_dummy_seq_data(seq_len: int,
+                        vlm_config: VisionLanguageConfig) -> SequenceData:
+    # NOTE: We assume that <image> token is repeated `image_feature_size` times
+    # and then concatenated with the text prompt
+    # TODO: Enable other ways of inserting the image into the prompt
+
+    token_ids = [vlm_config.image_token_id] * vlm_config.image_feature_size
+    token_ids += [0] * (seq_len - vlm_config.image_feature_size)
+
+    return SequenceData(token_ids)
+
+
+def _get_dummy_values(vlm_config: VisionLanguageConfig) -> torch.Tensor:
+    if vlm_config.image_processor is None:
+        values_dtype = torch.float16
+    else:
+        values_dtype = torch.uint8
+
+    return torch.zeros(vlm_config.image_input_shape, dtype=values_dtype)
+
+
+def get_dummy_image_data(
+    seq_len: int,
+    model_config: ModelConfig,
+    vlm_config: VisionLanguageConfig,
+) -> Tuple[SequenceData, MultiModalData]:
+    """Standard dummy data factory for image data (to be used in
+    :meth:`vlm.multimodal.MultiModalRegistry.register_dummy_data`)."""
+    seq_data = _get_dummy_seq_data(seq_len, vlm_config)
+    values = _get_dummy_values(vlm_config)
+
+    config_input_type = vlm_config.image_input_type
+    ImageInputType = VisionLanguageConfig.ImageInputType
+
+    fake_mm_data: MultiModalData
+    if config_input_type == ImageInputType.PIXEL_VALUES:
+        fake_mm_data = ImagePixelData(values)
+    elif config_input_type == ImageInputType.IMAGE_FEATURES:
+        fake_mm_data = ImageFeatureData(values)
+    else:
+        raise NotImplementedError
+
+    return seq_data, fake_mm_data
 
 
 # From PyTorch internals
