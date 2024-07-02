@@ -17,8 +17,7 @@ def run_llava():
         image_feature_size=576,
     )
 
-    prompt = "<image>" * 576 + (
-        "\nUSER: What is the content of this image?\nASSISTANT:")
+    prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     image = Image.open("images/stop_sign.jpg")
 

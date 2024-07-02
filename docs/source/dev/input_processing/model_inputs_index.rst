@@ -8,7 +8,7 @@ Input Processing
 vLLM provides a mechanism for defining input processors for each model so that the inputs are processed
 in :class:`~vllm.LLMEngine` before they are passed to model executors. 
 
-Currently, this mechanism is only utilized in **multi-modal models** for preprocessing multi-modal input 
+Currently, this mechanism is only utilized in :ref:`multi-modal models <multi_modality>` for preprocessing multi-modal input 
 data in addition to input prompt, but it can be extended to text-only language models when needed.
 
 Guides
