@@ -73,6 +73,11 @@ kill_gpu_processes() {
       echo "All GPU processes have been killed."
   fi
 
+  # Sometimes kill with pid doesn't work properly, we can also kill all process running python or python3
+  # since we are in container anyway
+  pkill -9 -f python
+  pkill -9 -f python3
+
   # waiting for GPU processes to be fully killed
   # loop while nvidia-smi returns any processes
   while [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)" ]; do
