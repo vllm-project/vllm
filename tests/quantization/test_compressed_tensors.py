@@ -104,7 +104,7 @@ def test_compressed_tensors_w4a16(vllm_runner, wNa16_args):
 
         assert qkv_proj.weight_packed.dtype is torch.int32
         assert qkv_proj.weight_scale.dtype is torch.float16
-        assert qkv_proj.weight_packed.pack_factor == pack_factor
+        assert qkv_proj.weight_packed.packed_factor == pack_factor
 
 
 def test_compressed_tensors_w4a16_marlin24(vllm_runner):

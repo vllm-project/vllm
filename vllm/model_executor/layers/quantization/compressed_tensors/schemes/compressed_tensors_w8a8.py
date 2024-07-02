@@ -1,13 +1,15 @@
 from typing import Callable, List, Tuple, Union
 
 import torch
-from torch.nn import Parameter
+from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+                                           ModelWeightParameter,
+                                           PerTensorScaleParameter)
 
 
 class CompressedTensorsW8A8(CompressedTensorsScheme):
@@ -50,28 +52,23 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
         else:
             shape = (len(self.logical_widths), )
 
-        weight_scale = Parameter(torch.empty(*shape, dtype=torch.float32),
-                                 requires_grad=False)
-        layer.register_parameter("weight_scale", weight_scale)
-        if self.strategy == QuantizationStrategy.CHANNEL:
-            set_weight_attrs(weight_scale, {
-                "weight_loader": weight_loader,
-                "output_dim": 0,
-            })
-        else:
-            set_weight_attrs(weight_scale, {
-                "weight_loader": weight_loader,
-                "needs_scalar_to_array": True,
-            })
+        weight = ModelWeightParameter(data=torch.empty(
+            sum(output_partition_sizes),
+            input_size_per_partition,
+            dtype=torch.int8),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
 
-        # WEIGHT
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=torch.int8),
-                           requires_grad=False)
+        weight_scale_data = torch.empty(*shape, dtype=torch.float32)
+        if self.strategy == QuantizationStrategy.CHANNEL:
+            weight_scale = ChannelQuantScaleParameter(
+                data=weight_scale_data,
+                output_dim=0,
+                weight_loader=weight_loader)
+        else:
+            weight_scale = PerTensorScaleParameter(data=weight_scale_data,
+                                                   weight_loader=weight_loader)
+
         layer.register_parameter("weight", weight)
-        set_weight_attrs(weight, {
-            "input_dim": 1,
-            "output_dim": 0,
-            "weight_loader": weight_loader,
-        })
+        layer.register_parameter("weight_scale", weight_scale)

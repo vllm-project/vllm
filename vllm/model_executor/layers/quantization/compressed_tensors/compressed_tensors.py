@@ -16,6 +16,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_first_name_or_class_match)
 from vllm.utils import get_device_capability_stateless
 
+__all__ = ["CompressedTensorsLinearMethod"]
+
 
 class CompressedTensorsConfig(QuantizationConfig):
 
