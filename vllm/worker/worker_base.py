@@ -227,7 +227,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 execute_model_req=execute_model_req)
             model_input: ModelRunnerInputBase = (
                 self.model_runner.prepare_model_input(
-                    execute_model_req.seq_group_metadata_list))
+                    execute_model_req.seq_group_metadata_list,
+                    execute_model_req.finished_requests_ids))
             num_steps = execute_model_req.num_steps
 
             if self.do_metadata_broadcast:
