@@ -9,7 +9,7 @@ from transformers.models.llava_next.modeling_llava_next import (
 from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -204,13 +204,13 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: LlavaNextConfig,
-                 vlm_config: VisionLanguageConfig,
+                 mm_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
 
         self.config = config
-        self.vlm_config = vlm_config
+        self.mm_config = mm_config
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = CLIPVisionModel(config=config.vision_config)
@@ -454,7 +454,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
             inputs_embeds = merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
-                self.vlm_config.image_token_id)
+                self.config.image_token_index)
 
             input_ids = None
         else:

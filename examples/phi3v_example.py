@@ -19,11 +19,7 @@ def run_phi3v():
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
-        image_token_id=32044,
-        image_input_shape="1,3,1008,1344",
-        # Use the maximum possible value for memory profiling
-        image_feature_size=2653,
-        max_num_seqs=5,
+        max_num_seqs=1,
     )
 
     image = Image.open("images/cherry_blossom.jpg")

@@ -24,7 +24,7 @@ from PIL import Image
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -49,6 +49,8 @@ logger = init_logger(__name__)
 _KEYS_TO_MODIFY_MAPPING = {
     "model.vision_embed_tokens": "vision_embed_tokens",
 }
+
+_IMAGE_TOKEN_ID = 32044
 
 CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      hidden_act="quick_gelu",
@@ -95,13 +97,10 @@ class Phi3ImageEmbeddingBase(nn.Module):
 class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
     """Phi3 Image embedding with HD transform."""
 
-    def __init__(self,
-                 vision_language_config: VisionLanguageConfig,
-                 config: PretrainedConfig,
-                 wte=None) -> None:
+    def __init__(self, config: PretrainedConfig, wte=None) -> None:
         super().__init__(wte)
 
-        self.image_token_id = vision_language_config.image_token_id
+        self.image_token_id = _IMAGE_TOKEN_ID
         # n_embed or hidden_size
         hidden_size = config.n_embd if hasattr(
             config, 'n_embd') else config.hidden_size
@@ -333,7 +332,7 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
     seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
-        image_token_id=32044,
+        image_token_id=_IMAGE_TOKEN_ID,
         image_feature_size_override=image_feature_size,
     )
     mm_data = dummy_image_for_clip(
@@ -370,7 +369,6 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         return llm_inputs
 
     model_config = ctx.model_config
-    multimodal_config = ctx.get_multimodal_config()
     hf_config = ctx.get_hf_config(PretrainedConfig)
 
     image_data = multi_modal_data["image"]
@@ -407,7 +405,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     new_token_ids: List[int] = []
     for i in range(len(prompt_token_ids) - len(image_1_token_ids) + 1):
         if prompt_token_ids[i:i + len(image_1_token_ids)] == image_1_token_ids:
-            new_token_ids.append(multimodal_config.image_token_id)
+            new_token_ids.append(_IMAGE_TOKEN_ID)
 
             # No need to further scan the list since we only replace once
             new_token_ids.extend(prompt_token_ids[i + len(image_1_token_ids):])
@@ -424,7 +422,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         model_config,
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         llm_inputs,
-        image_token_id=multimodal_config.image_token_id,
+        image_token_id=_IMAGE_TOKEN_ID,
         image_feature_size_override=image_feature_size,
     )
 
@@ -436,19 +434,19 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 vlm_config: VisionLanguageConfig,
+                 mm_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
 
         self.config = config
-        self.vlm_config = vlm_config
+        self.mm_config = mm_config
 
         self.model = LlamaModel(config, cache_config, quant_config)
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_embed_tokens = Phi3HDImageEmbedding(
-            vlm_config, config, self.model.embed_tokens)
+            config, self.model.embed_tokens)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
