@@ -1,9 +1,5 @@
 from typing import cast
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 
 def get_image_processor(
     processor_name: str,
