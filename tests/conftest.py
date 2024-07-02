@@ -6,9 +6,8 @@ from collections import UserList
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
-from typing import Sequence as GenericSequence
-from typing import Tuple, TypedDict, TypeVar
+from typing import (Any, Dict, List, Literal, Optional, Tuple, TypedDict,
+                    TypeVar)
 
 import pytest
 import torch
@@ -26,10 +25,6 @@ from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
-
-if TYPE_CHECKING:
-    # it will call torch.cuda.device_count()
-    from vllm.multimodal import MultiModalDataDict
 
 logger = init_logger(__name__)
 
@@ -54,12 +49,6 @@ class ImageAsset:
     @cached_property
     def pil_image(self) -> Image.Image:
         return Image.open(_IMAGE_DIR / f"{self.name}.jpg")
-
-    def for_hf(self) -> Image.Image:
-        return self.pil_image
-
-    def for_vllm(self) -> Dict[str, Any]:
-        return {"image": self.pil_image}
 
 
 class _ImageAssetPrompts(TypedDict):
@@ -466,7 +455,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[GenericSequence["MultiModalDataDict"]] = None,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -474,7 +463,7 @@ class VllmRunner:
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
             for i, image in enumerate(images):
-                inputs[i]["multi_modal_data"] = image
+                inputs[i]["multi_modal_data"] = {"image": image}
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -497,7 +486,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[GenericSequence["MultiModalDataDict"]] = None,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         assert sampling_params.logprobs is not None
 
@@ -507,7 +496,7 @@ class VllmRunner:
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
             for i, image in enumerate(images):
-                inputs[i]["multi_modal_data"] = image
+                inputs[i]["multi_modal_data"] = {"image": image}
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -524,7 +513,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[GenericSequence["MultiModalDataDict"]] = None,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)
@@ -536,7 +525,7 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
         num_logprobs: int,
-        images: Optional[GenericSequence["MultiModalDataDict"]] = None,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
                                                 max_tokens=max_tokens,

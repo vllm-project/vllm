@@ -112,27 +112,15 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
     """
     # don't put this import at the top level
     # it will call torch.cuda.device_count()
-    from vllm.multimodal.image import ImagePixelData
     from vllm.multimodal.utils import rescale_image_size
 
     model_id, vlm_config = model_and_config
-    hf_images = [asset.for_hf() for asset in image_assets]
-    vllm_images = [asset.for_vllm() for asset in image_assets]
+    images = [asset.pil_image for asset in image_assets]
 
-    image_inputs_per_image = [[(
-        prompt,
-        rescale_image_size(hf_image, factor),
-        ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
-    ) for factor in size_factors] for hf_image, vllm_image, prompt in zip(
-        hf_images, vllm_images, HF_IMAGE_PROMPTS)]
-    hf_inputs_per_image = [(
-        [prompt for prompt, hf_image, vllm_image in image_inputs],
-        [hf_image for prompt, hf_image, vllm_image in image_inputs],
-    ) for image_inputs in image_inputs_per_image]
-    vllm_inputs_per_image = [(
-        [prompt for prompt, hf_image, vllm_image in image_inputs],
-        [vllm_image for prompt, hf_image, vllm_image in image_inputs],
-    ) for image_inputs in image_inputs_per_image]
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model_id,
@@ -144,8 +132,8 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=vllm_images)
-            for prompts, vllm_images in vllm_inputs_per_image
+                                                images=images)
+            for prompts, images in inputs_per_image
         ]
 
     with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
@@ -153,8 +141,8 @@ def test_models(hf_runner, vllm_runner, image_assets, model_and_config,
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
-                                                    images=hf_images)
-            for prompts, hf_images in hf_inputs_per_image
+                                                    images=images)
+            for prompts, images in inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,

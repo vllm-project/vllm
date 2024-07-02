@@ -97,55 +97,20 @@ def run_test(
     """
     # don't put this import at the top level
     # it will call torch.cuda.device_count()
-    from vllm.multimodal.image import ImagePixelData
     from vllm.multimodal.utils import rescale_image_size
 
     model_id, vlm_config = model_and_config
+    images = [asset.pil_image for asset in image_assets]
+
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-
-    with vllm_runner(model_id,
-                     max_model_len=2048,
-                     dtype=dtype,
-                     tensor_parallel_size=tensor_parallel_size,
-                     enforce_eager=True,
-                     distributed_executor_backend=distributed_executor_backend,
-                     **vlm_config.as_cli_args_dict()) as vllm_model:
-
-        hf_images = [asset.for_hf() for asset in image_assets]
-        # NOTE: `asset.for_vllm` will call `torch.cuda.device_count()`
-        # we must put it inside the vllm_runner context manager
-        # i.e. after creating vLLM instance.
-
-        vllm_images = [asset.for_vllm() for asset in image_assets]
-
-        vllm_image_prompts = [
-            p.replace("<|image_1|>",
-                      "<|image|>" * vlm_config.image_feature_size + "<s>")
-            for p in HF_IMAGE_PROMPTS
-        ]
-
-        image_inputs_per_image = [[(
-            prompt,
-            rescale_image_size(hf_image, factor),
-            ImagePixelData(image=rescale_image_size(vllm_image.image, factor)),
-        ) for factor in size_factors] for hf_image, vllm_image, prompt in zip(
-            hf_images, vllm_images, HF_IMAGE_PROMPTS)]
-        hf_inputs_per_image = [(
-            [prompt for prompt, hf_image, vllm_image in image_inputs],
-            [hf_image for prompt, hf_image, vllm_image in image_inputs],
-        ) for image_inputs in image_inputs_per_image]
-        vllm_inputs_per_image = [(
-            [prompt for prompt, hf_image, vllm_image in image_inputs],
-            [vllm_image for prompt, hf_image, vllm_image in image_inputs],
-        ) for image_inputs in image_inputs_per_image]
-
-        vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
-                                                  max_tokens,
-                                                  images=vllm_images)
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model_id,
@@ -160,7 +125,7 @@ def run_test(
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
                                                 images=vllm_images)
-            for prompts, vllm_images in vllm_inputs_per_image
+            for prompts, vllm_images in inputs_per_image
         ]
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
@@ -174,7 +139,7 @@ def run_test(
                                                     num_logprobs=num_logprobs,
                                                     images=hf_images,
                                                     eos_token_id=eos_token_id)
-            for prompts, hf_images in hf_inputs_per_image
+            for prompts, hf_images in inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
