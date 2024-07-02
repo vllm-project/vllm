@@ -36,6 +36,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.worker.model_runner import _BATCH_SIZES_TO_CAPTURE
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -674,6 +675,7 @@ class JambaForCausalLM(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 kv_caches: List[KVCache], attn_metadata: AttentionMetadata,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs):
         if not self.mamba_cache:
             self._prepare_mamba_cache()
