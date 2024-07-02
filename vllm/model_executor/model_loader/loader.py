@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import get_device_capability_stateless, is_tpu
+from vllm.utils import get_device_capability_stateless, is_tpu, is_hpu
 
 logger = init_logger(__name__)
 
@@ -262,7 +262,8 @@ class DefaultModelLoader(BaseModelLoader):
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device('cpu'): # FIXME(kzawora): this is a nasty workaround!!!
+            load_device = torch.device(device_config.device) if not is_hpu() else 'cpu' # FIXME(kzawora): this is a nasty workaround!!!
+            with torch.device(load_device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config,
                                           cache_config)
@@ -282,7 +283,8 @@ class DefaultModelLoader(BaseModelLoader):
                 # to use quant_method.
                 if hasattr(module, "process_weights_after_loading"):
                     module.process_weights_after_loading()
-        model = model.to('hpu') # FIXME(kzawora): this is a nasty workaround!!!
+        if is_hpu():
+            model = model.to('hpu') # FIXME(kzawora): this is a nasty workaround!!!
         return model.eval()
 
 
