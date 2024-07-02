@@ -9,6 +9,7 @@ import torch_xla.core.xla_model as xm
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -408,6 +409,8 @@ class TPUModelRunner:
         # Execute the model.
         next_token_ids = self.model(inputs[0], inputs[1], kv_caches,
                                     *inputs[2:], t, p, num_samples)
+        if not self.is_driver_worker:
+            return []
         # Retrieve the outputs to CPU.
         next_token_ids = next_token_ids.cpu().tolist()
 
@@ -449,6 +452,16 @@ class TPUModelRunner:
         if num_steps > 1:
             raise ValueError(
                 "TPUModelRunner does not support multi-step execution.")
+
+        if self.is_driver_worker:
+            metadata_dict = {
+                "seq_group_metadata_list": seq_group_metadata_list
+            }
+            broadcast_tensor_dict(metadata_dict, src=0)
+        else:
+            metadata_dict = broadcast_tensor_dict(src=0)
+            seq_group_metadata_list = metadata_dict.pop(
+                "seq_group_metadata_list")
 
         assert seq_group_metadata_list is not None
         assert len(seq_group_metadata_list) > 0
