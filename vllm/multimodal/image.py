@@ -68,7 +68,7 @@ def repeat_and_pad_image_tokens(
         if image_token_count > 16:
             logger.warning(
                 "Please follow the prompt format that is "
-                "recommended on HuggingFace which does not involve "
+                "documented on HuggingFace which does not involve "
                 "repeating %s tokens.", image_token_str)
         elif image_token_count > 1:
             logger.warning("Multiple image input is not supported yet, "

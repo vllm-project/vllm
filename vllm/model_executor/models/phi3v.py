@@ -396,7 +396,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     else:
         if prompt.count("<|image|>") > 0:
             logger.warning("Please follow the prompt format that is "
-                           "recommended on HuggingFace which does not involve "
+                           "documented on HuggingFace which does not involve "
                            "repeating <|image|> tokens.")
         elif len(re.findall(r"(<\|image_\d+\|>)+", prompt)) > 1:
             logger.warning("Multiple image input is not supported yet, "
