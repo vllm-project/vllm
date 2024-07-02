@@ -218,10 +218,18 @@ class OpenAIServingChat(OpenAIServing):
                 conversation.extend(chat_parsed_result.messages)
                 image_futures.extend(chat_parsed_result.image_futures)
 
+            tool_dicts = None if request.tools is None else [
+                tool.model_dump() for tool in request.tools
+            ]
+
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
+                tools=tool_dicts,
+                documents=request.documents,
+                chat_template=request.chat_template,
+                **(request.chat_template_kwargs or {}),
             )
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
