@@ -21,25 +21,6 @@ steps:
           limit: 5
   - wait
 
-  - block: "Run AMD tests"
-    depends_on: ~
-
-  - group: "AMD Tests"
-    depends_on: ~
-    steps:
-    {% for step in steps %}
-    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
-      - label: "AMD: {{ step.label }}"
-        agents:
-          queue: amd
-        command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
-        env:
-          DOCKER_BUILDKIT: "1"
-        priority: 100
-        soft_fail: true
-    {% endif %}
-    {% endfor %}
-
   - label: "Neuron Test"
     depends_on: ~
     agents:
@@ -171,3 +152,22 @@ steps:
               type: Directory
   {% endif %}
   {% endfor %}
+
+  - block: "Run AMD tests"
+    depends_on: ~
+
+  - group: "AMD Tests"
+    depends_on: ~
+    steps:
+    {% for step in steps %}
+    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
+      - label: "AMD: {{ step.label }}"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        soft_fail: true
+    {% endif %}
+    {% endfor %}
