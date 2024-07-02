@@ -36,6 +36,8 @@ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.utils import random_uuid
 
+from vllm.entrypoints.openai.tool_parsers import ToolParser, MistralToolParser, Hermes2ProToolParser
+
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 env = Environment(
     loader=FileSystemLoader('./'),
@@ -68,8 +70,7 @@ class OpenAIServingChat(OpenAIServing):
                  lora_modules: Optional[List[LoRAModulePath]] = None,
                  chat_template: Optional[str] = None,
                  enable_auto_tools: Optional[bool] = False,
-                 tool_prompt_jinja_template_path: Optional[str] = None,
-                 tool_prompt_role: Optional[str] = 'system'
+                 tool_parser: Optional[str] = None
                  ):
         super().__init__(engine=engine,
                          model_config=model_config,
@@ -81,8 +82,16 @@ class OpenAIServingChat(OpenAIServing):
 
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
-        self.tool_prompt_role: str = tool_prompt_role
-        self.tool_use_prompt_template: Optional[jinja2.Template] = None
+
+        if self.enable_auto_tools and not tool_parser:
+            raise TypeError('Error: --enable-auto-tool-choice requires --tool-choice-parser')
+
+        if tool_parser == 'mistral':
+            self.tool_parser: ToolParser = MistralToolParser()
+        elif tool_parser == 'hermes':
+            self.tool_parser: ToolParser = Hermes2ProToolParser()
+        else:
+            raise ValueError(f'Invalid tool parser value {tool_parser}!')
 
     def _load_chat_template(self, chat_template: Optional[str]):
         tokenizer = self.tokenizer
@@ -238,7 +247,9 @@ class OpenAIServingChat(OpenAIServing):
             if self.enable_auto_tools and request.tools:
                 tools = [tool.model_dump() for tool in request.tools]
 
+            print()
             print('using tools', tools)
+            print('add generation prompt? ', request.add_generation_prompt)
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,

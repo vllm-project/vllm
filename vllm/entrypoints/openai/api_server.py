@@ -146,7 +146,31 @@ async def create_chat_completion(request: ChatCompletionRequest,
     # handle non-streaming requests
     else:
         assert isinstance(generator, ChatCompletionResponse)
-        return JSONResponse(content=generator.model_dump())
+        print('enable auto tools?', openai_serving_chat.enable_auto_tools)
+        print('tool parser?', openai_serving_chat.tool_parser)
+        if openai_serving_chat.enable_auto_tools and openai_serving_chat.tool_parser:
+
+            print('returning tool call response')
+            response = generator.model_dump()
+            print('Handling response with auto tools and a configured parser!')
+            tool_calls = openai_serving_chat.tool_parser.extract_tool_calls(generator)
+            if tool_calls and len(tool_calls):
+                response['choices'][0]['message']['content'] = None
+                response['choices'][0]['message']['tool_calls'] = [
+                    {
+                        "id": tool_call.id,
+                        "type": tool_call.type,
+                        "function": {
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments
+                        }
+                     } for tool_call in tool_calls
+                ]
+            return JSONResponse(content=response)
+
+        else:
+            print('Returning regular response')
+            return JSONResponse(content=generator.model_dump())
 
 
 @app.post("/v1/completions")
@@ -252,8 +276,7 @@ if __name__ == "__main__":
                                             args.lora_modules,
                                             args.chat_template,
                                             args.enable_auto_tool_choice,
-                                            args.tool_use_prompt_template,
-                                            args.tool_use_prompt_role
+                                            args.tool_call_parser
                                             )
     openai_serving_completion = OpenAIServingCompletion(
         engine, model_config, served_model_names, args.lora_modules)
