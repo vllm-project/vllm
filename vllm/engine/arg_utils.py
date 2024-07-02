@@ -100,7 +100,6 @@ class EngineArgs:
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
-    disable_bonus_tokens_in_kv_cache: bool = True
     spec_decoding_acceptance_method: str = 'rejection_sampler'
     typical_acceptance_sampler_posterior_threshold: Optional[float] = None
     typical_acceptance_sampler_posterior_alpha: Optional[float] = None
@@ -579,15 +578,6 @@ class EngineArgs:
             default=EngineArgs.ngram_prompt_lookup_min,
             help='Min size of window for ngram prompt lookup in speculative '
             'decoding.')
-
-        parser.add_argument(
-            '--disable-bonus-tokens-in-kv-cache',
-            type=int,
-            default=EngineArgs.disable_bonus_tokens_in_kv_cache,
-            help='A boolean flag to control the use of bonus tokens during '
-            'speculative decoding in models that rely on KV cache. If set '
-            'to True, bonus tokens will be disabled and if set to False, '
-            'bonus tokens will be enabled.')
         
         parser.add_argument(
             '--spec-decoding-acceptance-method',
@@ -781,7 +771,6 @@ class EngineArgs:
             use_v2_block_manager=self.use_v2_block_manager,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
-            disable_bonus_tokens_in_kv_cache=self.disable_bonus_tokens_in_kv_cache,
             draft_token_acceptance_method=\
                 self.spec_decoding_acceptance_method,
             typical_acceptance_sampler_posterior_threshold=self.

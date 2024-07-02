@@ -833,7 +833,6 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
-        disable_bonus_tokens_in_kv_cache: bool,
         draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: Optional[float],
         typical_acceptance_sampler_posterior_alpha: Optional[float],
@@ -873,10 +872,6 @@ class SpeculativeConfig:
                 window, if provided.
             ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
                 window, if provided.
-            disable_bonus_tokens_in_kv_cache (bool): A boolean flag to control
-            the use of bonus tokens during speculative decoding in models that
-            rely on KV cache. If set to True, bonus tokens will be disabled
-            and if set to False, bonus tokens will be enabled.
             draft_token_acceptance_method (str): The method to use for
                 accepting draft tokens. This can take two possible
                 values 'rejection_sampler' and 'typical_acceptance_sampler'
@@ -1015,7 +1010,6 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size,
             ngram_prompt_lookup_max,
             ngram_prompt_lookup_min,
-            disable_bonus_tokens_in_kv_cache,
             draft_token_acceptance_method=draft_token_acceptance_method,
             typical_acceptance_sampler_posterior_threshold=\
                 typical_acceptance_sampler_posterior_threshold,
@@ -1102,7 +1096,6 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
-        disable_bonus_tokens_in_kv_cache: bool,
         draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: float,
         typical_acceptance_sampler_posterior_alpha: float,
@@ -1119,10 +1112,6 @@ class SpeculativeConfig:
                 enqueue requests is larger than this value.
             ngram_prompt_lookup_max: Max size of ngram token window.
             ngram_prompt_lookup_min: Min size of ngram token window.
-            disable_bonus_tokens_in_kv_cache: A boolean flag to control the
-                use of bonus tokens during speculative decoding in models that 
-                rely on KV cache. If set to True, bonus tokens will be disabled 
-                and if set to False, bonus tokens will be enabled.
             draft_token_acceptance_method (str): The method to use for
                 accepting draft tokens. This can take two possible
                 values 'rejection_sampler' and 'typical_acceptance_sampler'
@@ -1144,8 +1133,6 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size
         self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
         self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
-        self.disable_bonus_tokens_in_kv_cache = \
-            disable_bonus_tokens_in_kv_cache
         self.draft_token_acceptance_method = draft_token_acceptance_method
         self.typical_acceptance_sampler_posterior_threshold = \
             typical_acceptance_sampler_posterior_threshold

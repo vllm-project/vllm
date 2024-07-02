@@ -282,6 +282,6 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         if print_tokens:
             print(f'{i=} {baseline_tokens=}')
             print(f'{i=}     {spec_tokens=}')
-        print(f'{i=} {baseline_token_ids=}')
-        print(f'{i=}     {spec_token_ids=}')
+        #print(f'{i=} {baseline_token_ids=}')
+        #print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
