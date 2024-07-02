@@ -53,11 +53,35 @@ cp -r ${tensorrt_demo_dir}/triton_model_repo ${tensorrtllm_backend_dir}/
 cd /tensorrtllm_backend
 cd ./tensorrt_llm/examples/${model_type}
 
-python3 convert_checkpoint.py \
---model_dir ${model_path} \
---dtype ${model_dtype} \
---tp_size ${model_tp_size} \
---output_dir ${trt_model_path}
+
+if echo "$server_params" | jq -e 'has("qformat")' > /dev/null; then
+
+    echo "Key 'qformat' exists in tensorrt server params. Use quantize.py"
+    echo "Reference: https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/llama/README.md"
+    qformat=$(echo "$server_params" | jq -r '.qformat')
+    kv_cache_dtype=$(echo "$server_params" | jq -r '.kv_cache_dtype')
+    calib_size=$(echo "$server_params" | jq -r '.calib_size')
+    python ../quantization/quantize.py \
+        --model_dir ${model_path} \
+        --dtype ${model_dtype} \
+        --tp_size ${model_tp_size} \
+        --output_dir ${trt_model_path} \
+        --qformat ${qformat} \
+        --kv_cache_dtype ${kv_cache_dtype} \
+        --calib_size ${calib_size} \
+
+else
+
+    echo "Key 'qformat' does not exist in tensorrt server params. Use convert_checkpoint.py"
+    python3 convert_checkpoint.py \
+        --model_dir ${model_path} \
+        --dtype ${model_dtype} \
+        --tp_size ${model_tp_size} \
+        --output_dir ${trt_model_path}
+        
+fi
+
+
 
 trtllm-build \
 --checkpoint_dir=${trt_model_path} \
