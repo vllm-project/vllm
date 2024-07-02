@@ -166,7 +166,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self._cached_decode_metadata
 
 
-def _make_alibi_bias_v2(alibi_slopes: torch.Tensor,
+def _make_alibi_bias(alibi_slopes: torch.Tensor,
                         dtype: torch.dtype,
                         seq_lens: Optional[List[int]],
                         make_attn_mask: bool = True) -> List[torch.Tensor]:
@@ -355,10 +355,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 # triton attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                att_masks = None
+                attn_masks = None
                 if self.use_triton_flash_attn:
                     if self.alibi_slopes is not None:
-                        att_masks = _make_alibi_bias_v2(
+                        attn_masks = _make_alibi_bias(
                             self.alibi_slopes,
                             query.dtype,
                             attn_metadata.seq_lens,
@@ -374,7 +374,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         prefill_meta.max_prefill_seq_len,
                         True,
                         self.scale,
-                        att_masks[0][None] if att_masks is not None else None,
+                        attn_masks[0][None] if attn_masks is not None else None,
                     )
                 elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:
@@ -382,7 +382,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         key = self.repeat_kv(key, self.num_queries_per_kv)
                         value = self.repeat_kv(value, self.num_queries_per_kv)
                     if self.alibi_slopes is not None:
-                        att_masks = _make_alibi_bias_v2(
+                        attn_masks = _make_alibi_bias(
                             self.alibi_slopes,
                             query.dtype,
                             attn_metadata.seq_lens,
@@ -400,7 +400,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         self.num_heads,
                         self.head_size,
                         self.scale,
-                        att_masks,
+                        attn_masks,
                     )
                 else:
                     out = self.attn_func(
