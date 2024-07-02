@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Optional, Tuple, Type
 
 import pytest
 
@@ -21,7 +21,6 @@ from vllm.model_executor.models.deepseek_vl import (
 from vllm.transformers_utils.config import DeepSeekMultiModalityConfig
 
 
-
 pytestmark = pytest.mark.vlm
 
 # The image token is placed before "user" on purpose so that the test can pass
@@ -29,7 +28,6 @@ HF_IMAGE_PROMPTS = [
     "You are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.\n User: <image_placeholder>What's the content of the image?\nAssistant:",
     "You are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.\n User: <image_placeholder>What is the season?\nAssistant:",
 ]
-
 
 
 class MultiModalityCausalLM(MultiModalityPreTrainedModel):
@@ -114,7 +112,7 @@ def get_input(tokenizer, prompt, image):
     return prepare
 
 
-def iter_llava_configs(model_name: str):
+def iter_deepseek_vl_configs(model_name: str):
     image_hw_to_feature_size = {
         (1024, 1024): 576,
     }
@@ -138,7 +136,7 @@ def iter_llava_configs(model_name: str):
 
 
 model_and_vl_config = [
-    *iter_llava_configs("deepseek-ai/deepseek-vl-7b-chat"),
+    *iter_deepseek_vl_configs("deepseek-ai/deepseek-vl-7b-chat"),
 ]
 
 
@@ -174,14 +172,16 @@ def vllm_to_hf_output(
 @pytest.mark.parametrize("model_and_config", model_and_vl_config)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    hf_images,
-    vllm_images,
-    model_and_config,
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model_and_config: Tuple[str, VisionLanguageConfig],
+    *,
     dtype: str,
     max_tokens: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
 ) -> None:
     """Inference result should be the same between hf and vllm.
 
@@ -193,6 +193,7 @@ def test_models(
     The text output is sanitized to be able to compare with hf.
     """
     model_id, vlm_config = model_and_config
+    hf_images = [asset.for_hf() for asset in image_assets]
 
     vllm_image_prompts = [
         p.replace(
@@ -202,58 +203,60 @@ def test_models(
         for p in HF_IMAGE_PROMPTS
     ]
 
-    with vllm_runner(
-        model_id,
-        dtype=dtype,
-        enforce_eager=True,
-        **vlm_config.as_cli_args_dict(),
-    ) as vllm_model:
+    with vllm_runner(model_id,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True,
+                     **vlm_config.as_cli_args_dict()) as vllm_model:
+        vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
         vllm_outputs = vllm_model.generate_greedy(
             vllm_image_prompts, max_tokens, images=vllm_images
         )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
     AutoModelForCausalLM.register(
         DeepSeekMultiModalityConfig, MultiModalityCausalLM
     )
-    with hf_runner(model_id, dtype=dtype, is_vision_model=True) as hf_model:
-        prepare_input_one = get_input(
-            tokenizer,
-            HF_IMAGE_PROMPTS[0].replace(
-                "<image_placeholder>", "<image_placeholder>" * 576
-            ),
-            hf_images,
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_id, trust_remote_code=True
+    )
+    hf_model = hf_model.to("cuda").eval()
+    prepare_input_one = get_input(
+        tokenizer,
+        HF_IMAGE_PROMPTS[0].replace(
+            "<image_placeholder>", "<image_placeholder>" * 576
+        ),
+        hf_images,
+    )
+    prepare_input_two = get_input(
+        tokenizer,
+        HF_IMAGE_PROMPTS[1].replace(
+            "<image_placeholder>", "<image_placeholder>" * 576
+        ),
+        hf_images,
+    )
+    prepare_input_one = hf_model.prepare_inputs_embeds(**prepare_input_one)
+    prepare_input_two = hf_model.prepare_inputs_embeds(**prepare_input_two)
+    prepare_input = torch.concat(prepare_input_one, prepare_input_two)
+    attention_mask = torch.concat(
+        prepare_input_one["attention_mask"],
+        prepare_input_two["attention_mask"],
+    )
+    outputs = hf_model.generate(
+        inputs_embeds=prepare_input,
+        attention_mask=attention_mask,
+        max_new_tokens=max_tokens,
+        pad_token_id=tokenizer.eos_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        do_sample=False,
+        use_cache=True,
+    )
+    hf_outputs = []
+    for o in outputs:
+        hf_outputs.append(
+            o, tokenizer.decode(o.cpu().tolist(), skip_special_tokens=True)
         )
-        prepare_input_two = get_input(
-            tokenizer,
-            HF_IMAGE_PROMPTS[1].replace(
-                "<image_placeholder>", "<image_placeholder>" * 576
-            ),
-            hf_images,
-        )
-        prepare_input_one = hf_model.prepare_inputs_embeds(**prepare_input_one)
-        prepare_input_two = hf_model.prepare_inputs_embeds(**prepare_input_two)
-        prepare_input = torch.concat(prepare_input_one, prepare_input_two)
-        attention_mask = torch.concat(
-            prepare_input_one["attention_mask"],
-            prepare_input_two["attention_mask"],
-        )
-        hf_outputs = hf_model.generate_greedy(
-            HF_IMAGE_PROMPTS,
-            max_tokens,
-            images=hf_images,
-            inputs_embeds=prepare_input,
-            attention_mask=attention_mask,
-            pad_token_id=tokenizer.eos_token_id,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            do_sample=False,
-            use_cache=True,
-        )
-
-    
-
-    
 
     for i in range(len(HF_IMAGE_PROMPTS)):
         hf_output_ids, hf_output_str = hf_outputs[i]
@@ -266,3 +269,25 @@ def test_models(
         assert (
             hf_output_ids == vllm_output_ids
         ), f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
+
+
+@pytest.mark.parametrize("model_and_config", model_and_vl_config)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+def test_models(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    model_and_config,
+    dtype: str,
+    max_tokens: int,
+) -> None:
+    run_test(
+        hf_runner,
+        vllm_runner,
+        image_assets,
+        model_and_config,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        tensor_parallel_size=1,
+    )
