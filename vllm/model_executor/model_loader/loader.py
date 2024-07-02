@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import get_device_capability_stateless, is_tpu
+from vllm.utils import get_device_capability_stateless, is_tpu, is_hip
 
 logger = init_logger(__name__)
 
@@ -277,7 +277,7 @@ class DefaultModelLoader(BaseModelLoader):
             load_quantized_weights_method = getattr(model,
                                                     "load_quantized_weights",
                                                     "None")
-            if (model_config.quantization == 'fp8'
+            if (is_hip() and model_config.quantization == 'fp8'
                     and load_quantized_weights_method is not None):
                 quant_config = _get_quantization_config(
                     model_config, self.load_config)
