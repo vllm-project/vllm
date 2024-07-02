@@ -77,14 +77,6 @@ jobs:
             exit 0
           fi
 
-          echo "Checking if PR is up-to-date"
-
-          git fetch origin refs/pull/${pr_number}/head
-          if git diff --stat --exit-code upstream/main FETCH_HEAD; then
-            echo "PR is up-to-date"
-            exit 0
-          fi
-
           echo "Updating PR \#${pr_number}"
           gh pr edit \
             $pr_number \
