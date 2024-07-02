@@ -87,6 +87,15 @@ class QuantizationConfig(ABC):
         raise ValueError(f"Cannot find any of {keys} in the model's "
                          "quantization config.")
 
+    @staticmethod
+    def get_from_keys_or(config: Dict[str, Any], keys: List[str],
+                         default: Any) -> Any:
+        """Get a optional value from the model's quantization config."""
+        try:
+            return QuantizationConfig.get_from_keys(config, keys)
+        except ValueError:
+            return default
+
     @abstractmethod
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional[QuantizeMethodBase]:

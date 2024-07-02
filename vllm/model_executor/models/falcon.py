@@ -394,13 +394,13 @@ class FalconForCausalLM(nn.Module):
                                     if config.tie_word_embeddings is not None
                                     else True)
         if self.tie_word_embeddings:
-            self.lm_head_weight = self.transformer.word_embeddings.weight
+            self.lm_head = self.transformer.word_embeddings
         else:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
+                quant_config=quant_config,
             )
-            self.lm_head_weight = self.lm_head.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -422,7 +422,7 @@ class FalconForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
