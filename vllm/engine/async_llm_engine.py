@@ -378,6 +378,11 @@ class AsyncLLMEngine:
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_config = engine_args.create_engine_config()
+
+        if engine_args.engine_use_ray:
+            from vllm.executor import ray_utils
+            ray_utils.assert_ray_available()
+
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
 
