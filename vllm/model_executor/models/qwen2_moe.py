@@ -255,10 +255,10 @@ class Qwen2MoeDecoderLayer(nn.Module):
             quant_config=quant_config,
         )
 
-        # Note: Qwen/Qwen2-57B-A14B-Instruct does not have 
+        # Note: Qwen/Qwen2-57B-A14B-Instruct does not have
         # `mlp_only_layers` in the config.
-        mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") 
-                           else config.mlp_only_layers)
+        mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
+                           config.mlp_only_layers)
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
