@@ -30,6 +30,8 @@ Please see the [OpenAI API Reference](https://platform.openai.com/docs/api-refer
 - Chat: `tools`, and `tool_choice`.
 - Completions: `suffix`.
 
+vLLM also provides experimental support for OpenAI Vision API compatible inference. See more details in [Using VLMs](../models/vlm.rst).
+
 ## Extra Parameters
 vLLM supports a set of parameters that are not part of the OpenAI API.
 In order to use them, you can pass them as extra parameters in the OpenAI client.
@@ -108,5 +110,16 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 ```{argparse}
 :module: vllm.entrypoints.openai.cli_args
 :func: make_arg_parser
-:prog: vllm-openai-server
+:prog: -m vllm.entrypoints.openai.api_server
 ```
+
+## Tool calling in the chat completion API
+vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
+
+To use a named function you need to define the function in the `tools` parameter and call it in the `tool_choice` parameter. 
+
+It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt. **This may change in the future.**
+
+vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
+
+Please refer to the OpenAI API reference documentation for more information.

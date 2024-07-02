@@ -1,24 +1,72 @@
-from typing import List, Optional, Tuple
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from torch import nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
+from vllm.worker.model_runner_base import (
+    ModelRunnerBase, ModelRunnerInputBase,
+    _add_attn_metadata_broadcastable_dict,
+    _add_sampling_metadata_broadcastable_dict,
+    _init_attn_metadata_from_tensor_dict,
+    _init_sampling_metadata_from_tensor_dict)
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
 
 
-class CPUModelRunner:
+@dataclass(frozen=True)
+class CPUModelInput(ModelRunnerInputBase):
+    """
+    Used by the CPUModelRunner.
+    """
+    input_tokens: Optional[torch.Tensor] = None
+    input_positions: Optional[torch.Tensor] = None
+    attn_metadata: Optional["AttentionMetadata"] = None
+    sampling_metadata: Optional["SamplingMetadata"] = None
+    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+        }
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                  self.sampling_metadata)
+        return tensor_dict
+
+    @classmethod
+    def from_broadcasted_tensor_dict(
+            cls: Type["CPUModelInput"],
+            tensor_dict: Dict[str, Any],
+            attn_backend: Optional["AttentionBackend"] = None
+    ) -> "CPUModelInput":
+        tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
+        if attn_backend is not None:
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
+
+
+class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
 
     def __init__(
         self,
@@ -26,6 +74,7 @@ class CPUModelRunner:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
@@ -39,27 +88,34 @@ class CPUModelRunner:
         self.scheduler_config = scheduler_config
         # Currently, CPU worker doesn't support chunked prefill.
         assert self.scheduler_config.chunked_prefill_enabled is False
+        self.device_config = device_config
+        self.cache_config = cache_config
         self.lora_config = lora_config
         self.vision_language_config = vision_language_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
 
-        # model_config can be None in tests/samplers/test_sampler.py.
-        # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
-        self.sliding_window = (model_config.get_sliding_window()
-                               if model_config is not None else None)
-        self.device_config = (device_config
-                              if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
 
         self.kv_cache_dtype = kv_cache_dtype
-
+        self.sliding_window = model_config.get_sliding_window()
+        self.block_size = cache_config.block_size
         self.attn_backend = get_attn_backend(
-            self.model_config.dtype if model_config is not None else None)
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
+
+        # Multi-modal data support
+        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
+            .create_input_mapper(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
-        self.block_size: int  # Set after initial profiling.
 
     def load_model(self) -> None:
         self.model = get_model(
@@ -69,19 +125,21 @@ class CPUModelRunner:
             vision_language_config=self.vision_language_config,
             lora_config=self.lora_config,
             parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config)
+            scheduler_config=self.scheduler_config,
+            cache_config=self.cache_config)
 
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
-               Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int], Dict[
+            str, torch.Tensor]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
-        multi_modal_input_list: List[torch.Tensor] = []
+        multi_modal_kwargs_list: Dict[str,
+                                      List[torch.Tensor]] = defaultdict(list)
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -102,9 +160,11 @@ class CPUModelRunner:
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
 
-            if seq_group_metadata.multi_modal_data:
-                multi_modal_input_list.append(
-                    seq_group_metadata.multi_modal_data.data)
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data is not None:
+                mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                for k, v in mm_kwargs.items():
+                    multi_modal_kwargs_list[k].append(v)
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
@@ -128,14 +188,10 @@ class CPUModelRunner:
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-        if multi_modal_input_list:
-            assert self.vision_language_config, (
-                "Multi-modal inputs are only supported by "
-                "vision language models.")
-            multi_modal_input = torch.cat(multi_modal_input_list,
-                                          dim=0).to(self.device)
-        else:
-            multi_modal_input = None
+        multi_modal_kwargs = {
+            k: torch.cat(v, dim=0).to(self.device)
+            for k, v in multi_modal_kwargs_list.items()
+        }
 
         num_prompt_tokens = len(input_tokens)
 
@@ -153,18 +209,15 @@ class CPUModelRunner:
             is_prompt=True,
             seq_lens=seq_lens,
             seq_lens_tensor=None,
-            max_seq_len=None,
+            max_decode_seq_len=None,
             num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
-            prefill_metadata=None,
-            decode_metadata=None,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (input_tokens, input_positions, attn_metadata, seq_lens,
-                multi_modal_input)
+                multi_modal_kwargs)
 
     def _prepare_decode(
         self,
@@ -208,7 +261,7 @@ class CPUModelRunner:
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
-        max_seq_len = max(seq_lens)
+        max_decode_seq_len = max(seq_lens)
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
@@ -238,14 +291,11 @@ class CPUModelRunner:
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
-            max_seq_len=max_seq_len,
+            max_decode_seq_len=max_decode_seq_len,
             num_prefill_tokens=0,
             num_decode_tokens=len(input_tokens),
             num_prefills=0,
-            prefill_metadata=None,
-            decode_metadata=None,
             block_tables=block_tables,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (
             input_tokens,
@@ -253,94 +303,84 @@ class CPUModelRunner:
             attn_metadata,
         )
 
-    def prepare_input_tensors(
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> CPUModelInput:
+        return CPUModelInput.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
+
+    def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Optional[torch.Tensor]]:
-        multi_modal_input = None
-        if self.is_driver_worker:
-            # NOTE: We assume that all sequences in the group are all prompts or
-            # all decodes.
-            is_prompt = seq_group_metadata_list[0].is_prompt
-            # Prepare input tensors.
-            if is_prompt:
-                (input_tokens, input_positions, attn_metadata, seq_lens,
-                 multi_modal_input
-                 ) = self._prepare_prompt(seq_group_metadata_list)
-            else:
-                (input_tokens, input_positions,
-                 attn_metadata) = self._prepare_decode(seq_group_metadata_list)
-                seq_lens = []
-            sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list,
-                seq_lens,
-                # query_lens is not needed if chunked prefill is not
-                # supported. Since CPU worker doesn't support chunked prefill
-                # just use seq_lens instead.
-                seq_lens,
-                self.device,
-                pin_memory=False)
-            # Broadcast the metadata.
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-            }
-            metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
+    ) -> CPUModelInput:
+        multi_modal_kwargs = None
+        # NOTE: We assume that all sequences in the group are all prompts or
+        # all decodes.
+        is_prompt = seq_group_metadata_list[0].is_prompt
+        # Prepare input tensors.
+        if is_prompt:
+            (input_tokens, input_positions, attn_metadata, seq_lens,
+             multi_modal_kwargs
+             ) = self._prepare_prompt(seq_group_metadata_list)
         else:
-            metadata_dict = broadcast_tensor_dict(src=0)
-            input_tokens = metadata_dict.pop("input_tokens")
-            input_positions = metadata_dict.pop("input_positions")
-            selected_token_indices = metadata_dict.pop(
-                "selected_token_indices")
-            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
-            sampling_metadata = SamplingMetadata(
-                seq_groups=None,
-                seq_data=None,
-                seq_lens=None,
-                selected_token_indices=selected_token_indices,
-                categorized_sample_indices=None,
-                generators=None,
-            )
-
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, multi_modal_input)
+            (input_tokens, input_positions,
+             attn_metadata) = self._prepare_decode(seq_group_metadata_list)
+            seq_lens = []
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            seq_lens,
+            # query_lens is not needed if chunked prefill is not
+            # supported. Since CPU worker doesn't support chunked prefill
+            # just use seq_lens instead.
+            seq_lens,
+            self.device,
+            pin_memory=False)
+        return CPUModelInput(
+            input_tokens=input_tokens,
+            input_positions=input_positions,
+            attn_metadata=attn_metadata,
+            sampling_metadata=sampling_metadata,
+            multi_modal_kwargs=multi_modal_kwargs,
+        )
 
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        model_input: CPUModelInput,
         kv_caches: List[torch.Tensor],
-    ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+        num_steps: int = 1,
+    ) -> Optional[List[SamplerOutput]]:
+        if num_steps > 1:
+            raise ValueError(
+                "CPU worker does not support multi-step execution.")
 
         model_executable = self.model
         execute_model_kwargs = {
-            "input_ids": input_tokens,
-            "positions": input_positions,
+            "input_ids": model_input.input_tokens,
+            "positions": model_input.input_positions,
             "kv_caches": kv_caches,
-            "attn_metadata": attn_metadata,
+            "attn_metadata": model_input.attn_metadata,
         }
-        if self.vision_language_config:
-            execute_model_kwargs.update({"image_input": multi_modal_input})
+        if (self.vision_language_config
+                and model_input.multi_modal_kwargs is not None):
+            execute_model_kwargs.update(model_input.multi_modal_kwargs)
 
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        logits = self.model.compute_logits(hidden_states,
+                                           model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
-            return None
+            return []
 
         # Sample the next token.
         output = self.model.sample(
             logits=logits,
-            sampling_metadata=sampling_metadata,
+            sampling_metadata=model_input.sampling_metadata,
         )
-        return output
+        return [output]

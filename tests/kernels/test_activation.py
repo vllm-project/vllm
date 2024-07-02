@@ -2,22 +2,19 @@ from typing import Type
 
 import pytest
 import torch
-from allclose_default import get_default_atol, get_default_rtol
 
 from vllm.model_executor.layers.activation import (FastGELU, GeluAndMul,
                                                    NewGELU, SiluAndMul)
-from vllm.utils import is_hpu
+
+from .allclose_default import get_default_atol, get_default_rtol
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
 D = [512, 4096, 5120, 13824]  # Arbitrary values for testing
 SEEDS = [0]
-if is_hpu():
-    DEVICES = ["hpu"]
-else:
-    DEVICES = [
-        f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-    ]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 
 
 @pytest.mark.parametrize("activation", ["silu", "gelu", "gelu_tanh"])
@@ -25,7 +22,7 @@ else:
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_act_and_mul(
     activation: str,
@@ -35,15 +32,9 @@ def test_act_and_mul(
     seed: int,
     device: str,
 ) -> None:
-
-    if is_hpu() and activation != "silu":
-        pytest.skip("Only SiluAndMul supported on HPU.")
-
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-    elif is_hpu():
-        torch.hpu.manual_seed(seed)
     torch.set_default_device(device)
     x = torch.randn(num_tokens, 2 * d, dtype=dtype)
     if activation == "silu":
@@ -53,7 +44,7 @@ def test_act_and_mul(
     elif activation == "gelu_tanh":
         layer = GeluAndMul(approximate="tanh")
     out = layer(x)
-    ref_out = layer._forward(x)
+    ref_out = layer.forward_native(x)
     # The SiLU and GELU implementations are equivalent to the native PyTorch
     # implementations, so we can do exact comparison.
     assert torch.allclose(out, ref_out, atol=0.0, rtol=0.0)
@@ -64,7 +55,7 @@ def test_act_and_mul(
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_activation(
     activation: Type[torch.nn.Module],
@@ -74,19 +65,14 @@ def test_activation(
     seed: int,
     device: str,
 ) -> None:
-    if is_hpu():
-        pytest.skip("GELU not supported on HPU.")
-
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-    elif is_hpu():
-        torch.hpu.manual_seed(seed)
     torch.set_default_device(device)
     x = torch.randn(num_tokens, d, dtype=dtype)
     layer = activation()
     out = layer(x)
-    ref_out = layer._forward(x)
+    ref_out = layer.forward_native(x)
     assert torch.allclose(out,
                           ref_out,
                           atol=get_default_atol(out),

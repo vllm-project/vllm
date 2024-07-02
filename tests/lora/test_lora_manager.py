@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import Dict, List
 
 import pytest
 import torch
@@ -17,7 +17,6 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.utils import is_hpu
 
 EMBEDDING_MODULES = {
     "embed_tokens": "input_embeddings",
@@ -27,7 +26,6 @@ EMBEDDING_MODULES = {
 EMBEDDING_PADDING_MODULES = ["lm_head"]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_from_lora_tensors(sql_lora_files):
     tensors = load_file(
         os.path.join(sql_lora_files, "adapter_model.safetensors"))
@@ -64,7 +62,7 @@ def test_from_lora_tensors(sql_lora_files):
 
 def create_lora(lora_id: int, model: nn.Module,
                 sub_modules: List[str]) -> LoRAModel:
-    loras = {}
+    loras: Dict[str, LoRALayerWeights] = {}
     for name in sub_modules:
         w = model.get_submodule(name).weight
         loras[name] = LoRALayerWeights(
@@ -85,7 +83,7 @@ def create_packed_lora(
     empty_replaced_module_name=None,
 ) -> LoRAModel:
     w = model.get_submodule(module_name).weight
-    loras = {}
+    loras: Dict[str, LoRALayerWeights] = {}
     for replaced_module_name in replaced_module_names:
         if replaced_module_name == empty_replaced_module_name:
             continue
@@ -100,7 +98,6 @@ def create_packed_lora(
     return LoRAModel(lora_id, 8, loras)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_replace_submodules(dist_init, dummy_model):
     model = dummy_model
     model.supported_lora_modules = ["dense1", "layer1.dense2"]
@@ -119,7 +116,6 @@ def test_replace_submodules(dist_init, dummy_model):
                       RowParallelLinearWithLoRA)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_lora_model_manager(dist_init, dummy_model):
     model = dummy_model
     model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
@@ -166,7 +162,6 @@ def test_lora_model_manager(dist_init, dummy_model):
     assert manager.lora_index_to_id[1] == 2
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_lora_lru_cache_model_manager(dist_init, dummy_model):
     model = dummy_model
     model.supported_lora_modules = ["dense1", "dense2", "lm_head"]
@@ -214,9 +209,36 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model):
     assert manager.activate_lora(3)
     assert manager.lora_index_to_id[0] == 2
     assert manager.lora_index_to_id[1] == 3
+    assert manager.pin_lora(2)
+    assert manager.lora_index_to_id[0] == 2
+    assert manager.lora_index_to_id[1] == 3
+    assert manager.activate_lora(1)
+    assert manager.lora_index_to_id[0] == 2
+    assert manager.lora_index_to_id[1] == 1
+    assert manager.deactivate_lora(2)
+    assert manager.lora_index_to_id[0] is None
+    assert manager.lora_index_to_id[1] == 1
+    assert manager.activate_lora(3)
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] == 1
+    assert manager.pin_lora(3)
+    assert manager.pin_lora(1)
+    with pytest.raises(RuntimeError):
+        assert manager.pin_lora(2)
+    assert manager.lora_index_to_id[0] == 3
+    assert manager.lora_index_to_id[1] == 1
+    with pytest.raises(RuntimeError):
+        assert manager.activate_lora(2)
+
+    assert manager.deactivate_lora(3)
+    assert manager.pin_lora(2)
+    assert manager.lora_index_to_id[0] == 2
+    assert manager.lora_index_to_id[1] == 1
+    assert manager.remove_lora(3)
+    with pytest.raises(ValueError):
+        assert manager.pin_lora(3)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_lru_lora_model_manager(dist_init, dummy_model):
     # This tests just the LRU cache functionality, everything else is
     # tested in test_lora_model_manager
@@ -294,8 +316,43 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     assert set(manager.list_loras()) == set()
     assert all(x is None for x in manager.lora_index_to_id)
 
+    # pinning
+    assert manager.add_lora(model_lora3)
+    assert manager.activate_lora(3)
+    assert manager.add_lora(model_lora4)
+    assert manager.activate_lora(4)
+    assert set(manager.list_loras()) == {3, 4}
+    with pytest.raises(ValueError):
+        assert manager.pin_lora(1)
+    assert manager.pin_lora(3)
+    # Remove manually
+    assert manager.remove_lora(3)
+    assert not manager.remove_lora(3)
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
+    assert set(manager.list_loras()) == {4}
+    assert manager.lora_index_to_id[0] is None
+    assert manager.lora_index_to_id[1] == 4
+
+    assert manager.add_lora(model_lora1)
+    assert manager.pin_lora(1)
+    assert manager.add_lora(model_lora2)
+    assert manager.activate_lora(2)
+
+    assert set(manager.list_loras()) == {1, 2}
+    assert manager.lora_index_to_id[0] == 1
+    assert manager.lora_index_to_id[1] == 2
+
+    assert manager.remove_oldest_lora()
+    assert set(manager.list_loras()) == {1}
+    assert manager.lora_index_to_id[0] == 1
+    assert manager.lora_index_to_id[1] is None
+
+    with pytest.raises(RuntimeError):
+        assert manager.remove_oldest_lora()
+
+    assert set(manager.list_loras()) == {1}
+
+
 def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
                                        sql_lora_files):
     lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
@@ -369,7 +426,6 @@ def test_lru_cache_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         ], mapping)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
                              sql_lora_files):
     # Should remove every LoRA not specified in the request.
@@ -440,7 +496,6 @@ def test_worker_lora_manager(llama_2_7b_model_extra_embeddings,
         ], mapping)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 def test_packed_loras(dist_init, dummy_model_gate_up):
     model = dummy_model_gate_up
     model.supported_lora_modules = ["gate_up_proj"]

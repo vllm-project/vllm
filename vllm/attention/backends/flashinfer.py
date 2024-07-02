@@ -2,31 +2,34 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 try:
-    import flashinfer
-    from flash_attn import flash_attn_varlen_func
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+    from vllm_flash_attn import flash_attn_varlen_func
 except ImportError:
-    flashinfer = None
     flash_attn_varlen_func = None
     BatchDecodeWithPagedKVCacheWrapper = None
+    BatchPrefillWithPagedKVCacheWrapper = None
 
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataPerStage)
+                                              AttentionMetadata)
 
 
 class FlashInferBackend(AttentionBackend):
+
+    @staticmethod
+    def get_name() -> str:
+        return "flashinfer"
 
     @staticmethod
     def get_impl_cls() -> Type["FlashInferImpl"]:
         return FlashInferImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "FlashInferMetadata":
-        return FlashInferMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return FlashInferMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -41,7 +44,7 @@ class FlashInferBackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: torch.Tensor,
     ) -> None:
         raise NotImplementedError
 
@@ -58,24 +61,21 @@ class FlashInferBackend(AttentionBackend):
 
 
 @dataclass
-class FlashInferMetadata(AttentionMetadataPerStage):
+class FlashInferMetadata(AttentionMetadata):
+    # Maximum sequence length among prefill batch. 0 if there are decoding
+    # requests only.
+    max_prefill_seq_len: int
 
-    is_prompt: bool
+    use_cuda_graph: bool = True
 
-    use_cuda_graph: bool = False
-
+    prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
     decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
 
-    # Metadata for the prefill stage since we still
-    # use flash attention for prefill.
+    # Metadata for the prefill stage
     seq_start_loc: Optional[torch.Tensor] = None
-    max_seq_len: Optional[int] = None
+    query_start_loc: Optional[torch.Tensor] = None
     block_tables: Optional[torch.Tensor] = None
 
-    # Metadata for the decode stage
-    # Workspace buffer required by the kernel, the buffer should not
-    # be allocated/deacollated by the FalshInfermetadata object.
-    workspace_buffer: Optional[torch.Tensor] = None
     # An example for paged_kv_indices, paged_kv_indptr:
     # request 1, page indices [0, 5, 8]
     # request 2, page indices [1, 6, 7]
@@ -101,6 +101,7 @@ class FlashInferMetadata(AttentionMetadataPerStage):
     page_size: Optional[int] = None
     # The data type of the paged kv cache
     data_type: torch.dtype = None
+    device: torch.device = torch.device("cuda")
 
     def __post_init__(self):
         # Refer to
@@ -112,12 +113,37 @@ class FlashInferMetadata(AttentionMetadataPerStage):
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
 
-        # When using flashinfer, we are also creating the FlashInferMetadata,
-        # which will also call post_init by default, here we want to skip the
-        # post_init if it's the prefill phase.
-        if not self.is_prompt:
-            self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                self.workspace_buffer, "NHD")
+    def begin_forward(self):
+        if self.num_prefill_tokens > 0:
+            if self.paged_kv_indices is None:
+                return
+
+            assert self.prefill_wrapper is not None
+            assert self.paged_kv_indices is not None
+            assert self.paged_kv_indptr is not None
+            assert self.paged_kv_last_page_len is not None
+            self.paged_kv_indices = self.paged_kv_indices.to(self.device)
+            self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
+            self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
+                self.device)
+            self.prefill_wrapper.end_forward()
+            self.prefill_wrapper.begin_forward(
+                self.query_start_loc, self.paged_kv_indptr,
+                self.paged_kv_indices, self.paged_kv_last_page_len,
+                self.num_qo_heads, self.num_kv_heads, self.head_dim,
+                self.page_size)
+        else:
+            if not self.use_cuda_graph:
+                assert self.paged_kv_indices is not None
+                assert self.paged_kv_indptr is not None
+                assert self.paged_kv_last_page_len is not None
+                self.paged_kv_indices = self.paged_kv_indices.to(self.device)
+                self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
+                self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
+                    self.device)
+
+            assert self.decode_wrapper is not None
+            self.decode_wrapper.end_forward()
             self.decode_wrapper.begin_forward(
                 self.paged_kv_indptr,
                 self.paged_kv_indices,
@@ -135,10 +161,29 @@ class FlashInferMetadata(AttentionMetadataPerStage):
                         ) -> Dict[str, Any]:
         if skip_fields is None:
             skip_fields = set()
-        # We need to skip the decode_wrapper field since it cannot be
+        # We need to skip the prefill/decode_wrapper field since it cannot be
         # broadcasted with nccl when TP is enabled.
+        skip_fields.add('prefill_wrapper')
         skip_fields.add('decode_wrapper')
         return super().asdict_zerocopy(skip_fields)
+
+    @property
+    def prefill_metadata(self) -> Optional["FlashInferMetadata"]:
+        # Currently chunked prefill is not supported
+        if self.num_decode_tokens == 0:
+            assert self.num_prefills > 0
+            return self
+
+        return None
+
+    @property
+    def decode_metadata(self) -> Optional["FlashInferMetadata"]:
+        # Currently chunked prefill is not supported
+        if self.num_prefills > 0:
+            assert self.num_decode_tokens == 0
+            return None
+
+        return self
 
 
 class FlashInferImpl(AttentionImpl):
@@ -148,23 +193,37 @@ class FlashInferImpl(AttentionImpl):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+        if alibi_slopes is not None:
+            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
+        self.alibi_slopes = alibi_slopes
         if sliding_window is not None:
             raise ValueError("Sliding window is not supported in FlashInfer.")
         self.sliding_window = (-1, -1)
-        self.alibi_slopes = alibi_slopes
-        self.scale = scale
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.kv_cache_dtype = kv_cache_dtype
 
-    def forward(self, query: torch.Tensor, key: torch.Tensor,
-                value: torch.Tensor, kv_cache: Optional[torch.Tensor],
-                attn_metadata: AttentionMetadata[FlashInferMetadata],
-                kv_scale: float):
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: Optional[torch.Tensor],
+        attn_metadata: FlashInferMetadata,
+        kv_scale: float = 1.0,
+    ) -> torch.Tensor:
+        assert kv_scale == 1.0
         num_tokens, hidden_size = query.shape
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -185,33 +244,39 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache[:, 0],
                 kv_cache[:, 1],
                 attn_metadata.slot_mapping.flatten(),
-                attn_metadata.kv_cache_dtype,
+                self.kv_cache_dtype,
             )
 
+        query = query.contiguous(
+        )  # Flashinfer requires query to be contiguous
         if prefill_meta := attn_metadata.prefill_metadata:
-            assert prefill_meta.block_tables is not None
-            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
+            # We will use flash attention for prefill
+            # when kv_cache is not provided.
+            # This happens when vllm runs the profiling to
+            # determine the number of blocks.
+            if kv_cache is None:
                 output = flash_attn_varlen_func(
                     q=query,
                     k=key,
                     v=value,
                     cu_seqlens_q=prefill_meta.seq_start_loc,
                     cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_q=prefill_meta.max_seq_len,
-                    max_seqlen_k=prefill_meta.max_seq_len,
+                    max_seqlen_q=prefill_meta.max_prefill_seq_len,
+                    max_seqlen_k=prefill_meta.max_prefill_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                 )
             else:
-                raise NotImplementedError(
-                    "Prefix caching is not supported with flashinfer yet.")
+                assert prefill_meta is not None
+                assert prefill_meta.prefill_wrapper is not None
+                output = prefill_meta.prefill_wrapper.forward(query,
+                                                              kv_cache,
+                                                              causal=True)
         else:
             assert attn_metadata.decode_metadata is not None
             assert attn_metadata.decode_metadata.decode_wrapper is not None
-            query = query.contiguous(
-            )  # Flashinfer requires query to be contiguous
             output = attn_metadata.decode_metadata.decode_wrapper.forward(
                 query,
                 kv_cache,

@@ -1,7 +1,7 @@
-sphinx == 6.2.1
-sphinx-book-theme == 1.0.1
-sphinx-copybutton == 0.5.2
-myst-parser == 2.0.0
+sphinx==6.2.1
+sphinx-book-theme==1.0.1
+sphinx-copybutton==0.5.2
+myst-parser==2.0.0
 sphinx-argparse
 
 # packages to install to build the documentation
@@ -10,3 +10,4 @@ pydantic
 torch
 py-cpuinfo
 transformers
+openai # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args

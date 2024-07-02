@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 import os
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import get_ip, is_hip, is_hpu
+from vllm.utils import get_ip, is_hip, is_hpu, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -44,7 +44,7 @@ try:
 
 except ImportError as e:
     logger.warning(
-        "Failed to import Ray with %r. For distributed inference, "
+        "Failed to import Ray with %r. For multi-node inference, "
         "please install Ray with `pip install ray`.", e)
     ray = None  # type: ignore
     RayWorkerWrapper = None  # type: ignore
@@ -67,11 +67,11 @@ def initialize_ray_cluster(
     """
     if ray is None:
         raise ImportError(
-            "Ray is not installed. Please install Ray to use distributed "
+            "Ray is not installed. Please install Ray to use multi-node "
             "serving.")
 
     # Connect to a ray cluster.
-    if is_hip():
+    if is_hip() or is_xpu():
         ray.init(address=ray_address,
                  ignore_reinit_error=True,
                  num_gpus=parallel_config.world_size)

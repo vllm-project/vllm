@@ -3,17 +3,13 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
-import math
-import vllm.hpu.xops as xops
-from vllm.hpu.attn_bias import (AttentionBias,
-                                LowerTriangularMaskWithTensorBias)
+import vllm.hpu.ops as ops
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataPerStage)
+                                              AttentionMetadata)
 from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,
                                                   HabanaPagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -58,7 +54,7 @@ class HabanaAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class HabanaAttentionMetadata(AttentionMetadataPerStage, HabanaPagedAttentionMetadata):
+class HabanaAttentionMetadata(AttentionMetadata, HabanaPagedAttentionMetadata):
     """Metadata for HabanaAttentionbackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -108,7 +104,7 @@ class HabanaAttentionMetadata(AttentionMetadataPerStage, HabanaPagedAttentionMet
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
         # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[List[AttentionBias]] = None
+        self.attn_bias: Optional[List[torch.Tensor]] = None
 
 
 class HabanaAttentionImpl(AttentionImpl):
@@ -133,11 +129,14 @@ class HabanaAttentionImpl(AttentionImpl):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
         max_seq_len : Optional[int] = 4096,
     ) -> None:
+        self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -166,7 +165,7 @@ class HabanaAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata[HabanaAttentionMetadata],
+        attn_metadata: HabanaAttentionMetadata,
         kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
@@ -196,21 +195,21 @@ class HabanaAttentionImpl(AttentionImpl):
             HabanaPagedAttention.write_to_paged_cache(key, value, key_cache,
                                                       value_cache,
                                                       attn_metadata.slot_mapping,
-                                                      attn_metadata.kv_cache_dtype,
-                                                      attn_metadata.prefill_metadata is not None)
+                                                      self.kv_cache_dtype,
+                                                      attn_metadata.is_prompt)
 
-        if prefill_meta := attn_metadata.prefill_metadata:
+        if attn_metadata.is_prompt:
             # Prompt run.
-            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
+            if kv_cache is None or attn_metadata.block_tables.numel() == 0:
                 # TODO: move this outside of model
-                assert prefill_meta.attn_bias is not None, 'attn_bias must be set before calling model.forward!'
-                attn_bias = prefill_meta.attn_bias
+                assert attn_metadata.attn_bias is not None, 'attn_bias must be set before calling model.forward!'
+                attn_bias = attn_metadata.attn_bias
                 if self.alibi_slopes is not None:
                     attn_bias.add_(self.position_bias[:, :, -attn_bias.size(2):, -attn_bias.size(3):])
 
                 query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
                 kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
-                out = xops.prompt_attention(
+                out = ops.prompt_attention(
                     query.view(query_shape),
                     key.view(kv_shape),
                     value.view(kv_shape),
@@ -227,22 +226,22 @@ class HabanaAttentionImpl(AttentionImpl):
                     value,
                     key_cache,
                     value_cache,
-                    prefill_meta.block_tables,
-                    prefill_meta.subquery_start_loc,
-                    prefill_meta.seq_lens_tensor,
-                    prefill_meta.context_lens_tensor,
-                    prefill_meta.max_query_len,
+                    attn_metadata.block_tables,
+                    attn_metadata.subquery_start_loc,
+                    attn_metadata.seq_lens_tensor,
+                    attn_metadata.context_lens_tensor,
+                    attn_metadata.max_query_len,
                     self.alibi_slopes,
                 )
-        if decode_meta := attn_metadata.decode_metadata:
+        else:
             # Decoding run.
             output = HabanaPagedAttention.forward_decode(
                 query,
                 key_cache,
                 value_cache,
-                decode_meta.block_tables,
-                decode_meta.seq_lens_tensor,
-                attn_metadata.kv_cache_dtype,
+                attn_metadata.block_tables,
+                attn_metadata.seq_lens_tensor,
+                self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
                 self.position_bias,

@@ -1,0 +1,24 @@
+# testing
+pytest
+tensorizer>=2.9.0
+pytest-forked
+pytest-asyncio
+pytest-rerunfailures
+pytest-shard
+
+# testing utils
+awscli
+einops # required for MPT
+httpx
+peft
+requests
+ray
+sentence-transformers # required for embedding
+sparseml==1.8.0 # required for compressed-tensors
+compressed-tensors==0.4.0 # required for compressed-tensors
+
+# Benchmarking
+aiohttp
+
+# quantization
+bitsandbytes==0.42.0

@@ -14,14 +14,18 @@ TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
 import os
 
 import pytest
-import torch
+
+from vllm.utils import cuda_device_count_stateless
+
+from ..models.utils import check_outputs_equal
 
 MODELS = [
     os.environ["TEST_DIST_MODEL"],
 ]
+DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
+@pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
@@ -36,31 +40,36 @@ def test_models(
     max_tokens: int,
     chunked_prefill_token_size: int,
 ) -> None:
+    distributed_executor_backend = os.getenv(DISTRIBUTED_EXECUTOR_BACKEND)
+
     # Add a chunked prefill config.
     max_num_seqs = min(chunked_prefill_token_size, 256)
     assert chunked_prefill_token_size != -1
     enable_chunked_prefill = True
     max_num_batched_tokens = chunked_prefill_token_size
 
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-    del hf_model
+    # NOTE: take care of the order. run vLLM first, and then run HF.
+    # vLLM needs a fresh new process without cuda initialization.
+    # if we run HF first, the cuda initialization will be done and it
+    # will hurt multiprocessing backend with fork method (the default method).
 
-    vllm_model = vllm_runner(
-        model,
-        dtype=dtype,
-        tensor_parallel_size=2,
-        max_num_seqs=max_num_seqs,
-        enable_chunked_prefill=enable_chunked_prefill,
-        max_num_batched_tokens=max_num_batched_tokens,
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tensor_parallel_size=2,
+            max_num_seqs=max_num_seqs,
+            enable_chunked_prefill=enable_chunked_prefill,
+            max_num_batched_tokens=max_num_batched_tokens,
+            distributed_executor_backend=distributed_executor_backend,
+    ) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
     )
-    vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    del vllm_model
-
-    for i in range(len(example_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")

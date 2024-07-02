@@ -7,7 +7,8 @@ prefill requests are chunked.
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
 import pytest
-from vllm.utils import is_hpu
+
+from ..models.utils import check_outputs_equal
 
 MODELS = [
     "facebook/opt-125m",
@@ -15,7 +16,6 @@ MODELS = [
 ]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -42,26 +42,23 @@ def test_models(
         enable_chunked_prefill = True
         max_num_batched_tokens = chunked_prefill_token_size
 
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-    del hf_model
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    vllm_model = vllm_runner(
-        model,
-        dtype=dtype,
-        max_num_batched_tokens=max_num_batched_tokens,
-        enable_chunked_prefill=enable_chunked_prefill,
-        tensor_parallel_size=tensor_parallel_size,
-        enforce_eager=enforce_eager,
-        max_num_seqs=max_num_seqs,
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            max_num_batched_tokens=max_num_batched_tokens,
+            enable_chunked_prefill=enable_chunked_prefill,
+            tensor_parallel_size=tensor_parallel_size,
+            enforce_eager=enforce_eager,
+            max_num_seqs=max_num_seqs,
+    ) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
     )
-    vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    del vllm_model
-
-    for i in range(len(example_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")

@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 import requests
-from vllm.utils import is_hpu
 
 
 def _query_server(prompt: str, max_tokens: int = 5) -> dict:
@@ -45,7 +44,6 @@ def api_server(tokenizer_pool_size: int, engine_use_ray: bool,
     uvicorn_process.terminate()
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("tokenizer_pool_size", [0, 2])
 @pytest.mark.parametrize("worker_use_ray", [False, True])
 @pytest.mark.parametrize("engine_use_ray", [False, True])

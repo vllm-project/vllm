@@ -1,30 +1,26 @@
-from itertools import accumulate
-from typing import List, Optional
+from itertools import accumulate, product
+from typing import Dict, List, Optional
 
 import pytest
 import torch
-from allclose_default import get_default_atol, get_default_rtol
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.utils import is_hpu
+
+from .allclose_default import get_default_atol, get_default_rtol
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HEAD_SIZES = [64, 80, 96, 112, 128, 256]
+HEAD_SIZES = [64, 80, 96, 112, 128, 192, 256]
 ROTARY_DIMS = [None, 32]  # None means rotary dim == head size
 NUM_HEADS = [7, 17]  # Arbitrary values for testing
 BATCH_SIZES = [1, 5]  # Arbitrary values for testing
 SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
-if is_hpu():
-    DEVICES = ["hpu"]
-else:
-    DEVICES = [
-        f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-    ]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("seq_len", SEQ_LENS)
@@ -33,7 +29,7 @@ else:
 @pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_rotary_embedding(
     is_neox_style: bool,
@@ -68,7 +64,7 @@ def test_rotary_embedding(
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
-    ref_query, ref_key = rope._forward(positions, query, key)
+    ref_query, ref_key = rope.forward_native(positions, query, key)
     out_query, out_key = rope.forward(positions, query, key)
     # Compare the results.
     assert torch.allclose(out_query,
@@ -81,7 +77,6 @@ def test_rotary_embedding(
                           rtol=get_default_rtol(out_key))
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("seq_len", SEQ_LENS)
@@ -90,7 +85,7 @@ def test_rotary_embedding(
 @pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_batched_rotary_embedding(
     is_neox_style: bool,
@@ -126,12 +121,12 @@ def test_batched_rotary_embedding(
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
-    ref_query, ref_key = rope._forward(positions, query, key)
+    ref_query, ref_key = rope.forward_native(positions, query, key)
     out_query, out_key = rope.forward(positions,
                                       query,
                                       key,
                                       offsets=torch.zeros(batch_size * seq_len,
-                                                          dtype=int,
+                                                          dtype=torch.long,
                                                           device=device))
     # Compare the results.
     assert torch.allclose(out_query,
@@ -144,7 +139,6 @@ def test_batched_rotary_embedding(
                           rtol=get_default_rtol(out_key))
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("seq_len", SEQ_LENS)
@@ -153,7 +147,7 @@ def test_batched_rotary_embedding(
 @pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_batched_rotary_embedding_multi_lora(
     is_neox_style: bool,
@@ -201,7 +195,8 @@ def test_batched_rotary_embedding_multi_lora(
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
-    ref_query, ref_key = rope._forward(positions, query, key, query_offsets)
+    ref_query, ref_key = rope.forward_native(positions, query, key,
+                                             query_offsets)
     out_query, out_key = rope.forward(positions, query, key,
                                       query_offsets.flatten())
     # Compare the results.
@@ -213,3 +208,41 @@ def test_batched_rotary_embedding_multi_lora(
                           ref_key,
                           atol=get_default_atol(out_key),
                           rtol=get_default_rtol(out_key))
+
+
+@torch.inference_mode()
+def test_rope_module_cache():
+    MAX_POSITIONS = [123, 1234]
+    BASES = [10000, 1000000]
+    ROPE_SCALINGS = (None, {
+        "type": "linear",
+        "factor": (1, )
+    }, {
+        "type": "dynamic",
+        "factor": 1
+    })
+    settings = (HEAD_SIZES, ROTARY_DIMS, MAX_POSITIONS, BASES, IS_NEOX_STYLE,
+                ROPE_SCALINGS, DTYPES)
+    rope_setting_id_map: Dict[str, int] = {}
+    for setting in product(*settings):
+        head_size, rotary_dim, max_position, base, \
+            is_neox_stype, rope_scaling, dtype = setting
+        if rotary_dim is None:
+            rotary_dim = head_size
+        rope = get_rope(head_size, rotary_dim, max_position, base,
+                        is_neox_stype, rope_scaling, dtype)
+        # different settings cannot share the same rope module
+        assert id(rope) not in rope_setting_id_map.values()
+        assert all(x.dtype == dtype for x in rope.buffers())
+        assert all(x.dtype == dtype for x in rope.parameters())
+        rope_setting_id_map[str(setting)] = id(rope)
+
+    for setting in product(*settings):
+        head_size, rotary_dim, max_position, base, \
+            is_neox_stype, rope_scaling, dtype = setting
+        if rotary_dim is None:
+            rotary_dim = head_size
+        rope = get_rope(head_size, rotary_dim, max_position, base,
+                        is_neox_stype, rope_scaling, dtype)
+        # check if cache take effect
+        assert id(rope) == rope_setting_id_map[str(setting)]

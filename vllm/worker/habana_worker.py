@@ -12,10 +12,9 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         VisionLanguageConfig, SpeculativeConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
-                              get_tensor_model_parallel_cpu_group,
                               init_distributed_environment)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -46,6 +45,7 @@ class HabanaWorker(WorkerBase):
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        speculative_config: Optional[SpeculativeConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -159,7 +159,7 @@ class HabanaWorker(WorkerBase):
     def _init_cache_engine(self) -> None:
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
+                                        self.parallel_config, self.device_config)
         self.hpu_cache = self.cache_engine.gpu_cache
         htorch.hpu.synchronize() # we want to materialize cache tensors before we proceed with graph capture/execution
 
@@ -227,6 +227,40 @@ class HabanaWorker(WorkerBase):
                                                  self.hpu_cache)
         return [output]
 
+    @torch.inference_mode()
+    def start_worker_execution_loop(self) -> None:
+        """Execute model loop in parallel worker.
+
+        You can stop the loop by executing a driver worker with an empty output.
+        See `stop_remote_worker_execution_loop` for more details.
+        """
+        while self._execute_model_non_driver():
+            pass
+
+    def _execute_model_non_driver(self) -> bool:
+        """Execute model in parallel worker.
+
+        Returns True iff there are remaining sequences to process.
+        """
+        assert not self.is_driver_worker
+        data = broadcast_tensor_dict(src=0)
+        if not data:
+            return False
+
+        num_seq_groups = data.get("num_seq_groups", 0)
+        blocks_to_swap_in = data.get("blocks_to_swap_in")
+        blocks_to_swap_out = data.get("blocks_to_swap_out")
+        blocks_to_copy = data.get("blocks_to_copy")
+        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+
+        # If there is no input, we don't need to execute the model.
+        if num_seq_groups == 0:
+            return False
+
+        self.model_runner.execute_model(None, self.hpu_cache)
+        return True
+
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
 
@@ -234,6 +268,9 @@ class HabanaWorker(WorkerBase):
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
 
     def list_loras(self) -> Set[int]:
+        raise NotImplementedError("LoRA is not implemented for HPU backend.")
+
+    def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
 
     @property

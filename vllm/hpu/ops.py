@@ -23,13 +23,6 @@ def silu_and_mul(output, input):
     output.copy_(silu(x) * y)
 
 
-def gelu_new(output, input):
-    raise NotImplementedError
-
-
-def gelu_fast(output, input):
-    raise NotImplementedError
-
 
 def fetch_from_cache(cache, blocks, permutations):
     return [cache.index_select(0, blocks[:, i]).permute(permutations) for i in range(blocks.size(1))]
@@ -77,46 +70,6 @@ def paged_attention_v1(query, key_cache, value_cache, head_mapping, scale, block
     return attn_weights.squeeze(-2)
 
 
-def rms_norm(out, hidden_states, weight, eps):
-    htorch.core.mark_step()
-    input_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float32)
-    variance = hidden_states.pow(2).mean(-1, keepdim=True)
-    hidden_states = hidden_states * torch.rsqrt(variance + eps)
-    out.copy_(weight * hidden_states.to(input_dtype))
-    htorch.core.mark_step()
-
-
-def rotate_neox(x: torch.Tensor) -> torch.Tensor:
-    x1 = x[..., :x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def rotate_gptj(x: torch.Tensor) -> torch.Tensor:
-    x1 = x[..., ::2]
-    x2 = x[..., 1::2]
-    x = torch.stack((-x2, x1), dim=-1)
-    return x.flatten(-2)
-
-
-def apply_rope(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    is_neox_style: bool,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    rotate_fn = rotate_neox if is_neox_style else rotate_gptj
-    q_embed = (q * cos) + (rotate_fn(q) * sin)
-    k_embed = (k * cos) + (rotate_fn(k) * sin)
-    return q_embed, k_embed
-
-
-def awq_gemm(*args):
-    raise NotImplementedError
-
-
 def silu_and_mul_wrapper(x: torch.Tensor) -> torch.Tensor:
     d = x.shape[-1] // 2
     output_shape = (x.shape[:-1] + (d, ))
@@ -154,3 +107,33 @@ def static_fused_moe(hidden_states, w1, w2, score, topk):
         htorch.core.mark_step()
 
     return final_hidden_states.view(-1, D)
+
+
+@hpu_utils.with_mark_steps
+def prompt_attention(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_bias: Optional[torch.Tensor] = None,
+        p: float = 0.0,
+        scale: Optional[float] = None,
+) -> torch.Tensor:
+    query = query.transpose(1, 2)
+    key = key.transpose(1, 2)
+    value = value.transpose(1, 2)
+    query_heads = query.size(1)
+    kv_heads = key.size(1)
+    if query_heads != kv_heads:
+        query = query.unflatten(1, (kv_heads, -1))
+        key = key.unflatten(1, (kv_heads, 1))
+        value = value.unflatten(1, (kv_heads, 1))
+        attn_bias = attn_bias.unsqueeze(2)
+    attn_weights = torch.matmul(query * scale, key.transpose(-1, -2))
+    if attn_bias is not None:
+        attn_weights.add_(attn_bias)
+    attn_weights = torch.softmax(attn_weights, dim=-1)
+    attn_weights = torch.matmul(attn_weights, value)
+    if query_heads != kv_heads:
+        attn_weights = attn_weights.flatten(1, 2)
+    attn_weights = attn_weights.transpose(1, 2)
+    return attn_weights

@@ -2,10 +2,8 @@ import pytest
 
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_hpu
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization
@@ -16,7 +14,7 @@ def test_skip_tokenizer_initialization(model: str):
     with pytest.raises(ValueError) as err:
         llm.generate("abc", sampling_params)
     assert "prompts must be None if" in str(err.value)
-    outputs = llm.generate(prompt_token_ids=[[1, 2, 3]],
+    outputs = llm.generate({"prompt_token_ids": [1, 2, 3]},
                            sampling_params=sampling_params)
     assert len(outputs) > 0
     completions = outputs[0].outputs

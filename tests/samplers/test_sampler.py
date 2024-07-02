@@ -1,6 +1,6 @@
 import itertools
 import random
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -11,8 +11,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.utils import Counter, is_hpu
-from vllm.worker.model_runner import ModelRunner
+from vllm.utils import Counter, is_pin_memory_available
 
 
 class MockLogitsSampler(Sampler):
@@ -26,42 +25,32 @@ class MockLogitsSampler(Sampler):
 
 
 def _prepare_test(
-    batch_size: int
-) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, ModelRunner]:
+        batch_size: int
+) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler]:
     input_tensor = torch.rand((batch_size, 1024), dtype=torch.float16)
     fake_logits = torch.full((batch_size, VOCAB_SIZE),
                              1e-2,
                              dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(fake_logits)
-    model_runner = ModelRunner(model_config=None,
-                               parallel_config=None,
-                               scheduler_config=None,
-                               device_config=None,
-                               load_config=None,
-                               lora_config=None)
-    return input_tensor, fake_logits, sampler, model_runner
+    return input_tensor, fake_logits, sampler
 
 
 VOCAB_SIZE = 32000
 RANDOM_SEEDS = list(range(128))
-if is_hpu():
-    DEVICES = ["hpu"]
-else:
-    DEVICES = [
-        f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-    ]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 
 
 def _do_sample(
     batch_size: int,
     input_tensor: torch.Tensor,
     sampler: MockLogitsSampler,
-    model_runner: ModelRunner,
     sampling_params: SamplingParams,
     device: str,
 ):
-    seq_group_metadata_list = []
-    seq_lens = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    seq_lens: List[int] = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -78,38 +67,34 @@ def _do_sample(
         seq_lens,
         query_lens=seq_lens,
         device=device,
-        pin_memory=model_runner.pin_memory)
+        pin_memory=is_pin_memory_available())
     return sampler(logits=input_tensor, sampling_metadata=sampling_metadata)
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_all_greedy(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+    input_tensor, fake_logits, sampler = _prepare_test(batch_size)
 
     sampling_params = SamplingParams(temperature=0)
-    sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
+    sampler_output = _do_sample(batch_size, fake_logits, sampler,
                                 sampling_params, device)
     expected = torch.argmax(fake_logits, dim=-1)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
             assert nth_output.output_token == expected[i].item()
 
-    del model_runner
-
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_all_random(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+    _, fake_logits, sampler = _prepare_test(batch_size)
 
     for i in range(batch_size):
         fake_logits[i, i] = 1e2
@@ -118,24 +103,21 @@ def test_sampler_all_random(seed: int, device: str):
         temperature=1.0,
         n=random.randint(1, 10),
     )
-    sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
+    sampler_output = _do_sample(batch_size, fake_logits, sampler,
                                 sampling_params, device)
 
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
             assert nth_output.output_token == i
 
-    del model_runner
 
-
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_all_random_seed(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+    _, fake_logits, sampler = _prepare_test(batch_size)
 
     for i in range(batch_size):
         fake_logits[i, i] = 1e2
@@ -145,24 +127,21 @@ def test_sampler_all_random_seed(seed: int, device: str):
         n=random.randint(1, 10),
         seed=random.randint(0, 10000),
     )
-    sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
+    sampler_output = _do_sample(batch_size, fake_logits, sampler,
                                 sampling_params, device)
 
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
             assert nth_output.output_token == i
 
-    del model_runner
 
-
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_all_random_seed_deterministic(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+    _, fake_logits, sampler = _prepare_test(batch_size)
 
     sampling_params = SamplingParams(
         temperature=1.0,
@@ -170,40 +149,36 @@ def test_sampler_all_random_seed_deterministic(seed: int, device: str):
         seed=random.randint(0, 10000),
     )
     first_sampler_output = _do_sample(batch_size, fake_logits, sampler,
-                                      model_runner, sampling_params, device)
+                                      sampling_params, device)
 
     second_sampler_output = _do_sample(batch_size, fake_logits, sampler,
-                                       model_runner, sampling_params, device)
+                                       sampling_params, device)
 
     assert first_sampler_output == second_sampler_output
 
-    del model_runner
-
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_all_beam(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+    _, fake_logits, sampler = _prepare_test(batch_size)
 
     sampling_params = SamplingParams(
         temperature=0,
         best_of=2,
         use_beam_search=True,
     )
-    _do_sample(batch_size, fake_logits, sampler, model_runner, sampling_params,
-               device)
+    _do_sample(batch_size, fake_logits, sampler, sampling_params, device)
     # no assertion here as I am not sure how to determine whether
     # the outputs are expected - in other words, this just tests
     # whether there are no exceptions in the sampler
     # when handling an all-beam search case.
-    del model_runner
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_min_tokens_penalty(seed: int, device: str):
     seq_id_counter = Counter(start=random.randint(0, 100))
     set_random_seed(seed)
@@ -237,7 +212,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         batch_size = random.randint(1, 128)
 
         expected_penalization = []
-        sequence_metadata_list = []
+        sequence_metadata_list: List[SequenceGroupMetadata] = []
         # 20% chance to generate seq group metadata list with all prompts
         is_prompt = random.random() < 0.2
         while batch_size > 0:
@@ -257,8 +232,8 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 eos_token_id=eos_token_id,
                 stop_token_ids=stop_token_ids)
 
-            seq_data = {}
-            seq_group_penalization = []
+            seq_data: Dict[int, SequenceData] = {}
+            seq_group_penalization: List[bool] = []
             for _ in range(num_seqs):
                 num_input = random.randint(1, 100)
                 num_generated = 0 if is_prompt else random.randint(1, 100)
@@ -417,17 +392,16 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     else:
         test_cases = [generate_test_case()]
 
-    def run_test_case(*,
-                      expected_penalization=None,
-                      seq_group_metadata_list=None):
+    def run_test_case(*, expected_penalization: List[bool],
+                      seq_group_metadata_list: List[SequenceGroupMetadata]):
         assert expected_penalization, \
             "Invalid test case, need expected_penalization"
         assert seq_group_metadata_list, \
             "Invalid test case, need seq_group_metadata_list"
 
         batch_size = 0
-        seq_lens = []
-        sampling_params_per_row = []
+        seq_lens: List[int] = []
+        sampling_params_per_row: List[SamplingParams] = []
         for sgm in seq_group_metadata_list:
             sampling_params = sgm.sampling_params
 
@@ -453,13 +427,13 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             ("Invalid test case, expected_penalization does not match computed"
              "batch size")
 
-        _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+        _, fake_logits, sampler = _prepare_test(batch_size)
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             seq_lens=seq_lens if seq_lens else None,
             query_lens=seq_lens if seq_lens else None,
             device=device,
-            pin_memory=model_runner.pin_memory)
+            pin_memory=is_pin_memory_available())
         # the logits tensor is modified in-place by the sampler
         _ = sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
 
@@ -485,31 +459,27 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                     fake_logits[logits_idx, :] ==
                     -float('inf')) == 0, "No tokens should have been penalized"
 
-        del model_runner
-
     for test_case in test_cases:
         run_test_case(**test_case)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_mixed(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
     batch_size = random.randint(1, 256)
-    input_tensor, fake_logits, sampler, model_runner = _prepare_test(
-        batch_size)
+    input_tensor, fake_logits, sampler = _prepare_test(batch_size)
 
-    seq_group_metadata_list = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
     expected_tokens: List[Optional[List[int]]] = []
-    seq_lens = []
+    seq_lens: List[int] = []
     for i in range(batch_size):
         expected: Optional[List[int]] = None
         sampling_type = random.randint(0, 3)
         if sampling_type == 0:
             sampling_params = SamplingParams(temperature=0)
-            expected = [torch.argmax(fake_logits[i], dim=-1).item()]
+            expected = [int(torch.argmax(fake_logits[i], dim=-1).item())]
         elif sampling_type in (1, 2):
             n = random.randint(1, 10)
             sampling_params = SamplingParams(
@@ -540,13 +510,13 @@ def test_sampler_mixed(seed: int, device: str):
             ))
         seq_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    def test_sampling(model_runner: ModelRunner):
+    def test_sampling():
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             seq_lens,
             query_lens=seq_lens,
             device=device,
-            pin_memory=model_runner.pin_memory)
+            pin_memory=is_pin_memory_available())
         sampler_output = sampler(logits=fake_logits,
                                  sampling_metadata=sampling_metadata)
 
@@ -565,18 +535,21 @@ def test_sampler_mixed(seed: int, device: str):
                 ]
                 continue
 
+            expected_tokens_item = expected_tokens[i]
+            assert expected_tokens_item is not None
+
             for n, nth_output in enumerate(sequence_output.samples):
                 if (metadata.sampling_params.temperature == 0
                         or metadata.sampling_params.seed is not None):
                     # Ensure exact matches for greedy or random with seed
-                    assert nth_output.output_token == expected_tokens[i][n]
+                    assert nth_output.output_token == expected_tokens_item[n]
                 else:
                     # For non-seeded random check that one of the high-logit
                     # tokens were chosen
-                    assert nth_output.output_token in expected_tokens[i]
+                    assert nth_output.output_token in expected_tokens_item
 
     # Test batch
-    test_sampling(model_runner)
+    test_sampling()
 
     # Shuffle the batch and resample
     target_index = list(range(batch_size))
@@ -589,13 +562,11 @@ def test_sampler_mixed(seed: int, device: str):
 
     # This time, results of seeded random samples will be compared with
     # the corresponding sample in the pre-shuffled batch
-    test_sampling(model_runner)
-
-    del model_runner
+    test_sampling()
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_top_k_top_p(seed: int, device: str):
     set_random_seed(seed)
     batch_size = random.randint(1, 256)
@@ -611,22 +582,16 @@ def test_sampler_top_k_top_p(seed: int, device: str):
                                device=input_tensor.device,
                                dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(fake_logits)
-    model_runner = ModelRunner(model_config=None,
-                               parallel_config=None,
-                               scheduler_config=None,
-                               device_config=None,
-                               load_config=None,
-                               lora_config=None)
 
     generation_model = GenerationMixin()
     generation_config = GenerationConfig(top_k=top_k,
                                          top_p=top_p,
                                          do_sample=True)
-    warpers = generation_model._get_logits_warper(generation_config)
+    warpers = generation_model._get_logits_warper(generation_config, device)
     assert len(warpers) == 2  # top_p and top_k
 
-    seq_group_metadata_list = []
-    seq_lens = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    seq_lens: List[int] = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -647,7 +612,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
         seq_lens,
         query_lens=seq_lens,
         device=device,
-        pin_memory=model_runner.pin_memory)
+        pin_memory=is_pin_memory_available())
 
     sample_probs = None
 
@@ -659,9 +624,79 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 
     with patch("vllm.model_executor.layers.sampler._sample", mock_sample):
         sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
+
+    assert sample_probs is not None
+
     hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
     assert torch.allclose(hf_probs, sample_probs, atol=1e-5)
     assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
 
-    del model_runner
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_repetition_penalty_mixed(device: str):
+
+    vocab_size = 8
+
+    def test_sampling_params(sampling_params: List[SamplingParams]):
+
+        seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        seq_lens: List[int] = []
+        for i in range(2):
+            seq_group_metadata_list.append(
+                SequenceGroupMetadata(
+                    request_id=f"test_{i}",
+                    is_prompt=True,
+                    seq_data={0: SequenceData([1, 2, 3])},
+                    sampling_params=sampling_params[i],
+                    block_tables={0: [1]},
+                ))
+            seq_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
+
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            seq_lens,
+            query_lens=seq_lens,
+            device=device,
+            pin_memory=is_pin_memory_available())
+
+        fake_logits = torch.full((2, vocab_size),
+                                 1e-2,
+                                 device=device,
+                                 dtype=torch.float16)
+
+        fake_logits[:, 5] = 1.1e-2
+        fake_logits[:, 1] = 1.2e-2
+
+        sampler = MockLogitsSampler(fake_logits)
+
+        sampler_output = sampler(logits=fake_logits,
+                                 sampling_metadata=sampling_metadata)
+
+        generated_tokens = []
+        for output in sampler_output:
+            generated_tokens.append(output.samples[0].output_token)
+
+        return generated_tokens
+
+    # one configuration is greedy with repetition_penalty
+    sampling_params_rep = SamplingParams(
+        temperature=0.0,
+        repetition_penalty=2.0,
+    )
+
+    # other configuration is sampling w/o repetition_penalty
+    sampling_params_sample = SamplingParams(
+        temperature=1.0,
+        top_k=1,
+        seed=42,
+    )
+
+    tokens1 = test_sampling_params(
+        [sampling_params_rep, sampling_params_sample])
+
+    tokens2 = test_sampling_params(
+        [sampling_params_sample, sampling_params_rep])
+
+    assert tokens1[0] == tokens2[1]
+    assert tokens1[1] == tokens2[0]

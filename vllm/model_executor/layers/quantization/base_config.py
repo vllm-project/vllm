@@ -44,8 +44,9 @@ class QuantizationConfig(ABC):
         """List of supported activation dtypes."""
         raise NotImplementedError
 
+    @classmethod
     @abstractmethod
-    def get_min_capability(self) -> int:
+    def get_min_capability(cls) -> int:
         """Minimum GPU capability to support the quantization method.
 
         E.g., 70 for Volta, 75 for Turing, 80 for Ampere.
@@ -65,6 +66,17 @@ class QuantizationConfig(ABC):
     def from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         """Create a config class from the model's quantization config."""
         raise NotImplementedError
+
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        """
+           Detects if this quantization method can support a given checkpoint
+           format by overriding the user specified quantization method -- 
+           this method should only be overwritten by subclasses in exceptional 
+           circumstances
+        """
+        return None
 
     @staticmethod
     def get_from_keys(config: Dict[str, Any], keys: List[str]) -> Any:

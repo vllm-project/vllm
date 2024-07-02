@@ -3,17 +3,13 @@ import random
 import tempfile
 from unittest.mock import patch
 
-import pytest
-
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig)
 from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.worker.worker import Worker
-from vllm.utils import is_hpu
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @patch.dict(os.environ, {"RANK": "0"})
 def test_worker_apply_lora(sql_lora_files):
     worker = Worker(

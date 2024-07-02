@@ -1,30 +1,29 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple, Type
 
 import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict,
-                              ensure_model_parallel_initialized,
-                              get_tensor_model_parallel_cpu_group,
-                              init_distributed_environment)
-from vllm.distributed.device_communicators import pynccl_utils
-from vllm.distributed.device_communicators.custom_all_reduce import (
-    init_custom_ar)
+                         SpeculativeConfig, VisionLanguageConfig)
+from vllm.distributed import (ensure_model_parallel_initialized,
+                              init_distributed_environment,
+                              set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.sequence import ExecuteModelRequest
+from vllm.utils import get_device_capability_stateless
 from vllm.worker.cache_engine import CacheEngine
-from vllm.worker.model_runner import ModelRunner
-from vllm.worker.worker_base import WorkerBase
+from vllm.worker.embedding_model_runner import EmbeddingModelRunner
+from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
+from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 
-class Worker(WorkerBase):
+class Worker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
 
     Each worker is associated with a single GPU. The worker is responsible for
@@ -45,7 +44,9 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        speculative_config: Optional[SpeculativeConfig] = None,
         is_driver_worker: bool = False,
+        model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -70,21 +71,37 @@ class Worker(WorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
-        self.model_runner = ModelRunner(
+        # Return hidden states from target model if the draft model is an
+        # mlp_speculator
+        speculative_args = {} if speculative_config is None \
+            or (speculative_config.draft_model_config.model ==
+                model_config.model) \
+              or (speculative_config.draft_model_config.hf_config.model_type !=
+                  "mlp_speculator") else {"return_hidden_states": True}
+
+        ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
+        if model_runner_cls is not None:
+            ModelRunnerClass = model_runner_cls
+        elif self.model_config.embedding_mode:
+            ModelRunnerClass = EmbeddingModelRunner
+        self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             model_config,
             parallel_config,
             scheduler_config,
             device_config,
+            cache_config,
             load_config=load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
+            **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: CacheEngine
-        self.gpu_cache: List[torch.Tensor]
+        # Initialize gpu_cache as embedding models don't initialize kv_caches
+        self.gpu_cache: Optional[List[torch.tensor]] = None
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -116,6 +133,25 @@ class Worker(WorkerBase):
 
     def load_model(self):
         self.model_runner.load_model()
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        self.model_runner.save_sharded_state(
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
+
+    def save_tensorized_model(
+        self,
+        tensorizer_config: TensorizerConfig,
+    ) -> None:
+        self.model_runner.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -182,9 +218,9 @@ class Worker(WorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
+                                        self.parallel_config,
+                                        self.device_config)
         self.gpu_cache = self.cache_engine.gpu_cache
-        self.model_runner.set_block_size(self.cache_engine.block_size)
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -193,73 +229,61 @@ class Worker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    def cache_swap(
-        self,
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: torch.Tensor,
-    ) -> None:
-        # Issue cache operations.
-        # TODO(woosuk): Profile swapping overhead and optimize if needed.
-        if blocks_to_swap_in:
-            self.cache_engine.swap_in(blocks_to_swap_in)
-        if blocks_to_swap_out:
-            self.cache_engine.swap_out(blocks_to_swap_out)
-        if blocks_to_copy.numel() > 0:
-            self.cache_engine.copy(blocks_to_copy)
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return self.parallel_config.tensor_parallel_size > 1
+
+    @property
+    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+        return self.gpu_cache
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
-
-        if execute_model_req is None:
-            seq_group_metadata_list = None
-        else:
-            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            assert execute_model_req is not None
-            num_seq_groups = len(seq_group_metadata_list)
-            blocks_to_swap_in = execute_model_req.blocks_to_swap_in
-            blocks_to_swap_out = execute_model_req.blocks_to_swap_out
-            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
-                                          device=self.device,
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        num_seq_groups = len(execute_model_req.seq_group_metadata_list)
+        # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
+        # they contain parameters to launch cudamemcpyasync.
+        blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
+                                         device="cpu",
+                                         dtype=torch.int64).view(-1, 2)
+        blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
+                                          device="cpu",
                                           dtype=torch.int64).view(-1, 2)
-            data: Dict[str, Any] = {
-                "num_seq_groups": num_seq_groups,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            }
-            broadcast_tensor_dict(data, src=0)
-        else:
-            data = broadcast_tensor_dict(src=0)
-            num_seq_groups = data["num_seq_groups"]
-            blocks_to_swap_in = data["blocks_to_swap_in"]
-            blocks_to_swap_out = data["blocks_to_swap_out"]
-            blocks_to_copy = data["blocks_to_copy"]
+        # `blocks_to_copy` is a gpu tensor. The src and tgt of
+        # blocks to copy are in the same device, and `blocks_to_copy`
+        # can be used directly within cuda kernels.
+        blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                      device=self.device,
+                                      dtype=torch.int64).view(-1, 2)
 
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
+        return WorkerInput(
+            num_seq_groups=num_seq_groups,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+        )
 
-        # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
-            return []
-
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
-
-        # Worker only supports single-step execution. Wrap the output in a list
-        # to conform to interface.
-        return [output]
+    @torch.inference_mode()
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        # Issue cache operations.
+        if (worker_input.blocks_to_swap_in is not None
+                and worker_input.blocks_to_swap_in.numel() > 0):
+            self.cache_engine.swap_in(worker_input.blocks_to_swap_in)
+        if (worker_input.blocks_to_swap_out is not None
+                and worker_input.blocks_to_swap_out.numel() > 0):
+            self.cache_engine.swap_out(worker_input.blocks_to_swap_out)
+        if (worker_input.blocks_to_copy is not None
+                and worker_input.blocks_to_copy.numel() > 0):
+            self.cache_engine.copy(worker_input.blocks_to_copy)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_runner.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
@@ -287,40 +311,19 @@ def init_worker_distributed_environment(
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
+    set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
+
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank)
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
-    if pynccl_utils.is_initialized():
-        pynccl_world_size = pynccl_utils.get_world_size()
-        if pynccl_world_size != parallel_config.world_size:
-            raise RuntimeError(
-                "pynccl is already initialized but the pynccl world "
-                "size does not match parallel_config.world_size "
-                f"({pynccl_world_size} vs. {parallel_config.world_size}).")
-    elif parallel_config.world_size > 1:
-        # NOTE(woosuk): We don't initialize pynccl process group when world size
-        # is 1.
-        # NOTE(kaichao): By default, pynccl is initialized for tp group.
-        pynccl_utils.init_process_group(
-            group=get_tensor_model_parallel_cpu_group())
-
-    # Initialize a custom fast all-reduce implementation.
-    if not parallel_config.disable_custom_all_reduce:
-        init_custom_ar()
-
-    # A small all_reduce for warmup.
-    torch.distributed.all_reduce(torch.zeros(1).cuda())
-    if pynccl_utils.is_initialized():
-        pynccl_utils.all_reduce(torch.zeros(1).cuda())
-
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     # Check if the GPU supports the dtype.
     if torch_dtype == torch.bfloat16:
-        compute_capability = torch.cuda.get_device_capability()
+        compute_capability = get_device_capability_stateless()
         if compute_capability[0] < 8:
             gpu_name = torch.cuda.get_device_name()
             raise ValueError(

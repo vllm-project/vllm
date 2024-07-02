@@ -4,7 +4,6 @@ import pytest
 import torch
 
 import vllm.lora.punica as punica
-from vllm.utils import is_hpu
 
 
 def assert_close(a, b):
@@ -50,36 +49,60 @@ H1 = H2 = [
     128,
     256,
     512,
+    896,
     1024,
     1152,
+    1216,
     1280,
     1536,
+    1664,
     2048,
+    2240,
     2304,
+    2368,
+    2432,
     2560,
     2752,
     3072,
+    3328,
     3456,
     3584,
+    3712,
     4096,
+    4480,
     4608,
+    4736,
+    4864,
     5120,
     5504,
     5632,
+    5888,
     6144,
+    6400,
     6848,
     6912,
     7168,
+    7424,
     8192,
+    8960,
     9216,
+    9472,
     10240,
     11008,
+    11264,
     13824,
     14336,
+    14784,
+    14848,
     15360,
+    18944,
     22016,
+    22528,
     24576,
     27392,
+    27648,
+    29568,
+    29696,
     32000,
     32256,
     32512,
@@ -88,6 +111,9 @@ H1 = H2 = [
     36864,
     43264,
     49152,
+    49408,
+    60544,
+    60672,
     64000,
     64256,
     102400,
@@ -103,7 +129,6 @@ CUDA_DEVICES = [
 ]
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("dtype_str", ["float16", "bfloat16"])
 @pytest.mark.parametrize("h1", H1)
 @pytest.mark.parametrize("r", R)
@@ -146,7 +171,6 @@ def test_lora_a_extra_shapes(dtype_str, h1, r, seed):
         assert_close(y_ref, y_our)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("dtype_str", ["float16", "bfloat16"])
 @pytest.mark.parametrize("h1", H1)
 @pytest.mark.parametrize("h2", H2)
@@ -181,7 +205,6 @@ def test_lora_correctness(dtype_str, h1, h2, seed, device):
         assert_close(y_ref, y_our)
 
 
-@pytest.mark.skipif(is_hpu(), reason="Skipping test on HPU")
 @pytest.mark.parametrize("dtype_str", ["float16", "bfloat16"])
 @pytest.mark.parametrize("h1", H1)
 @pytest.mark.parametrize("h2", H2)

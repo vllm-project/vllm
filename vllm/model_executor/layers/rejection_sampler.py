@@ -1,54 +1,34 @@
 from functools import cached_property
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.jit
-import torch.nn as nn
+
+from vllm.model_executor.layers.spec_decode_base_sampler import (
+    SpecDecodeBaseSampler)
 
 
-class RejectionSampler(nn.Module):
+class RejectionSampler(SpecDecodeBaseSampler):
     """Apply modified rejection sampling as described in "Accelerating Large
         Language Model Decoding with Speculative Sampling"
         https://arxiv.org/pdf/2302.01318.pdf.
     """
 
-    def __init__(self, strict_mode: bool = False):
+    def __init__(self,
+                 disable_bonus_tokens: bool = True,
+                 strict_mode: bool = False):
         """Create a rejection sampler.
 
         Args:
+            disable_bonus_tokens: Whether or not to disable the bonus token.
+            Require when bonus tokens will cause corrupt KV cache for
+            proposal methods that require KV cache.
             strict_mode: Whether or not to perform shape/device/dtype checks
-                during sampling. This catches correctness issues but adds
-                nontrivial latency.
+            during sampling. This catches correctness issues but adds
+            nontrivial latency.
         """
-        super().__init__()
-        self._strict_mode = strict_mode
-
-        # NOTE: A "bonus token" is accepted iff all proposal tokens are
-        # accepted. There is always only one possible bonus token. We store this
-        # value in a variable for readability.
-        self._num_bonus_tokens = 1
-
-        self.num_accepted_tokens: Optional[torch.Tensor] = None
-        self.num_emitted_tokens: Optional[torch.Tensor] = None
-        self.num_draft_tokens: int = 0
-
-    def init_gpu_tensors(self, rank: int) -> None:
-        assert self.num_accepted_tokens is None
-        device = f"cuda:{rank}"
-        self.num_accepted_tokens = torch.tensor(0,
-                                                dtype=torch.long,
-                                                device=device)
-        self.num_emitted_tokens = torch.tensor(0,
-                                               dtype=torch.long,
-                                               device=device)
-
-    @property
-    def probs_dtype(self):
-        return torch.float32
-
-    @property
-    def token_id_dtype(self):
-        return torch.int64
+        super().__init__(disable_bonus_tokens=disable_bonus_tokens,
+                         strict_mode=strict_mode)
 
     def forward(
         self,
@@ -94,21 +74,15 @@ class RejectionSampler(nn.Module):
         # Only perform shape/dtype/device checking in strict mode, as it adds
         # overhead.
         if self._strict_mode:
-            self._raise_if_incorrect_shape(target_probs, bonus_token_ids,
+            self._raise_if_incorrect_input(target_probs, bonus_token_ids,
                                            draft_probs, draft_token_ids)
-            self._raise_if_incorrect_dtype(target_probs, bonus_token_ids,
-                                           draft_probs, draft_token_ids)
-            self._raise_if_inconsistent_device(target_probs, bonus_token_ids,
-                                               draft_probs, draft_token_ids)
-            self._raise_if_out_of_bounds_vocab(target_probs.shape[-1],
-                                               bonus_token_ids,
-                                               draft_token_ids)
 
-        accepted, recovered_token_ids = self._batch_modified_rejection_sampling(
-            target_probs,
-            draft_probs,
-            draft_token_ids,
-        )
+        accepted, recovered_token_ids = (
+            self._batch_modified_rejection_sampling(
+                target_probs,
+                draft_probs,
+                draft_token_ids,
+            ))
 
         output_token_ids = self._create_output(
             accepted,
@@ -116,6 +90,7 @@ class RejectionSampler(nn.Module):
             draft_token_ids,
             bonus_token_ids,
         )
+
         return output_token_ids
 
     def _batch_modified_rejection_sampling(
@@ -264,125 +239,6 @@ class RejectionSampler(nn.Module):
         See https://en.wikipedia.org/wiki/Subnormal_number for more information.
         """
         return torch.finfo(self.probs_dtype).tiny
-
-    def _create_output(
-            self,
-            accepted: torch.Tensor,  # [batch_size, k]
-            recovered_token_ids: torch.Tensor,  # [batch_size, k]
-            draft_token_ids: torch.Tensor,  # [batch_size, k]
-            bonus_token_ids: torch.Tensor,  # [batch_size]
-    ) -> torch.Tensor:
-        """Format output. Returns a matrix of token ids. When
-        a token is rejected via rejection sampling, all subsequent
-        token ids are set to -1 for the sequence.
-
-        shape = [batch_size, k + num_bonus_tokens]
-        """
-        bonus_token_ids = bonus_token_ids.squeeze()
-        batch_size, k = recovered_token_ids.shape
-
-        # Determine the index of the first False value for each row.
-        limits = (accepted == 0).max(1).indices
-        limits[~(accepted == 0).any(1)] = k
-
-        # Create masks using the indices.
-        indices = torch.arange(k, device=accepted.device).unsqueeze(0)
-        accepted_mask = indices < limits.unsqueeze(1)
-        after_false_mask = indices == limits.unsqueeze(1)
-
-        # Create an extended output tensor
-        output_with_bonus_tokens = -torch.ones(
-            (batch_size, k + self._num_bonus_tokens),
-            dtype=self.token_id_dtype,
-            device=accepted.device)
-        output = output_with_bonus_tokens[:, :k]
-
-        # Fill in the first k columns of the output tensor using masks and data
-        # tensors.
-        output[:, :k] = torch.where(accepted_mask, draft_token_ids,
-                                    -torch.ones_like(draft_token_ids))
-
-        # Fill the last column.
-        # We check output directly as accepted may have True values inconsistent
-        # with causal acceptance.
-        output_with_bonus_tokens[:, -1] = torch.where(output[:, -1] != -1,
-                                                      bonus_token_ids, -1)
-
-        # We disable bonus tokens because it causes corrupt KV cache for
-        # proposal methods that require KV cache. We can fix it by "prefilling"
-        # the bonus token in the proposer. The following issue tracks the fix.
-        # https://github.com/vllm-project/vllm/issues/4212
-        output_with_bonus_tokens[:, -1] = -1
-
-        # Fill the recovered token ids.
-        output.mul_(~after_false_mask).add_(
-            recovered_token_ids.mul(after_false_mask))
-
-        self.num_accepted_tokens += accepted.sum()
-        self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
-        self.num_draft_tokens += batch_size * k
-
-        return output_with_bonus_tokens
-
-    def _raise_if_incorrect_shape(
-        self,
-        target_probs: torch.Tensor,
-        bonus_token_ids: torch.Tensor,
-        draft_probs: torch.Tensor,
-        draft_token_ids: torch.Tensor,
-    ) -> None:
-        (target_batch_size, num_target_probs,
-         target_vocab_size) = target_probs.shape
-        bonus_batch_size, num_bonus_tokens = bonus_token_ids.shape
-        draft_batch_size, num_draft_probs, draft_vocab_size = draft_probs.shape
-        draft_token_ids_batch_size, num_draft_token_ids = draft_token_ids.shape
-
-        assert draft_batch_size == target_batch_size
-        assert num_draft_probs == num_target_probs
-        assert (draft_vocab_size == target_vocab_size
-                ), f"{draft_vocab_size=} {target_vocab_size=}"
-
-        assert draft_token_ids_batch_size == draft_batch_size
-        assert num_draft_token_ids == num_draft_probs
-
-        assert bonus_batch_size == target_batch_size
-        assert num_bonus_tokens == self._num_bonus_tokens
-
-    def _raise_if_incorrect_dtype(
-        self,
-        target_probs: torch.Tensor,
-        bonus_token_ids: torch.Tensor,
-        draft_probs: torch.Tensor,
-        draft_token_ids: torch.Tensor,
-    ) -> None:
-        assert all(probs.dtype == self.probs_dtype
-                   for probs in [target_probs, draft_probs])
-        assert all(token_ids.dtype == self.token_id_dtype
-                   for token_ids in [bonus_token_ids, draft_token_ids])
-
-    def _raise_if_inconsistent_device(
-        self,
-        target_probs: torch.Tensor,
-        bonus_token_ids: torch.Tensor,
-        draft_probs: torch.Tensor,
-        draft_token_ids: torch.Tensor,
-    ) -> None:
-        devices = [
-            t.device for t in
-            [target_probs, bonus_token_ids, draft_probs, draft_token_ids]
-        ]
-        assert all([devices[0] == device for device in devices])
-
-    def _raise_if_out_of_bounds_vocab(
-        self,
-        vocab_size: int,
-        bonus_token_ids: torch.Tensor,
-        draft_token_ids: torch.Tensor,
-    ) -> None:
-        assert torch.all(bonus_token_ids < vocab_size)
-        assert torch.all(bonus_token_ids >= 0)
-        assert torch.all(draft_token_ids < vocab_size)
-        assert torch.all(draft_token_ids >= 0)
 
 
 # torch.multinomial forces a GPU<->CPU sync.
