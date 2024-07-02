@@ -146,9 +146,14 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_data,
   if (idx >= N) {
     return;
   }
-#if defined(ENABLE_FP8) && defined(USE_ROCM)
+#if defined(ENABLE_FP8)
+  #ifdef USE_ROCM
   dst_data_vec[idx] = fp8::scaled_vec_conversion<V_out_vec, V_in_vec>(
       src_data_vec[idx], *scale);
+  #else
+  dst_data_vec[idx] =
+      fp8::scaled_convert<V_out_vec, V_in_vec>(src_data_vec[idx], *scale);
+  #endif
 #else
   assert(false);
 #endif
@@ -199,7 +204,11 @@ struct call_convert_fp8 {
   void operator()(torch::Tensor const& src_data, torch::Tensor& dst_data,
                   torch::Tensor const& scale) {
     const auto N = src_data.numel() / Vec_size;
+#ifdef USE_ROCM
     constexpr dim3 numThreads{1024, 1, 1};
+#else
+    constexpr dim3 numThreads{512, 1, 1};
+#endif
     uint32_t numBlocks = (N + numThreads.x - 1) / numThreads.x;
     const dim3 grid{numBlocks, 1, 1};
     const auto stream = at::cuda::getCurrentCUDAStream();
@@ -223,17 +232,24 @@ void convert_fp8(torch::Tensor& dst_data, torch::Tensor const& src_data,
   at::cuda::OptionalCUDAGuard device_guard(src_device);
   auto t1 = src_data.dtype();
   auto t2 = dst_data.dtype();
+#ifdef USE_ROCM
+  constexpr int VecSize = 2;
+#else
+  constexpr int VecSize = 1;
+#endif
   if (src_data.dtype() == at::ScalarType::Float) {
-    call_convert_fp8<uint8_t, float, 2>{}(src_data, dst_data, scale);
+    call_convert_fp8<uint8_t, float, VecSize>{}(src_data, dst_data, scale);
   } else if (src_data.dtype() == at::ScalarType::Half) {
-    call_convert_fp8<uint8_t, uint16_t, 2>{}(src_data, dst_data, scale);
+    call_convert_fp8<uint8_t, uint16_t, VecSize>{}(src_data, dst_data, scale);
   } else if (src_data.dtype() == at::ScalarType::BFloat16) {
-    call_convert_fp8<uint8_t, __nv_bfloat16, 2>{}(src_data, dst_data, scale);
+    call_convert_fp8<uint8_t, __nv_bfloat16, VecSize>{}(src_data, dst_data,
+                                                        scale);
   } else if (dst_data.dtype() == at::ScalarType::Float) {
-    call_convert_fp8<float, uint8_t, 2>{}(src_data, dst_data, scale);
+    call_convert_fp8<float, uint8_t, VecSize>{}(src_data, dst_data, scale);
   } else if (dst_data.dtype() == at::ScalarType::Half) {
-    call_convert_fp8<uint16_t, uint8_t, 2>{}(src_data, dst_data, scale);
+    call_convert_fp8<uint16_t, uint8_t, VecSize>{}(src_data, dst_data, scale);
   } else if (dst_data.dtype() == at::ScalarType::BFloat16) {
-    call_convert_fp8<__nv_bfloat16, uint8_t, 2>{}(src_data, dst_data, scale);
+    call_convert_fp8<__nv_bfloat16, uint8_t, VecSize>{}(src_data, dst_data,
+                                                        scale);
   }
 }
