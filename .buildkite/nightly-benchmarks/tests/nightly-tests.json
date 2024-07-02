@@ -3,7 +3,8 @@
         "test_name": "llama8B_fp8_tp1",
         "qps_list": [4,8],
         "common_parameters": {
-            "model": "meta-llama/llama-2-7b-chat-hf",
+            "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+            "neuralmagic_quantized_model": "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
             "tp": 1,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
@@ -33,7 +34,8 @@
         },
         "vllm_server_parameters": {
             "disable_log_stats": "",
-            "disable_log_requests": ""
+            "disable_log_requests": "",
+            "kv_cache_dtype": "fp8"
         },
         "vllm_client_parameters": {
         }
