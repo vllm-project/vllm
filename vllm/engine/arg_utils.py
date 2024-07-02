@@ -1,7 +1,6 @@
 import argparse
 import dataclasses
 import json
-import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -84,13 +83,9 @@ class EngineArgs:
     preemption_mode: Optional[str] = None
 
     # Related to Vision-language models such as llava
-    image_input_type: Optional[str] = None
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
-    image_processor: Optional[str] = None
-    image_processor_revision: Optional[str] = None
-    disable_image_processor: bool = False
 
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
@@ -104,7 +99,9 @@ class EngineArgs:
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
-
+    spec_decoding_acceptance_method: str = 'rejection_sampler'
+    typical_acceptance_sampler_posterior_threshold: Optional[float] = None
+    typical_acceptance_sampler_posterior_alpha: Optional[float] = None
     qlora_adapter_name_or_path: Optional[str] = None
 
     otlp_traces_endpoint: Optional[str] = None
@@ -116,14 +113,6 @@ class EngineArgs:
     @staticmethod
     def add_cli_args_for_vlm(
             parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        parser.add_argument('--image-input-type',
-                            type=nullable_str,
-                            default=None,
-                            choices=[
-                                t.name.lower()
-                                for t in VisionLanguageConfig.ImageInputType
-                            ],
-                            help=('The image input type passed into vLLM.'))
         parser.add_argument('--image-token-id',
                             type=int,
                             default=None,
@@ -139,24 +128,6 @@ class EngineArgs:
             type=int,
             default=None,
             help=('The image feature size along the context dimension.'))
-        parser.add_argument(
-            '--image-processor',
-            type=str,
-            default=EngineArgs.image_processor,
-            help='Name or path of the huggingface image processor to use. '
-            'If unspecified, model name or path will be used.')
-        parser.add_argument(
-            '--image-processor-revision',
-            type=str,
-            default=None,
-            help='Revision of the huggingface image processor version to use. '
-            'It can be a branch name, a tag name, or a commit id. '
-            'If unspecified, will use the default version.')
-        parser.add_argument(
-            '--disable-image-processor',
-            action='store_true',
-            help='Disables the use of image processor, even if one is defined '
-            'for the model on huggingface.')
 
         return parser
 
@@ -592,6 +563,38 @@ class EngineArgs:
             help='Min size of window for ngram prompt lookup in speculative '
             'decoding.')
 
+        parser.add_argument(
+            '--spec-decoding-acceptance-method',
+            type=str,
+            default=EngineArgs.spec_decoding_acceptance_method,
+            choices=['rejection_sampler', 'typical_acceptance_sampler'],
+            help='Specify the acceptance method to use during draft token '
+            'verification in speculative decoding. Two types of acceptance '
+            'routines are supported: '
+            '1) RejectionSampler which does not allow changing the '
+            'acceptance rate of draft tokens, '
+            '2) TypicalAcceptanceSampler which is configurable, allowing for '
+            'a higher acceptance rate at the cost of lower quality, '
+            'and vice versa.')
+
+        parser.add_argument(
+            '--typical-acceptance-sampler-posterior-threshold',
+            type=float,
+            default=EngineArgs.typical_acceptance_sampler_posterior_threshold,
+            help='Set the lower bound threshold for the posterior '
+            'probability of a token to be accepted. This threshold is '
+            'used by the TypicalAcceptanceSampler to make sampling decisions '
+            'during speculative decoding. Defaults to 0.09')
+
+        parser.add_argument(
+            '--typical-acceptance-sampler-posterior-alpha',
+            type=float,
+            default=EngineArgs.typical_acceptance_sampler_posterior_alpha,
+            help='A scaling factor for the entropy-based threshold for token '
+            'acceptance in the TypicalAcceptanceSampler. Typically defaults '
+            'to sqrt of --typical-acceptance-sampler-posterior-threshold '
+            'i.e. 0.3')
+
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
                             default=EngineArgs.model_loader_extra_config,
@@ -660,33 +663,16 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
-        if self.image_input_type:
-            if (not self.image_token_id or not self.image_input_shape
-                    or not self.image_feature_size):
+        if self.image_token_id is not None:
+            if (not self.image_input_shape or not self.image_feature_size):
                 raise ValueError(
-                    'Specify `image_token_id`, `image_input_shape` and '
-                    '`image_feature_size` together with `image_input_type`.')
-
-            if self.image_processor is None:
-                self.image_processor = self.model
-            if self.disable_image_processor:
-                if self.image_processor != self.model:
-                    warnings.warn(
-                        "You've specified an image processor "
-                        f"({self.image_processor}) but also disabled "
-                        "it via `--disable-image-processor`.",
-                        stacklevel=2)
-
-                self.image_processor = None
+                    'Specify `image_input_shape` and '
+                    '`image_feature_size` together with `image_token_id`.')
 
             vision_language_config = VisionLanguageConfig(
-                image_input_type=VisionLanguageConfig.
-                get_image_input_enum_type(self.image_input_type),
                 image_token_id=self.image_token_id,
                 image_input_shape=str_to_int_tuple(self.image_input_shape),
                 image_feature_size=self.image_feature_size,
-                image_processor=self.image_processor,
-                image_processor_revision=self.image_processor_revision,
             )
         else:
             vision_language_config = None
@@ -752,6 +738,12 @@ class EngineArgs:
             use_v2_block_manager=self.use_v2_block_manager,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
+            draft_token_acceptance_method=\
+                self.spec_decoding_acceptance_method,
+            typical_acceptance_sampler_posterior_threshold=self.
+            typical_acceptance_sampler_posterior_threshold,
+            typical_acceptance_sampler_posterior_alpha=self.
+            typical_acceptance_sampler_posterior_alpha,
         )
 
         scheduler_config = SchedulerConfig(

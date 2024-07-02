@@ -753,7 +753,6 @@ class SchedulerConfig:
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
-
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -834,6 +833,9 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        draft_token_acceptance_method: str,
+        typical_acceptance_sampler_posterior_threshold: Optional[float],
+        typical_acceptance_sampler_posterior_alpha: Optional[float],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -870,7 +872,20 @@ class SpeculativeConfig:
                 window, if provided.
             ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
                 window, if provided.
-
+            draft_token_acceptance_method (str): The method to use for
+                accepting draft tokens. This can take two possible
+                values 'rejection_sampler' and 'typical_acceptance_sampler'
+                for RejectionSampler and TypicalAcceptanceSampler
+                respectively.
+            typical_acceptance_sampler_posterior_threshold (Optional[float]):
+                A threshold value that sets a lower bound on the posterior
+                probability of a token in the target model for it to be
+                accepted. This threshold is used only when we use the 
+                TypicalAcceptanceSampler for token acceptance.
+            typical_acceptance_sampler_posterior_alpha (Optional[float]):
+                A scaling factor for the entropy-based threshold in the
+                TypicalAcceptanceSampler.
+    
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
@@ -942,12 +957,6 @@ class SpeculativeConfig:
             )
 
             draft_hf_config = draft_model_config.hf_config
-            if (draft_hf_config.model_type == "mlp_speculator"
-                    and target_parallel_config.world_size != 1):
-                # MLPSpeculator TP support will be added very soon
-                raise ValueError(
-                    "Speculative decoding with mlp_speculator models does not "
-                    "yet support distributed inferencing (TP > 1).")
 
             if (num_speculative_tokens is not None
                     and hasattr(draft_hf_config, "num_lookahead_tokens")):
@@ -984,6 +993,11 @@ class SpeculativeConfig:
                 "speculative_model unless the draft model config contains an "
                 "n_predict parameter.")
 
+        if typical_acceptance_sampler_posterior_threshold is None:
+            typical_acceptance_sampler_posterior_threshold = 0.09
+        if typical_acceptance_sampler_posterior_alpha is None:
+            typical_acceptance_sampler_posterior_alpha = 0.3
+
         return SpeculativeConfig(
             draft_model_config,
             draft_parallel_config,
@@ -991,6 +1005,11 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size,
             ngram_prompt_lookup_max,
             ngram_prompt_lookup_min,
+            draft_token_acceptance_method=draft_token_acceptance_method,
+            typical_acceptance_sampler_posterior_threshold=\
+                typical_acceptance_sampler_posterior_threshold,
+            typical_acceptance_sampler_posterior_alpha=\
+                typical_acceptance_sampler_posterior_alpha,
         )
 
     @staticmethod
@@ -1072,6 +1091,9 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        draft_token_acceptance_method: str,
+        typical_acceptance_sampler_posterior_threshold: float,
+        typical_acceptance_sampler_posterior_alpha: float,
     ):
         """Create a SpeculativeConfig object.
 
@@ -1085,6 +1107,19 @@ class SpeculativeConfig:
                 enqueue requests is larger than this value.
             ngram_prompt_lookup_max: Max size of ngram token window.
             ngram_prompt_lookup_min: Min size of ngram token window.
+            draft_token_acceptance_method (str): The method to use for
+                accepting draft tokens. This can take two possible
+                values 'rejection_sampler' and 'typical_acceptance_sampler'
+                for RejectionSampler and TypicalAcceptanceSampler
+                respectively.
+            typical_acceptance_sampler_posterior_threshold (Optional[float]):
+                A threshold value that sets a lower bound on the posterior
+                probability of a token in the target model for it to be
+                accepted. This threshold is used only when we use the 
+                TypicalAcceptanceSampler for token acceptance.
+            typical_acceptance_sampler_posterior_alpha (Optional[float]):
+                A scaling factor for the entropy-based threshold in the
+                TypicalAcceptanceSampler.
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
@@ -1093,6 +1128,11 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size
         self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
         self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
+        self.draft_token_acceptance_method = draft_token_acceptance_method
+        self.typical_acceptance_sampler_posterior_threshold = \
+            typical_acceptance_sampler_posterior_threshold
+        self.typical_acceptance_sampler_posterior_alpha = \
+            typical_acceptance_sampler_posterior_alpha
 
         self._verify_args()
 
@@ -1104,6 +1144,31 @@ class SpeculativeConfig:
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config)
+            # Validate and set draft token acceptance related settings.
+
+        if (self.draft_token_acceptance_method is None):
+            raise ValueError("draft_token_acceptance_method is not set. "
+                             "Expected values are rejection_sampler or "
+                             "typical_acceptance_sampler.")
+
+        if (self.draft_token_acceptance_method != 'rejection_sampler'
+                and self.draft_token_acceptance_method !=
+                'typical_acceptance_sampler'):
+            raise ValueError(
+                "Expected draft_token_acceptance_method to be either "
+                "rejection_sampler or typical_acceptance_sampler. Instead it "
+                f"is {self.draft_token_acceptance_method}")
+
+        if (self.typical_acceptance_sampler_posterior_threshold < 0
+                or self.typical_acceptance_sampler_posterior_alpha < 0):
+            raise ValueError(
+                "Expected typical_acceptance_sampler_posterior_threshold "
+                "and typical_acceptance_sampler_posterior_alpha to be > 0. "
+                "Instead found "
+                f"typical_acceptance_sampler_posterior_threshold = "
+                f"{self.typical_acceptance_sampler_posterior_threshold} and "
+                f"typical_acceptance_sampler_posterior_alpha = "
+                f"{self.typical_acceptance_sampler_posterior_alpha}")
 
     @property
     def num_lookahead_slots(self) -> int:
@@ -1179,6 +1244,7 @@ class LoRAConfig:
             raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
+# TODO: To be replaced by MultiModalConfig.
 @dataclass
 class PromptAdapterConfig:
     max_prompt_adapters: int
@@ -1214,24 +1280,6 @@ class PromptAdapterConfig:
 class VisionLanguageConfig:
     """Configs the input data format and how models should run for
     vision language models."""
-
-    class ImageInputType(enum.Enum):
-        """Image input type into the vision language model.
-
-        An image roughly goes through the following transformation:
-        Raw image --> pixel values --> image features --> image embeddings.
-
-        The difference between different image input types is where the
-        image encoder (pixel values --> image features) is run.
-        Different image input types also correspond to different tensor shapes.
-
-        For example, for Llava, PIXEL_VALUES: (1, 3, 336, 336).
-        IMAGE_FEATURES: (1, 576, 1024).
-        """
-        PIXEL_VALUES = enum.auto()
-        IMAGE_FEATURES = enum.auto()
-
-    image_input_type: ImageInputType
     # The input id corresponding to image token.
     image_token_id: int
     # Used for running `run_prefill_max_token`.
@@ -1239,19 +1287,6 @@ class VisionLanguageConfig:
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
-    # The image processor to load from HuggingFace
-    image_processor: Optional[str]
-    image_processor_revision: Optional[str]
-
-    @classmethod
-    def get_image_input_enum_type(cls, value: str) -> ImageInputType:
-        """Get the image input type from a string."""
-        try:
-            return cls.ImageInputType[value.upper()]
-        except KeyError as e:
-            raise ValueError(f"{value} is not a valid choice. "
-                             f"Expecting to choose from "
-                             f"{[x.name for x in cls.ImageInputType]}.") from e
 
     #TODO(ywang96): make this a cached property once we refactor the
     # VisionLanguageConfig class.
@@ -1277,8 +1312,6 @@ class VisionLanguageConfig:
                 result[f.name] = ",".join([str(item) for item in value])
             else:
                 result[f.name] = value
-
-        result["disable_image_processor"] = self.image_processor is None
 
         return result
 

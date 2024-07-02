@@ -179,7 +179,8 @@ class LLMEngine:
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
-            "seed=%d, served_model_name=%s)",
+            "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
+            "enable_prefix_caching=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -206,6 +207,8 @@ class LLMEngine:
             observability_config,
             model_config.seed,
             model_config.served_model_name,
+            scheduler_config.use_v2_block_manager,
+            cache_config.enable_prefix_caching,
         )
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -861,7 +864,7 @@ class LLMEngine:
         # Tracing
         self.do_tracing(scheduler_outputs)
 
-        if not request_outputs:
+        if not self.has_unfinished_requests():
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
             # torch.distributed ops which may otherwise timeout, and unblocks

@@ -345,7 +345,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     out_logprobs = prompt_logprobs
                     output_text = prompt_text
                 elif request.echo and request.max_tokens > 0:
-                    token_ids = prompt_token_ids + output.token_ids
+                    token_ids = prompt_token_ids + list(output.token_ids)
                     out_logprobs = (prompt_logprobs + output.logprobs
                                     if request.logprobs is not None else None)
                     output_text = prompt_text + output.text
