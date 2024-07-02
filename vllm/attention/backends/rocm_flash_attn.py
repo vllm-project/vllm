@@ -167,9 +167,9 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
 
 
 def _make_alibi_bias(alibi_slopes: torch.Tensor,
-                        dtype: torch.dtype,
-                        seq_lens: Optional[List[int]],
-                        make_attn_mask: bool = True) -> List[torch.Tensor]:
+                     dtype: torch.dtype,
+                     seq_lens: Optional[List[int]],
+                     make_attn_mask: bool = True) -> List[torch.Tensor]:
     attn_biases = []
     if seq_lens:
         for seq_len in seq_lens:
@@ -374,7 +374,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         prefill_meta.max_prefill_seq_len,
                         True,
                         self.scale,
-                        attn_masks[0][None] if attn_masks is not None else None,
+                        attn_masks[0][None]
+                        if attn_masks is not None else None,
                     )
                 elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:
