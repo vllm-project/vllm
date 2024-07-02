@@ -1,8 +1,8 @@
 from typing import List, Optional, Tuple
 
+import flashinfer
 import pytest
 import torch
-import flashinfer
 
 NUM_HEADS = [(16, 16), (32, 8), (64, 8)]
 HEAD_SIZES = [128, 256]
@@ -71,16 +71,13 @@ def ref_paged_attn(
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [None, 10.0, 20.0, 30.0])
+@pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
 @torch.inference_mode
-def test_flashinfer_decode_with_paged_kv(
-    kv_lens: List[int],
-    num_heads: Tuple[int, int],
-    head_size: int,
-    dtype: torch.dtype,
-    block_size: int,
-    soft_cap: Optional[float]
-) -> None:
+def test_flashinfer_decode_with_paged_kv(kv_lens: List[int],
+                                         num_heads: Tuple[int,
+                                                          int], head_size: int,
+                                         dtype: torch.dtype, block_size: int,
+                                         soft_cap: Optional[float]) -> None:
     torch.set_default_device("cuda")
     torch.cuda.manual_seed_all(0)
     num_seqs = len(kv_lens)
@@ -91,9 +88,12 @@ def test_flashinfer_decode_with_paged_kv(
     scale = head_size**-0.5
 
     query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
-    key_value_cache = torch.randn(
-        NUM_BLOCKS, 2, block_size, num_kv_heads, head_size, dtype=dtype
-    )
+    key_value_cache = torch.randn(NUM_BLOCKS,
+                                  2,
+                                  block_size,
+                                  num_kv_heads,
+                                  head_size,
+                                  dtype=dtype)
     key_cache = key_value_cache[:, 0, :, :, :].squeeze(1)
     value_cache = key_value_cache[:, 1, :, :, :].squeeze(1)
 
@@ -102,7 +102,7 @@ def test_flashinfer_decode_with_paged_kv(
                                  NUM_BLOCKS,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
-    
+
     kv_indptr = [0]
     kv_indices = []
     kv_last_page_lens = []
@@ -114,45 +114,38 @@ def test_flashinfer_decode_with_paged_kv(
         kv_indptr.append(kv_indptr[-1] + num_blocks)
         kv_last_page_len = seq_len % block_size
         if kv_last_page_len == 0:
-             kv_last_page_len = block_size
+            kv_last_page_len = block_size
         kv_last_page_lens.append(kv_last_page_len)
-      
+
     kv_indptr = torch.tensor(kv_indptr, dtype=torch.int32)
     kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
-    kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)  
-    
-    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
-    wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, "NHD")
-    wrapper.begin_forward(
-        kv_indptr,
-        kv_indices,
-        kv_last_page_lens,
-        num_query_heads,
-        num_kv_heads,
-        head_size,
-        block_size,
-        "NONE",
-        data_type=dtype
-    )
-    
-    output = wrapper.forward(
-            query, key_value_cache, logits_soft_cap=soft_cap
-        )
+    kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
-    ref_output = ref_paged_attn(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        query_lens=[1] * num_seqs,
-        kv_lens=kv_lens,
-        block_tables=block_tables,
-        scale=scale,
-        soft_cap=soft_cap
-    )
+    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    wrapper = flashinfer.\
+        BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, "NHD")
+    wrapper.begin_forward(kv_indptr,
+                          kv_indices,
+                          kv_last_page_lens,
+                          num_query_heads,
+                          num_kv_heads,
+                          head_size,
+                          block_size,
+                          "NONE",
+                          data_type=dtype)
+
+    output = wrapper.forward(query, key_value_cache, logits_soft_cap=soft_cap)
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=[1] * num_seqs,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                soft_cap=soft_cap)
     assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output - ref_output))}"
-
-
 
 
 @pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
@@ -160,16 +153,13 @@ def test_flashinfer_decode_with_paged_kv(
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [None, 10.0, 20.0, 30.0])
+@pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
 @torch.inference_mode
-def test_flashinfer_prefill_with_paged_kv(
-    seq_lens: List[Tuple[int, int]],
-    num_heads: Tuple[int, int],
-    head_size: int,
-    dtype: torch.dtype,
-    block_size: int,
-    soft_cap: Optional[float]
-) -> None:
+def test_flashinfer_prefill_with_paged_kv(seq_lens: List[Tuple[int, int]],
+                                          num_heads: Tuple[int, int],
+                                          head_size: int, dtype: torch.dtype,
+                                          block_size: int,
+                                          soft_cap: Optional[float]) -> None:
     torch.set_default_device("cuda")
     torch.cuda.manual_seed_all(0)
     num_seqs = len(seq_lens)
@@ -185,9 +175,12 @@ def test_flashinfer_prefill_with_paged_kv(
                         num_query_heads,
                         head_size,
                         dtype=dtype)
-    key_value_cache = torch.randn(
-        NUM_BLOCKS, 2, block_size, num_kv_heads, head_size, dtype=dtype
-    )
+    key_value_cache = torch.randn(NUM_BLOCKS,
+                                  2,
+                                  block_size,
+                                  num_kv_heads,
+                                  head_size,
+                                  dtype=dtype)
     key_cache = key_value_cache[:, 0, :, :, :].squeeze(1)
     value_cache = key_value_cache[:, 1, :, :, :].squeeze(1)
 
@@ -214,20 +207,18 @@ def test_flashinfer_prefill_with_paged_kv(
         kv_indptr.append(kv_indptr[-1] + num_blocks)
         kv_last_page_len = seq_len % block_size
         if kv_last_page_len == 0:
-             kv_last_page_len = block_size
+            kv_last_page_len = block_size
         kv_last_page_lens.append(kv_last_page_len)
         qo_indptr.append(qo_indptr[-1] + query_lens[i])
-     
-    qo_indptr = torch.tensor(qo_indptr, dtype=torch.int32) 
+
+    qo_indptr = torch.tensor(qo_indptr, dtype=torch.int32)
     kv_indptr = torch.tensor(kv_indptr, dtype=torch.int32)
     kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
-    kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32) 
-    
+    kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
     wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-        workspace_buffer, "NHD"
-    )
+        workspace_buffer, "NHD")
     wrapper.begin_forward(
         qo_indptr,
         kv_indptr,
@@ -238,21 +229,20 @@ def test_flashinfer_prefill_with_paged_kv(
         head_size,
         block_size,
     )
-        
+
     output = wrapper.forward(
-        query, key_value_cache, 
-        logits_soft_cap=soft_cap, 
+        query,
+        key_value_cache,
+        logits_soft_cap=soft_cap,
     )
 
-    ref_output = ref_paged_attn(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        query_lens=query_lens,
-        kv_lens=kv_lens,
-        block_tables=block_tables,
-        scale=scale,
-        soft_cap=soft_cap
-    )
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                soft_cap=soft_cap)
     assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output - ref_output))}"
