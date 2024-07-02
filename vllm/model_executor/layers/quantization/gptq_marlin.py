@@ -11,6 +11,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.utils import get_device_capability_stateless
 
 logger = init_logger(__name__)
@@ -59,7 +60,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     """Config class for GPTQ Marlin"""
 
     def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
-                 is_sym: bool) -> None:
+                 is_sym: bool, lm_head_quantized: bool) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
@@ -69,6 +70,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.group_size = group_size
         self.desc_act = desc_act
         self.is_sym = is_sym
+        self.lm_head_quantized = lm_head_quantized
 
         # Verify
         if self.weight_bits not in GPTQ_MARLIN_SUPPORTED_NUM_BITS:
@@ -96,7 +98,8 @@ class GPTQMarlinConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act})")
+                f"desc_act={self.desc_act}, "
+                f"lm_head_quantized={self.lm_head_quantized})")
 
     @classmethod
     def get_name(cls) -> str:
@@ -120,7 +123,10 @@ class GPTQMarlinConfig(QuantizationConfig):
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
         is_sym = cls.get_from_keys(config, ["sym"])
-        return cls(weight_bits, group_size, desc_act, is_sym)
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
+                                                 default=False)
+        return cls(weight_bits, group_size, desc_act, is_sym,
+                   lm_head_quantized)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -145,7 +151,8 @@ class GPTQMarlinConfig(QuantizationConfig):
     def get_quant_method(
             self,
             layer: torch.nn.Module) -> Optional["GPTQMarlinLinearMethod"]:
-        if isinstance(layer, LinearBase):
+        if (isinstance(layer, LinearBase) or
+            (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return GPTQMarlinLinearMethod(self)
         return None
 
