@@ -54,7 +54,7 @@ class MultiModalRegistry:
         mapper: Optional[MultiModalInputMapper] = None,
     ):
         """
-        Register an input mapper for image pixel data to a model class.
+        Register an input mapper for image data to a model class.
 
         See :meth:`MultiModalPlugin.register_input_mapper` for more details.
         """

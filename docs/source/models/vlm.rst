@@ -48,7 +48,12 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
 
 * ``prompt``: The prompt should have a number of ``<image>`` tokens equal to ``image_feature_size``.
-* ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`~vllm.multimodal.base.MultiModalDataDict`.
+* ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
+
+.. note::
+
+   ``multi_modal_data`` can accept keys and values beyond the builtin ones, as long as a customized plugin is registered through
+    :class:`vllm.multimodal.MULTIMODAL_REGISTRY`.
 
 .. code-block:: python
 
