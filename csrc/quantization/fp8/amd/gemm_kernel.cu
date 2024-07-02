@@ -9,8 +9,6 @@
 #include <hipblaslt/hipblaslt.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
 
-#define max_workspace_size 2 * 128 * 1024 * 1024
-
 #define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x) \
   TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
@@ -35,6 +33,37 @@
       exit(EXIT_FAILURE);                                               \
     }
 #endif
+
+static void* workspace = nullptr;
+static size_t workspace_size;
+
+// Copied from
+// https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/cuda/tunable/GemmHipblaslt.h
+static size_t get_hipblaslt_workspace_size() {
+  static const char* env = getenv("HIPBLASLT_WORKSPACE_SIZE");
+  // 256MB is max workspace size allowed for hipblaslt
+  // hipblaslt-bench uses 32MB
+  // recommendation from hipblaslt author was 76MB
+  size_t workspace_size = 32 * 1024;  // going with 32MB
+  if (env) {
+    try {
+      workspace_size = std::stoi(env);
+    } catch (std::invalid_argument const& e) {
+      TORCH_WARN("invalid HIPBLASLT_WORKSPACE_SIZE,",
+                 " using default workspace size of ", workspace_size, " KiB.");
+    } catch (std::out_of_range const& e) {
+      TORCH_WARN("HIPBLASLT_WORKSPACE_SIZE out of range,",
+                 " using default workspace size of ", workspace_size, " KiB.");
+    }
+  }
+  return workspace_size * 1024;
+}
+
+void create_workspace() {
+  workspace_size = get_hipblaslt_workspace_size();
+  if (workspace_size > 0)
+    CHECK_HIP_ERROR(hipMalloc(&workspace, workspace_size));
+}
 
 torch::Tensor fp8_gemm(torch::Tensor& a, torch::Tensor& b,
                        torch::Tensor& scaleA, torch::Tensor& scaleB,
@@ -116,7 +145,7 @@ torch::Tensor fp8_gemm(torch::Tensor& a, torch::Tensor& b,
   auto stream = at::cuda::getCurrentCUDAStream();
 
   hipblaslt_ext::GemmPreference gemmPref;
-  gemmPref.setMaxWorkspaceBytes(0);
+  gemmPref.setMaxWorkspaceBytes(workspace_size);
   hipblaslt_ext::Gemm gemm(handle, transpose_a ? HIPBLAS_OP_T : HIPBLAS_OP_N,
                            transpose_b ? HIPBLAS_OP_T : HIPBLAS_OP_N,
                            HIP_R_8F_E4M3_FNUZ, HIP_R_8F_E4M3_FNUZ,
@@ -173,7 +202,7 @@ torch::Tensor fp8_gemm(torch::Tensor& a, torch::Tensor& b,
   TORCH_CUDABLAS_CHECK(
       hipblaslt_ext::getAlgosFromIndex(handle, algoIndex, tmpAlgo));
 
-  CHECK_HIPBLASLT_ERROR(gemm.initialize(tmpAlgo[0].algo, nullptr));
+  CHECK_HIPBLASLT_ERROR(gemm.initialize(tmpAlgo[0].algo, workspace));
   CHECK_HIPBLASLT_ERROR(gemm.run(stream));
 
   // hipFree(d_scaleA);
@@ -260,7 +289,7 @@ torch::Tensor fp8_gemm_16(torch::Tensor& a, torch::Tensor& b,
   auto stream = at::cuda::getCurrentCUDAStream();
 
   hipblaslt_ext::GemmPreference gemmPref;
-  gemmPref.setMaxWorkspaceBytes(0);
+  gemmPref.setMaxWorkspaceBytes(workspace_size);
   hipblaslt_ext::Gemm gemm(handle, transpose_a ? HIPBLAS_OP_T : HIPBLAS_OP_N,
                            transpose_b ? HIPBLAS_OP_T : HIPBLAS_OP_N,
                            HIP_R_8F_E4M3_FNUZ, HIP_R_8F_E4M3_FNUZ, HIP_R_16F,
@@ -314,7 +343,7 @@ torch::Tensor fp8_gemm_16(torch::Tensor& a, torch::Tensor& b,
   TORCH_CUDABLAS_CHECK(
       hipblaslt_ext::getAlgosFromIndex(handle, algoIndex, tmpAlgo));
 
-  CHECK_HIPBLASLT_ERROR(gemm.initialize(tmpAlgo[0].algo, nullptr));
+  CHECK_HIPBLASLT_ERROR(gemm.initialize(tmpAlgo[0].algo, workspace));
   CHECK_HIPBLASLT_ERROR(gemm.run(stream));
 
   // hipFree(d_scaleA);

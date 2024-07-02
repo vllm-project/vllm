@@ -124,6 +124,8 @@ torch::Tensor fp8_gemm(torch::Tensor& a, torch::Tensor& b,
 torch::Tensor fp8_gemm_16(torch::Tensor& a, torch::Tensor& b,
                           torch::Tensor& scaleA, torch::Tensor& scaleB,
                           int algo_idx);
+
+void create_workspace();
 #endif
 
 void moe_align_block_size(torch::Tensor topk_ids, int num_experts,
