@@ -152,7 +152,8 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_data,
       src_data_vec[idx], *scale);
   #else
   dst_data_vec[idx] =
-      fp8::scaled_convert<V_out_vec, V_in_vec>(src_data_vec[idx], *scale);
+      fp8::scaled_convert<V_out_vec, V_in_vec, Fp8KVCacheDataType::kFp8E4M3>(
+          src_data_vec[idx], *scale);
   #endif
 #else
   assert(false);
