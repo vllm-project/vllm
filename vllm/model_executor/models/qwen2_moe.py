@@ -412,7 +412,7 @@ class Qwen2MoeForCausalLM(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                # Skip non-stacked and experts (experts handled below).
+                # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
                 # We have mlp.experts[0].gate_proj in the checkpoint.
