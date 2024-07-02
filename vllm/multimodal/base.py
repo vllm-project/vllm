@@ -1,19 +1,17 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type,
-                    TypedDict, TypeVar, Union)
+from typing import (Any, Callable, Dict, List, Optional, Type, TypedDict,
+                    TypeVar, Union)
 
+import torch
+import torch.types
 from PIL import Image
+from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-
-if TYPE_CHECKING:
-    import torch
-    import torch.types
-    from torch import nn
 
 logger = init_logger(__name__)
 
@@ -35,7 +33,7 @@ class MultiModalData:
     pass
 
 
-BatchedTensors = Union["torch.Tensor", List["torch.Tensor"]]
+BatchedTensors = Union[torch.Tensor, List[torch.Tensor]]
 """
 If each input tensor in the batch has the same size, this is a single batched
 tensor; otherwise, this is a list of tensors with one element per batch.
@@ -47,7 +45,7 @@ if sys.version_info < (3, 9):
         pass
 else:
 
-    class _MultiModalInputsBase(UserDict[str, "torch.Tensor"]):
+    class _MultiModalInputsBase(UserDict[str, torch.Tensor]):
         pass
 
 
@@ -59,9 +57,9 @@ class MultiModalInputs(_MultiModalInputsBase):
 
     @staticmethod
     def try_concat(
-        tensors: List["torch.Tensor"],
+        tensors: List[torch.Tensor],
         *,
-        device: "torch.types.Device",
+        device: torch.types.Device,
     ) -> BatchedTensors:
         # Avoid initializing CUDA too early
         import torch
@@ -79,7 +77,7 @@ class MultiModalInputs(_MultiModalInputsBase):
     @staticmethod
     def batch(
         inputs_list: List["MultiModalInputs"],
-        device: "torch.types.Device",
+        device: torch.types.Device,
     ) -> Dict[str, BatchedTensors]:
         """Batch multiple inputs together into a dictionary."""
         if len(inputs_list) == 0:
@@ -87,7 +85,7 @@ class MultiModalInputs(_MultiModalInputsBase):
 
         keys = inputs_list[0].keys()
 
-        item_lists: Dict[str, List["torch.Tensor"]] = defaultdict(list)
+        item_lists: Dict[str, List[torch.Tensor]] = defaultdict(list)
 
         for inputs in inputs_list:
             if inputs.keys() != keys:
@@ -121,7 +119,7 @@ MultiModalInputMapper = Callable[[InputContext, object], MultiModalInputs]
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
 and processors in HuggingFace Transformers."""
 
-N = TypeVar("N", bound=Type["nn.Module"])
+N = TypeVar("N", bound=Type[nn.Module])
 
 
 class MultiModalPlugin(ABC):
@@ -136,8 +134,7 @@ class MultiModalPlugin(ABC):
     """
 
     def __init__(self) -> None:
-        self._input_mappers: Dict[Type["nn.Module"],
-                                  MultiModalInputMapper] = {}
+        self._input_mappers: Dict[Type[nn.Module], MultiModalInputMapper] = {}
 
     @abstractmethod
     def get_data_key(self) -> str:

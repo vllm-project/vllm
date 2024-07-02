@@ -1,5 +1,7 @@
 import functools
-from typing import TYPE_CHECKING, Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence
+
+import torch
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -7,9 +9,6 @@ from vllm.logger import init_logger
 from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
                    MultiModalPlugin)
 from .image import ImagePlugin
-
-if TYPE_CHECKING:
-    import torch
 
 logger = init_logger(__name__)
 
@@ -100,7 +99,7 @@ class MultiModalRegistry:
         
         See :meth:`MultiModalPlugin.map_input` for more details.
         """
-        merged_dict: Dict[str, "torch.Tensor"] = {}
+        merged_dict: Dict[str, torch.Tensor] = {}
 
         for data_key, data_value in data.items():
             input_dict = self._process_input(data_key, data_value,

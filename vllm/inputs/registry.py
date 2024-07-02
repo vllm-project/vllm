@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Callable, Dict, Optional, Tuple, Type,
                     TypeVar)
 
+from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
@@ -10,8 +11,6 @@ from vllm.logger import init_logger
 from .data import LLMInputs
 
 if TYPE_CHECKING:
-    from torch import nn
-
     from vllm.config import ModelConfig, VisionLanguageConfig
     from vllm.multimodal import MultiModalDataDict
     from vllm.sequence import SequenceData
@@ -64,7 +63,7 @@ class InputContext:
         return hf_config
 
 
-N = TypeVar("N", bound=Type["nn.Module"])
+N = TypeVar("N", bound=Type[nn.Module])
 
 DummyDataFactory = Callable[[InputContext, int],
                             Tuple["SequenceData",
@@ -87,9 +86,9 @@ class InputRegistry:
     """
 
     def __init__(self) -> None:
-        self._dummy_factories_by_model_type: Dict[Type["nn.Module"],
+        self._dummy_factories_by_model_type: Dict[Type[nn.Module],
                                                   DummyDataFactory] = {}
-        self._input_processors_by_model_type: Dict[Type["nn.Module"],
+        self._input_processors_by_model_type: Dict[Type[nn.Module],
                                                    InputProcessor] = {}
 
     def _default_dummy_data_factory(
