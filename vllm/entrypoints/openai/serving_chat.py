@@ -53,17 +53,24 @@ class ChatMessageParseResult:
 
 class OpenAIServingChat(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 model_config: ModelConfig,
-                 served_model_names: List[str],
-                 response_role: str,
-                 lora_modules: Optional[List[LoRAModulePath]] = None,
-                 chat_template: Optional[str] = None):
+    def __init__(
+        self,
+        engine: AsyncLLMEngine,
+        model_config: ModelConfig,
+        served_model_names: List[str],
+        response_role: str,
+        lora_modules: Optional[List[LoRAModulePath]],
+        chat_template: Optional[str],
+        *,
+        log_requests: bool,
+        max_log_len: Optional[int],
+    ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         log_requests=log_requests,
+                         max_log_len=max_log_len)
 
         self.response_role = response_role
         self._load_chat_template(chat_template)
@@ -240,11 +247,6 @@ class OpenAIServingChat(OpenAIServing):
 
         request_id = f"cmpl-{random_uuid()}"
         try:
-            # Tokenize/detokenize depending on prompt format (string/token list)
-            prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
-                request,
-                prompt=prompt,
-                add_special_tokens=request.add_special_tokens)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
             decoding_config = await self.engine.get_decoding_config()
@@ -259,31 +261,44 @@ class OpenAIServingChat(OpenAIServing):
                     sampling_params.logits_processors = []
                 sampling_params.logits_processors.append(
                     guided_decode_logits_processor)
+
+            prompt_inputs = self._tokenize_prompt_input(
+                request,
+                prompt,
+                truncate_prompt_tokens=sampling_params.truncate_prompt_tokens,
+                add_special_tokens=False,
+            )
+
+            self._log_inputs(request_id,
+                             prompt_inputs,
+                             sampling_params,
+                             lora_request=lora_request)
+
+            engine_inputs: PromptInputs = {
+                "prompt_token_ids": prompt_inputs["prompt_token_ids"],
+            }
+            if image_data is not None:
+                engine_inputs["multi_modal_data"] = image_data
+
+            is_tracing_enabled = await self.engine.is_tracing_enabled()
+            trace_headers = None
+            if is_tracing_enabled and raw_request:
+                trace_headers = extract_trace_headers(raw_request.headers)
+            if (not is_tracing_enabled and raw_request
+                    and contains_trace_headers(raw_request.headers)):
+                log_tracing_disabled_warning()
+
+            result_generator = self.engine.generate(
+                engine_inputs,
+                sampling_params,
+                request_id,
+                lora_request,
+                trace_headers=trace_headers,
+            )
         except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        inputs: PromptInputs = {
-            "prompt": prompt_text,
-            "prompt_token_ids": prompt_ids,
-        }
-        if image_data is not None:
-            inputs["multi_modal_data"] = image_data
-
-        is_tracing_enabled = await self.engine.is_tracing_enabled()
-        trace_headers = None
-        if is_tracing_enabled and raw_request:
-            trace_headers = extract_trace_headers(raw_request.headers)
-        if not is_tracing_enabled and raw_request and contains_trace_headers(
-                raw_request.headers):
-            log_tracing_disabled_warning()
-
-        result_generator = self.engine.generate(
-            inputs,
-            sampling_params,
-            request_id,
-            lora_request,
-            trace_headers=trace_headers,
-        )
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
@@ -314,10 +329,11 @@ class OpenAIServingChat(OpenAIServing):
         first_iteration = True
 
         # Send response for each token for each request.n (index)
-        assert request.n is not None
-        previous_texts = [""] * request.n
-        previous_num_tokens = [0] * request.n
-        finish_reason_sent = [False] * request.n
+        num_choices = 1 if request.n is None else request.n
+        previous_texts = [""] * num_choices
+        previous_num_tokens = [0] * num_choices
+        finish_reason_sent = [False] * num_choices
+
         try:
             async for res in result_generator:
                 # We need to do it here, because if there are exceptions in
@@ -327,7 +343,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send first response for each request.n (index) with
                     # the role
                     role = self.get_chat_request_role(request)
-                    for i in range(request.n):
+                    for i in range(num_choices):
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=DeltaMessage(role=role),
@@ -355,19 +371,19 @@ class OpenAIServingChat(OpenAIServing):
                             last_msg_content = conversation[-1]["content"]
 
                         if last_msg_content:
-                            for i in range(request.n):
+                            for i in range(num_choices):
                                 choice_data = (
                                     ChatCompletionResponseStreamChoice(
                                         index=i,
                                         delta=DeltaMessage(
                                             content=last_msg_content),
+                                        logprobs=None,
                                         finish_reason=None))
                                 chunk = ChatCompletionStreamResponse(
                                     id=request_id,
                                     object=chunk_object_type,
                                     created=created_time,
                                     choices=[choice_data],
-                                    logprobs=None,
                                     model=model_name)
                                 if (request.stream_options and
                                         request.stream_options.include_usage):
