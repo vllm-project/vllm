@@ -90,10 +90,10 @@ def test_create_single_target_seq_group_metadata(k: int):
 
     assert output.request_id == input_seq_group_metadata.request_id
     assert len(output.seq_data) == 1
-    assert output.seq_data[target_seq_id].get_prompt_token_ids(
-    ) == prompt_tokens
-    assert output.seq_data[target_seq_id].get_output_token_ids(
-    ) == prev_output_tokens + token_ids
+    assert output.seq_data[target_seq_id].get_prompt_token_ids() == tuple(
+        prompt_tokens)
+    assert output.seq_data[target_seq_id].get_output_token_ids() == tuple(
+        prev_output_tokens + token_ids)
 
     assert len(output.block_tables) == 1
     assert output.block_tables[
