@@ -526,8 +526,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def _load_no_shard_id(self, param: BasevLLMParameter,
-                          loaded_weight: torch.Tensor):
+    def _load_fused_module_from_checkpoint(self, param: BasevLLMParameter,
+                                           loaded_weight: torch.Tensor):
+        """
+        Handle special case for models where MLP layers are already
+        fused on disk. In this case, we have no shard id. This function
+        determmines the shard id by splitting these layers and then calls
+        the weight loader using the shard id.
+
+        An example of a model with these fused layers:
+        https://huggingface.co/microsoft/Phi-3-mini-4k-instruct
+        """
+
         current_shard_offset = 0
         shard_offsets: List[Tuple[int, int, int]] = []
         for i, output_size in enumerate(self.output_sizes):
@@ -538,7 +548,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # Special case for Quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
-            # TODO: Define this relationship more clearly
             if isinstance(param, PackedvLLMParameter
                           ) and param.packed_dim == param.output_dim:
                 param.adjust_shard_indexes_for_packing(
@@ -555,11 +564,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                          loaded_shard_id: Optional[int] = None):
         param_data = param.data
         if loaded_shard_id is None:
-            if param.output_dim is None:  # TODO: why?
+            if param.output_dim is None:
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
-            self._load_no_shard_id(param, loaded_weight)
+            self._load_fused_module_from_checkpoint(param, loaded_weight)
             return
 
         assert loaded_shard_id < len(self.output_sizes)
@@ -661,8 +670,17 @@ class QKVParallelLinear(ColumnParallelLinear):
         }
         return shard_size_mapping.get(loaded_shard_id)
 
-    def _load_no_shard_id(self, param: BasevLLMParameter,
-                          loaded_weight: torch.Tensor):
+    def _load_fused_module_from_checkpoint(self, param: BasevLLMParameter,
+                                           loaded_weight: torch.Tensor):
+        """
+        Handle special case for models where QKV layers are already 
+        fused on disk. In this case, we have no shard id. This function
+        determmines the shard id by splitting these layers and then calls
+        the weight loader using the shard id.
+
+        An example of a model with these fused layers:
+        https://huggingface.co/microsoft/Phi-3-mini-4k-instruct
+        """
         shard_offsets = [
             # (shard_id, shard_offset, shard_size)
             ("q", 0, self.total_num_heads * self.head_size),
@@ -677,7 +695,6 @@ class QKVParallelLinear(ColumnParallelLinear):
             # Special case for Quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
-
             if isinstance(param, PackedvLLMParameter
                           ) and param.packed_dim == param.output_dim:
                 param.adjust_shard_indexes_for_packing(
@@ -695,11 +712,11 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         param_data = param.data
         if loaded_shard_id is None:  # special case for certain models
-            if param.output_dim is None:  # TODO: why?
+            if param.output_dim is None:
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
-            self._load_no_shard_id(param, loaded_weight)
+            self._load_fused_module_from_checkpoint(param, loaded_weight)
             return
 
         assert loaded_shard_id in ["q", "k", "v"]
