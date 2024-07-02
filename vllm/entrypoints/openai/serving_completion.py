@@ -10,6 +10,7 @@ from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
+from vllm.engine.llm_engine import QueueOverflowError
 from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionRequest,
                                               CompletionResponse,
@@ -151,10 +152,12 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
 
                 generators.append(generator)
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
+        except QueueOverflowError as e:
             msg, status_code = e.args
             return self.create_error_response(msg, status_code=status_code)
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
         result_generator: AsyncIterator[Tuple[
             int, RequestOutput]] = merge_async_iterators(*generators)
@@ -187,10 +190,12 @@ class OpenAIServingCompletion(OpenAIServing):
                 final_res_batch[i] = res
             response = self.request_output_to_completion_response(
                 final_res_batch, request, request_id, created_time, model_name)
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
+        except QueueOverflowError as e:
             msg, status_code = e.args
             return self.create_error_response(msg, status_code=status_code)
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.

@@ -17,7 +17,7 @@ from openai import BadRequestError
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from ..utils import RemoteOpenAIServer
+from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
@@ -71,8 +71,6 @@ TEST_CHOICE = [
     "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
     "Swift", "Kotlin"
 ]
-
-pytestmark = pytest.mark.openai
 
 
 @pytest.fixture(scope="module")
