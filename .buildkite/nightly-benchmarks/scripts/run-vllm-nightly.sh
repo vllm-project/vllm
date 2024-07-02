@@ -101,13 +101,24 @@ run_serving_tests() {
       continue
     fi
 
-
-    server_command="python3 \
-      -m vllm.entrypoints.openai.api_server \
-      -tp $tp \
-      --model $model \
-      --port $port \
-      $server_args"
+    if echo "$common_params" | jq -e 'has("fp8")' > /dev/null; then
+      echo "Key 'fp8' exists in common params."
+      server_command="python3 \
+        -m vllm.entrypoints.openai.api_server \
+        -tp $tp \
+        --model $model \
+        --port $port \
+        --quantization fp8 \
+        $server_args"
+    else
+      echo "Key 'fp8' does not exist in common params."
+      server_command="python3 \
+        -m vllm.entrypoints.openai.api_server \
+        -tp $tp \
+        --model $model \
+        --port $port \
+        $server_args"
+    fi
 
     # run the server
     echo "Running test case $test_name"
