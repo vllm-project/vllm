@@ -1,14 +1,14 @@
 from functools import cached_property
-from typing import Tuple, List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 import torch.jit
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
-    SpecDecodeBaseSampler)
+    SpecDecodeStochasticBaseSampler)
 
 
-class RejectionSampler(SpecDecodeBaseSampler):
+class RejectionSampler(SpecDecodeStochasticBaseSampler):
     """Apply modified rejection sampling as described in "Accelerating Large
         Language Model Decoding with Speculative Sampling"
         https://arxiv.org/pdf/2302.01318.pdf.
@@ -96,11 +96,11 @@ class RejectionSampler(SpecDecodeBaseSampler):
         return output_token_ids
 
     def _batch_modified_rejection_sampling(
-            self,
-            target_probs: torch.Tensor,  # [batch_size, k, vocab_size]
-            draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
-            draft_token_ids: torch.Tensor,  # [batch_size, k]
-            generators: List[Optional[torch.Generator]],
+        self,
+        target_probs: torch.Tensor,  # [batch_size, k, vocab_size]
+        draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
+        draft_token_ids: torch.Tensor,  # [batch_size, k]
+        generators: List[Optional[torch.Generator]],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Perform modified rejection sampling on each sequence.
 
@@ -131,11 +131,11 @@ class RejectionSampler(SpecDecodeBaseSampler):
         return accepted, recovered_token_ids
 
     def _get_accepted(
-            self,
-            target_probs: torch.Tensor,  # [batch_size, k, vocab_size]
-            draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
-            draft_token_ids: torch.Tensor,  # [batch_size, k]
-            generators: List[Optional[torch.Generator]],
+        self,
+        target_probs: torch.Tensor,  # [batch_size, k, vocab_size]
+        draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
+        draft_token_ids: torch.Tensor,  # [batch_size, k]
+        generators: List[Optional[torch.Generator]],
     ) -> torch.Tensor:
         r"""Create bool matrix over the proposed draft tokens. If
         True, then a token can be accepted, else it should be
@@ -170,11 +170,17 @@ class RejectionSampler(SpecDecodeBaseSampler):
         selected_target_probs = target_probs[batch_indices, probs_indicies,
                                              draft_token_ids]
 
-
         if any(generator is not None for generator in generators):
-            uniform_rand = torch.empty(batch_size, k, dtype=self.probs_dtype, device=target_probs.device)
+            uniform_rand = torch.empty(batch_size,
+                                       k,
+                                       dtype=self.probs_dtype,
+                                       device=target_probs.device)
             for i, generator in enumerate(generators):
-                uniform_rand[i,:] = torch.rand(1, k, dtype=self.probs_dtype, device=target_probs.device, generator=generator)
+                uniform_rand[i, :] = torch.rand(1,
+                                                k,
+                                                dtype=self.probs_dtype,
+                                                device=target_probs.device,
+                                                generator=generator)
         else:
 
             uniform_rand = torch.rand(batch_size,
@@ -278,7 +284,7 @@ def _multinomial(
     q = torch.empty_like(probs)
     if any(generator is not None for generator in generators):
         for i, generator in enumerate(generators):
-            start_idx, end_idx = k*i, k*(i+1)
+            start_idx, end_idx = k * i, k * (i + 1)
             q[start_idx:end_idx].exponential_(1.0, generator=generator)
     else:
         q.exponential_(1.0)

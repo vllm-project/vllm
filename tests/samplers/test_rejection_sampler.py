@@ -150,9 +150,10 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
                                     high=vocab_size,
                                     size=(batch_size, k),
                                     dtype=torch.int64)
+    generators = [None] * batch_size
 
     rejection_sampler(target_probs, bonus_token_ids, draft_probs,
-                      draft_token_ids)
+                      draft_token_ids, generators)
 
 
 @pytest.mark.parametrize("above_or_below_vocab_range", ["above", "below"])
@@ -197,10 +198,11 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
         raise AssertionError()
 
     oob_token_ids[0][0] = rogue_token_id
+    generators = [None] * batch_size
 
     with pytest.raises(AssertionError):
         rejection_sampler(target_probs, bonus_token_ids, draft_probs,
-                          draft_token_ids)
+                          draft_token_ids, generators)
 
 
 @pytest.mark.parametrize("draft_and_target_probs_equal", [True, False])
@@ -371,11 +373,15 @@ class _CorrectnessTestHelper:
                                       dtype=torch.int64,
                                       device="cuda").repeat(num_samples, 1)
 
+        # unseeded
+        generators = [None]
+
         # Get output tokens via rejection sampling.
         output_token_ids = self.rejection_sampler(target_probs.to("cuda"),
                                                   bonus_token_ids.to("cuda"),
                                                   draft_probs.to("cuda"),
-                                                  draft_token_ids.to("cuda"))
+                                                  draft_token_ids.to("cuda"),
+                                                  generators)
 
         # Remove bonus tokens
         output_token_ids = output_token_ids[:, :-1].flatten()
