@@ -146,8 +146,12 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_data,
   if (idx >= N) {
     return;
   }
+#ifdef ENABLE_FP8
   dst_data_vec[idx] = fp8::scaled_vec_conversion<V_out_vec, V_in_vec>(
       src_data_vec[idx], *scale);
+#else
+  assert(false);
+#endif
 }
 
 }  // namespace vllm
