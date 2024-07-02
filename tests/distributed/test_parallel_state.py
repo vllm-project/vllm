@@ -1,5 +1,6 @@
 from typing import Any, Dict
 
+import pytest
 import torch
 
 from vllm.distributed.parallel_state import (_split_tensor_dict,
@@ -24,6 +25,14 @@ def test_split_tensor_dict():
     assert torch.allclose(tensor_list[2], test_dict["key_c"]["key_2"])
 
 
+def test_split_tensor_dict_invalid_key():
+    test_dict = {
+        "a%b": "a",
+    }
+    with pytest.raises(AssertionError):
+        _split_tensor_dict(test_dict)
+
+
 def test_update_nested_dict():
     flattened_keys_values = [("key1%key2%key3", "value1"),
                              ("key1%key2%key4", "value2"),
@@ -31,7 +40,6 @@ def test_update_nested_dict():
                              ("key8", "value5")]
     res: Dict[str, Any] = {}
 
-    # Update the nested dictionary with each flattened key-value pair
     for flat_key, value in flattened_keys_values:
         _update_nested_dict(res, flat_key, value)
     assert res == {

@@ -52,8 +52,6 @@ TEST_SCHEMA = {
 TEST_REGEX = (r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
               r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
 
-pytestmark = pytest.mark.openai
-
 
 def test_guided_logits_processors():
     """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""

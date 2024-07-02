@@ -228,11 +228,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             model_input: ModelRunnerInputBase = (
                 self.model_runner.prepare_model_input(
                     execute_model_req.seq_group_metadata_list))
+            num_steps = execute_model_req.num_steps
 
             if self.do_metadata_broadcast:
                 broadcast_data = worker_input.as_broadcastable_tensor_dict()
                 broadcast_data.update(
                     model_input.as_broadcastable_tensor_dict())
+                broadcast_data["num_steps"] = num_steps
                 broadcast_tensor_dict(broadcast_data, src=0)
         else:
             assert self.do_metadata_broadcast
@@ -240,6 +242,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             if not broadcast_data:
                 return None
 
+            num_steps = broadcast_data.pop("num_steps")
             worker_input = WorkerInput.from_broadcasted_tensor_dict(
                 broadcast_data)
             model_input = (
@@ -252,10 +255,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(model_input, self.kv_cache)
-        # Worker only supports single-step execution. Wrap the output in a
-        # list to conform to interface.
-        return [output]
+        return self.model_runner.execute_model(model_input, self.kv_cache,
+                                               num_steps)
 
 
 class WorkerWrapperBase:

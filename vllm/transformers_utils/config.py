@@ -1,7 +1,7 @@
 import contextlib
 from typing import Dict, Optional, Type
 
-from transformers import PretrainedConfig
+from transformers import GenerationConfig, PretrainedConfig
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
@@ -80,3 +80,25 @@ def get_hf_text_config(config: PretrainedConfig):
         return config.text_config
     else:
         return config
+
+
+def try_get_generation_config(
+    model: str,
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+) -> Optional[GenerationConfig]:
+    try:
+        return GenerationConfig.from_pretrained(
+            model,
+            revision=revision,
+        )
+    except OSError:  # Not found
+        try:
+            config = get_config(
+                model,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+            )
+            return GenerationConfig.from_model_config(config)
+        except OSError:  # Not found
+            return None

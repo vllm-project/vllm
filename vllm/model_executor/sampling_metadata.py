@@ -427,8 +427,8 @@ class SamplingTensors:
                 if seq_group.do_sample:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
-                        prompt_tokens.append(seq_data.prompt_token_ids)
-                        output_tokens.append(seq_data.output_token_ids)
+                        prompt_tokens.append(list(seq_data.prompt_token_ids))
+                        output_tokens.append(list(seq_data.output_token_ids))
 
         sampling_tensors = SamplingTensors.from_lists(
             temperatures, top_ps, top_ks, min_ps, presence_penalties,

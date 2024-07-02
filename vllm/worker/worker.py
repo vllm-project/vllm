@@ -16,6 +16,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.sequence import ExecuteModelRequest
+from vllm.utils import get_device_capability_stateless
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -45,6 +46,7 @@ class Worker(LocalOrDistributedWorkerBase):
         vision_language_config: Optional[VisionLanguageConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
         is_driver_worker: bool = False,
+        model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -78,7 +80,9 @@ class Worker(LocalOrDistributedWorkerBase):
                   "mlp_speculator") else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if self.model_config.embedding_mode:
+        if model_runner_cls is not None:
+            ModelRunnerClass = model_runner_cls
+        elif self.model_config.embedding_mode:
             ModelRunnerClass = EmbeddingModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             model_config,
@@ -319,7 +323,7 @@ def init_worker_distributed_environment(
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     # Check if the GPU supports the dtype.
     if torch_dtype == torch.bfloat16:
-        compute_capability = torch.cuda.get_device_capability()
+        compute_capability = get_device_capability_stateless()
         if compute_capability[0] < 8:
             gpu_name = torch.cuda.get_device_name()
             raise ValueError(

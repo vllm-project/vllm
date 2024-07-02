@@ -165,7 +165,9 @@ def sql_lora_files():
 
 @pytest.fixture(scope="session")
 def mixtral_lora_files():
-    return snapshot_download(repo_id="terrysun/mixtral-lora-adapter")
+    # Note: this module has incorrect adapter_config.json to test
+    # https://github.com/vllm-project/vllm/pull/5909/files.
+    return snapshot_download(repo_id="SangBinCho/mixtral-lora")
 
 
 @pytest.fixture(scope="session")

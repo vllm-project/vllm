@@ -5,8 +5,8 @@ from collections import UserList
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import (Any, Dict, List, Literal, Optional, Tuple, TypedDict,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple,
+                    TypedDict, TypeVar)
 
 import pytest
 import torch
@@ -14,18 +14,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoProcessor, AutoTokenizer, BatchEncoding)
+                          AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
-from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
+from vllm.config import TokenizerPoolConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalData
-from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
 from vllm.utils import cuda_device_count_stateless, is_cpu
+
+if TYPE_CHECKING:
+    # it will call torch.cuda.device_count()
+    from vllm.multimodal import MultiModalDataDict
 
 logger = init_logger(__name__)
 
@@ -48,30 +50,14 @@ class ImageAsset:
     name: Literal["stop_sign", "cherry_blossom"]
 
     @cached_property
-    def pixel_values(self) -> torch.Tensor:
-        return torch.load(_IMAGE_DIR / f"{self.name}_pixel_values.pt")
-
-    @cached_property
-    def image_features(self) -> torch.Tensor:
-        return torch.load(_IMAGE_DIR / f"{self.name}_image_features.pt")
-
-    @cached_property
     def pil_image(self) -> Image.Image:
         return Image.open(_IMAGE_DIR / f"{self.name}.jpg")
 
     def for_hf(self) -> Image.Image:
         return self.pil_image
 
-    def for_vllm(self, vision_config: VisionLanguageConfig) -> MultiModalData:
-        image_input_type = vision_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
-
-        if image_input_type == ImageInputType.IMAGE_FEATURES:
-            return ImageFeatureData(self.image_features)
-        if image_input_type == ImageInputType.PIXEL_VALUES:
-            return ImagePixelData(self.pil_image)
-
-        raise NotImplementedError
+    def for_vllm(self) -> Dict[str, Any]:
+        return {"image": self.pil_image}
 
 
 class _ImageAssetPrompts(TypedDict):
@@ -176,6 +162,7 @@ class HfRunner:
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
+        is_sparseml_model: bool = False,
     ) -> None:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
@@ -193,6 +180,9 @@ class HfRunner:
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
+            elif is_sparseml_model:
+                from sparseml.transformers import SparseAutoModelForCausalLM
+                auto_cls = SparseAutoModelForCausalLM
             else:
                 auto_cls = AutoModelForCausalLM
 
@@ -212,6 +202,9 @@ class HfRunner:
         )
 
         try:
+            # don't put this import at the top level
+            # it will call torch.cuda.device_count()
+            from transformers import AutoProcessor  # noqa: F401
             self.processor = AutoProcessor.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
@@ -438,7 +431,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[List[MultiModalData]] = None,
+        images: Optional[List["MultiModalDataDict"]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -459,7 +452,7 @@ class VllmRunner:
             req_sample_output_strs: List[str] = []
             for sample in req_output.outputs:
                 output_str = sample.text
-                output_ids = sample.token_ids
+                output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
                 req_sample_output_strs.append(prompt_str + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
@@ -487,7 +480,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[List[MultiModalData]] = None,
+        images: Optional[List["MultiModalDataDict"]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)

@@ -38,7 +38,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         return [torch.float32, torch.float16, torch.bfloat16]
 
     @classmethod
-    def get_min_capability(self) -> int:
+    def get_min_capability(cls) -> int:
         return 70
 
     @staticmethod

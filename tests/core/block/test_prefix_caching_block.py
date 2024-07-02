@@ -26,11 +26,10 @@ class TestPrefixCachingBlock:
         token_ids = list(range(num_to_fill))
         mock_allocator = MagicMock(spec=PrefixCachingBlockAllocator)
 
-        block_with_prev = PrefixCachingBlock(
-            prev_block=None,
-            token_ids=token_ids,
-            block_size=block_size,
-            prefix_caching_allocator=mock_allocator)
+        block_with_prev = PrefixCachingBlock(prev_block=None,
+                                             token_ids=token_ids,
+                                             block_size=block_size,
+                                             allocator=mock_allocator)
 
         if is_curr_block_full:
             # Expect hash since block is full.
@@ -71,7 +70,7 @@ class TestPrefixCachingBlock:
             prev_block=previous_block,
             token_ids=token_ids,
             block_size=block_size,
-            prefix_caching_allocator=mock_allocator,
+            allocator=mock_allocator,
         )
 
         if is_curr_block_full and prev_block_has_hash:
@@ -138,7 +137,7 @@ class TestPrefixCachingBlock:
                 prev_block=prev_block,
                 token_ids=[],
                 block_size=block_size,
-                prefix_caching_allocator=allocator,
+                allocator=allocator,
             )
 
             tokens_to_append = token_ids[block_number *
@@ -159,11 +158,11 @@ class TestPrefixCachingBlockAllocator:
                                prev_block: Optional[Block],
                                token_ids: List[int]):
         if allocate_type == "immutable":
-            allocate_block = lambda: allocator.allocate_immutable(
+            allocate_block = lambda: allocator.allocate_immutable_block(
                 prev_block=prev_block, token_ids=token_ids)
         elif allocate_type == "mutable":
-            allocate_block = lambda: allocator.allocate_mutable(prev_block=
-                                                                prev_block)
+            allocate_block = lambda: allocator.allocate_mutable_block(
+                prev_block=prev_block)
         else:
             raise ValueError()
 
@@ -233,12 +232,13 @@ class TestPrefixCachingBlockAllocator:
 
         # Expect allocation with unseen hash to fail.
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
-            allocator.allocate_immutable(prev_block=chain[-1],
-                                         token_ids=list(range(block_size)))
+            allocator.allocate_immutable_block(prev_block=chain[-1],
+                                               token_ids=list(
+                                                   range(block_size)))
 
         # Expect mutable allocation to fail.
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
-            allocator.allocate_mutable(prev_block=chain[-1])
+            allocator.allocate_mutable_block(prev_block=chain[-1])
 
         # Expect allocation of exact same chain to pass.
         second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
@@ -270,7 +270,7 @@ class TestPrefixCachingBlockAllocator:
 
         # Expect mutable allocation to fail.
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
-            allocator.allocate_mutable(prev_block=None)
+            allocator.allocate_mutable_block(prev_block=None)
 
         block_to_free = chain[-1]
 
@@ -280,11 +280,11 @@ class TestPrefixCachingBlockAllocator:
             allocator.free(block_to_free)
             assert block_to_free.block_id is None, i
 
-            new_block = allocator.allocate_mutable(prev_block=None)
+            new_block = allocator.allocate_mutable_block(prev_block=None)
             assert new_block.block_id == block_id, i
 
             with pytest.raises(BlockAllocator.NoFreeBlocksError):
-                allocator.allocate_mutable(prev_block=None)
+                allocator.allocate_mutable_block(prev_block=None)
 
             block_to_free = new_block
 
@@ -376,16 +376,12 @@ class TestPrefixCachingBlockAllocator:
 
         # Create token ids that will exhaust all blocks.
         token_ids = list(range(num_blocks_to_consume * block_size))
-        blocks = list(range(num_blocks_to_consume))
 
         first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
             block_size=block_size,
             token_ids=token_ids,
             allocator=allocator,
         )
-
-        # mark all blocks in first chain as computed
-        allocator.mark_blocks_as_computed(blocks)
 
         # After zero_point, second_chain's token_ids would be set -1, which
         # make it different from here comparing with first_chain
@@ -424,15 +420,16 @@ class TestPrefixCachingBlockAllocator:
                                                 block_size=block_size)
         token_ids = list(range(block_size))
 
-        block = allocator.allocate_immutable(prev_block=None,
-                                             token_ids=token_ids)
+        block = allocator.allocate_immutable_block(prev_block=None,
+                                                   token_ids=token_ids)
 
         assert allocator._refcounter.get(block.block_id) == 1
-        m = allocator.allocate_mutable(prev_block=None)
+        m = allocator.allocate_mutable_block(prev_block=None)
 
         block_id = m.block_id
         for i in range(block_size):
             m.append_token_ids([i])
+
         # After block get promoted to immutable from mutable, if there is
         # already same content hash block, then it shall be released into
         # hashless_allocator
@@ -452,48 +449,79 @@ class TestPrefixCachingBlockAllocator:
 
         all_blocks_list = [i for i in range(num_blocks)]
         zero_ref = {i: 0 for i in range(num_blocks)}
+        one_ref = {i: 1 for i in range(num_blocks)}
         allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
                                                 block_size=block_size)
         token_ids = list(range(num_blocks * block_size))
 
-        # now we have num_blocks free blocks in hashless allocator
-        # with internal tracking list _blocks _cached_blocks and evictor
-        # empty and block's ref shall be 0
+        # Verify initial/pre-alloc state
+
+        # Ensure all blocks are free inside hashless allocator
         assert list(allocator._hashless_allocator._free_block_indices
                     ) == all_blocks_list
-        assert len(allocator._blocks.keys()) == 0
+        # Ensure no tracked blocks
+        assert len(allocator._block_tracker.keys()) == num_blocks
+        for block_id in range(num_blocks):
+            assert not allocator._block_tracker[block_id].active
+        # Ensure no cached blocks
         assert len(allocator._cached_blocks.values()) == 0
+        # Ensure no evicted blocks
         assert len(allocator.evictor.free_table.keys()) == 0
+        # Ensure 0s ref counts for all blocks
         assert allocator._refcounter._refcounts == zero_ref
 
         # Allocate immutable chains with only one block residuled in
         new_block = []
         for i in range(num_blocks):
-            block = allocator.allocate_immutable(
+            block = allocator.allocate_immutable_block(
                 prev_block=None,
                 token_ids=token_ids[block_size * i:block_size * (i + 1)])
             new_block.append(block)
 
+        # Verify post-alloc state
+
+        # Ensure no blocks are free inside hashless allocator
+        assert (len(allocator._hashless_allocator._free_block_indices) == 0)
+        # Ensure all blocks are tracked
+        assert len(allocator._block_tracker.keys()) == num_blocks
+        for block_id in range(num_blocks):
+            assert allocator._block_tracker[block_id].active
+        # Ensure all blocks are cached (all promoted)
+        assert len(allocator._cached_blocks.values()) == num_blocks
+        # Ensure no evicted blocks
+        assert len(allocator.evictor.free_table.keys()) == 0
+        # Ensure 1s ref counts for all blocks
+        assert allocator._refcounter._refcounts == one_ref
+
         # Free all blocks, and now all blocks shall be in the evictor
-        # there shall be no tracking data left in _blocks
+        # there shall be no tracking data left in _block_tracker
         # all blocks shall be tracked in _cached_blocks
         # all blocks' ref shall be zero
         for block in new_block:
             allocator.free(block)
 
-        assert len(allocator._blocks.keys()) == 0
+        # Verify post-free state
+
+        # Ensure no tracked blocks
+        assert len(allocator._block_tracker.keys()) == num_blocks
+        for block_id in range(num_blocks):
+            assert not allocator._block_tracker[block_id].active
+        # Ensure no blocks in hashless allocator (all promoted)
         assert len(allocator._hashless_allocator._free_block_indices) == 0
+        # Ensure all blocks are cached
         assert list(allocator._cached_blocks.values()) == all_blocks_list
+        # Ensure all blocks are inside the evictor
         assert list(allocator.evictor.free_table.keys()) == all_blocks_list
+        # Ensure 0s refcounts
         assert allocator._refcounter._refcounts == zero_ref
 
         # Allocate a mutable block, and the first block shall be evicted
         # and set its content hash into None, ref to 1
-        mutable = allocator.allocate_mutable(prev_block=None)
+        mutable = allocator.allocate_mutable_block(prev_block=None)
 
         assert mutable.block_id == 0
         assert mutable.content_hash is None
-        assert 0 in allocator._blocks
+        assert allocator._block_tracker[0].active
         assert allocator._refcounter.get(0) == 1
         assert 0 not in allocator._cached_blocks
         assert 0 not in allocator.evictor
@@ -502,27 +530,27 @@ class TestPrefixCachingBlockAllocator:
         # hashless allocator
         allocator.free(mutable)
 
-        assert len(allocator._blocks.keys()) == 0
+        assert not allocator._block_tracker[0].active
         assert allocator._refcounter._refcounts == zero_ref
         assert 0 not in allocator._cached_blocks
         assert 0 not in allocator.evictor
         assert 0 in allocator._hashless_allocator._free_block_indices
 
-        # when allocate immutable with first block_size tokens, we
+        # When allocate immutable with first block_size tokens, we
         # shall get free block from hashless allocator, thus no block left
         # in hashless
-        block = allocator.allocate_immutable(prev_block=None,
-                                             token_ids=token_ids[:block_size])
+        block = allocator.allocate_immutable_block(
+            prev_block=None, token_ids=token_ids[:block_size])
 
         assert block.block_id == 0
         assert len(allocator._hashless_allocator._free_block_indices) == 0
-        assert 0 in allocator._blocks
+        assert allocator._block_tracker[0].active
         assert 0 in allocator._cached_blocks.values()
         assert allocator._refcounter.get(0) == 1
         assert 0 not in allocator.evictor
 
         # allocate mutable block again, it shall be popped from evictor
-        mutable = allocator.allocate_mutable(prev_block=None)
+        mutable = allocator.allocate_mutable_block(prev_block=None)
         assert len(allocator._hashless_allocator._free_block_indices) == 0
         assert mutable.block_id not in allocator.evictor.free_table
         assert allocator._refcounter.get(mutable.block_id) == 1
@@ -619,7 +647,7 @@ class TestPrefixCachingBlockAllocator:
             block_token_ids = token_ids[block_number *
                                         block_size:(block_number + 1) *
                                         block_size]
-            prev_block = allocator.allocate_immutable(
+            prev_block = allocator.allocate_immutable_block(
                 prev_block=prev_block, token_ids=block_token_ids)
             blocks.append(prev_block)
 

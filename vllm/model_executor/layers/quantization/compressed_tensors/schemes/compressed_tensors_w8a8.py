@@ -16,20 +16,40 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
     def __init__(self, strategy: str):
         self.strategy = strategy
 
+    # Cutlass kernels support only per-tensor and per-channel cases.
+    # So if we have a fused module (QKV, MLP) with per tensor scales (thus N
+    # scales being passed to the kernel), we convert to the per-channel case.
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if (self.strategy == QuantizationStrategy.TENSOR
+                and len(self.logical_widths) > 1):
+
+            # Load the N per-tensor scales into the channelwise buffer.
+            weight_scale_channel = torch.empty(
+                (sum(self.logical_widths), 1),
+                dtype=torch.float32,
+                device=layer.weight_scale.device)
+            start = 0
+            for idx, logical_width in enumerate(self.logical_widths):
+                end = start + logical_width
+                weight_scale_channel[start:end, :] = layer.weight_scale[idx]
+                start = end
+
+            layer.weight_scale = Parameter(weight_scale_channel,
+                                           requires_grad=False)
+
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: List[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
+        self.logical_widths = output_partition_sizes
 
-        is_tensor_partitioned = len(output_partition_sizes) != 1
-        weight_scale_dim = sum(output_partition_sizes) if (
-            is_tensor_partitioned
-            or self.strategy == QuantizationStrategy.CHANNEL) else 1
-
-        shape: Union[Tuple[int], Tuple[int, int]] = (weight_scale_dim, )
+        # WEIGHT SCALE
+        shape: Union[Tuple[int], Tuple[int, int]]
         if self.strategy == QuantizationStrategy.CHANNEL:
-            shape = (weight_scale_dim, 1)
+            shape = (sum(self.logical_widths), 1)
+        else:
+            shape = (len(self.logical_widths), )
 
         weight = ModelWeightParameter(data=torch.empty(
             sum(output_partition_sizes),

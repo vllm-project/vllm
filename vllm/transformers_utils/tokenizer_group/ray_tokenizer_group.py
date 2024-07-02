@@ -2,7 +2,11 @@ import asyncio
 import os
 from typing import List, Optional
 
-from ray.exceptions import ActorDiedError
+try:
+    from ray.exceptions import ActorDiedError
+except ImportError:
+    # For older versions of Ray
+    from ray.exceptions import RayActorError as ActorDiedError
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizer
 
