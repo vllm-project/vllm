@@ -118,7 +118,7 @@ def test_same_output_for_single_step():
     actual_output, _ = multi_step_worker.sampler_output(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=multi_step_seq_group),
-        sample_len=num_steps)
+        sample_len=num_steps, seq_ids_with_bonus_token_in_last_step=set())
     assert len(actual_output) == num_steps
     actual_output = actual_output[0]
 
@@ -152,9 +152,9 @@ def test_same_output_for_single_step():
     print(f'{expected_logprobs=}')
     assert_logprobs_dict_allclose(actual_logprobs, expected_logprobs)
 
-
+@pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @torch.inference_mode()
-def test_same_output_for_multi_step():
+def test_same_output_for_multi_step(disable_bonus_tokens:bool):
     """Verify the multi-step worker produces the same output as the normal
     worker when num_steps > 1. This test runs the multi-step worker once, and
     then runs the worker num_steps times, and compares the output.
@@ -180,60 +180,86 @@ def test_same_output_for_multi_step():
         num_gpu_blocks,
         seed,
     )
-
     # Make sure we go over the block boundary.
     num_steps = block_size + 1
-
     random.seed(seed)
     prompts = [[
         random.randint(0, 1000) for _ in range(random.randint(10, 20))
     ] for _ in range(10)]
 
-    final_prompt_lens = [len(prompt) + num_steps for prompt in prompts]
+    # For the case of disable_bonus_tokens = False we execute (num_steps + 1)
+    # iterations in order to accomodate the draft token. 
+    final_prompt_lens = [len(prompt) + num_steps + 1 for prompt in prompts]
 
-    rand_seeds = list(random.randint(0, 100) for _ in range(num_steps))
+    rand_seeds = list(random.randint(0, 100) for _ in range(num_steps + 1))
     multi_step_worker.execute_model = patch_execute_model_with_seeds(
         multi_step_worker, rand_seeds)
     worker.execute_model = patch_execute_model_with_seeds(worker, rand_seeds)
 
+    # Continuations to use for the single step worker.
     continuations = [[1] for _ in prompts]
-    seq_group_metadata_list = create_seq_group_metadata_from_prompts(
-        prompts,
-        num_gpu_blocks,
-        block_size,
-        continuations=continuations,
-        final_prompt_lens=final_prompt_lens)
-
-    # Run multi-step.
-    zero_kv_cache(multi_step_worker.cache_engine)
-    set_random_seed(seed)
-    multi_step_output, _ = multi_step_worker.sampler_output(
-        execute_model_req=ExecuteModelRequest(
-            seq_group_metadata_list=seq_group_metadata_list),
-        sample_len=num_steps)
-
-    # Run single-step repeatedly.
-    zero_kv_cache(worker.cache_engine)
-    single_step_output: List[SamplerOutput] = []
-    continuations = [[1] for _ in prompts]
-    set_random_seed(seed)
-
-    for _ in multi_step_output:
-
+    # Continuations to use for the multi step step worker.
+    multi_step_worker_continuations = [[1] for _ in prompts]
+    indices_of_seq_with_bonus_tokens = []
+    if not disable_bonus_tokens:
+        # Bonus tokens are enabled. For half of the sequences, add bonus
+        # tokens. Make one forward pass of the model and add the generated
+        # tokens to the continuations of the sequences selected for bonus tokens.
+        # Do nothing for other sequences.
+        num_sequences_with_bonus_tokens = len(prompts) // 2 
+        indices_of_seq_with_bonus_tokens= random.sample(
+            range(len(prompts)), num_sequences_with_bonus_tokens)
         seq_group_metadata_list = create_seq_group_metadata_from_prompts(
             prompts,
             num_gpu_blocks,
             block_size,
             continuations=continuations,
             final_prompt_lens=final_prompt_lens)
-
+        step_output = (
+            worker.execute_model(execute_model_req=ExecuteModelRequest(
+                seq_group_metadata_list=seq_group_metadata_list)))
+        # Add generated tokens to the continuations for both single-step
+        # and multi-step workers for the sequences selected for bonus tokens.
+        for i, seq_group_output in enumerate(step_output[0].outputs):
+            if i in indices_of_seq_with_bonus_tokens:
+                multi_step_worker_continuations[i].append(
+                    seq_group_output.samples[0].output_token)
+                continuations[i].append(
+                    seq_group_output.samples[0].output_token)
+    
+    # Run single-step repeatedly.
+    zero_kv_cache(worker.cache_engine)
+    single_step_output: List[SamplerOutput] = []
+    set_random_seed(seed)
+    for step in range(num_steps):
+        seq_group_metadata_list = create_seq_group_metadata_from_prompts(
+            prompts,
+            num_gpu_blocks,
+            block_size,
+            continuations=continuations,
+            final_prompt_lens=final_prompt_lens)
         single_step_output.extend(
             worker.execute_model(execute_model_req=ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list)))
-
         # Append output tokens to new sequence data.
         for i, seq_group_output in enumerate(single_step_output[-1]):
             continuations[i].append(seq_group_output.samples[0].output_token)
+    random.seed(seed)
+    # Run multi-step.
+    zero_kv_cache(multi_step_worker.cache_engine)
+    set_random_seed(seed)
+    seq_group_metadata_list = create_seq_group_metadata_from_prompts(
+        prompts,
+        num_gpu_blocks,
+        block_size,
+        continuations=multi_step_worker_continuations,
+        final_prompt_lens=final_prompt_lens)
+    multi_step_output, _ = multi_step_worker.sampler_output(
+        execute_model_req=ExecuteModelRequest(
+            seq_group_metadata_list=seq_group_metadata_list),
+        sample_len=num_steps,
+        seq_ids_with_bonus_token_in_last_step=indices_of_seq_with_bonus_tokens)
+
 
     # Get token ids and logprobs for comparison.
     multi_step_output_logprobs: List[List[Dict[int,
@@ -318,7 +344,8 @@ def test_draft_proposals_full_speculation_len():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=k), )
+            num_lookahead_slots=k),
+        seq_ids_with_bonus_token_in_last_step=set())
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -328,7 +355,7 @@ def test_draft_proposals_full_speculation_len():
 
     assert proposals.proposal_lens.shape == torch.Size([batch_size])
     assert proposals.proposal_lens.tolist() == [k for _ in range(batch_size)]
-
+    
 
 @torch.inference_mode()
 def test_draft_proposals_no_speculations():
@@ -356,7 +383,8 @@ def test_draft_proposals_no_speculations():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=k), )
+            num_lookahead_slots=k),
+        seq_ids_with_bonus_token_in_last_step=set())
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -428,7 +456,8 @@ def test_draft_proposals_mixed_k():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=k), )
+            num_lookahead_slots=k),
+        seq_ids_with_bonus_token_in_last_step=set())
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -440,3 +469,127 @@ def test_draft_proposals_mixed_k():
     assert proposals.proposal_lens.tolist() == [
         k for _ in range(expected_num_proposal_seqs - 1)
     ] + [0 for _ in range(expected_num_no_proposal_seqs)] + [k]
+
+
+@torch.inference_mode()
+def test_expand_execute_model_request_for_bonus_tokens():
+    """
+    Test the expansion of the execute model request to handle bonus tokens.
+    
+    This test ensures that the execute model request is correctly expanded. For
+    sequences with a bonus token, the expanded batch should contain two sequences:
+    one with the bonus token and one without. Sequences without a bonus token
+    are added unchanged to the expanded batch.
+    """
+    seed = 100
+    model_name = 'JackFram/llama-68m'
+    block_size = 16
+    num_gpu_blocks = 2048 // block_size
+    # Create prompts and continuations to be used in the 
+    # execute_model_request.
+    prompts = [[
+        random.randint(0, 1000) for _ in range(random.randint(10, 20))
+    ] for _ in range(10)]
+    continuations = [[random.randint(0, 1000) for _ in range(random.randint(1, 10))] for _ in prompts]
+    # Create an ExecuteModelRequest using the prompts and continuations.
+    execute_model_request = ExecuteModelRequest(
+        seq_group_metadata_list=create_seq_group_metadata_from_prompts(
+            prompts,
+            num_gpu_blocks,
+            block_size,
+            continuations=continuations,
+            final_prompt_lens=[len(prompt) + 100 for prompt in prompts]))
+    # Validate that the number of sequence groups matches the number of prompts.
+    assert len(
+        execute_model_request.seq_group_metadata_list) == len(prompts)
+    seq_id_prompt_map = {}
+    seq_id_output_token_map = {}
+    for seq_group in execute_model_request.seq_group_metadata_list:
+        seq_id = next(iter(seq_group.seq_data.keys()))
+        seq_id_prompt_map[seq_id] = \
+            seq_group.seq_data[seq_id].prompt_token_ids
+        seq_id_output_token_map[seq_id] = \
+            seq_group.seq_data[seq_id].output_token_ids
+    
+    # Construct a list of seq_ids with bonus tokens.
+    # The seq_ids are in the range 0 to num_prompts.
+    num_sequences_with_bonus_tokens = len(prompts) // 2 
+    seq_ids_with_bonus_tokens= random.sample(
+        range(len(prompts)), num_sequences_with_bonus_tokens)
+    # Expand the execute_model_request.
+    expanded_request, indices_of_original_sequence_groups =\
+        MultiStepWorker._expand_execute_model_request(
+            execute_model_request,
+            set(seq_ids_with_bonus_tokens))
+    # Validate that the number of sequence groups is now the original number
+    # plus the number of sequences with bonus tokens.
+    assert len(expanded_request.seq_group_metadata_list) == \
+        len(prompts) + len(seq_ids_with_bonus_tokens)
+    # Iterate through the updated request and validate the following:
+    # 1. If the sequence group is part of the original request, it contains all
+    #    token ids including the bonus tokens.
+    # 2. If the sequence group is newly added, it does not contain the bonus token.
+    for index, seq_group_metadata in enumerate(
+        expanded_request.seq_group_metadata_list):
+        seq_id = next(iter(seq_group_metadata.seq_data.keys()))
+        assert seq_group_metadata.seq_data[seq_id].prompt_token_ids ==\
+            seq_id_prompt_map[seq_id] 
+        if index in indices_of_original_sequence_groups:
+            assert seq_group_metadata.seq_data[seq_id].output_token_ids ==\
+                seq_id_output_token_map[seq_id]
+        else:
+            assert seq_group_metadata.seq_data[seq_id].output_token_ids ==\
+                seq_id_output_token_map[seq_id][:-1]
+
+
+@torch.inference_mode()
+def test_filter_model_output():
+    """
+    Test the _filter_model_output function of the MultiStepWorker class.
+
+    This test ensures that the _filter_model_output method correctly filters the
+    model's output, retaining only the specified sequences.
+    """
+
+    seed = 100
+    model_name = 'JackFram/llama-68m'
+    block_size = 16
+    num_gpu_blocks = 2048 // block_size
+    # generate the prompts and continuations and construct a
+    # ExecuteModelRequest using them.
+    prompts = [[
+        random.randint(0, 1000) for _ in range(random.randint(10, 20))
+    ] for _ in range(10)]
+    continuations = [[random.randint(0, 1000) for _ in range(random.randint(1, 10))] for _ in prompts]
+    execute_model_request = ExecuteModelRequest(
+        seq_group_metadata_list=create_seq_group_metadata_from_prompts(
+            prompts,
+            num_gpu_blocks,
+            block_size,
+            continuations=continuations,
+            final_prompt_lens=[len(prompt) + 100 for prompt in prompts]))
+    # Generate a list of output indices to retain.
+    num_outputs_to_retain = len(prompts) // 2 
+    output_indices_to_retain= random.sample(
+        range(len(prompts)), num_outputs_to_retain)
+    # Initialize a worker and use it to make a forward pass of the model
+    # and generate output corresponding to execute_model_request.
+    worker = create_worker(
+        Worker,
+        model_name,
+        block_size,
+        num_gpu_blocks,
+        seed,
+    )
+    step_output = worker.execute_model(
+        execute_model_req=execute_model_request)
+    # Filter the model output using _filter_model_output and validate
+    # the results.
+    filtered_output = MultiStepWorker._filter_model_output(
+        step_output[0], output_indices_to_retain)
+    for index, output in enumerate(filtered_output[0].outputs):
+        assert output == \
+            step_output[0].outputs[output_indices_to_retain[index]]
+
+
+
