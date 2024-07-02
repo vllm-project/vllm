@@ -7,8 +7,8 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.linear import (FusedMoELinear, LinearBase,
-                                               LinearMethodBase)
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -71,9 +71,11 @@ class Fp8Config(QuantizationConfig):
             self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
-        if isinstance(layer, (LinearBase, FusedMoELinear)):
+        if isinstance(layer, LinearBase):
             return Fp8LinearMethod(self)
-        if isinstance(layer, Attention):
+        elif isinstance(layer, FusedMoE):
+            return Fp8MoEMethod(self)
+        elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
 
@@ -169,11 +171,131 @@ class Fp8LinearMethod(LinearMethodBase):
                     output_partition_sizes=output_partition_sizes,
                     **extra_weight_attrs)
 
-    def create_weights_moe(self, layer: Module, num_experts: int,
-                           hidden_size: int, intermediate_size: int,
-                           params_dtype: torch.dtype, **extra_weight_attrs):
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if (not hasattr(layer, "process_after_load")
+                or not layer.process_after_load):
+            return
 
-        layer.is_moe = True
+        # If checkpoint is fp/bf16, quantize in place.
+        if not self.quant_config.is_checkpoint_fp8_serialized:
+            qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
+                                                         scale=None)
+            layer.weight = Parameter(qweight.t(), requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            layer.logical_widths = None
+            layer.input_scale = None
+            return
+
+        # If checkpoint if fp8, need to handle that we can only pass
+        # one scale to torch._scaled_mm and to cutlass kernels, but we
+        # have N scales for fused layers.
+        else:
+            # WEIGHT_SCALE / WEIGHT
+            #   Loop over logical weights, requantizing with single scale.
+            max_w_scale = layer.weight_scale.max()
+
+            # QKV / MLP is fused in the on disk checkpoint if any of the
+            # weight scales are still set to the default since we initialize
+            # N weight scales for N shards but we only load 1 weight scale
+            # from disk in this case. As a result, we skip dequant -> requant
+            # since we already have quantized QKV together.
+            # Sample Model with fused checkpoint:
+            #   * nm-testing/Phi-3-mini-128k-instruct-FP8
+            unfused_module_in_checkpoint = (
+                layer.weight_scale[-1] > torch.finfo(torch.float8_e4m3fn).min)
+
+            if unfused_module_in_checkpoint:
+                start = 0
+                for idx, logical_width in enumerate(layer.logical_widths):
+                    end = start + logical_width
+                    weight_dq = per_tensor_dequantize(
+                        layer.weight[start:end, :], layer.weight_scale[idx])
+
+                    layer.weight[start:end, :] = per_tensor_quantize(
+                        weight_dq, layer.weight_scale.max())
+                    start = end
+            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+
+            # WEIGHT
+            #   Transpose weight for passing to torch._scaled_mm
+            weight = layer.weight
+            layer.weight = Parameter(weight.t(), requires_grad=False)
+
+            # INPUT ACTIVATION SCALE
+            #   Dynamic: set to None (required input to ops.scaled_fp8_quant).
+            #   Static:  set to max of the input_scales (since they are equal).
+            if self.quant_config.activation_scheme == "dynamic":
+                layer.input_scale = None
+            elif self.quant_config.activation_scheme == "static":
+                layer.input_scale = Parameter(layer.input_scale.max(),
+                                              requires_grad=False)
+
+            # WEIGHT_SCALE / WEIGHT
+            #   Loop over logical weights, requantizing with single scale.
+            max_w_scale = layer.weight_scale.max()
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        # ops.scaled_fp8_quant supports both dynamic and static quant.
+        #   If dynamic, layer.input_scale is None and x_scale computed from x.
+        #   If static, layer.input_scale is scalar and x_scale is input_scale.
+
+        if bias is None and self.cutlass_fp8_supported:
+            qinput, x_scale = ops.scaled_fp8_quant(x, layer.input_scale)
+
+            # Fused GEMM_DQ
+            output = ops.cutlass_scaled_mm(
+                qinput,
+                layer.weight,
+                out_dtype=x.dtype,
+                scale_a=x_scale,
+                scale_b=layer.weight_scale,
+            )
+
+        else:
+            qinput, x_scale = ops.scaled_fp8_quant(x,
+                                                   layer.input_scale,
+                                                   batch_dim_padding=17)
+
+            # Fused GEMM_DQ -- note we padded the input above because
+            # torch._scaled_mm is more performant for matrices with
+            # batch dimension > 16. Note that this could change
+            # in the future.
+            output, _ = torch._scaled_mm(
+                qinput,
+                layer.weight,
+                out_dtype=x.dtype,
+                scale_a=x_scale,
+                scale_b=layer.weight_scale,
+                bias=bias,
+            )
+
+        return torch.narrow(output, 0, 0, x.shape[0])
+
+
+class Fp8MoEMethod(FusedMoEMethodBase):
+    """MoE method for FP8.
+    Supports loading FP8 checkpoints with static weight scale and
+    dynamic/static activation scale.
+
+    Also supports loading quantized FP16/BF16 model checkpoints with dynamic
+    activation scaling. The weight scaling factor will be initialized after
+    the model weights are loaded.
+
+    Args:
+        quant_config: The quantization config.
+    """
+
+    def __init__(self, quant_config: Fp8Config):
+        self.quant_config = quant_config
+
+    def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
+                       intermediate_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+
         layer.process_after_load = True
 
         if self.quant_config.is_checkpoint_fp8_serialized:
@@ -239,66 +361,11 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.a13_scale = None
             layer.a2_scale = None
 
-    def _process_weights_after_loading_dense(self, layer: Module) -> None:
-        # If checkpoint is fp/bf16, quantize in place.
-        if not self.quant_config.is_checkpoint_fp8_serialized:
-            qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
-                                                         scale=None)
-            layer.weight = Parameter(qweight.t(), requires_grad=False)
-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
-            layer.logical_widths = None
-            layer.input_scale = None
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if (not hasattr(layer, "process_after_load")
+                or not layer.process_after_load):
             return
 
-        # If checkpoint if fp8, need to handle that we can only pass
-        # one scale to torch._scaled_mm and to cutlass kernels, but we
-        # have N scales for fused layers.
-        else:
-            # WEIGHT_SCALE / WEIGHT
-            #   Loop over logical weights, requantizing with single scale.
-            max_w_scale = layer.weight_scale.max()
-
-            # QKV / MLP is fused in the on disk checkpoint if any of the
-            # weight scales are still set to the default since we initialize
-            # N weight scales for N shards but we only load 1 weight scale
-            # from disk in this case. As a result, we skip dequant -> requant
-            # since we already have quantized QKV together.
-            # Sample Model with fused checkpoint:
-            #   * nm-testing/Phi-3-mini-128k-instruct-FP8
-            unfused_module_in_checkpoint = (
-                layer.weight_scale[-1] > torch.finfo(torch.float8_e4m3fn).min)
-
-            if unfused_module_in_checkpoint:
-                start = 0
-                for idx, logical_width in enumerate(layer.logical_widths):
-                    end = start + logical_width
-                    weight_dq = per_tensor_dequantize(
-                        layer.weight[start:end, :], layer.weight_scale[idx])
-
-                    layer.weight[start:end, :] = per_tensor_quantize(
-                        weight_dq, layer.weight_scale.max())
-                    start = end
-            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
-
-            # WEIGHT
-            #   Transpose weight for passing to torch._scaled_mm
-            weight = layer.weight
-            layer.weight = Parameter(weight.t(), requires_grad=False)
-
-            # INPUT ACTIVATION SCALE
-            #   Dynamic: set to None (required input to ops.scaled_fp8_quant).
-            #   Static:  set to max of the input_scales (since they are equal).
-            if self.quant_config.activation_scheme == "dynamic":
-                layer.input_scale = None
-            elif self.quant_config.activation_scheme == "static":
-                layer.input_scale = Parameter(layer.input_scale.max(),
-                                              requires_grad=False)
-
-            # WEIGHT_SCALE / WEIGHT
-            #   Loop over logical weights, requantizing with single scale.
-            max_w_scale = layer.weight_scale.max()
-
-    def _process_weights_after_loading_moe(self, layer: Module) -> None:
         # If checkpoint is fp16, quantize in place.
         if not self.quant_config.is_checkpoint_fp8_serialized:
             w13_weight = torch.empty_like(layer.w13_weight.data,
@@ -369,68 +436,12 @@ class Fp8LinearMethod(LinearMethodBase):
                                                  requires_grad=False)
             return
 
-    def process_weights_after_loading(self, layer: Module) -> None:
-        if (not hasattr(layer, "process_after_load")
-                or not layer.process_after_load):
-            return
-
-        # MoE case:
-        elif (hasattr(layer, "is_moe") and layer.is_moe):
-            self._process_weights_after_loading_moe(layer)
-            return
-
-        # Dense case:
-        else:
-            self._process_weights_after_loading_dense(layer)
-            return
-
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-
-        # ops.scaled_fp8_quant supports both dynamic and static quant.
-        #   If dynamic, layer.input_scale is None and x_scale computed from x.
-        #   If static, layer.input_scale is scalar and x_scale is input_scale.
-
-        if bias is None and self.cutlass_fp8_supported:
-            qinput, x_scale = ops.scaled_fp8_quant(x, layer.input_scale)
-
-            # Fused GEMM_DQ
-            output = ops.cutlass_scaled_mm(
-                qinput,
-                layer.weight,
-                out_dtype=x.dtype,
-                scale_a=x_scale,
-                scale_b=layer.weight_scale,
-            )
-
-        else:
-            qinput, x_scale = ops.scaled_fp8_quant(x,
-                                                   layer.input_scale,
-                                                   batch_dim_padding=17)
-
-            # Fused GEMM_DQ -- note we padded the input above because
-            # torch._scaled_mm is more performant for matrices with
-            # batch dimension > 16. Note that this could change
-            # in the future.
-            output, _ = torch._scaled_mm(
-                qinput,
-                layer.weight,
-                out_dtype=x.dtype,
-                scale_a=x_scale,
-                scale_b=layer.weight_scale,
-                bias=bias,
-            )
-
-        return torch.narrow(output, 0, 0, x.shape[0])
-
-    def apply_moe(self,
-                  layer: torch.nn.Module,
-                  x: torch.Tensor,
-                  router_logits: torch.Tensor,
-                  top_k: int,
-                  renormalize: bool = True) -> torch.Tensor:
+              router_logits: torch.Tensor,
+              top_k: int,
+              renormalize: bool = True) -> torch.Tensor:
 
         return fused_moe(x,
                          layer.w13_weight,

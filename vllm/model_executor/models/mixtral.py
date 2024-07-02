@@ -30,9 +30,9 @@ from transformers import MixtralConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (FusedMoELinear,
-                                               QKVParallelLinear,
+from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -78,14 +78,14 @@ class MixtralMoE(nn.Module):
                                      params_dtype=params_dtype,
                                      quant_config=None)
 
-        self.experts = FusedMoELinear(num_experts=num_experts,
-                                      top_k=top_k,
-                                      hidden_size=hidden_size,
-                                      intermediate_size=intermediate_size,
-                                      params_dtype=params_dtype,
-                                      reduce_results=True,
-                                      renormalize=True,
-                                      quant_config=quant_config)
+        self.experts = FusedMoE(num_experts=num_experts,
+                                top_k=top_k,
+                                hidden_size=hidden_size,
+                                intermediate_size=intermediate_size,
+                                params_dtype=params_dtype,
+                                reduce_results=True,
+                                renormalize=True,
+                                quant_config=quant_config)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
