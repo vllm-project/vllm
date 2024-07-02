@@ -116,41 +116,66 @@ class SequenceData:
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
     ) -> None:
-        if output_token_ids is None:
-            output_token_ids = []
+        self._prompt_token_ids: List[int] = list(prompt_token_ids)
+        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
+        self._output_token_ids: List[int] = (
+            list(output_token_ids) if output_token_ids is not None else [])
 
-        self.prompt_token_ids = prompt_token_ids
-        self._prompt_token_ids_tuple = tuple(prompt_token_ids)
-        self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
 
+        self._update_cached_all_tokens()
+
+    def _update_cached_all_tokens(self):
+        self._cached_all_token_ids: List[int] = (self._prompt_token_ids +
+                                                 self._output_token_ids)
+
+    @property
+    def prompt_token_ids(self) -> Tuple[int, ...]:
+        return self._prompt_token_ids_tuple
+
+    @prompt_token_ids.setter
+    def prompt_token_ids(self, new_prompt_token_ids) -> None:
+        self._prompt_token_ids = list(new_prompt_token_ids)
+        self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
+        self._update_cached_all_tokens()
+
+    @property
+    def output_token_ids(self) -> Tuple[int, ...]:
+        return tuple(self._output_token_ids)
+
+    @output_token_ids.setter
+    def output_token_ids(self, new_output_token_ids) -> None:
+        self._output_token_ids = list(new_output_token_ids)
+        self._update_cached_all_tokens()
+
     def append_token_id(self, token_id: int, logprob: float) -> None:
-        self.output_token_ids.append(token_id)
+        self._output_token_ids.append(token_id)
+        self._cached_all_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
     def get_len(self) -> int:
-        return len(self.output_token_ids) + len(self.prompt_token_ids)
+        return len(self._output_token_ids) + len(self._prompt_token_ids)
 
     def get_prompt_len(self) -> int:
-        return len(self.prompt_token_ids)
+        return len(self._prompt_token_ids)
 
     def get_output_len(self) -> int:
-        return len(self.output_token_ids)
+        return len(self._output_token_ids)
 
     def get_token_ids(self) -> List[int]:
-        return self.prompt_token_ids + self.output_token_ids
+        return self._cached_all_token_ids
 
     def get_prefix_token_ids(
             self, num_tokens: int
     ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
         """Get prefix tokens, and make the return value hashable"""
-        prompt_length = len(self.prompt_token_ids)
+        prompt_length = self.get_prompt_len()
         if num_tokens > prompt_length:
             return (self._prompt_token_ids_tuple,
-                    tuple(self.output_token_ids[:num_tokens - prompt_length]))
+                    tuple(self._output_token_ids[:num_tokens - prompt_length]))
         else:
             return (self._prompt_token_ids_tuple[:num_tokens], None)
 
@@ -183,14 +208,14 @@ class SequenceData:
         return self.get_len() - self.get_num_computed_tokens()
 
     def get_last_token_id(self) -> int:
-        if not self.output_token_ids:
-            return self.prompt_token_ids[-1]
-        return self.output_token_ids[-1]
+        if not self._output_token_ids:
+            return self._prompt_token_ids[-1]
+        return self._output_token_ids[-1]
 
-    def get_prompt_token_ids(self) -> List[int]:
+    def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.prompt_token_ids
 
-    def get_output_token_ids(self) -> List[int]:
+    def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.output_token_ids
 
     @property
@@ -199,8 +224,8 @@ class SequenceData:
 
     def __repr__(self) -> str:
         return (f"SequenceData("
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"output_token_ids={self.output_token_ids}, "
+                f"prompt_token_ids={self._prompt_token_ids}, "
+                f"output_token_ids={self._output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob})")
 
 
@@ -306,14 +331,14 @@ class Sequence:
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
 
-    def get_prompt_token_ids(self) -> List[int]:
+    def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.data.get_prompt_token_ids()
 
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
 
-    def get_output_token_ids(self) -> List[int]:
-        return self.data.output_token_ids
+    def get_output_token_ids(self) -> Tuple[int, ...]:
+        return self.data.get_output_token_ids()
 
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob

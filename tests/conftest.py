@@ -474,7 +474,7 @@ class VllmRunner:
             req_sample_output_strs: List[str] = []
             for sample in req_output.outputs:
                 output_str = sample.text
-                output_ids = sample.token_ids
+                output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
                 req_sample_output_strs.append(prompt_str + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))

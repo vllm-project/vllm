@@ -177,7 +177,8 @@ class LLMEngine:
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
-            "seed=%d, served_model_name=%s)",
+            "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
+            "enable_prefix_caching=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -204,6 +205,8 @@ class LLMEngine:
             observability_config,
             model_config.seed,
             model_config.served_model_name,
+            scheduler_config.use_v2_block_manager,
+            cache_config.enable_prefix_caching,
         )
         # TODO(woosuk): Print more configs in debug mode.
 

@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
@@ -28,7 +28,7 @@ class CompletionOutput:
 
     index: int
     text: str
-    token_ids: List[int]
+    token_ids: Tuple[int, ...]
     cumulative_logprob: float
     logprobs: Optional[SampleLogprobs]
     finish_reason: Optional[str] = None
