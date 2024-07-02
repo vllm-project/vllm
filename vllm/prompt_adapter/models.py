@@ -11,9 +11,8 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         get_adapter, list_adapters,
                                         remove_adapter, set_adapter_mapping)
 from vllm.config import PromptAdapterConfig
-from vllm.prompt_adapter.layers import (PromptAdapterMapping,
-                                        VocabParallelEmbeddingWithPromptAdapter
-                                        )
+from vllm.prompt_adapter.layers import (
+    PromptAdapterMapping, VocabParallelEmbeddingWithPromptAdapter)
 
 logger = logging.getLogger(__name__)
 
