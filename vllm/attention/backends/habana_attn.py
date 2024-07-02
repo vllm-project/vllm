@@ -202,9 +202,11 @@ class HabanaAttentionImpl(AttentionImpl):
             # Prompt run.
             if kv_cache is None or attn_metadata.block_tables.numel() == 0:
                 # TODO: move this outside of model
-                assert attn_metadata.attn_bias is not None, 'attn_bias must be set before calling model.forward!' 
+                assert attn_metadata.attn_bias is not None, \
+                       'attn_bias must be set before calling model.forward!'
                 attn_bias = attn_metadata.attn_bias
-                if self.alibi_slopes is not None and self.position_bias is not None:
+                if self.alibi_slopes is not None and \
+                   self.position_bias is not None:
                     attn_bias.add_(self.position_bias[:, :,
                                                       -attn_bias.size(2):,
                                                       -attn_bias.size(3):])

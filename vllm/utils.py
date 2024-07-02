@@ -640,32 +640,38 @@ class HabanaMemoryProfiler:
         if getattr(self, 'final_device_memory', None) is None or getattr(
                 self, 'final_host_memory', None) is None:
             raise RuntimeError(
-                "HabanaMemoryProfiler.get_summary_string() can only be called after closing context manager"
-            )
+                "HabanaMemoryProfiler.get_summary_string() can only be called "
+                "after closing context manager")
         return (
-            f"{format_bytes(self.consumed_device_memory)} of device memory ({format_bytes(self.final_device_memory)}/{format_bytes(HabanaMemoryProfiler.total_device_memory())} used) and "
-            f"{format_bytes(self.consumed_host_memory)} of host memory ({format_bytes(self.final_host_memory)}/{format_bytes(HabanaMemoryProfiler.total_host_memory())} used)"
-        )
+            f"{format_bytes(self.consumed_device_memory)} of device memory "
+            f"({format_bytes(self.final_device_memory)}/"
+            f"({format_bytes(HabanaMemoryProfiler.total_device_memory())} used)"
+            f" and {format_bytes(self.consumed_host_memory)} of host memory "
+            f"({format_bytes(self.final_host_memory)}/"
+            f"{format_bytes(HabanaMemoryProfiler.total_host_memory())} used)")
 
     def __enter__(self):
         # Force garbage collection
         gc.collect()
-        self.initial_device_memory = HabanaMemoryProfiler.current_device_memory_usage(
-        )
-        self.initial_host_memory = HabanaMemoryProfiler.current_host_memory_usage(
-        )
+        self.initial_device_memory = \
+            HabanaMemoryProfiler.current_device_memory_usage()
+        self.initial_host_memory = \
+            HabanaMemoryProfiler.current_host_memory_usage()
         # This allows us to call methods of the context manager if needed
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         # Force garbage collection
         gc.collect()
-        self.final_device_memory = HabanaMemoryProfiler.current_device_memory_usage(
+        self.final_device_memory = \
+            HabanaMemoryProfiler.current_device_memory_usage(
         )
         self.final_host_memory = HabanaMemoryProfiler.current_host_memory_usage(
         )
-        self.consumed_device_memory = self.final_device_memory - self.initial_device_memory
-        self.consumed_host_memory = self.final_host_memory - self.initial_host_memory
+        self.consumed_device_memory = \
+            self.final_device_memory - self.initial_device_memory
+        self.consumed_host_memory = \
+            self.final_host_memory - self.initial_host_memory
 
 
 # Adapted from https://stackoverflow.com/a/49361727

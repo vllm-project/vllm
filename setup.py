@@ -207,7 +207,9 @@ class cmake_build_ext(build_ext):
 
 def _is_hpu() -> bool:
     is_hpu_available = True
-    return is_hpu_available  # FIXME(kzawora): HPU autodetection sporadically fails on certain clients. Find the cause and fix it.
+    # FIXME(kzawora): HPU autodetection sporadically fails on certain clients.
+    # Need to find the cause and fix it.
+    return is_hpu_available
     try:
         subprocess.run(["hl-smi"], capture_output=True, check=True)
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):

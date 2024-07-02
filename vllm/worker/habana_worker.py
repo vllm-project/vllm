@@ -70,7 +70,7 @@ class HabanaWorker(WorkerBase):
         if self.vision_language_config:
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
-            assert False, "To be tested: vision language model on HPU"
+            raise AssertionError("To be tested: vision language model on HPU")
 
         self.model_runner = HabanaModelRunner(
             model_config,
@@ -125,8 +125,8 @@ class HabanaWorker(WorkerBase):
         self.model_runner.profile_run()
         torch.hpu.synchronize()
 
-        # At this point we should've allocated the maximum workspace for all recipes
-        # we will use the extra memory for graphs/blocks
+        # At this point we should've allocated the maximum workspace for all
+        # recipes we will use the extra memory for graphs/blocks
         free_hpu_memory = torch.hpu.mem_get_info()[0]
 
         cache_block_size = self.get_cache_block_size_bytes()
@@ -170,8 +170,9 @@ class HabanaWorker(WorkerBase):
                                         self.parallel_config,
                                         self.device_config)
         self.hpu_cache = self.cache_engine.gpu_cache
-        htorch.hpu.synchronize(
-        )  # we want to materialize cache tensors before we proceed with graph capture/execution
+        # we want to materialize cache tensors before we proceed with
+        # graph capture/execution
+        htorch.hpu.synchronize()
 
     def _warm_up_model(self) -> None:
         self.model_runner.warmup_model(self.hpu_cache)

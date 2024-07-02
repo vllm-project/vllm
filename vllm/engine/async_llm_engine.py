@@ -396,7 +396,8 @@ class AsyncLLMEngine:
         elif engine_config.device_config.device_type == "hpu":
             if distributed_executor_backend == "ray":
                 initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_habana_executor import RayHabanaExecutorAsync
+                from vllm.executor.ray_habana_executor import (
+                    RayHabanaExecutorAsync)
                 executor_class = RayHabanaExecutorAsync
             else:
                 from vllm.executor.habana_executor import HabanaExecutorAsync

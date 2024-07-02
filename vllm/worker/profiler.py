@@ -58,7 +58,8 @@ class Profiler:
         self.enabled = os.getenv('VLLM_PROFILER_ENABLED',
                                  'false').lower() == 'true' and int(
                                      os.getenv('RANK', '0')) == 0
-        logger.info(f'Profiler enabled for: {self.vllm_instance_id}')
+        msg = f'Profiler enabled for: {self.vllm_instance_id}'
+        logger.info(msg)
         if self.enabled:
             # initialize the trace file (JSON Array Format)
             with open(self.filename, 'w') as outfile:
@@ -107,8 +108,8 @@ class Profiler:
             ts = self.get_timestamp_us()
             if not self.event_cache:
                 logger.warning(
-                    'Profiler: end() call does not have matching start() call. Disabling profiler.'
-                )
+                    'Profiler: end() call does not have matching start() call. '
+                    'Disabling profiler.')
                 self.enabled = False
                 return
             event = self.event_cache.pop()
