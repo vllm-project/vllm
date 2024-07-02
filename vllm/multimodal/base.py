@@ -35,7 +35,7 @@ class MultiModalData:
     pass
 
 
-BatchedTensors = Union[torch.Tensor, List[torch.Tensor]]
+BatchedTensors = Union["torch.Tensor", List["torch.Tensor"]]
 """
 If each input tensor in the batch has the same size, this is a single batched
 tensor; otherwise, this is a list of tensors with one element per batch.
@@ -47,7 +47,7 @@ if sys.version_info < (3, 9):
         pass
 else:
 
-    class _MultiModalInputsBase(UserDict[str, torch.Tensor]):
+    class _MultiModalInputsBase(UserDict[str, "torch.Tensor"]):
         pass
 
 
@@ -59,10 +59,13 @@ class MultiModalInputs(_MultiModalInputsBase):
 
     @staticmethod
     def try_concat(
-        tensors: List[torch.Tensor],
+        tensors: List["torch.Tensor"],
         *,
         device: "torch.types.Device",
     ) -> BatchedTensors:
+        # Avoid initializing CUDA too early
+        import torch
+        
         unbatched_shape = tensors[0].shape[1:]
 
         for tensor in tensors:
@@ -84,7 +87,7 @@ class MultiModalInputs(_MultiModalInputsBase):
 
         keys = inputs_list[0].keys()
 
-        item_lists: Dict[str, List[torch.Tensor]] = defaultdict(list)
+        item_lists: Dict[str, List["torch.Tensor"]] = defaultdict(list)
 
         for inputs in inputs_list:
             if inputs.keys() != keys:
