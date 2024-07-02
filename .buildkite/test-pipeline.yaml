@@ -107,7 +107,7 @@ steps:
 
 - label: Kernels Test %N
   #mirror_hardwares: [amd]
-  command:
+  commands:
     - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.0.7/flashinfer-0.0.7+cu121torch2.3-cp310-cp310-linux_x86_64.whl
     - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
