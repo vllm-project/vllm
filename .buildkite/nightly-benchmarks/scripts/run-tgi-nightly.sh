@@ -95,12 +95,25 @@ run_serving_tests() {
       continue
     fi
 
+    if echo "$common_params" | jq -e 'has("fp8")' > /dev/null; then
+      echo "Key 'fp8' exists in common params."
+      server_command="/tgi-entrypoint.sh \
+        --model-id $model \
+        --num-shard $tp \
+        --port $port \
+        --quantize fp8 \
+        $server_args"
+    else
+      echo "Key 'fp8' does not exist in common params."
+      server_command="/tgi-entrypoint.sh \
+        --model-id $model \
+        --num-shard $tp \
+        --port $port \
+        $server_args"
+    fi
 
-    server_command="/tgi-entrypoint.sh \
-      --model-id $model \
-      --num-shard $tp \
-      --port $port \
-      $server_args"
+
+    
 
     # run the server
     echo "Running test case $test_name"
