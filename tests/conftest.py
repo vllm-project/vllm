@@ -65,7 +65,7 @@ class _ImageAssetPrompts(TypedDict):
     cherry_blossom: str
 
 
-class _ImageAssets(UserList[ImageAsset]):
+class _ImageAssets(UserList):
 
     def __init__(self) -> None:
         super().__init__(
