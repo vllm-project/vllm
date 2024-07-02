@@ -1,6 +1,6 @@
-"""Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
+"""Compare the outputs of HF and vLLM for embedding models.
 
-Run `pytest tests/models/test_llama_embedding.py`.
+Run `pytest tests/models/test_embedding.py`.
 """
 import pytest
 import torch
@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 MODELS = [
     "intfloat/e5-mistral-7b-instruct",
+    "ssmits/Qwen2-7B-Instruct-embed-base",
 ]
 
 
