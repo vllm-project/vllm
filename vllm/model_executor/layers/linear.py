@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -26,6 +26,44 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
 
+def adjust_bitsandbytes_shard(param: Parameter,
+                              qkv_offsets: Dict[str, Tuple[int, int]],
+                              loaded_shard_id: str) -> Tuple[int, int]:
+    """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
+
+    total, _ = qkv_offsets["total"]
+    orig_offset, orig_size = qkv_offsets[loaded_shard_id]
+
+    quantized_total = param.data.shape[0]
+    quantized_offset = orig_offset * quantized_total // total
+    quantized_size = orig_size * quantized_total // total
+
+    return quantized_size, quantized_offset
+
+
+def adjust_scalar_to_fused_array(param, loaded_weight, shard_id):
+    """For fused modules (QKV and MLP) we have an array of length
+    N that holds 1 scale for each "logical" matrix. So the param
+    is an array of length N. The loaded_weight corresponds to 
+    one of the shards on disk. Here, we slice the param based on 
+    the shard_id for loading.
+    """
+    qkv_idxs = {"q": 0, "k": 1, "v": 2}
+
+    if isinstance(shard_id, str):
+        shard_id = qkv_idxs[shard_id]
+    elif not isinstance(shard_id, int):
+        raise ValueError(f"Unknown Shard Id {shard_id}")
+
+    # AutoFP8 scales do not have a shape
+    # compressed-tensors scales do have a shape
+    if len(loaded_weight.shape) != 0:
+        assert loaded_weight.shape[0] == 1
+        loaded_weight = loaded_weight[0]
+
+    return param[shard_id], loaded_weight
+
+
 class LinearMethodBase(QuantizeMethodBase):
     """Base class for different (maybe quantized) linear methods."""
 
@@ -37,7 +75,7 @@ class LinearMethodBase(QuantizeMethodBase):
                        **extra_weight_attrs):
         """Create weights for a linear layer. 
            The weights will be set as attributes of the layer.
-        
+
         Args:
             layer: The layer that is using the LinearMethodBase factory.
             input_size_per_partition: Size of the weight input dim on rank X.
@@ -254,10 +292,6 @@ class ColumnParallelLinear(LinearBase):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        # Special case for Fp8 scales.
-        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
-                                           None)
-
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
         param_data = param.data
@@ -266,11 +300,11 @@ class ColumnParallelLinear(LinearBase):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
-        # Special case for Fp8 scales.
-        elif fp8_scales_shard_indexer is not None:
-            param_data, loaded_weight = fp8_scales_shard_indexer(param_data,
-                                                                 loaded_weight,
-                                                                 shard_id=0)
+
+        # Special case for loading scales off disk, which often do not
+        # have a shape (such as in the case of AutoFP8).
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -347,38 +381,21 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         output_dim = getattr(param, "output_dim", None)
         # Special case for AQLM codebooks.
         is_metadata = getattr(param, "is_metadata", False)
-
-        param_shard_splitter = getattr(param, "shard_splitter", None)
-
-        if output_dim is not None and param_shard_splitter is not None:
-            raise NotImplementedError(
-                "We do not currently support output_dim != None and "
-                "shard_splitter != None for a parameter. Please open an issue."
-            )
-        # If a parameter has defined a shard_splitter to be used for
-        # the weight, it should be applied before the weight is
-        # loaded/copied to the parameter. The shard_splitter applies
-        # logic by using the loaded_shard_id to ensure that the loaded
-        # param is loaded to the correct location
-        # within the parameter defined by the linear method.
-        if loaded_shard_id is None and param_shard_splitter is not None:
-            raise NotImplementedError(
-                "We do not currently support loaded_shard_id == None and "
-                "shard_splitter != None for a parameter. Please open an issue."
-            )
-
-        # Special case for Fp8 scales.
-        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
-                                           None)
+        # Special case for per-tensor scale to load scalar into fused array.
+        needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
 
         if loaded_shard_id is None:
-            # Loaded weight is already packed.
+            # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
+                if needs_scalar_to_array is not None:
+                    param_data, loaded_weight = adjust_scalar_to_fused_array(
+                        param_data, loaded_weight, 0)
+
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
             current_shard_offset = 0
-            shard_offsets = []
+            shard_offsets: List[Tuple[int, int, int]] = []
             for i, output_size in enumerate(self.output_sizes):
                 shard_offsets.append((i, current_shard_offset, output_size))
                 current_shard_offset += output_size
@@ -416,6 +433,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
 
+            use_bitsandbytes = getattr(param, "use_bitsandbytes", False)
+            if use_bitsandbytes:
+                shard_size = loaded_weight.shape[output_dim]
+                shard_offset = loaded_weight.shape[output_dim] * \
+                    loaded_shard_id
+
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
             start_idx = tp_rank * shard_size
@@ -428,15 +451,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             shard_offset = loaded_shard_id * shard_size
             param_data = param_data.narrow(0, shard_offset, shard_size)
 
-        # If a param_shard_splitter is defined by the LinearMethod, use it.
-        elif param_shard_splitter is not None:
-            logical_widths = getattr(param, "logical_widths", None)
-            param_data, loaded_weight = param_shard_splitter(
-                param_data, loaded_weight, loaded_shard_id, logical_widths)
-
-        # Special case for Fp8 scales.
-        elif fp8_scales_shard_indexer is not None:
-            param_data, loaded_weight = fp8_scales_shard_indexer(
+        # Special case for per-tensor scales in fused case.
+        elif needs_scalar_to_array:
+            param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id)
 
         else:
@@ -446,13 +463,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "Loading a weight without `output_dim` attribute in "
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
-
-        if fp8_scales_shard_indexer is None:
-            if len(param_data.shape) == 0:
-                param_data = param_data.reshape(1)
-
-            if len(loaded_weight.shape) == 0:
-                loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -533,32 +543,16 @@ class QKVParallelLinear(ColumnParallelLinear):
         # Special case for AQLM codebooks.
         is_metadata = getattr(param, "is_metadata", False)
 
-        param_shard_splitter = getattr(param, "shard_splitter", None)
-
-        if output_dim is not None and param_shard_splitter is not None:
-            raise NotImplementedError(
-                "We do not currently support output_dim != None and "
-                "shard_splitter != None for a parameter. Please open an issue."
-            )
-        # If a parameter has defined a shard_splitter to be used for
-        # the weight, it should be applied before the weight is
-        # loaded/copied to the parameter. The shard_splitter applies
-        # logic by using the loaded_shard_id to ensure that the loaded
-        # param is loaded to the correct location
-        # within the parameter defined by the linear method.
-        if loaded_shard_id is None and param_shard_splitter is not None:
-            raise NotImplementedError(
-                "We do not currently support loaded_shard_id == None and "
-                "shard_splitter != None for a parameter. Please open an issue."
-            )
-
-        # Special case for Fp8 scales.
-        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
-                                           None)
+        # Special case for per-tensor scales in fused case.
+        needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
 
         if loaded_shard_id is None:
-            # Loaded weight is already packed.
+            # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
+                if needs_scalar_to_array is not None:
+                    param_data, loaded_weight = adjust_scalar_to_fused_array(
+                        param_data, loaded_weight, 0)
+
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
@@ -615,6 +609,22 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
 
+            use_bitsandbytes = getattr(param, "use_bitsandbytes", False)
+            if use_bitsandbytes:
+                orig_qkv_offsets = {
+                    "q": (0, self.num_heads * self.head_size),
+                    "k": (self.num_heads * self.head_size,
+                          self.num_kv_heads * self.head_size),
+                    "v":
+                    ((self.num_heads + self.num_kv_heads) * self.head_size,
+                     self.num_kv_heads * self.head_size),
+                    "total":
+                    ((self.num_heads + 2 * self.num_kv_heads) * self.head_size,
+                     0)
+                }
+                shard_size, shard_offset = adjust_bitsandbytes_shard(
+                    param, orig_qkv_offsets, loaded_shard_id)
+
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
             if loaded_shard_id == "q":
@@ -631,15 +641,9 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_index = ["q", "k", "v"].index(loaded_shard_id)
             param_data = param_data.narrow(0, shard_index * shard_size,
                                            shard_size)
-        # If a param_shard_splitter is defined by the LinearMethod, use it.
-        elif param_shard_splitter is not None:
-            logical_widths = getattr(param, "logical_widths", None)
-            param_data, loaded_weight = param_shard_splitter(
-                param_data, loaded_weight, loaded_shard_id, logical_widths)
-
-        # Special case for Fp8 scales.
-        elif fp8_scales_shard_indexer is not None:
-            param_data, loaded_weight = fp8_scales_shard_indexer(
+        # Special case for per-tensor scales in fused case.
+        elif needs_scalar_to_array:
+            param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
@@ -648,12 +652,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "Loading a weight without `output_dim` attribute in "
                     "QKVParallelLinear, assume the weight is the same "
                     "for all partitions.")
-
-        if len(param_data.shape) == 0:
-            param_data = param_data.reshape(1)
-
-        if len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -727,10 +725,6 @@ class RowParallelLinear(LinearBase):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        # Special case for Fp8 scales.
-        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
-                                           None)
-
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data
@@ -740,13 +734,9 @@ class RowParallelLinear(LinearBase):
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
 
-        # Special case for Fp8 scales.
-        elif fp8_scales_shard_indexer is not None:
-            param_data, loaded_weight = fp8_scales_shard_indexer(param_data,
-                                                                 loaded_weight,
-                                                                 shard_id=0)
-
-        if fp8_scales_shard_indexer is None and len(loaded_weight.shape) == 0:
+        # Special case for loading scales off disk, which often do not
+        # have a shape (such as in the case of AutoFP8).
+        if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape

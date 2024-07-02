@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm.utils import get_device_capability_stateless
+
 if triton.__version__ >= "2.1.0":
 
     @triton.jit
@@ -683,7 +685,7 @@ if triton.__version__ >= "2.1.0":
                               alibi_slopes=None,
                               sliding_window=None):
 
-        cap = torch.cuda.get_device_capability()
+        cap = get_device_capability_stateless()
         BLOCK = 128 if cap[0] >= 8 else 64
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -696,6 +698,10 @@ if triton.__version__ >= "2.1.0":
         num_queries_per_kv = q.shape[1] // k.shape[1]
 
         grid = (batch, head, triton.cdiv(max_input_len, BLOCK))  # batch, head,
+
+        # 0 means "disable"
+        if sliding_window is None or sliding_window <= 0:
+            sliding_window = 0
 
         num_warps = 8 if Lk <= 64 else 8
         if alibi_slopes is not None:
@@ -794,7 +800,7 @@ if triton.__version__ >= "2.1.0":
             BLOCK_DMODEL=Lk,
             BLOCK_DMODEL_PADDED=Lk_padded,
             BLOCK_N=BLOCK,
-            SLIDING_WINDOW=sliding_window if sliding_window is not None else 0,
+            SLIDING_WINDOW=sliding_window,
             num_warps=num_warps,
             num_stages=1,
         )

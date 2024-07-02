@@ -1,11 +1,13 @@
 import random
+from typing import Dict, List
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest, Logprob, SamplerOutput
+from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
@@ -84,6 +86,7 @@ def test_same_output_for_single_step():
         block_size,
         num_gpu_blocks,
         seed,
+        model_runner_cls=TP1DraftModelRunner,
     )
     worker = create_worker(
         Worker,
@@ -167,6 +170,7 @@ def test_same_output_for_multi_step():
         block_size,
         num_gpu_blocks,
         seed,
+        model_runner_cls=TP1DraftModelRunner,
     )
 
     worker = create_worker(
@@ -210,7 +214,7 @@ def test_same_output_for_multi_step():
 
     # Run single-step repeatedly.
     zero_kv_cache(worker.cache_engine)
-    single_step_output = []
+    single_step_output: List[SamplerOutput] = []
     continuations = [[1] for _ in prompts]
     set_random_seed(seed)
 
@@ -232,11 +236,15 @@ def test_same_output_for_multi_step():
             continuations[i].append(seq_group_output.samples[0].output_token)
 
     # Get token ids and logprobs for comparison.
-    multi_step_output_logprobs = [[] for _ in prompts]
-    single_step_output_logprobs = [[] for _ in prompts]
+    multi_step_output_logprobs: List[List[Dict[int,
+                                               Logprob]]] = [[]
+                                                             for _ in prompts]
+    single_step_output_logprobs: List[List[Dict[int,
+                                                Logprob]]] = [[]
+                                                              for _ in prompts]
 
-    multi_step_output_token_ids = [[] for _ in prompts]
-    single_step_output_token_ids = [[] for _ in prompts]
+    multi_step_output_token_ids: List[List[int]] = [[] for _ in prompts]
+    single_step_output_token_ids: List[List[int]] = [[] for _ in prompts]
     for i, _ in enumerate(prompts):
         for multi_step, single_step in zip(multi_step_output,
                                            single_step_output):
@@ -307,9 +315,10 @@ def test_draft_proposals_full_speculation_len():
 
     seq_group_metadata_list, _, _ = create_batch(batch_size, k)
 
-    proposals = proposer.get_proposals(execute_model_req=ExecuteModelRequest(
-        seq_group_metadata_list=seq_group_metadata_list,
-        num_lookahead_slots=k), )
+    proposals = proposer.get_spec_proposals(
+        execute_model_req=ExecuteModelRequest(
+            seq_group_metadata_list=seq_group_metadata_list,
+            num_lookahead_slots=k), )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -344,9 +353,10 @@ def test_draft_proposals_no_speculations():
                                                  k,
                                                  prompt_len=prompt_len)
 
-    proposals = proposer.get_proposals(execute_model_req=ExecuteModelRequest(
-        seq_group_metadata_list=seq_group_metadata_list,
-        num_lookahead_slots=k), )
+    proposals = proposer.get_spec_proposals(
+        execute_model_req=ExecuteModelRequest(
+            seq_group_metadata_list=seq_group_metadata_list,
+            num_lookahead_slots=k), )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -415,9 +425,10 @@ def test_draft_proposals_mixed_k():
         prev_output_token_len=prev_output_token_len,
     )
 
-    proposals = proposer.get_proposals(execute_model_req=ExecuteModelRequest(
-        seq_group_metadata_list=seq_group_metadata_list,
-        num_lookahead_slots=k), )
+    proposals = proposer.get_spec_proposals(
+        execute_model_req=ExecuteModelRequest(
+            seq_group_metadata_list=seq_group_metadata_list,
+            num_lookahead_slots=k), )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)

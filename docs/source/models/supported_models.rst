@@ -55,6 +55,10 @@ Alongside each architecture, we include some popular models that use it.
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
     - ✅︎
+  * - :code:`Gemma2ForCausalLM`
+    - Gemma2
+    - :code:`google/gemma-2-9b`, :code:`google/gemma-2-27b`, etc.
+    - ✅︎
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
@@ -62,7 +66,7 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`GPTBigCodeForCausalLM`
     - StarCoder, SantaCoder, WizardCoder
     - :code:`bigcode/starcoder`, :code:`bigcode/gpt_bigcode-santacoder`, :code:`WizardLM/WizardCoder-15B-V1.0`, etc.
-    -
+    - ✅︎
   * - :code:`GPTJForCausalLM`
     - GPT-J
     - :code:`EleutherAI/gpt-j-6b`, :code:`nomic-ai/gpt4all-j`, etc.
@@ -87,6 +91,14 @@ Alongside each architecture, we include some popular models that use it.
     - LLaMA, Llama 2, Meta Llama 3, Vicuna, Alpaca, Yi
     - :code:`meta-llama/Meta-Llama-3-8B-Instruct`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
     - ✅︎
+  * - :code:`LlavaForConditionalGeneration`
+    - LLaVA-1.5
+    - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
+    -
+  * - :code:`LlavaNextForConditionalGeneration`
+    - LLaVA-NeXT
+    - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
+    -
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
     - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, etc.
@@ -121,11 +133,15 @@ Alongside each architecture, we include some popular models that use it.
     - ✅︎
   * - :code:`Phi3ForCausalLM`
     - Phi-3
-    - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, etc.
+    - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, :code:`microsoft/Phi-3-medium-128k-instruct`, etc.
     -
   * - :code:`Phi3SmallForCausalLM`
     - Phi-3-Small
     - :code:`microsoft/Phi-3-small-8k-instruct`, :code:`microsoft/Phi-3-small-128k-instruct`, etc.
+    -
+  * - :code:`Phi3VForCausalLM`
+    - Phi-3-Vision
+    - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
     -
   * - :code:`QWenLMHeadModel`
     - Qwen

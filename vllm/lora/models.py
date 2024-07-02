@@ -18,6 +18,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
+from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.utils import LRUCache, is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -302,25 +303,54 @@ class LoRAModel:
                                                     "new_embeddings.bin")
         with open(lora_config_path) as f:
             config = json.load(f)
-        target_modules = config["target_modules"]
-        unexpected_modules = []
-        for module in target_modules:
-            # Compatible with more modules, such as:layers.11.self_attn.k_proj
-            part_name = module.split(".")[-1]
-            if part_name not in expected_lora_modules:
-                unexpected_modules.append(module)
-        # loaded lora's target modules must be a subset of expected_lora_modules
-
-        if unexpected_modules:
-            print(unexpected_modules, "modules")
-            raise ValueError(
-                f"While loading {lora_dir}, expected"
-                f" target modules in {expected_lora_modules}"
-                f" but received {unexpected_modules}."
-                f" Please verify that the loaded LoRA module is correct")
         if os.path.isfile(lora_tensor_path):
-            tensors = safetensors.torch.load_file(lora_tensor_path)
+            tensors: Dict[str, torch.Tensor] = {}
+            # Find unexpected modules.
+            # Use safetensor key as a source of truth to find expected modules.
+            # in peft if you have target_modules A, B, C and C does not exist
+            # in the model it won’t error and model will be trained with A, B
+            # loraified. C won’t exist in the safetensor but it will exist in
+            # the target_modules of the adapter_config.json.
+            unexpected_modules = []
+            with safetensors.safe_open(lora_tensor_path,
+                                       framework="pt") as f:  # type: ignore
+                for lora_module in f.keys():  # noqa
+                    module_name, _ = parse_fine_tuned_lora_name(lora_module)
+                    part_name = module_name.split(".")[-1]
+                    if part_name not in expected_lora_modules:
+                        unexpected_modules.append(module_name)
+                if unexpected_modules:
+                    raise ValueError(
+                        f"While loading {lora_dir}, expected"
+                        f" target modules in {expected_lora_modules}"
+                        f" but received {unexpected_modules}."
+                        f" Please verify that the loaded LoRA module is correct"
+                    )
+                # Load tensors if there are only expected modules.
+                for module in f.keys():  # noqa
+                    tensors[module] = f.get_tensor(module)
         elif os.path.isfile(lora_bin_file_path):
+            # When a bin file is provided, we rely on config to find unexpected
+            # modules.
+            unexpected_modules = []
+            target_modules = config["target_modules"]
+            for module in target_modules:
+                # Compatible with more modules,
+                # such as:layers.11.self_attn.k_proj
+                part_name = module.split(".")[-1]
+                if part_name not in expected_lora_modules:
+                    unexpected_modules.append(module)
+            # loaded lora's target modules must be a subset of
+            # expected_lora_modules. It is not reliable. See
+            # https://github.com/vllm-project/vllm/pull/5909. But there's no
+            # other better mechanism.
+            if unexpected_modules:
+                print(unexpected_modules, "modules")
+                raise ValueError(
+                    f"While loading {lora_dir}, expected"
+                    f" target modules in {expected_lora_modules}"
+                    f" but received {unexpected_modules}."
+                    f" Please verify that the loaded LoRA module is correct")
             tensors = torch.load(lora_bin_file_path)
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
@@ -363,7 +393,7 @@ class LoRAModelManager:
 
     def __init__(
         self,
-        model: nn.Module,
+        model: SupportsLoRA,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
@@ -411,7 +441,7 @@ class LoRAModelManager:
         # embeddings_indices
         self.indices_len: List[Optional[int]] = [None] * 4
 
-        self.model: nn.Module = model
+        self.model = model
         if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
                 self.model.supported_lora_modules)
@@ -428,7 +458,6 @@ class LoRAModelManager:
         self._active_loras: Dict[int, None] = {}
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
-        self.model.lora_manager = self
 
     @property
     def capacity(self) -> int:
@@ -524,6 +553,12 @@ class LoRAModelManager:
         if self.long_lora_context:
             self.long_lora_context.offsets_by_lora_id.pop(lora_id, None)
         return bool(self._registered_loras.pop(lora_id, None))
+
+    def pin_lora(self, lora_id: int) -> bool:
+        """Pin a LoRAModel in the manager cache."""
+        raise NotImplementedError(
+            "Pinning is not supported in LoRAModelManager."
+            "Use LRUCacheLoRAModelManager for pinning")  # type: ignore
 
     # TODO see if this can be vectorized
     def _set_lora_mapping(self, mapping: LoRAMapping) -> None:
@@ -776,6 +811,26 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             self._registered_loras.remove_oldest()
             return True
         return False
+
+    def pin_lora(self, lora_id: int) -> bool:
+        """Pin a LoRAModel in the manager cache."""
+        self._pin_lora_in_cpu_cache(lora_id)
+        self._pin_lora_in_gpu_cache(lora_id)
+        return True
+
+    def _pin_lora_in_cpu_cache(self, lora_id: int):
+        try:
+            self._registered_loras.pin(lora_id)
+        except ValueError as err:
+            raise ValueError("Pinning failed. "
+                             f"LoRA {lora_id} is not registered.") from err
+
+    def _pin_lora_in_gpu_cache(self, lora_id: int):
+        if lora_id not in self._active_loras:
+            # move lora to gpu if not already active
+            self.activate_lora(lora_id)
+
+        self._active_loras.pin(lora_id)
 
 
 def create_lora_manager(

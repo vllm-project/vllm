@@ -10,9 +10,10 @@ from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
+                                              DetokenizeRequest,
                                               EmbeddingRequest, ErrorResponse,
-                                              LogProbs, ModelCard, ModelList,
-                                              ModelPermission)
+                                              ModelCard, ModelList,
+                                              ModelPermission, TokenizeRequest)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob
@@ -62,6 +63,7 @@ class OpenAIServing:
         """Show available models. Right now we only have one model."""
         model_cards = [
             ModelCard(id=served_model_name,
+                      max_model_len=self.max_model_len,
                       root=self.served_model_names[0],
                       permission=[ModelPermission()])
             for served_model_name in self.served_model_names
@@ -74,51 +76,6 @@ class OpenAIServing:
         ]
         model_cards.extend(lora_cards)
         return ModelList(data=model_cards)
-
-    def _create_logprobs(
-        self,
-        token_ids: List[int],
-        top_logprobs: List[Optional[Dict[int, Logprob]]],
-        num_output_top_logprobs: Optional[int] = None,
-        initial_text_offset: int = 0,
-    ) -> LogProbs:
-        """Create OpenAI-style logprobs."""
-        logprobs = LogProbs()
-        last_token_len = 0
-        if num_output_top_logprobs:
-            logprobs.top_logprobs = []
-
-        for i, token_id in enumerate(token_ids):
-            step_top_logprobs = top_logprobs[i]
-            if step_top_logprobs is None:
-                token = self.tokenizer.decode(token_id)
-                logprobs.tokens.append(token)
-                logprobs.token_logprobs.append(None)
-                assert logprobs.top_logprobs is not None
-                logprobs.top_logprobs.append(None)
-            else:
-                token_logprob = step_top_logprobs[token_id].logprob
-                token = step_top_logprobs[token_id].decoded_token
-                logprobs.tokens.append(token)
-                token_logprob = max(token_logprob, -9999.0)
-                logprobs.token_logprobs.append(token_logprob)
-
-                if num_output_top_logprobs:
-                    assert logprobs.top_logprobs is not None
-                    logprobs.top_logprobs.append({
-                        # Convert float("-inf") to the
-                        # JSON-serializable float that OpenAI uses
-                        p.decoded_token: max(p.logprob, -9999.0)
-                        for i, p in step_top_logprobs.items()
-                    } if step_top_logprobs else None)
-
-            if len(logprobs.text_offset) == 0:
-                logprobs.text_offset.append(initial_text_offset)
-            else:
-                logprobs.text_offset.append(logprobs.text_offset[-1] +
-                                            last_token_len)
-            last_token_len = len(token)
-        return logprobs
 
     def create_error_response(
             self,
@@ -143,7 +100,9 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(
-        self, request: Union[CompletionRequest, ChatCompletionRequest]
+        self, request: Union[ChatCompletionRequest, CompletionRequest,
+                             DetokenizeRequest, EmbeddingRequest,
+                             TokenizeRequest]
     ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
@@ -155,7 +114,8 @@ class OpenAIServing:
             status_code=HTTPStatus.NOT_FOUND)
 
     def _maybe_get_lora(
-        self, request: Union[CompletionRequest, ChatCompletionRequest]
+        self, request: Union[CompletionRequest, ChatCompletionRequest,
+                             EmbeddingRequest]
     ) -> Optional[LoRARequest]:
         if request.model in self.served_model_names:
             return None
@@ -168,12 +128,14 @@ class OpenAIServing:
     def _validate_prompt_and_tokenize(
             self,
             request: Union[ChatCompletionRequest, CompletionRequest,
-                           EmbeddingRequest],
+                           DetokenizeRequest, EmbeddingRequest,
+                           TokenizeRequest],
             prompt: Optional[str] = None,
             prompt_ids: Optional[List[int]] = None,
             truncate_prompt_tokens: Optional[Annotated[int,
                                                        Field(ge=1)]] = None,
-            add_special_tokens: bool = True) -> Tuple[List[int], str]:
+            add_special_tokens: Optional[bool] = True
+    ) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
@@ -181,11 +143,12 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
-            # When using OpenAIServingChat for chat completions, the
-            # special tokens (e.g., BOS) have already been added by the
-            # chat template. Therefore, we do not need to add them again.
-            # Set add_special_tokens to False to avoid adding the BOS tokens
-            # again.
+            # When using OpenAIServingChat for chat completions, for
+            # most models the special tokens (e.g., BOS) have already
+            # been added by the chat template. Therefore, we do not
+            # need to add them again.
+            # Set add_special_tokens to False (by default) to avoid
+            # adding the BOS tokens again.
             tokenizer_kwargs: Dict[str, Any] = {
                 "add_special_tokens": add_special_tokens
             }
@@ -214,6 +177,11 @@ class OpenAIServing:
                     f"generation. Please reduce the length of the input.", )
             return input_ids, input_text
 
+        # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
+        # and does not require model context length validation
+        if isinstance(request, (TokenizeRequest, DetokenizeRequest)):
+            return input_ids, input_text
+
         if request.max_tokens is None:
             if token_num >= self.max_model_len:
                 raise ValueError(
@@ -233,3 +201,8 @@ class OpenAIServing:
                 f"Please reduce the length of the messages or completion.", )
         else:
             return input_ids, input_text
+
+    def _get_decoded_token(self, logprob: Logprob, token_id: int) -> str:
+        if logprob.decoded_token is not None:
+            return logprob.decoded_token
+        return self.tokenizer.decode(token_id)

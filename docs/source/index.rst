@@ -63,17 +63,14 @@ Documentation
 
    getting_started/installation
    getting_started/amd-installation
-   getting_started/neuron-installation
+   getting_started/openvino-installation
    getting_started/cpu-installation
+   getting_started/neuron-installation
+   getting_started/tpu-installation
+   getting_started/xpu-installation
    getting_started/quickstart
+   getting_started/debugging
    getting_started/examples/examples_index
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Offline Inference
-
-   offline_inference/llm
-   offline_inference/sampling_params
 
 .. toctree::
    :maxdepth: 1
@@ -86,6 +83,8 @@ Documentation
    serving/env_vars
    serving/usage_stats
    serving/integrations
+   serving/tensorizer
+   serving/faq
 
 .. toctree::
    :maxdepth: 1
@@ -95,26 +94,40 @@ Documentation
    models/adding_model
    models/engine_args
    models/lora
+   models/vlm
+   models/spec_decode
    models/performance
 
 .. toctree::
    :maxdepth: 1
    :caption: Quantization
 
+   quantization/supported_hardware
    quantization/auto_awq
+   quantization/fp8
    quantization/fp8_e5m2_kvcache
    quantization/fp8_e4m3_kvcache
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
+   :caption: Automatic Prefix Caching
+
+   automatic_prefix_caching/apc
+   automatic_prefix_caching/details
+
+.. toctree::
    :caption: Developer Documentation
 
+   dev/sampling_params
+   dev/offline_inference/offline_index
    dev/engine/engine_index
    dev/kernel/paged_attention
+   dev/input_processing/model_inputs_index
+   dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Community
 
    community/meetups
