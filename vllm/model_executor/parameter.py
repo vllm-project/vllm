@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Union
 
 import torch
 from torch.nn import Parameter
@@ -7,7 +7,7 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 
 __all__ = [
-    "vLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
+    "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
     "ModelWeightParameter", "ChannelQuantScaleParameter",
     "GroupQuantScaleParameter"
 ]
@@ -15,7 +15,7 @@ __all__ = [
 logger = init_logger(__name__)
 
 
-class vLLMParameter(Parameter):
+class BasevLLMParameter(Parameter):
 
     def __new__(cls, data: torch.Tensor, **kwargs):
 
@@ -33,8 +33,24 @@ class vLLMParameter(Parameter):
     def weight_loader(self):
         return self._weight_loader
 
+    def _assert_and_load(self, loaded_weight: torch.Tensor):
+        assert self.data.shape == loaded_weight.shape
+        self.data.copy_(loaded_weight)
 
-class _ColumnvLLMParameter(vLLMParameter):
+    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
+        self._assert_and_load(loaded_weight)
+
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        self._assert_and_load(loaded_weight)
+
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        self._assert_and_load(loaded_weight)
+
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        self._assert_and_load(loaded_weight)
+
+
+class _ColumnvLLMParameter(BasevLLMParameter):
 
     def __init__(self, output_dim: int, **kwargs):
         self._output_dim = output_dim
@@ -44,41 +60,48 @@ class _ColumnvLLMParameter(vLLMParameter):
     def output_dim(self):
         return self._output_dim
 
-    def load_column_parallel_weight(self, loaded_weight: torch.Tensor,
-                                    **kwargs):
+    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
         shard_size = self.data.shape[self.output_dim]
         loaded_weight = loaded_weight.narrow(self.output_dim,
                                              tp_rank * shard_size, shard_size)
+        assert self.data.shape == loaded_weight.shape
+        self.data.copy_(loaded_weight)
 
-    def load_merged_column_weight(self, param_data: torch.Tensor,
-                                  loaded_weight: torch.Tensor,
-                                  shard_offset: int, shard_size: int,
-                                  **kwargs):
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
 
+        shard_offset = kwargs.get("shard_offset")
+        shard_size = kwargs.get("shard_size")
         if isinstance(
                 self,
                 PackedvLLMParameter) and self.packed_dim == self.output_dim:
             shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
 
+        param_data = self.data
+
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
         loaded_weight = loaded_weight.narrow(self.output_dim,
                                              tp_rank * shard_size, shard_size)
-        return param_data, loaded_weight
+        assert param_data.shape == loaded_weight.shape
+        param_data.copy_(loaded_weight)
 
-    def load_qkv_weight(self, param_data: torch.Tensor,
-                        loaded_weight: torch.Tensor, num_heads: int,
-                        shard_offset: int, shard_size: int, shard_id: str,
-                        **kwargs):
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+
+        shard_offset = kwargs.get("shard_offset")
+        shard_size = kwargs.get("shard_size")
+        shard_id = kwargs.get("shard_id")
+        num_heads = kwargs.get("num_heads")
+
         if isinstance(
                 self,
                 PackedvLLMParameter) and self.output_dim == self.packed_dim:
             shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
 
+        param_data = self.data
         tp_rank = get_tensor_model_parallel_rank()
         shard_id = tp_rank if shard_id == "q" else tp_rank // num_heads
         param_data = param_data.narrow(self.output_dim, shard_offset,
@@ -86,7 +109,8 @@ class _ColumnvLLMParameter(vLLMParameter):
         loaded_weight = loaded_weight.narrow(self.output_dim,
                                              shard_id * shard_size, shard_size)
 
-        return param_data, loaded_weight
+        assert param_data.shape == loaded_weight.shape
+        param_data.copy_(loaded_weight)
 
 
 # has column and row dims
@@ -105,7 +129,12 @@ class ModelWeightParameter(_ColumnvLLMParameter):
         shard_size = self.data.shape[self.input_dim]
         loaded_weight = loaded_weight.narrow(self.input_dim,
                                              tp_rank * shard_size, shard_size)
-        return loaded_weight
+
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
+
+        assert self.data.shape == loaded_weight.shape
+        self.data.copy_(loaded_weight)
 
 
 # group scales are loaded the same as our weights; have column and row
@@ -118,7 +147,7 @@ class ChannelQuantScaleParameter(_ColumnvLLMParameter):
     pass
 
 
-class PerTensorScaleParameter(vLLMParameter):
+class PerTensorScaleParameter(BasevLLMParameter):
 
     def __init__(self, logical_widths: List[int], **kwargs):
         self.logical_widths = logical_widths
@@ -135,24 +164,27 @@ class PerTensorScaleParameter(vLLMParameter):
         return self.qkv_idxs[shard_id]
 
     def load_merged_column_weight(self, *args, **kwargs):
-        return self._col_shard_splitter(*args, **kwargs)
+        self._col_shard_splitter(*args, **kwargs)
 
     def load_qkv_weight(self, *args, **kwargs):
-        return self._col_shard_splitter(*args, **kwargs)
+        self._col_shard_splitter(*args, **kwargs)
 
     def load_column_parallel_weight(self, *args, **kwargs):
-        return self._col_shard_splitter(*args, **kwargs)
+        self._col_shard_splitter(*args, **kwargs)
 
-    def _col_shard_splitter(self, param_data: torch.Tensor,
-                            loaded_weight: torch.Tensor, shard_id: Union[str,
-                                                                         int],
-                            **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _col_shard_splitter(self, loaded_weight: torch.Tensor,
+                            shard_id: Union[str, int], **kwargs):
+
+        param_data = self.data
         shard_id = self._shard_id_as_int(shard_id)
         offset = sum(self.logical_widths[:shard_id])
         size = self.logical_widths[shard_id]
         # update loaded weight with copies for broadcast.
         loaded_weight = loaded_weight.repeat(size)
-        return param_data[offset:offset + size], loaded_weight
+        param_data = param_data[offset:offset + size]
+
+        assert param_data.shape == loaded_weight.shape
+        param_data.copy_(loaded_weight)
 
 
 class PackedvLLMParameter(ModelWeightParameter):

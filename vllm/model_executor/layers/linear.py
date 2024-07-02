@@ -13,17 +13,11 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.parameter import (ModelWeightParameter,
-                                           PackedvLLMParameter,
-                                           PerTensorScaleParameter,
-                                           _ColumnvLLMParameter, vLLMParameter)
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           PackedvLLMParameter)
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
-
-ROW_PARALLEL_LOAD_SUPPORTED = (ModelWeightParameter)
-COLUMN_PARALLEL_LOAD_SUPPORTED = (PerTensorScaleParameter,
-                                  _ColumnvLLMParameter)
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
@@ -305,13 +299,7 @@ class ColumnParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
-        param_data = param.data
-
-        loaded_weight = param.load_column_parallel_weight(
-            loaded_weight=loaded_weight)
-
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(self, input_):
         bias = self.bias if not self.skip_bias_add else None
@@ -494,7 +482,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def _load_no_shard_id(self, param: vLLMParameter, loaded_weight):
+    def _load_no_shard_id(self, param: BasevLLMParameter,
+                          loaded_weight: torch.Tensor):
         current_shard_offset = 0
         shard_offsets: List[Tuple[int, int, int]] = []
         for i, output_size in enumerate(self.output_sizes):
@@ -517,7 +506,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
     def weight_loader_v2(self,
-                         param: vLLMParameter,
+                         param: BasevLLMParameter,
                          loaded_weight: torch.Tensor,
                          loaded_shard_id: Optional[int] = None):
         param_data = param.data
@@ -535,16 +524,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
         shard_size = self.output_sizes[loaded_shard_id] // tp_size
 
-        if isinstance(param, COLUMN_PARALLEL_LOAD_SUPPORTED):
-            param_data, loaded_weight = param.load_merged_column_weight(
-                param_data=param_data,
-                loaded_weight=loaded_weight,
-                shard_id=loaded_shard_id,
-                shard_offset=shard_offset,
-                shard_size=shard_size)
-
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        param.load_merged_column_weight(loaded_weight=loaded_weight,
+                                        shard_id=loaded_shard_id,
+                                        shard_offset=shard_offset,
+                                        shard_size=shard_size)
 
 
 class QKVParallelLinear(ColumnParallelLinear):
@@ -630,7 +613,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         }
         return shard_size_mapping.get(loaded_shard_id)
 
-    def _load_no_shard_id(self, param: vLLMParameter,
+    def _load_no_shard_id(self, param: BasevLLMParameter,
                           loaded_weight: torch.Tensor):
         shard_offsets = [
             # (shard_id, shard_offset, shard_size)
@@ -658,7 +641,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
     def weight_loader_v2(self,
-                         param: vLLMParameter,
+                         param: BasevLLMParameter,
                          loaded_weight: torch.Tensor,
                          loaded_shard_id: Optional[str] = None):
 
@@ -676,17 +659,11 @@ class QKVParallelLinear(ColumnParallelLinear):
         shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
         shard_size = self._get_shard_size_mapping(loaded_shard_id)
 
-        if isinstance(param, COLUMN_PARALLEL_LOAD_SUPPORTED):
-            param_data, loaded_weight = param.load_qkv_weight(
-                param_data=param_data,
-                loaded_weight=loaded_weight,
-                num_heads=self.num_kv_head_replicas,
-                shard_id=loaded_shard_id,
-                shard_offset=shard_offset,
-                shard_size=shard_size)
-
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        param.load_qkv_weight(loaded_weight=loaded_weight,
+                              num_heads=self.num_kv_head_replicas,
+                              shard_id=loaded_shard_id,
+                              shard_offset=shard_offset,
+                              shard_size=shard_size)
 
     def weight_loader(self,
                       param: Parameter,
@@ -931,18 +908,10 @@ class RowParallelLinear(LinearBase):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def weight_loader_v2(self, param: vLLMParameter,
+    def weight_loader_v2(self, param: BasevLLMParameter,
                          loaded_weight: torch.Tensor):
 
-        if isinstance(param, ROW_PARALLEL_LOAD_SUPPORTED):
-            loaded_weight = param.load_row_parallel_weight(
-                loaded_weight=loaded_weight)
-
-        if len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
-
-        assert param.data.shape == loaded_weight.shape
-        param.data.copy_(loaded_weight)
+        param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(self, input_):
         # Set up backprop all-reduce.
