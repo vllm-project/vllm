@@ -11,11 +11,13 @@ from contextlib import contextmanager
 
 from vllm.logger import init_logger
 from vllm.utils import get_vllm_instance_id
+from typing import List, Any
 
 logger = init_logger(__name__)
 
 
 class FileWriter(threading.Thread):
+
     def __init__(self, filename, event_queue):
         super().__init__()
         self.filename = filename
@@ -46,11 +48,11 @@ class FileWriter(threading.Thread):
 
 
 class Profiler:
-    profiling_trace_events = queue.Queue()
+    profiling_trace_events: queue.Queue = queue.Queue()
     event_tid = {'counter': 1, 'external': 2, 'internal': 3}
     vllm_instance_id = get_vllm_instance_id()
     filename = f'server_events_{vllm_instance_id}.json'
-    event_cache = []
+    event_cache: List[Any] = []
 
     def __init__(self):
         self.enabled = os.getenv('VLLM_PROFILER_ENABLED',

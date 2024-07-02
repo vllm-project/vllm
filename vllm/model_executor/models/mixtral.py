@@ -279,10 +279,9 @@ class MixtralMoE(nn.Module):
 
         if is_hpu():
             final_hidden_states = static_fused_moe(hidden_states,
-                        self.w13_weight,
-                        self.w2_weight,
-                        router_logits,
-                        self.top_k)
+                                                   self.w13_weight,
+                                                   self.w2_weight,
+                                                   router_logits, self.top_k)
         else:
             final_hidden_states = fused_moe(hidden_states,
                                             self.w13_weight,
@@ -301,8 +300,9 @@ class MixtralMoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
-        return (final_hidden_states.view(batch_size, sequence_length, hidden_size) if is_hpu() 
-                else final_hidden_states.view(num_tokens, hidden_size))
+        return (final_hidden_states.view(batch_size, sequence_length,
+                                         hidden_size) if is_hpu() else
+                final_hidden_states.view(num_tokens, hidden_size))
 
 
 class MixtralAttention(nn.Module):
@@ -651,9 +651,10 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
-            
+
             if is_hpu():
                 torch.hpu.synchronize()
+
 
 def all_close_1d(x: torch.Tensor) -> bool:
     assert len(x.shape) == 1

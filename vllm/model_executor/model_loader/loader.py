@@ -262,7 +262,8 @@ class DefaultModelLoader(BaseModelLoader):
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
-            load_device = torch.device(device_config.device) if not is_hpu() else 'cpu' # FIXME(kzawora): this is a nasty workaround!!!
+            load_device = torch.device(device_config.device) if not is_hpu(
+            ) else 'cpu'  # FIXME(kzawora): this is a nasty workaround!!!
             with torch.device(load_device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config,
@@ -284,7 +285,8 @@ class DefaultModelLoader(BaseModelLoader):
                 if hasattr(module, "process_weights_after_loading"):
                     module.process_weights_after_loading()
         if is_hpu():
-            model = model.to('hpu') # FIXME(kzawora): this is a nasty workaround!!!
+            model = model.to(
+                'hpu')  # FIXME(kzawora): this is a nasty workaround!!!
         return model.eval()
 
 

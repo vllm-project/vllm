@@ -87,7 +87,7 @@ def get_attn_backend(
         logger.info("Using HabanaAttention backend.")
         from vllm.attention.backends.habana_attn import (  # noqa: F401
             HabanaAttentionBackend)
-        return HabanaAttentionBackend       
+        return HabanaAttentionBackend
     elif backend == _Backend.PALLAS:
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend

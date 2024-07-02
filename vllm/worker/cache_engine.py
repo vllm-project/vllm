@@ -76,11 +76,11 @@ class CacheEngine:
         for _ in range(self.num_layers):
             if device == 'hpu':
                 key_cache = torch.zeros(kv_cache_shape,
-                        dtype=self.dtype,
-                        device=device)
+                                        dtype=self.dtype,
+                                        device=device)
                 value_cache = torch.zeros(kv_cache_shape,
-                        dtype=self.dtype,
-                        device=device)
+                                          dtype=self.dtype,
+                                          device=device)
                 kv_layer = (key_cache, value_cache)
                 kv_cache.append(kv_layer)
             else:

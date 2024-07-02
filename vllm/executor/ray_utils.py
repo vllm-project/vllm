@@ -76,10 +76,12 @@ def initialize_ray_cluster(
                  ignore_reinit_error=True,
                  num_gpus=parallel_config.world_size)
     else:
-        ray.init(address=ray_address, ignore_reinit_error=True,
-                 log_to_driver=not os.environ.get('VLLM_RAY_DISABLE_LOG_TO_DRIVER', '0') != '0')
+        ray.init(address=ray_address,
+                 ignore_reinit_error=True,
+                 log_to_driver=not os.environ.get(
+                     'VLLM_RAY_DISABLE_LOG_TO_DRIVER', '0') != '0')
     ray_accel_name = "HPU" if is_hpu() else "GPU"
-    
+
     if parallel_config.placement_group:
         # Placement group is already set.
         return
@@ -95,7 +97,8 @@ def initialize_ray_cluster(
             bundle_gpus = bundle.get(ray_accel_name, 0)
             if bundle_gpus > 1:
                 raise ValueError(
-                    f"Placement group bundle cannot have more than 1 {ray_accel_name}.")
+                    f"Placement group bundle cannot have more than 1 {ray_accel_name}."
+                )
             if bundle_gpus:
                 gpu_bundles += 1
         if parallel_config.world_size > gpu_bundles:
@@ -109,7 +112,9 @@ def initialize_ray_cluster(
                 f"The number of required {ray_accel_name}s exceeds the total number of "
                 f"available {ray_accel_name}s in the cluster.")
         # Create a new placement group
-        placement_group_specs = ([{ray_accel_name: 1}] * parallel_config.world_size)
+        placement_group_specs = ([{
+            ray_accel_name: 1
+        }] * parallel_config.world_size)
         current_placement_group = ray.util.placement_group(
             placement_group_specs)
         # Wait until PG is ready - this will block until all

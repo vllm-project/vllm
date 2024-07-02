@@ -510,7 +510,8 @@ class SamplingTensors:
             dtype=torch.int,
             pin_memory=pin_memory,
         )
-        idx_dtype = torch.long if not is_hpu() else torch.int # Gaudi doesn't have full native int64 support 
+        idx_dtype = torch.long if not is_hpu(
+        ) else torch.int  # Gaudi doesn't have full native int64 support
         sample_indices_t = torch.tensor(
             sample_indices,
             device="cpu",
@@ -598,7 +599,8 @@ class SamplingTensors:
             else:
                 generator = random.Random(str((seed, ) + extra_entropy))
                 randint_fn = generator.randint
-            idx_dtype = torch.long if not is_hpu() else torch.int # Gaudi doesn't have full native int64 support 
+            idx_dtype = torch.long if not is_hpu(
+            ) else torch.int  # Gaudi doesn't have full native int64 support
             lo, hi = torch.iinfo(idx_dtype).min, torch.iinfo(idx_dtype).max
             # If the user/random sets seed = 0 but request should
             # have sampling, we need to change it to something
