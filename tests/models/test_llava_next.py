@@ -29,9 +29,6 @@ def iter_llava_next_configs(model_name: str):
     # Need to use the max possible feature size for profile_run
     image_hw_to_feature_size = {
         (336, 336): 2928,
-        (672, 672): 2928,
-        (1344, 336): 2928,
-        (336, 1344): 2928,
     }
 
     for (h, w), f in image_hw_to_feature_size.items():
@@ -50,7 +47,7 @@ model_and_vl_config = [
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
-                                         Optional["SampleLogprobs"]],
+                                         Optional[SampleLogprobs]],
                       vlm_config: VisionLanguageConfig, model_id: str):
     """Sanitize vllm output to be comparable with hf output.
     The function reduces `input_ids` from 1, 32000, 32000, ..., 32000,

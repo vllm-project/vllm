@@ -14,7 +14,8 @@ def run_llava_next():
         model="llava-hf/llava-v1.6-mistral-7b-hf",
         image_token_id=32000,
         image_input_shape="1,3,336,336",
-        image_feature_size=1176,  # The value does not matter
+        # Use the maximum possible value for memory profiling
+        image_feature_size=2928,
     )
 
     prompt = "[INST] <image>\nWhat is shown in this image? [/INST]"

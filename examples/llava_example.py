@@ -14,7 +14,7 @@ def run_llava():
         model="llava-hf/llava-1.5-7b-hf",
         image_token_id=32000,
         image_input_shape="1,3,336,336",
-        image_feature_size=576,  # The value does not matter
+        image_feature_size=576,
     )
 
     prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"

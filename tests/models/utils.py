@@ -36,7 +36,7 @@ def check_outputs_equal(
 
 TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
                                                                     float]],
-                                                          "SampleLogprobs"]]]
+                                                          SampleLogprobs]]]
 
 
 def check_logprobs_close(

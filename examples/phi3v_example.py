@@ -21,7 +21,8 @@ def run_phi3v():
         trust_remote_code=True,
         image_token_id=32044,
         image_input_shape="1,3,1008,1344",
-        image_feature_size=1921,  # The value does not matter
+        # Use the maximum possible value for memory profiling
+        image_feature_size=2653,
         max_num_seqs=5,
     )
 

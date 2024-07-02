@@ -22,9 +22,9 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 
 
 def iter_phi3v_configs(model_name: str):
+    # Need to use the max possible feature size for profile_run
     image_hw_to_feature_size = {
-        (1008, 1344): 1921,
-        (2016, 2688): 1933,
+        (1008, 1344): 2653,
     }
 
     for (h, w), f in image_hw_to_feature_size.items():
@@ -41,7 +41,7 @@ model_and_vl_config = [
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
-                                         Optional["SampleLogprobs"]],
+                                         Optional[SampleLogprobs]],
                       vlm_config: VisionLanguageConfig, model_id: str):
     """Sanitize vllm output to be comparable with hf output.
     The function reduces `input_ids` from 1, 32000, 32000, ..., 32000,
