@@ -525,7 +525,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                      is not None else 1))
 
                 mm_data = seq_group_metadata.multi_modal_data
-                if mm_data is not None:
+                if mm_data:
                     # Process multi-modal data
                     mm_kwargs = self.multi_modal_input_mapper(mm_data)
                     for k, v in mm_kwargs.items():
@@ -839,7 +839,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
         finished_requests_ids = [seq.request_id for seq in seqs]
-        model_input = self.prepare_model_input(seqs, finished_requests_ids)
+        model_input = self.prepare_model_input(
+            seqs,
+            finished_requests_ids= finished_requests_ids
+        )
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = self.model.make_empty_intermediate_tensors(
@@ -1081,7 +1084,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self.model.get_seqlen_agnostic_capture_inputs(
                             batch_size)
                     })
-                hidden_states = graph_runner.capture(**capture_inputs)
+                graph_runner.capture(**capture_inputs)
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[virtual_engine][batch_size] = (
                     graph_runner)

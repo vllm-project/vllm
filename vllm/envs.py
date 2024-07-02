@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
     VLLM_XLA_CACHE_PATH: str = "~/.vllm/xla_cache/"
+    VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -248,6 +249,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH":
     lambda: os.getenv("VLLM_XLA_CACHE_PATH", "~/.vllm/xla_cache/"),
+    "VLLM_FUSED_MOE_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
 }
 
 # end-env-vars-definition
