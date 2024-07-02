@@ -578,7 +578,7 @@ class EngineArgs:
             default=EngineArgs.ngram_prompt_lookup_min,
             help='Min size of window for ngram prompt lookup in speculative '
             'decoding.')
-        
+
         parser.add_argument(
             '--spec-decoding-acceptance-method',
             type=str,

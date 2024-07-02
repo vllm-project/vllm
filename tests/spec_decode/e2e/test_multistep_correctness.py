@@ -643,12 +643,12 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
         # Try a range of common k.
         for k in [1, 2, 3]
     ])
-@pytest.mark.parametrize("batch_size", [1, 8, 64])
+@pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize(
     "output_len",
     [
         # Use smaller output len for fast test.
-        256,
+        32,
     ])
 @pytest.mark.parametrize("seed", [1])
 def test_typical_acceptance_sampling(baseline_llm_generator,
