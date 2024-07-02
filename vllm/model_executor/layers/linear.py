@@ -2,9 +2,11 @@ from abc import abstractmethod
 from typing import Dict, List, Optional, Tuple
 
 import torch
+from torch.nn.utils import skip_init
+
+
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
-
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -102,13 +104,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
-
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         if not hasattr(layer, "ipex_linear"):
-            linear = torch.nn.Linear(layer.weight.shape[1], layer.weight.shape[0], bias=True if bias is not None else False)
+            linear = skip_init(torch.nn.Linear, layer.weight.shape[1], layer.weight.shape[0], bias=True if bias is not None else False)
             linear.weight = layer.weight
             if bias is not None:
                 linear.bias = bias
