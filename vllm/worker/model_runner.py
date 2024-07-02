@@ -1359,8 +1359,8 @@ class CUDAGraphRunner:
         # Return the output tensor.
         if get_pp_group().is_last_rank:
             return self.output_buffers["hidden_states"]
-        else:
-            return self.output_buffers
+
+        return self.output_buffers
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)

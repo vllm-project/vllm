@@ -219,11 +219,11 @@ class GPT2Model(nn.Module):
                                   kv_caches[i - self.start_layer],
                                   attn_metadata)
 
-        if get_pp_group().is_last_rank:
-            hidden_states = self.ln_f(hidden_states)
-            return hidden_states
-        else:
+        if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
+
+        hidden_states = self.ln_f(hidden_states)
+        return hidden_states
 
 
 class GPT2LMHeadModel(nn.Module):

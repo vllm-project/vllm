@@ -311,14 +311,14 @@ class LlamaModel(nn.Module):
                 residual,
             )
 
-        if get_pp_group().is_last_rank:
-            hidden_states, _ = self.norm(hidden_states, residual)
-            return hidden_states
-        else:
+        if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
+
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
 
 
 class LlamaForCausalLM(nn.Module, SupportsLoRA):
