@@ -8,6 +8,7 @@ import openai  # use the official client for correctness check
 import pytest
 # using Ray for overall ease of process management, parallel requests,
 # and debugging.
+import asyncio
 import ray
 import requests
 # downloading lora to test lora requests
@@ -646,3 +647,62 @@ async def test_detokenize(client: openai.AsyncOpenAI, model_name: str):
                              })
     response.raise_for_status()
     assert response.json() == {"prompt": prompt}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("max_queue_len", [1, 2, 3, 4])
+async def test_max_queue_length(model_name: str, max_queue_len: int):
+
+    print(f"Name of model: {model_name}")
+    print(f"Test max queue length of {max_queue_len}")
+
+    server = RemoteOpenAIServer([
+        "--model",
+        MODEL_NAME,
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",
+        "--max-queue-length",
+        str(max_queue_len),
+        "--max-num-seqs",
+        "1",
+    ])
+
+    client = server.get_async_client()
+
+    sample_prompts = [
+        "Who won the world series in 2020?",
+        "Where was the 2020 world series played?",
+        "How long did the 2020 world series last?",
+        "What were some television viewership statistics?",
+        "Why was the 2020 world series so popular?"
+    ]
+
+    coroutines = [
+        asyncio.create_task(
+            client.completions.create(
+                prompt=sample_prompt,
+                model=model_name,
+                temperature=0.8,
+                presence_penalty=0.2,
+                max_tokens=400,
+            )) for sample_prompt in sample_prompts
+    ]
+    responses = await asyncio.gather(*coroutines, return_exceptions=True)
+
+    err_cnt = 0
+    for response in responses:
+        if "code" in response.__dict__:
+            assert response.__dict__["code"] == 503
+            err_cnt += 1
+
+    # Ensure that the number of err requests equals:
+    # number of requests - max queue len - run queue len
+    # where "-" is a minus sign
+    correctness_check = err_cnt == (len(sample_prompts) - max_queue_len - 1)
+    print("Correct number of errors? ", correctness_check)
+    assert correctness_check

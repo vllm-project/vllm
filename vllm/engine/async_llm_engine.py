@@ -503,13 +503,10 @@ class AsyncLLMEngine:
         """Kick the engine to process the waiting requests.
 
         Returns True if there are in-progress requests."""
-
         new_requests, finished_requests = (
             self._request_tracker.get_new_and_finished_requests())
 
         for new_request in new_requests:
-            # Add the request into the vLLM engine's waiting queue.
-            # TODO: Maybe add add_request_batch to reduce Ray overhead
             try:
                 if self.engine_use_ray:
                     await self.engine.add_request.remote(  # type: ignore
