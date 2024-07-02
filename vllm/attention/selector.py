@@ -62,8 +62,8 @@ def get_attn_backend(
             ROCmFlashAttentionBackend)
         return ROCmFlashAttentionBackend
     elif backend == _Backend.TORCH_SDPA:
-        assert is_cpu(), RuntimeError(
-            "Torch SDPA backend is only used for the CPU device.")
+        # assert is_cpu(), RuntimeError(
+        #     "Torch SDPA backend is only used for the CPU device.")
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
         return TorchSDPABackend

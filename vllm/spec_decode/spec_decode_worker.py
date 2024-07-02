@@ -67,7 +67,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         typical_acceptance_sampler_posterior_threshold=speculative_config.
         typical_acceptance_sampler_posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
-        typical_acceptance_sampler_posterior_alpha
+        typical_acceptance_sampler_posterior_alpha,
         cpu_draft_worker=speculative_config.cpu_draft_worker)
 
     return spec_decode_worker
@@ -132,8 +132,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
-            if draft_tp == 1:
-                draft_worker_kwargs["model_runner_cls"] = TP1DraftModelRunner
+            # if draft_tp == 1:
+            #     draft_worker_kwargs["model_runner_cls"] = TP1DraftModelRunner
             if cpu_draft_worker:
                 cpu_draft_worker_kwargs = copy.deepcopy(draft_worker_kwargs)
                 from vllm.executor.cpu_executor import (
