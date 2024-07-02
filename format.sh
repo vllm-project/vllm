@@ -15,7 +15,6 @@
 
 # Cause the script to exit if a single command fails
 set -eo pipefail
-source ~/venv/bin/activate
 
 # this stops git rev-parse from failing if we run this from the .git directory
 builtin cd "$(dirname "${BASH_SOURCE:-$0}")"
