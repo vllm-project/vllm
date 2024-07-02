@@ -138,6 +138,7 @@ class ExecutorAsyncBase(ExecutorBase):
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
+        prompt_adapter_config: Optional[PromptAdapterConfig],
     ) -> None:
         # This locks each pipeline parallel stage so multiple virtual engines
         # can't execute on the same stage at the same time
@@ -149,7 +150,7 @@ class ExecutorAsyncBase(ExecutorBase):
         super().__init__(model_config, cache_config, parallel_config,
                          scheduler_config, device_config, load_config,
                          lora_config, vision_language_config,
-                         speculative_config)
+                         speculative_config, prompt_adapter_config)
 
     @abstractmethod
     async def execute_model_async(
