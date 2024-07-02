@@ -6,10 +6,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
-from vllm.distributed import broadcast_tensor_dict
+from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                           SamplerOutput)
 from vllm.utils import (enable_trace_function_call_for_thread, is_hip,
                         update_environment_variables)
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
@@ -124,6 +125,7 @@ class WorkerInput:
     blocks_to_swap_in: Optional[torch.Tensor] = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
+    virtual_engine: int = 0
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -139,6 +141,7 @@ class WorkerInput:
             blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
+            virtual_engine=tensor_dict["virtual_engine"],
         )
 
     def as_broadcastable_tensor_dict(
@@ -151,6 +154,7 @@ class WorkerInput:
             "blocks_to_swap_in": self.blocks_to_swap_in,
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
+            "virtual_engine": self.virtual_engine,
         }
 
         return tensor_dict
@@ -181,11 +185,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     @property
     @abstractmethod
-    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         """
-        Get the kv cache to pass to the worker's model runner. Used by the
-        default `execute_model`. If the worker's model runner does not follow
-        the ModelRunnerBase interface, then inherit from WorkerBase instead.
+        Gets the list of kv caches to pass to the worker's model runner. Each
+        element in the list is a kv cache corresponding to a particular virtual
+        engine (PP stream). Used by the default `execute_model`. If the worker's
+        model runner does not follow the ModelRunnerBase interface, then inherit
+        from WorkerBase instead.
         """
         raise NotImplementedError
 
@@ -227,7 +233,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 execute_model_req=execute_model_req)
             model_input: ModelRunnerInputBase = (
                 self.model_runner.prepare_model_input(
-                    execute_model_req.seq_group_metadata_list))
+                    execute_model_req.seq_group_metadata_list,
+                    execute_model_req.virtual_engine))
             num_steps = execute_model_req.num_steps
 
             if self.do_metadata_broadcast:
@@ -255,8 +262,23 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
-        return self.model_runner.execute_model(model_input, self.kv_cache,
-                                               num_steps)
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = IntermediateTensors(
+                get_pp_group().recv_tensor_dict())
+
+        output = self.model_runner.execute_model(
+            model_input, self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None, intermediate_tensors,
+            num_steps)
+
+        if not get_pp_group().is_last_rank:
+            get_pp_group().send_tensor_dict(output.tensors)
+            return [None]
+
+        # Worker only supports single-step execution. Wrap the output in a
+        # list to conform to interface.
+        return output
 
 
 class WorkerWrapperBase:
