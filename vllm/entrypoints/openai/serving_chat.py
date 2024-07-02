@@ -84,32 +84,6 @@ class OpenAIServingChat(OpenAIServing):
         self.tool_prompt_role: str = tool_prompt_role
         self.tool_use_prompt_template: Optional[jinja2.Template] = None
 
-        if self.enable_auto_tools and tool_prompt_jinja_template_path:
-            self.tool_use_prompt_template = self._load_tool_prompt_template(tool_prompt_jinja_template_path)
-        elif self.enable_auto_tools and not tool_prompt_jinja_template_path:
-            raise ValueError(
-                'Argument --enable-auto-tool-choice requires --tool-use-prompt-path to set the prompt for instructing '
-                'the model on which tools are available and how to use them.'
-            )
-
-
-    # TODO set the system prompt for tools and system prompt role for tools if applicable
-    def _load_tool_prompt_template(self, tool_prompt_jinja_template_path: str) -> jinja2.Template:
-        """
-        Load the Jinja template for the tool prompt
-        """
-        print("Loading tool prompt template!", tool_prompt_jinja_template_path)
-
-        template = env.get_template(tool_prompt_jinja_template_path)
-        if not template:
-            raise FileNotFoundError(
-                f'The specified tool use prompt template {tool_prompt_jinja_template_path} was not found'
-            )
-
-        # Load the JINJA template
-        return template
-
-
     def _load_chat_template(self, chat_template: Optional[str]):
         tokenizer = self.tokenizer
 
@@ -260,24 +234,19 @@ class OpenAIServingChat(OpenAIServing):
                 conversation.extend(chat_parsed_result.messages)
                 image_futures.extend(chat_parsed_result.image_futures)
 
-            # if specified, add the system prompt template
-            if self.enable_auto_tools and self.tool_use_prompt_template:
-                # create the system prompt from the template
-                templated_prompt_with_tools: str = self.tool_use_prompt_template.render(tools=request.tools)
+            tools = None
+            if self.enable_auto_tools and request.tools:
+                tools = [tool.model_dump() for tool in request.tools]
 
-                # if there is already a system prompt
-                if conversation[0]['role'] == 'system':
-                    conversation[0]['content'] = f'{templated_prompt_with_tools}\n\n{conversation[0]["content"]}'
-
-                # if there isn't a system prompt already
-                else:
-                    conversation.insert(0, ConversationMessage(role='system', content=templated_prompt_with_tools))
-
+            print('using tools', tools)
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
+                tools=tools
             )
+
+            print('fully tokenized prompt:', prompt)
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))

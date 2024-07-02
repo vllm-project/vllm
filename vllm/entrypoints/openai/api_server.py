@@ -131,12 +131,19 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
+
+    # if there's an error, return it
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
+
+    # if streaming is requested, handle streaming
+    # TODO implement for streaming later
     if request.stream:
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
+
+    # handle non-streaming requests
     else:
         assert isinstance(generator, ChatCompletionResponse)
         return JSONResponse(content=generator.model_dump())
