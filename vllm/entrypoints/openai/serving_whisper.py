@@ -49,13 +49,6 @@ pattern = r'<\|\-?\d+\.?\d*\|>'
 pattern_pair = r'<\|(\d+\.\d+)\|>(.*?)<\|(\d+\.\d+)\|>'
 
 
-@dataclass(frozen=True)
-class ChatMessageParseResult:
-    messages: List[ConversationMessage]
-    image_futures: List[Awaitable[ImagePixelData]] = field(
-        default_factory=list)
-
-
 class OpenAIServingWhisper(OpenAIServing):
 
     def __init__(self,
@@ -88,8 +81,7 @@ class OpenAIServingWhisper(OpenAIServing):
         repetition_penalty,
         stream,
         raw_request: Optional[Request] = None
-    ) -> Union[ErrorResponse, AsyncGenerator[str, None],
-               ChatCompletionResponse]:
+    ):
 
         if len(file) > self.max_size_whisper:
             return self.create_error_response(f"maximum size for file is {self.max_size_whisper}MB only")
@@ -148,24 +140,48 @@ class OpenAIServingWhisper(OpenAIServing):
         request_id,
         trace_headers,
     ):
-        prompt_text = '<|startoftranscript|>'
-        prompt_ids = self.tokenizer.encode(prompt_text, add_special_tokens = False)
+        if language is None:
+            prompt_ids = [50258]
+            inputs: PromptInputs = {
+                "prompt": None,
+                "prompt_token_ids": prompt_ids,
+                "whisper_data": wav_data
+            }
+            lang_sampling_params = SamplingParams(
+                max_tokens = 1, temperature = 0, skip_special_tokens = False)
 
+            result_generator = self.engine.generate(
+                inputs,
+                lang_sampling_params,
+                request_id=request_id,
+                lora_request = None,
+                trace_headers=trace_headers,
+            )
+            async for res in result_generator:
+                if raw_request is not None and await raw_request.is_disconnected():
+                    # Abort the request if the client disconnects.
+                    await self.engine.abort(request_id)
+                    yield self.create_error_response("Client disconnected")
+                final_res = res
+            assert final_res is not None
+
+            lang_token = final_res.outputs[0].token_ids[0]
+        else:
+            lang_token = self.tokenizer.encode(
+                lang_token = f'<|{language}|>', add_special_tokens = False)[0]
+
+        prompt_ids = [50258, lang_token, 50360, 50365]
         inputs: PromptInputs = {
-            "prompt": prompt_text,
+            "prompt": None,
             "prompt_token_ids": prompt_ids,
             "whisper_data": wav_data
         }
-        sampling_params = SamplingParams(max_tokens = 1, temperature = 0, skip_special_tokens = False)
 
-        result_generator = self.engine.generate(
-            inputs,
-            sampling_params,
-            request_id=request_id,
-            lora_request = None,
-            trace_headers=trace_headers,
-        )
-        
+        text = processor.tokenizer.decode(prompt_ids, decode_with_timestamps = True)
+
+        async for res in result_generator:
+            print(res.outputs)
+            yield res.outputs
 
 
     async def audio_transcription_stream_generator(
@@ -179,195 +195,30 @@ class OpenAIServingWhisper(OpenAIServing):
         
         wav_data = np.array([], dtype=np.float32)
         last_timestamp = 0
-        for chunk in stream_iterator:
-            wav_data = np.concatenate([wav_data, frame])
-            audio_len = len(wav_data) / sample_rate
-            if audio_len >= maxlen:
-                async for t in generate(
-                    sampling_params=sampling_params,
-                    language=language,
-                    wav_data=wav_data,
-                    last_timestamp=last_timestamp,
-                ):
-                    yield t
-
-                last_timestamp += audio_len
-                wav_data = np.array([], dtype=np.float32)
-
-            if len(wav_data):
-
-
-        inputs: PromptInputs = {
-            "prompt": prompt_text,
-            "prompt_token_ids": prompt_ids,
-        }
-
-        # Send response for each token for each request.n (index)
-        result_generator = self.engine.generate(
-            inputs,
-            sampling_params,
-            request_id,
-            lora_request,
-            trace_headers=trace_headers,
-        )
-        assert request.n is not None
-        previous_texts = [""] * request.n
-        previous_num_tokens = [0] * request.n
-        finish_reason_sent = [False] * request.n
         try:
-            async for res in result_generator:
-                # We need to do it here, because if there are exceptions in
-                # the result_generator, it needs to be sent as the FIRST
-                # response (by the try...catch).
-                if first_iteration:
-                    # Send first response for each request.n (index) with
-                    # the role
-                    role = self.get_chat_request_role(request)
-                    for i in range(request.n):
-                        choice_data = ChatCompletionResponseStreamChoice(
-                            index=i,
-                            delta=DeltaMessage(role=role),
-                            logprobs=None,
-                            finish_reason=None)
-                        chunk = ChatCompletionStreamResponse(
-                            id=request_id,
-                            object=chunk_object_type,
-                            created=created_time,
-                            choices=[choice_data],
-                            model=model_name)
-                        if (request.stream_options
-                                and request.stream_options.include_usage):
-                            chunk.usage = None
-                        data = chunk.model_dump_json(exclude_unset=True)
-                        yield f"data: {data}\n\n"
+            for chunk in stream_iterator:
+                wav_data = np.concatenate([wav_data, frame])
+                audio_len = len(wav_data) / sample_rate
+                if audio_len >= maxlen:
+                    async for t in generate(
+                        sampling_params=sampling_params,
+                        language=language,
+                        wav_data=wav_data,
+                        last_timestamp=last_timestamp,
+                    ):
+                        yield t
 
-                    # Send response to echo the input portion of the
-                    # last message
-                    if request.echo:
-                        last_msg_content = ""
-                        if conversation and conversation[-1].get(
-                                "content") and conversation[-1].get(
-                                    "role") == role:
-                            last_msg_content = conversation[-1]["content"]
+                    last_timestamp += audio_len
+                    wav_data = np.array([], dtype=np.float32)
 
-                        if last_msg_content:
-                            for i in range(request.n):
-                                choice_data = (
-                                    ChatCompletionResponseStreamChoice(
-                                        index=i,
-                                        delta=DeltaMessage(
-                                            content=last_msg_content),
-                                        finish_reason=None))
-                                chunk = ChatCompletionStreamResponse(
-                                    id=request_id,
-                                    object=chunk_object_type,
-                                    created=created_time,
-                                    choices=[choice_data],
-                                    logprobs=None,
-                                    model=model_name)
-                                if (request.stream_options and
-                                        request.stream_options.include_usage):
-                                    chunk.usage = None
-                                data = chunk.model_dump_json(
-                                    exclude_unset=True)
-                                yield f"data: {data}\n\n"
-                    first_iteration = False
-
-                for output in res.outputs:
-                    i = output.index
-
-                    if finish_reason_sent[i]:
-                        continue
-
-                    delta_token_ids = output.token_ids[previous_num_tokens[i]:]
-                    out_logprobs = output.logprobs[
-                        previous_num_tokens[i]:] if output.logprobs else None
-
-                    if request.logprobs and request.top_logprobs is not None:
-                        assert out_logprobs is not None, (
-                            "Did not output logprobs")
-                        logprobs = self._create_chat_logprobs(
-                            token_ids=delta_token_ids,
-                            top_logprobs=out_logprobs,
-                            num_output_top_logprobs=request.top_logprobs,
-                        )
-                    else:
-                        logprobs = None
-
-                    delta_text = output.text[len(previous_texts[i]):]
-                    previous_texts[i] = output.text
-                    previous_num_tokens[i] = len(output.token_ids)
-
-                    if request.tool_choice and type(
-                            request.tool_choice
-                    ) is ChatCompletionNamedToolChoiceParam:
-                        delta_message = DeltaMessage(tool_calls=[
-                            ToolCall(function=FunctionCall(
-                                name=request.tool_choice.function.name,
-                                arguments=delta_text))
-                        ])
-                    else:
-                        delta_message = DeltaMessage(content=delta_text)
-
-                    if output.finish_reason is None:
-                        # Send token-by-token response for each request.n
-
-                        choice_data = ChatCompletionResponseStreamChoice(
-                            index=i,
-                            delta=delta_message,
-                            logprobs=logprobs,
-                            finish_reason=None)
-                        chunk = ChatCompletionStreamResponse(
-                            id=request_id,
-                            object=chunk_object_type,
-                            created=created_time,
-                            choices=[choice_data],
-                            model=model_name)
-                        if (request.stream_options
-                                and request.stream_options.include_usage):
-                            chunk.usage = None
-                        data = chunk.model_dump_json(exclude_unset=True)
-                        yield f"data: {data}\n\n"
-                    else:
-                        # Send the finish response for each request.n only once
-                        prompt_tokens = len(res.prompt_token_ids)
-                        choice_data = ChatCompletionResponseStreamChoice(
-                            index=i,
-                            delta=delta_message,
-                            logprobs=logprobs,
-                            finish_reason=output.finish_reason,
-                            stop_reason=output.stop_reason)
-                        chunk = ChatCompletionStreamResponse(
-                            id=request_id,
-                            object=chunk_object_type,
-                            created=created_time,
-                            choices=[choice_data],
-                            model=model_name)
-                        if (request.stream_options
-                                and request.stream_options.include_usage):
-                            chunk.usage = None
-                        data = chunk.model_dump_json(exclude_unset=True)
-                        yield f"data: {data}\n\n"
-                        finish_reason_sent[i] = True
-
-            if (request.stream_options
-                    and request.stream_options.include_usage):
-                final_usage = UsageInfo(
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=previous_num_tokens[i],
-                    total_tokens=prompt_tokens + previous_num_tokens[i],
-                )
-
-                final_usage_chunk = ChatCompletionStreamResponse(
-                    id=request_id,
-                    object=chunk_object_type,
-                    created=created_time,
-                    choices=[],
-                    model=model_name,
-                    usage=final_usage)
-                final_usage_data = (final_usage_chunk.model_dump_json(
-                    exclude_unset=True, exclude_none=True))
-                yield f"data: {final_usage_data}\n\n"
+                if len(wav_data):
+                    async for t in generate(
+                        sampling_params=sampling_params,
+                        language=language,
+                        wav_data=wav_data,
+                        last_timestamp=last_timestamp,
+                    ):
+                        yield t
 
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
@@ -375,87 +226,3 @@ class OpenAIServingWhisper(OpenAIServing):
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
-
-    async def chat_completion_full_generator(
-        self, request: ChatCompletionRequest, raw_request: Optional[Request],
-        result_generator: AsyncIterator[RequestOutput], request_id: str,
-        conversation: List[ConversationMessage]
-    ) -> Union[ErrorResponse, ChatCompletionResponse]:
-
-        model_name = self.served_model_names[0]
-        created_time = int(time.time())
-        final_res: Optional[RequestOutput] = None
-
-        async for res in result_generator:
-            if raw_request is not None and await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await self.engine.abort(request_id)
-                return self.create_error_response("Client disconnected")
-            final_res = res
-        assert final_res is not None
-
-        choices: List[ChatCompletionResponseChoice] = []
-
-        role = self.get_chat_request_role(request)
-        for output in final_res.outputs:
-            token_ids = output.token_ids
-            out_logprobs = output.logprobs
-
-            if request.logprobs and request.top_logprobs is not None:
-                assert out_logprobs is not None, "Did not output logprobs"
-                logprobs = self._create_chat_logprobs(
-                    token_ids=token_ids,
-                    top_logprobs=out_logprobs,
-                    num_output_top_logprobs=request.top_logprobs,
-                )
-            else:
-                logprobs = None
-
-            if request.tool_choice and type(
-                    request.tool_choice) is ChatCompletionNamedToolChoiceParam:
-                message = ChatMessage(
-                    role=role,
-                    content="",
-                    tool_calls=[
-                        ToolCall(function=FunctionCall(
-                            name=request.tool_choice.function.name,
-                            arguments=output.text))
-                    ])
-            elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, content=output.text)
-
-            choice_data = ChatCompletionResponseChoice(
-                index=output.index,
-                message=message,
-                logprobs=logprobs,
-                finish_reason=output.finish_reason,
-                stop_reason=output.stop_reason)
-            choices.append(choice_data)
-
-        if request.echo:
-            last_msg_content = ""
-            if conversation and conversation[-1].get(
-                    "content") and conversation[-1].get("role") == role:
-                last_msg_content = conversation[-1]["content"]
-
-            for choice in choices:
-                full_message = last_msg_content + choice.message.content
-                choice.message.content = full_message
-
-        num_prompt_tokens = len(final_res.prompt_token_ids)
-        num_generated_tokens = sum(
-            len(output.token_ids) for output in final_res.outputs)
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
-        )
-        response = ChatCompletionResponse(
-            id=request_id,
-            created=created_time,
-            model=model_name,
-            choices=choices,
-            usage=usage,
-        )
-
-        return response

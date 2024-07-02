@@ -166,23 +166,31 @@ class EngineArgs:
     def add_cli_args_for_whisper(
             parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         parser.add_argument(
-            '--image-processor',
+            '--whisper-input-type',
+            type=nullable_str,
+            default=EngineArgs.whisper_input_type,
+            choices=[
+                'input_features'
+            ],
+            help=('The audio input type for whisper passed into vLLM.'))
+        parser.add_argument(
+            '--whisper-processor',
             type=str,
-            default=EngineArgs.image_processor,
-            help='Name or path of the huggingface image processor to use. '
+            default=EngineArgs.whisper_processor,
+            help='Name or path of the huggingface whisper processor to use. '
             'If unspecified, model name or path will be used.')
         parser.add_argument(
-            '--image-processor-revision',
+            '--whisper-processor-revision',
             type=str,
             default=None,
-            help='Revision of the huggingface image processor version to use. '
+            help='Revision of the huggingface whisper processor version to use. '
             'It can be a branch name, a tag name, or a commit id. '
             'If unspecified, will use the default version.')
         parser.add_argument(
-            '--disable-image-processor',
-            action='store_true',
-            help='Disables the use of image processor, even if one is defined '
-            'for the model on huggingface.')
+            '--sample-rate',
+            type=int,
+            default=EngineArgs.sample_rate,
+            help='sample rate for whisper processor')
 
         return parser
 
@@ -543,6 +551,7 @@ class EngineArgs:
 
         # Related to Vision-language models such as llava
         parser = EngineArgs.add_cli_args_for_vlm(parser)
+        parser = EngineArgs.add_cli_args_for_whisper(parser)
 
         parser.add_argument(
             '--scheduler-delay-factor',
