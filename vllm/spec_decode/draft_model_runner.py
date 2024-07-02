@@ -79,7 +79,7 @@ class TP1DraftModelRunner(ModelRunner):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
-        ) -> ModelInputForGPUWithSamplingMetadata:
+    ) -> ModelInputForGPUWithSamplingMetadata:
         """A temporary solution that caches the seq_group_metadata_list
         for multi-step execution.
         TODO: In-place update model_input and remove this function.

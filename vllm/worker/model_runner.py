@@ -840,9 +840,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         kv_caches = [None] * num_layers
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
-            seqs,
-            finished_requests_ids= finished_requests_ids
-        )
+            seqs, finished_requests_ids=finished_requests_ids)
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = self.model.make_empty_intermediate_tensors(
@@ -1086,8 +1084,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     })
                 graph_runner.capture(**capture_inputs)
                 self.graph_memory_pool = graph_runner.graph.pool()
-                self.graph_runners[virtual_engine][batch_size] = (
-                    graph_runner)
+                self.graph_runners[virtual_engine][batch_size] = (graph_runner)
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
