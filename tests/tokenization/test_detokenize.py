@@ -139,6 +139,12 @@ def create_dummy_logprobs(
     } for token_id in complete_sequence_token_ids]
 
 
+def create_dummy_prompt_logprobs(
+        complete_sequence_token_ids: List[int]) -> List[Dict[int, Logprob]]:
+    # logprob for the first prompt token is not defined.
+    return create_dummy_logprobs(complete_sequence_token_ids)[1:]
+
+
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
 @pytest.mark.parametrize("skip_special_tokens", [True, False])
@@ -192,19 +198,63 @@ def test_decode_prompt_logprobs(complete_sequence: str,
                               seqs=[seq],
                               sampling_params=sampling_params,
                               arrival_time=0.0)
-    dummy_logprobs = create_dummy_logprobs(complete_sequence_token_ids)
+    dummy_logprobs = create_dummy_prompt_logprobs(complete_sequence_token_ids)
     detokenizer.decode_prompt_logprobs_inplace(seq_group, dummy_logprobs)
     decoded_prompt_logprobs = dummy_logprobs
 
     if skip_special_tokens:
+        # decoded_prompt_logprobs doesn't contain the first token.
+        token_ids = complete_sequence_token_ids[1:]
+        tokenzier = detokenizer.get_tokenizer_for_seq(seq)
+        text = tokenzier.decode(token_ids,
+                                skip_special_tokens=skip_special_tokens)
         # Text for logprobs for the chosen token should be the same as the
         # prompt text. Note that this will only be true if we skip
         # special tokens.
-        assert complete_sequence == "".join([
-            logprobs[token_id].decoded_token for token_id, logprobs in zip(
-                complete_sequence_token_ids, decoded_prompt_logprobs)
+        assert text == "".join([
+            logprobs[token_id].decoded_token
+            for token_id, logprobs in zip(token_ids, decoded_prompt_logprobs)
         ])
-        assert complete_sequence != "".join([
-            logprobs[token_id + 1].decoded_token for token_id, logprobs in zip(
-                complete_sequence_token_ids, decoded_prompt_logprobs)
+        assert text != "".join([
+            logprobs[token_id + 1].decoded_token
+            for token_id, logprobs in zip(token_ids, decoded_prompt_logprobs)
         ])
+
+
+@pytest.mark.parametrize("tokenizer_name", ["facebook/opt-125m"])
+def test_decode_prompt_logprobs_pr_5846(detokenizer: Detokenizer):
+    """ Regression test for PR #5846. """
+
+    # This set of random input will generate incorrect output before #5846.
+    prompt_token_ids = [3290, 1562, 8652, 3123, 1838, 9660]
+    dummy_logprobs = [{
+        1562: Logprob(logprob=0.0),
+        3290: Logprob(logprob=0.1)
+    }, {
+        8652: Logprob(logprob=0.0),
+        977: Logprob(logprob=0.1)
+    }, {
+        3123: Logprob(logprob=0.0),
+        30: Logprob(logprob=0.1)
+    }, {
+        1838: Logprob(logprob=0.0),
+        6: Logprob(logprob=0.1)
+    }, {
+        9660: Logprob(logprob=0.0),
+        1316: Logprob(logprob=0.1)
+    }]
+
+    seq = create_sequence(prompt_token_ids)
+    seq_group = SequenceGroup(
+        request_id="1",
+        seqs=[seq],
+        sampling_params=SamplingParams(prompt_logprobs=1),
+        arrival_time=0.0)
+
+    detokenizer.decode_prompt_logprobs_inplace(seq_group, dummy_logprobs)
+    decoded_prompt_logprobs = dummy_logprobs
+
+    tokenzier = detokenizer.get_tokenizer_for_seq(seq)
+    for logprobs in decoded_prompt_logprobs:
+        for token_id, logprob in logprobs.items():
+            assert tokenzier.decode(token_id) == logprob.decoded_token
