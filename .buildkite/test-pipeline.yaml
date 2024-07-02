@@ -198,6 +198,15 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
+- label: LM Eval Large Models
+  gpu: a100
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+  - pip install lm-eval
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh -c configs/models-large.txt -t 4
+
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
   no_gpu: True
