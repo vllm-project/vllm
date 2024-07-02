@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
 from functools import lru_cache
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
@@ -24,6 +25,7 @@ from transformers import CLIPVisionConfig, PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VisionLanguageConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -41,6 +43,8 @@ from vllm.sequence import SamplerOutput
 from .clip import (dummy_pixel_data_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
 from .interfaces import SupportsVision
+
+logger = init_logger(__name__)
 
 _KEYS_TO_MODIFY_MAPPING = {
     "model.vision_embed_tokens": "vision_embed_tokens",
@@ -386,6 +390,21 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         image_features = multi_modal_data.image_features
         image_feature_size = image_features.shape[-2]
 
+    prompt = llm_inputs.get("prompt")
+    if prompt is None:
+        new_prompt = None
+    else:
+        if prompt.count("<|image|>") > 0:
+            logger.warning("Please follow the prompt format that is "
+                           "recommended on HuggingFace which does not involve "
+                           "repeating <|image|> tokens.")
+        elif len(re.findall(r"(<\|image_\d+\|>)+", prompt)) > 1:
+            logger.warning("Multiple image input is not supported yet, "
+                           "so any extra image tokens will be treated "
+                           "as plain text.")
+
+        new_prompt = prompt
+
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     image_1_token_ids = _get_image_placeholder_token_ids(model_config, idx=1)
 
@@ -402,7 +421,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
     # NOTE: Create a defensive copy of the original inputs
     llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
-                           prompt=llm_inputs.get("prompt"),
+                           prompt=new_prompt,
                            multi_modal_data=multi_modal_data)
 
     return input_processor_for_clip(

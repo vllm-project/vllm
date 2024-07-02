@@ -64,6 +64,17 @@ def repeat_and_pad_image_tokens(
                 pad_token_right=pad_token_str_right,
             ))
 
+        image_token_count = prompt.count(image_token_str)
+        if image_token_count > 16:
+            logger.warning(
+                "Please follow the prompt format that is "
+                "recommended on HuggingFace which does not involve "
+                "repeating %s tokens.", image_token_str)
+        elif image_token_count > 1:
+            logger.warning("Multiple image input is not supported yet, "
+                           "so any extra image tokens will be treated "
+                           "as plain text.")
+
         # The image tokens are removed to be consistent with HuggingFace
         new_prompt = prompt.replace(image_token_str, replacement_str, 1)
 
