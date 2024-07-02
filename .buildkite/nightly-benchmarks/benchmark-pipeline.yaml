@@ -53,7 +53,6 @@ steps:
         - .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
         mount-buildkite-agent: true
         propagate-environment: true
-        propagate-uid-gid: true
         ipc: host
         gpus: all
         environment:
