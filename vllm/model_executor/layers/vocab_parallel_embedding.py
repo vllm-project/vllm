@@ -9,6 +9,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import is_tpu
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
@@ -169,6 +170,12 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         # Keep the input dimensions.
         tp_rank = get_tensor_model_parallel_rank()
+        if is_tpu():
+            import torch_xla.core.xla_model as xm
+
+            # FIXME(woosuk): This is a temporary hack.
+            tp_rank = xm.get_ordinal()
+
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
