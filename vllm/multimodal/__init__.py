@@ -1,4 +1,4 @@
-from .base import MultiModalData, MultiModalPlugin
+from .base import MultiModalDataDict, MultiModalPlugin
 from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
@@ -11,6 +11,8 @@ See also:
 """
 
 __all__ = [
-    "MultiModalData", "MultiModalPlugin", "MULTIMODAL_REGISTRY",
-    "MultiModalRegistry"
+    "MultiModalPlugin",
+    "MULTIMODAL_REGISTRY",
+    "MultiModalRegistry",
+    "MultiModalDataDict",
 ]

@@ -84,9 +84,8 @@ def _get_model_initialization_kwargs(
 
     if supports_vision(model_class):
         if vlm_config is None:
-            raise ValueError("Provide `image_input_type` and other vision "
-                             "related configurations through LLM entrypoint "
-                             "or engine arguments.")
+            raise ValueError("Provide vision related configurations "
+                             "through LLM entrypoint or engine arguments.")
 
         extra_kwargs["vlm_config"] = vlm_config
 

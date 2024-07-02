@@ -1250,28 +1250,11 @@ class LoRAConfig:
             raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
+# TODO: To be replaced by MultiModalConfig.
 @dataclass
 class VisionLanguageConfig:
     """Configs the input data format and how models should run for
     vision language models."""
-
-    class ImageInputType(enum.Enum):
-        """Image input type into the vision language model.
-
-        An image roughly goes through the following transformation:
-        Raw image --> pixel values --> image features --> image embeddings.
-
-        The difference between different image input types is where the
-        image encoder (pixel values --> image features) is run.
-        Different image input types also correspond to different tensor shapes.
-
-        For example, for Llava, PIXEL_VALUES: (1, 3, 336, 336).
-        IMAGE_FEATURES: (1, 576, 1024).
-        """
-        PIXEL_VALUES = enum.auto()
-        IMAGE_FEATURES = enum.auto()
-
-    image_input_type: ImageInputType
     # The input id corresponding to image token.
     image_token_id: int
     # Used for running `run_prefill_max_token`.
@@ -1279,19 +1262,6 @@ class VisionLanguageConfig:
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
     image_feature_size: int
-    # The image processor to load from HuggingFace
-    image_processor: Optional[str]
-    image_processor_revision: Optional[str]
-
-    @classmethod
-    def get_image_input_enum_type(cls, value: str) -> ImageInputType:
-        """Get the image input type from a string."""
-        try:
-            return cls.ImageInputType[value.upper()]
-        except KeyError as e:
-            raise ValueError(f"{value} is not a valid choice. "
-                             f"Expecting to choose from "
-                             f"{[x.name for x in cls.ImageInputType]}.") from e
 
     #TODO(ywang96): make this a cached property once we refactor the
     # VisionLanguageConfig class.
@@ -1317,8 +1287,6 @@ class VisionLanguageConfig:
                 result[f.name] = ",".join([str(item) for item in value])
             else:
                 result[f.name] = value
-
-        result["disable_image_processor"] = self.image_processor is None
 
         return result
 
