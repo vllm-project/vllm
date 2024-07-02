@@ -144,6 +144,7 @@ class HabanaAttentionImpl(AttentionImpl):
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
         self.position_bias = None
+        self.alibi_slopes = alibi_slopes
         if alibi_slopes is not None:
             alibi_slopes_tensor = torch.tensor(alibi_slopes,
                                                dtype=torch.bfloat16)
@@ -151,7 +152,7 @@ class HabanaAttentionImpl(AttentionImpl):
                                                   num_kv_heads,
                                                   alibi_slopes_tensor.dtype,
                                                   max_seq_len)
-        self.alibi_slopes = alibi_slopes_tensor
+            self.alibi_slopes = alibi_slopes_tensor
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 

@@ -94,8 +94,10 @@ def find_bucket(value: int, config: Tuple[int, int, int]):
     return result
 
 
-def subtuple(obj: object, typename: str, to_copy: List[str],
-             to_override: Optional[Dict[str, object]]):
+def subtuple(obj: object,
+             typename: str,
+             to_copy: List[str],
+             to_override: Optional[Dict[str, object]] = None):
     if to_override is None:
         to_override = {}
     if obj is None:
@@ -1230,5 +1232,4 @@ class HabanaProfilerCounterHelper():
                 'const_gpu_memory_utilization'] = \
                     cache_config.gpu_memory_utilization
             counters['const_block_size'] = cache_config.block_size
-            self.logged_once = True
-        return counters
+            self.logged_once = Tru
