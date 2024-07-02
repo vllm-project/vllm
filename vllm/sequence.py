@@ -1,19 +1,19 @@
 """Sequence and its related classes."""
 import copy
 import enum
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from vllm.block import LogicalTokenBlock
-from vllm.inputs import LLMInputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
+    from vllm.inputs import LLMInputs
     from vllm.multimodal import MultiModalData
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
@@ -39,24 +39,21 @@ PromptLogprobs = List[Optional[Dict[int, Logprob]]]
 SampleLogprobs = List[Dict[int, Logprob]]
 
 
-class SequenceStatus(enum.Enum):
+class SequenceStatus(enum.IntEnum):
     """Status of a sequence."""
-    WAITING = enum.auto()
-    RUNNING = enum.auto()
-    SWAPPED = enum.auto()
-    FINISHED_STOPPED = enum.auto()
-    FINISHED_LENGTH_CAPPED = enum.auto()
-    FINISHED_ABORTED = enum.auto()
-    FINISHED_IGNORED = enum.auto()
+    WAITING = 0
+    RUNNING = 1
+    SWAPPED = 2
+    # Note: anything after SWAPPED (2) will be considered
+    # as a finished status.
+    FINISHED_STOPPED = 3
+    FINISHED_LENGTH_CAPPED = 4
+    FINISHED_ABORTED = 5
+    FINISHED_IGNORED = 6
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:
-        return status in [
-            SequenceStatus.FINISHED_STOPPED,
-            SequenceStatus.FINISHED_LENGTH_CAPPED,
-            SequenceStatus.FINISHED_ABORTED,
-            SequenceStatus.FINISHED_IGNORED,
-        ]
+        return status > SequenceStatus.SWAPPED
 
     @staticmethod
     def get_finished_reason(status: "SequenceStatus") -> Union[str, None]:
@@ -119,41 +116,66 @@ class SequenceData:
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
     ) -> None:
-        if output_token_ids is None:
-            output_token_ids = []
+        self._prompt_token_ids: List[int] = list(prompt_token_ids)
+        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
+        self._output_token_ids: List[int] = (
+            list(output_token_ids) if output_token_ids is not None else [])
 
-        self.prompt_token_ids = prompt_token_ids
-        self._prompt_token_ids_tuple = tuple(prompt_token_ids)
-        self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
 
+        self._update_cached_all_tokens()
+
+    def _update_cached_all_tokens(self):
+        self._cached_all_token_ids: List[int] = (self._prompt_token_ids +
+                                                 self._output_token_ids)
+
+    @property
+    def prompt_token_ids(self) -> Tuple[int, ...]:
+        return self._prompt_token_ids_tuple
+
+    @prompt_token_ids.setter
+    def prompt_token_ids(self, new_prompt_token_ids) -> None:
+        self._prompt_token_ids = list(new_prompt_token_ids)
+        self._prompt_token_ids_tuple = tuple(new_prompt_token_ids)
+        self._update_cached_all_tokens()
+
+    @property
+    def output_token_ids(self) -> Tuple[int, ...]:
+        return tuple(self._output_token_ids)
+
+    @output_token_ids.setter
+    def output_token_ids(self, new_output_token_ids) -> None:
+        self._output_token_ids = list(new_output_token_ids)
+        self._update_cached_all_tokens()
+
     def append_token_id(self, token_id: int, logprob: float) -> None:
-        self.output_token_ids.append(token_id)
+        self._output_token_ids.append(token_id)
+        self._cached_all_token_ids.append(token_id)
         self.cumulative_logprob += logprob
 
     def get_len(self) -> int:
-        return len(self.output_token_ids) + len(self.prompt_token_ids)
+        return len(self._output_token_ids) + len(self._prompt_token_ids)
 
     def get_prompt_len(self) -> int:
-        return len(self.prompt_token_ids)
+        return len(self._prompt_token_ids)
 
     def get_output_len(self) -> int:
-        return len(self.output_token_ids)
+        return len(self._output_token_ids)
 
     def get_token_ids(self) -> List[int]:
-        return self.prompt_token_ids + self.output_token_ids
+        return self._cached_all_token_ids
 
     def get_prefix_token_ids(
             self, num_tokens: int
     ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
         """Get prefix tokens, and make the return value hashable"""
-        prompt_length = len(self.prompt_token_ids)
+        prompt_length = self.get_prompt_len()
         if num_tokens > prompt_length:
             return (self._prompt_token_ids_tuple,
-                    tuple(self.output_token_ids[:num_tokens - prompt_length]))
+                    tuple(self._output_token_ids[:num_tokens - prompt_length]))
         else:
             return (self._prompt_token_ids_tuple[:num_tokens], None)
 
@@ -186,14 +208,14 @@ class SequenceData:
         return self.get_len() - self.get_num_computed_tokens()
 
     def get_last_token_id(self) -> int:
-        if not self.output_token_ids:
-            return self.prompt_token_ids[-1]
-        return self.output_token_ids[-1]
+        if not self._output_token_ids:
+            return self._prompt_token_ids[-1]
+        return self._output_token_ids[-1]
 
-    def get_prompt_token_ids(self) -> List[int]:
+    def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.prompt_token_ids
 
-    def get_output_token_ids(self) -> List[int]:
+    def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.output_token_ids
 
     @property
@@ -202,8 +224,8 @@ class SequenceData:
 
     def __repr__(self) -> str:
         return (f"SequenceData("
-                f"prompt_token_ids={self.prompt_token_ids}, "
-                f"output_token_ids={self.output_token_ids}, "
+                f"prompt_token_ids={self._prompt_token_ids}, "
+                f"output_token_ids={self._output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob})")
 
 
@@ -221,7 +243,7 @@ class Sequence:
     def __init__(
         self,
         seq_id: int,
-        inputs: LLMInputs,
+        inputs: "LLMInputs",
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -236,9 +258,6 @@ class Sequence:
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
-        self.logical_token_blocks: List[LogicalTokenBlock] = []
-        # Initialize the logical token blocks with the prompt token ids.
-        self._append_tokens_to_blocks(self.prompt_token_ids)
         self.status = SequenceStatus.WAITING
         self.stop_reason: Union[int, str, None] = None
 
@@ -247,6 +266,10 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+
+    @property
+    def n_blocks(self) -> int:
+        return math.ceil(self.get_len() / self.block_size)
 
     @property
     def prompt(self) -> Optional[str]:
@@ -287,36 +310,12 @@ class Sequence:
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
 
-    def _append_logical_block(self) -> None:
-        block = LogicalTokenBlock(
-            block_number=len(self.logical_token_blocks),
-            block_size=self.block_size,
-        )
-        self.logical_token_blocks.append(block)
-
-    def _append_tokens_to_blocks(self, token_ids: List[int]) -> None:
-        cursor = 0
-        while cursor < len(token_ids):
-            if not self.logical_token_blocks:
-                self._append_logical_block()
-
-            last_block = self.logical_token_blocks[-1]
-            if last_block.is_full():
-                self._append_logical_block()
-                last_block = self.logical_token_blocks[-1]
-
-            num_empty_slots = last_block.get_num_empty_slots()
-            last_block.append_tokens(token_ids[cursor:cursor +
-                                               num_empty_slots])
-            cursor += num_empty_slots
-
     def append_token_id(
         self,
         token_id: int,
         logprobs: Dict[int, Logprob],
     ) -> None:
         assert token_id in logprobs
-        self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
@@ -332,14 +331,14 @@ class Sequence:
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
 
-    def get_prompt_token_ids(self) -> List[int]:
+    def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.data.get_prompt_token_ids()
 
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
 
-    def get_output_token_ids(self) -> List[int]:
-        return self.data.output_token_ids
+    def get_output_token_ids(self) -> Tuple[int, ...]:
+        return self.data.get_output_token_ids()
 
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
@@ -388,7 +387,7 @@ class Sequence:
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
                 f"status={self.status.name}, "
-                f"num_blocks={len(self.logical_token_blocks)})")
+                f"num_blocks={self.n_blocks}, ")
 
 
 @dataclass
@@ -887,7 +886,8 @@ class HiddenStates:
 
 @dataclass
 class ExecuteModelRequest:
-    """The model execution request."""
+    """The model execution request, containing CPU metadata only. The LLM
+    engine should create an instance of this class for each request batch."""
     # The sequence group metadata list.
     seq_group_metadata_list: List[SequenceGroupMetadata]
     # Blocks to swap in. List of CPU -> GPU block number.
@@ -902,6 +902,8 @@ class ExecuteModelRequest:
     running_queue_size: int = 0
     # Optional hidden states from prior step.
     previous_hidden_states: Optional[HiddenStates] = None
+    # The number of forward steps to run.
+    num_steps: int = 1
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -915,4 +917,5 @@ class ExecuteModelRequest:
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
             previous_hidden_states=self.previous_hidden_states,
+            num_steps=self.num_steps,
         )

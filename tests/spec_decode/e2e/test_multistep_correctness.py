@@ -11,9 +11,15 @@ distribution matches the target model's output distribution (up to hardware
 numerics, see https://arxiv.org/pdf/2302.01318.pdf), we can expect greedy
 equality. This gives us good coverage of temp=0.
 
+At temp=0, the TypicalAcceptanceSampler ensures that only the tokens with the
+highest probability in the target distribution are accepted. Therefore, we can 
+expect greedy equality for the TypicalAcceptanceSampler at temp=0.
+
 For temp>0, we rely on unit tests on the rejection sampler to verify that the
 output distribution is the same with spec decode vs. no spec decode (this would
-be prohibitively expensive to run with a real model).
+be prohibitively expensive to run with a real model). Similarly, for the
+TypicalAcceptance sampler also, we rely on unit tests to validate temp>0
+test cases.
 
 NOTE: Speculative decoding's distribution equality requires that the measured
 distributions of the target model and proposal model be deterministic given the
@@ -632,30 +638,25 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": k,
-            "disable_bonus_tokens_in_kv_cache": False,
+            "spec_decoding_acceptance_method": "typical_acceptance_sampler"
         }
-        # Try small k for speculative decoding.
+        # Try a range of common k.
         for k in [1, 2, 3]
     ])
-@pytest.mark.parametrize("batch_size", [1, 8, 64])
+@pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize(
     "output_len",
     [
         # Use smaller output len for fast test.
-        256,
+        32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_enable_bonus_tokens_in_kv_cache(
-    baseline_llm_generator, test_llm_generator, batch_size: int,
-    output_len: int):
-    """
-    Test speculative decoding with bonus token acceptance enabled for a model 
-    using KV cache.
-
-    This test verifies that speculative decoding produces results exactly 
-    matching those from non-speculative decoding across various values of 'k' 
-    and batch sizes when bonus token acceptance is enabled. It ensures 
-    correctness by comparing the output of speculative decoding with the baseline.
+def test_typical_acceptance_sampling(baseline_llm_generator,
+                                     test_llm_generator, batch_size: int,
+                                     output_len: int):
+    """Verify that speculative decoding produces exact equality to without spec
+    decode with TypicalAcceptanceSampler as the draft token acceptance
+    sampling method.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,

@@ -6,7 +6,9 @@ import torch
 
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.spec_decode.interfaces import SpeculativeProposals
+from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+from vllm.spec_decode.interfaces import (SpeculativeProposals,
+                                         SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
@@ -28,9 +30,9 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         super().__init__(*args, **kwargs)
 
         # Lazy initialization list.
-        self._proposer: Top1Proposer
+        self._proposer: SpeculativeProposer
 
-    def init_device(self):
+    def init_device(self) -> None:
         super().init_device()
 
         self._proposer = Top1Proposer(
@@ -40,7 +42,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             max_proposal_len=self.max_model_len,
         )
 
-    def set_include_gpu_probs_tensor(self):
+    def set_include_gpu_probs_tensor(self) -> None:
         # Need include_gpu_probs_tensor for multi_step_worker
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
 
@@ -72,31 +74,30 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                                      sample_len)
         # Run model sample_len times.
         model_outputs = []
-        for step in range(sample_len):
-            if step == 0 and seq_ids_with_bonus_token_in_last_step is not None:
-                # Step 0: Expand the batch for sequences with a bonus token.
-                # Perform a forward pass on the expanded batch and filter the 
-                # response to retain only the original sequences' responses.
-                expanded_request, indices_of_seq_with_bonus_tokens =\
-                    self._expand_execute_model_request(
-                        copied_execute_model_req, seq_ids_with_bonus_token_in_last_step)
-                model_output = super().execute_model(
+        # Step 0: Expand the batch for sequences with a bonus token.
+        # Perform a forward pass on the expanded batch and filter the 
+        # response to retain only the original sequences' responses.
+        expanded_request, indices_of_seq_with_bonus_tokens =\
+            self._expand_execute_model_request(
+                copied_execute_model_req, seq_ids_with_bonus_token_in_last_step)
+        # Run model sample_len times.
+        model_outputs: List[SamplerOutput] = []
+        if isinstance(self.model_runner, TP1DraftModelRunner):
+            copied_execute_model_req.num_steps = sample_len
+            model_outputs = self.execute_model(
+                execute_model_req=expanded_request)
+        else:
+            # TODO: Remove this branch once DraftModelRunner supports TP>1.
+            for _ in range(sample_len):
+                model_output: List[SamplerOutput] = super().execute_model(
                     execute_model_req=expanded_request)
-                model_output = self._filter_model_output(
-                    model_output[0], indices_of_seq_with_bonus_tokens)
-            else:
-                # For subsequent steps, perform a forward pass on the
-                # original request.
-                model_output = super().execute_model(
-                    execute_model_req=copied_execute_model_req)
-            assert (len(model_output) == 1
-                    ), "composing multistep workers not supported"
-            model_output = model_output[0]
+                assert (len(model_output) == 1
+                        ), "composing multistep workers not supported"
+                model_output = model_output[0]
 
-            self._append_new_tokens(model_output,
-                                    copied_seq_group_metadata_list)
-            model_outputs.append(model_output)
-
+                self._append_new_tokens(model_output,
+                                        copied_seq_group_metadata_list)
+                model_outputs.append(model_output)
         return model_outputs, True
 
     @staticmethod
