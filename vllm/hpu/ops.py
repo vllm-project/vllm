@@ -5,10 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 import os
+from typing import Optional
+
+import habana_frameworks.torch as htorch
 import torch
 import torch.nn.functional as F
-import habana_frameworks.torch as htorch
-from typing import Optional
 
 import vllm.hpu.utils as hpu_utils
 

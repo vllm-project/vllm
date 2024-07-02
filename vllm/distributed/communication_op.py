@@ -3,9 +3,10 @@ from typing import Any, Dict, Optional, Union
 import torch
 import torch.distributed
 
+from vllm.utils import is_hpu
+
 from .parallel_state import get_tp_group
 
-from vllm.utils import is_hpu
 if is_hpu():
     import habana_frameworks.torch as htorch
 

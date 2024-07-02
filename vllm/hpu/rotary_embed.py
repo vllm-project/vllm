@@ -5,9 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
+import habana_frameworks.torch.utils.experimental as htexp
 import torch
 import torch.nn as nn
-import habana_frameworks.torch.utils.experimental as htexp
 
 
 def get_device_type():

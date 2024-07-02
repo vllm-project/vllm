@@ -8,10 +8,10 @@ import queue
 import threading
 import time
 from contextlib import contextmanager
+from typing import Any, List
 
 from vllm.logger import init_logger
 from vllm.utils import get_vllm_instance_id
-from typing import List, Any
 
 logger = init_logger(__name__)
 

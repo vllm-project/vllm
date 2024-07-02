@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
-import vllm.hpu.ops as ops
 
+import vllm.hpu.ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,

@@ -6,10 +6,11 @@ import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
 from vllm.utils import is_hpu
+
 if is_hpu():
     try:
-        from habana_frameworks.torch.hpex.normalization import (FusedRMSNorm as
-                                                                FusedRMSNorm)
+        from habana_frameworks.torch.hpex.normalization import (
+            FusedRMSNorm as FusedRMSNorm)
     except ImportError:
         print("Not using HPU fused kernel for RMSNorm")
         FusedRMSNorm = None

@@ -52,7 +52,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
-from vllm.utils import print_warning_once, is_hpu
+from vllm.utils import is_hpu, print_warning_once
 
 if is_hpu():
     from vllm.hpu.ops import static_fused_moe

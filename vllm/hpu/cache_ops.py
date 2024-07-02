@@ -5,8 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-import torch
 import habana_frameworks.torch as htorch
+import torch
 
 
 def reshape_and_cache(key,

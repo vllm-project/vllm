@@ -6,13 +6,13 @@ import gc
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import torch
 import habana_frameworks.torch as htorch
+import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig, SpeculativeConfig)
+                         SpeculativeConfig, VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
