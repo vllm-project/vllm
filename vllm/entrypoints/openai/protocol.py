@@ -636,7 +636,7 @@ class EmbeddingResponse(BaseModel):
 
 class FunctionCall(OpenAIBaseModel):
     name: str
-    arguments: str
+    arguments: str | Dict
 
 
 class ToolCall(OpenAIBaseModel):
