@@ -16,17 +16,26 @@ logger = init_logger(__name__)
 
 
 class BasevLLMParameter(Parameter):
+    """
+    Base parameter for vLLM linear layers. Extends the torch.nn.parameter
+    by taking in a linear weight loader. Will copy the loaded weight
+    into the parameter when the provided weight loader is called.
+    """
 
     def __new__(cls, data: torch.Tensor, **kwargs):
 
         return super().__new__(cls, data=data, requires_grad=False)
 
-    def __init__(self,
-                 data: torch.Tensor,
-                 weight_loader: Callable,
-                 ignore_warnings: Optional[bool] = True):
+    def __init__(self, data: torch.Tensor, weight_loader: Callable):
+        """
+        Initialize the BasevLLMParameter
 
-        self._ignore_warnings = True
+        :param data: torch tensor with the parameter data
+        :param weight_loader: weight loader callable
+
+        :returns: a torch.nn.parameter
+        """
+
         self._weight_loader = weight_loader
 
     @property
@@ -51,6 +60,15 @@ class BasevLLMParameter(Parameter):
 
 
 class _ColumnvLLMParameter(BasevLLMParameter):
+    """
+    Private class defining weight loading functionality 
+    (load_merged_column_weight, load_qkv_weight)
+    for parameters being loaded into linear layers with column
+    parallelism. This includes QKV and MLP layers which are
+    not already fused on disk. Requires an output dimension 
+    to be defined. Called within the weight loader of
+    each of the column parallel linear layers.
+    """
 
     def __init__(self, output_dim: int, **kwargs):
         self._output_dim = output_dim
@@ -113,8 +131,13 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data.copy_(loaded_weight)
 
 
-# has column and row dims
 class ModelWeightParameter(_ColumnvLLMParameter):
+    """
+    Parameter class for linear layer weights. Extends the
+    _ColumnvLLMParameter by adding loading functionality
+    for linear layers with row parallel functionality.
+    Requires an input dimension to be defined.
+    """
 
     def __init__(self, input_dim: int, **kwargs):
         self._input_dim = input_dim
@@ -137,17 +160,35 @@ class ModelWeightParameter(_ColumnvLLMParameter):
         self.data.copy_(loaded_weight)
 
 
-# group scales are loaded the same as our weights; have column and row
 class GroupQuantScaleParameter(ModelWeightParameter):
+    """
+    Parameter class for weight scales loaded for weights with
+    grouped quantization. Equivalent to ModelWeightParameter.
+    """
     pass
 
 
-# channel scales are loaded with column dim only; same as _ColumnvLLMParameter
 class ChannelQuantScaleParameter(_ColumnvLLMParameter):
+    """
+    Parameter class for weight scales loaded for weights with
+    channel-wise quantization. Equivalent to _ColumnvLLMParameter. 
+    """
     pass
 
 
 class PerTensorScaleParameter(BasevLLMParameter):
+    """
+    Parameter class for scales where the number of scales is
+    equivalent to the number of logical matrices in fused linear
+    layers (e.g. for QKV, there are 3 scales loaded from disk).
+    This is relevant to weights with per-tensor quantization. 
+    Adds functionality to map the scalers to a shard during
+    weight loading. 
+
+    Note: additional parameter manipulation may be handled 
+    for each quantization config specifically, within 
+    process_weights_after_loading 
+    """
 
     def __init__(self, **kwargs):
         self.qkv_idxs = {"q": 0, "k": 1, "v": 2}
@@ -172,11 +213,9 @@ class PerTensorScaleParameter(BasevLLMParameter):
 
     def _col_shard_splitter(self, loaded_weight: torch.Tensor,
                             shard_id: Union[str, int], **kwargs):
-        """For fused modules (QKV and MLP) we have an array of length
-        N that holds 1 scale for each "logical" matrix. So the param
-        is an array of length N. The loaded_weight corresponds to 
-        one of the shards on disk. Here, we slice the param based on 
-        the shard_id for loading.
+        """
+        Slice the parameter data based on the shard id for 
+        loading.
         """
 
         param_data = self.data
@@ -194,6 +233,15 @@ class PerTensorScaleParameter(BasevLLMParameter):
 
 
 class PackedvLLMParameter(ModelWeightParameter):
+    """
+    Parameter for model weights which are packed on disk.
+    Example: GPTQ Marlin weights are int4 or int8, packed into int32.
+    Extends the ModelWeightParameter to take in the
+    packed factor, the packed dimension, and optionally, marlin
+    tile size for marlin kernels. Adjusts the shard_size and 
+    shard_offset for fused linear layers model weight loading 
+    by accounting for packing and optionally, marlin tile size.
+    """
 
     def __init__(self,
                  packed_factor: int,
