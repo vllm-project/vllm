@@ -1,16 +1,13 @@
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
+from vllm.sequence import SampleLogprobs
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
-
-if TYPE_CHECKING:
-    # it may call torch.cuda.device_count()
-    from vllm.sequence import SampleLogprobs
 
 pytestmark = pytest.mark.vlm
 

@@ -1,9 +1,7 @@
 import warnings
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-if TYPE_CHECKING:
-    # it may call torch.cuda.device_count()
-    from vllm.sequence import SampleLogprobs
+from vllm.sequence import SampleLogprobs
 
 TokensText = Tuple[List[int], str]
 
