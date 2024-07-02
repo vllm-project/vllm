@@ -67,6 +67,7 @@ class MixtralMoE(nn.Module):
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        tp_size: Optional[int] = None
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -85,7 +86,8 @@ class MixtralMoE(nn.Module):
                                 params_dtype=params_dtype,
                                 reduce_results=True,
                                 renormalize=True,
-                                quant_config=quant_config)
+                                quant_config=quant_config,
+                                tp_size=tp_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
