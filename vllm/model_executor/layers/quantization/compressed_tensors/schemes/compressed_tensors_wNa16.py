@@ -10,9 +10,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
     marlin_permute_scales, replace_tensor, verify_gptq_marlin_supported,
     verify_marlin_supports_shape)
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
-                                           PackedvLLMParameter, vLLMParameter)
+                                           PackedvLLMParameter)
 
 __all__ = ["CompressedTensorsWNA16"]
 WNA16_SUPPORTED_BITS = [4, 8]
@@ -104,8 +105,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # A 2D array defining the original shape of the weights
         # before packing
-        weight_shape = vLLMParameter(data=torch.empty(2, dtype=torch.int64),
-                                     weight_loader=weight_loader)
+        weight_shape = BasevLLMParameter(data=torch.empty(2,
+                                                          dtype=torch.int64),
+                                         weight_loader=weight_loader)
 
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)

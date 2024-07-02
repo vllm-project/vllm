@@ -8,9 +8,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N)
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
-                                           PackedvLLMParameter, vLLMParameter)
+                                           PackedvLLMParameter)
 
 __all__ = ["CompressedTensorsW4A16Sparse24"]
 W4A16SPARSE24_SUPPORTED_BITS = [4]
@@ -82,8 +83,9 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
             scales = ChannelQuantScaleParameter(output_dim=1,
                                                 **weight_scale_args)
 
-        weight_shape = vLLMParameter(data=torch.empty(2, dtype=torch.int64),
-                                     weight_loader=weight_loader)
+        weight_shape = BasevLLMParameter(data=torch.empty(2,
+                                                          dtype=torch.int64),
+                                         weight_loader=weight_loader)
 
         meta = PackedvLLMParameter(data=torch.empty(
             input_size_per_partition // 8 // 2 // 2,
