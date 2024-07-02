@@ -62,5 +62,4 @@ def check_logprobs_close(outputs_0_lst: List[TokensTextLogprobs],
                     f"\n{name_1}:\t{output_str_1!r}")
 
                 # Break out since sequences will now diverge.
-                print(f"BREAKOUT AT IDX {idx} FOR PROMPT_IDX {prompt_idx} ")
                 break
