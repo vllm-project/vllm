@@ -40,4 +40,4 @@ WORKDIR /workspace/
 
 RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
 
-CMD ["/bin/bash"]
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
