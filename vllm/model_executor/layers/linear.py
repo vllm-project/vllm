@@ -134,43 +134,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
             return F.linear(x, weight)
         return F.linear(x, weight, bias)
 
-    def create_weights_moe(self, layer: torch.nn.Module, num_experts: int,
-                           hidden_size: int, intermediate_size: int,
-                           params_dtype: torch.dtype, **extra_weight_attrs):
-
-        # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                    2 * intermediate_size,
-                                                    hidden_size,
-                                                    dtype=params_dtype),
-                                        requires_grad=False)
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
-
-        # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                   hidden_size,
-                                                   intermediate_size,
-                                                   dtype=params_dtype),
-                                       requires_grad=False)
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-
-    def apply_moe(self,
-                  layer: torch.nn.Module,
-                  x: torch.Tensor,
-                  router_logits: torch.Tensor,
-                  top_k: int,
-                  renormalize: bool = True) -> torch.Tensor:
-
-        return fused_moe(x,
-                         layer.w13_weight,
-                         layer.w2_weight,
-                         router_logits,
-                         top_k,
-                         renormalize=renormalize,
-                         inplace=True)
-
 
 class LinearBase(torch.nn.Module):
     """Base linear layer.
