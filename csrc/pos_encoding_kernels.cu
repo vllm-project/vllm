@@ -1,4 +1,4 @@
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
@@ -127,7 +127,7 @@ void rotary_embedding(
                            // [num_tokens, num_heads * head_size]
     torch::Tensor& key,    // [batch_size, seq_len, num_kv_heads * head_size] or
                            // [num_tokens, num_kv_heads * head_size]
-    int head_size,
+    int64_t head_size,
     torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox) {
   int64_t num_tokens = query.numel() / query.size(-1);
@@ -138,7 +138,7 @@ void rotary_embedding(
   int64_t key_stride = key.stride(-2);
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * rot_dim / 2, 512));
+  dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "rotary_embedding", [&] {
@@ -168,9 +168,9 @@ void batched_rotary_embedding(
                            // [num_tokens, num_heads * head_size]
     torch::Tensor& key,    // [batch_size, seq_len, num_kv_heads * head_size] or
                            // [num_tokens, num_kv_heads * head_size]
-    int head_size,
+    int64_t head_size,
     torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
-    bool is_neox, int rot_dim,
+    bool is_neox, int64_t rot_dim,
     torch::Tensor& cos_sin_cache_offsets  // [num_tokens]
 ) {
   int64_t num_tokens = cos_sin_cache_offsets.size(0);
@@ -180,7 +180,7 @@ void batched_rotary_embedding(
   int64_t key_stride = key.stride(-2);
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * rot_dim / 2, 512));
+  dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "rotary_embedding", [&] {

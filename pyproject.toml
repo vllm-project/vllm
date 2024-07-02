@@ -59,7 +59,7 @@ exclude = [
 ]
 
 [tool.codespell]
-ignore-words-list = "dout, te, indicies"
+ignore-words-list = "dout, te, indicies, subtile"
 skip = "./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
 
 [tool.isort]
@@ -71,4 +71,5 @@ markers = [
     "skip_global_cleanup",
     "llm: run tests for vLLM API only",
     "openai: run tests for OpenAI API only",
+    "vlm: run tests for vision language models only",
 ]

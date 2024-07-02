@@ -17,9 +17,8 @@ RANDOM_SEEDS = list(range(5))
 
 @pytest.fixture
 def vllm_model(vllm_runner):
-    vllm_model = vllm_runner(MODEL, dtype="half")
-    yield vllm_model
-    del vllm_model
+    with vllm_runner(MODEL, dtype="half") as vllm_model:
+        yield vllm_model
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)

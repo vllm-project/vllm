@@ -12,7 +12,7 @@ include_directories("${CMAKE_SOURCE_DIR}/csrc")
 #
 # Check the compile flags
 #
-list(APPEND CXX_COMPILE_FLAGS 
+list(APPEND CXX_COMPILE_FLAGS
     "-fopenmp"
     "-DVLLM_CPU_EXTENSION")
 
@@ -33,9 +33,21 @@ function (find_isa CPUINFO TARGET OUT)
     endif()
 endfunction()
 
+function (is_avx512_disabled OUT)
+    set(DISABLE_AVX512 $ENV{VLLM_CPU_DISABLE_AVX512})
+    if(DISABLE_AVX512 AND DISABLE_AVX512 STREQUAL "true")
+        set(${OUT} ON PARENT_SCOPE)
+    else()
+        set(${OUT} OFF PARENT_SCOPE)
+    endif()
+endfunction()
+
+is_avx512_disabled(AVX512_DISABLED)
+
+find_isa(${CPUINFO} "avx2" AVX2_FOUND)
 find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
 
-if (AVX512_FOUND)
+if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
         "-mavx512f"
         "-mavx512vl"
@@ -44,8 +56,8 @@ if (AVX512_FOUND)
 
     find_isa(${CPUINFO} "avx512_bf16" AVX512BF16_FOUND)
     if (AVX512BF16_FOUND OR ENABLE_AVX512BF16)
-        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND 
-            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3) 
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
             list(APPEND CXX_COMPILE_FLAGS "-mavx512bf16")
         else()
             message(WARNING "Disable AVX512-BF16 ISA support, requires gcc/g++ >= 12.3")
@@ -53,8 +65,11 @@ if (AVX512_FOUND)
     else()
         message(WARNING "Disable AVX512-BF16 ISA support, no avx512_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512BF16=1.")
     endif()
+elseif (AVX2_FOUND)
+    list(APPEND CXX_COMPILE_FLAGS "-mavx2")
+    message(WARNING "vLLM CPU backend using AVX2 ISA")
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512 ISA support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512 or AVX2 ISA support.")
 endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
@@ -73,7 +88,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/cache.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/pos_encoding.cpp"
-    "csrc/cpu/pybind.cpp")
+    "csrc/cpu/torch_bindings.cpp")
 
 define_gpu_extension_target(
     _C_cpu
@@ -81,7 +96,8 @@ define_gpu_extension_target(
     LANGUAGE CXX
     SOURCES ${VLLM_EXT_SRC}
     COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
-    WITH_SOABI 
+    USE_SABI 3
+    WITH_SOABI
 )
 
 add_custom_target(default)

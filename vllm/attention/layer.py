@@ -71,7 +71,12 @@ class Attention(nn.Module):
         dtype = torch.get_default_dtype()
         device = None
         if hasattr(cache_config, "cpu_kvcache_space_bytes"):
+            print("===========cache config has cpu_kvcache_space_bytes attr device = cpu =======")
             device = "cpu"
+        # else:
+        #     print("===========cache config has cpu_kvcache_space_bytes attr device = cuda =======")
+        #     device = "cuda"
+            # device = "openvino"
         attn_backend = get_attn_backend(num_heads, head_size, num_kv_heads,
                                         sliding_window, dtype, kv_cache_dtype,
                                         block_size, device, blocksparse_params

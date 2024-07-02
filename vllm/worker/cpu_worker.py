@@ -174,6 +174,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.cpu_cache: List[torch.Tensor]
 
     def init_device(self) -> None:
+        print("=======================CPU WORKER INIT_DEVICE======================")
         self.device = torch.device("cpu")
         self.init_distributed_environment()
         # Set random seed.
@@ -292,7 +293,6 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             assert seq_group_metadata_list is not None
             num_seq_groups: int = len(seq_group_metadata_list)
             assert execute_model_req is not None
-            blocks_to_copy = execute_model_req.blocks_to_copy
             blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                           device="cpu",
                                           dtype=torch.int64).view(-1, 2)

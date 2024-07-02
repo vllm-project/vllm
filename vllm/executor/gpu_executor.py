@@ -18,9 +18,10 @@ class GPUExecutor(ExecutorBase):
         """
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")
-
+        print("############# GPUExecutor preate create worker ############")
         self.driver_worker = self._create_worker()
         self.driver_worker.init_device()
+        print("############# GPUExecutor driver_worker.load_model ############")
         self.driver_worker.load_model()
 
     def _get_worker_kwargs(
@@ -59,11 +60,12 @@ class GPUExecutor(ExecutorBase):
         else:
             worker_module_name = "vllm.spec_decode.spec_decode_worker"
             worker_class_name = "create_spec_worker"
-
+        print("################ GPU Executor ####### init wokrer, worker_class_name =", worker_class_name)
         wrapper = WorkerWrapperBase(
             worker_module_name=worker_module_name,
             worker_class_name=worker_class_name,
         )
+
         wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
                                                       distributed_init_method))
         return wrapper.worker
@@ -110,6 +112,10 @@ class GPUExecutor(ExecutorBase):
     def remove_lora(self, lora_id: int) -> bool:
         assert lora_id > 0, "lora_id must be greater than 0."
         return self.driver_worker.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self.driver_worker.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()

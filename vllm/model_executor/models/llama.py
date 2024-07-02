@@ -141,6 +141,7 @@ class LlamaAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
+        print("~~~~~~~~~~~~~~~~Llama attention~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
@@ -172,6 +173,7 @@ class LlamaDecoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
+        print("~~~~~~~~~~~~~~~~LlamaDecoderLayer~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -259,6 +261,7 @@ class LlamaModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
+        print("~~~~~~~~~~~~~~~~LlamaModel~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config=config,
                               cache_config=cache_config,
@@ -283,6 +286,7 @@ class LlamaModel(nn.Module):
         else:
             hidden_states = self.get_input_embeddings(input_ids)
         residual = None
+        print("~~~~~~~~~~~~~~~~Llama forward~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -319,6 +323,14 @@ class LlamaForCausalLM(nn.Module):
         "lm_head": "output_embeddings",
     }
     embedding_padding_modules = ["lm_head"]
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
 
     def __init__(
         self,
@@ -360,6 +372,7 @@ class LlamaForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        print("###################LlamaForCausalLM Forward####################")
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
         return hidden_states

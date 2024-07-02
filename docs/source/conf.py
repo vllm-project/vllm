@@ -66,6 +66,7 @@ html_theme_options = {
     'path_to_docs': 'docs/source',
     'repository_url': 'https://github.com/vllm-project/vllm',
     'use_repository_button': True,
+    'use_edit_page_button': True,
 }
 
 # Add any paths that contain custom static files (such as style sheets) here,
@@ -90,7 +91,9 @@ autodoc_mock_imports = [
     "sentencepiece",
     "vllm.cuda_utils",
     "vllm._C",
+    "PIL",
     "numpy",
+    'triton',
     "tqdm",
     "tensorizer",
 ]
@@ -116,12 +119,13 @@ class MockedClassDocumenter(autodoc.ClassDocumenter):
 autodoc.ClassDocumenter = MockedClassDocumenter
 
 intersphinx_mapping = {
-    'python': ('https://docs.python.org/3', None),
-    'typing_extensions':
-    ('https://typing-extensions.readthedocs.io/en/latest', None),
-    'numpy': ('https://numpy.org/doc/stable', None),
-    'torch': ('https://pytorch.org/docs/stable', None),
-    'psutil': ('https://psutil.readthedocs.io/en/stable', None),
+    "python": ("https://docs.python.org/3", None),
+    "typing_extensions":
+    ("https://typing-extensions.readthedocs.io/en/latest", None),
+    "pillow": ("https://pillow.readthedocs.io/en/stable", None),
+    "numpy": ("https://numpy.org/doc/stable", None),
+    "torch": ("https://pytorch.org/docs/stable", None),
+    "psutil": ("https://psutil.readthedocs.io/en/stable", None),
 }
 
 autodoc_preserve_defaults = True

@@ -122,15 +122,22 @@ def get_quant_config(model_config: ModelConfig,
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)
     if hf_quant_config is None:
-        compression_config = getattr(model_config.hf_config,
-                                     "compression_config", None)
-        if compression_config is not None:
-            hf_quant_config = compression_config.get("quantization_config",
-                                                     None)
-
+        # compressed-tensors uses a compressions_config
+        hf_quant_config = getattr(model_config.hf_config, "compression_config",
+                                  None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
-    model_name_or_path = model_config.model
+    # In case of bitsandbytes/QLoRA, get quant config from the adapter model.
+    if model_config.quantization == "bitsandbytes":
+        if (not load_config.model_loader_extra_config
+                or "qlora_adapter_name_or_path"
+                not in load_config.model_loader_extra_config):
+            return quant_cls.from_config({"adapter_name_or_path": ""})
+        model_name_or_path = load_config.model_loader_extra_config[
+            "qlora_adapter_name_or_path"]
+
+    else:
+        model_name_or_path = model_config.model
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
@@ -169,6 +176,10 @@ def get_quant_config(model_config: ModelConfig,
     quant_config_file = quant_config_files[0]
     with open(quant_config_file, "r") as f:
         config = json.load(f)
+
+        if model_config.quantization == "bitsandbytes":
+            config["adapter_name_or_path"] = model_name_or_path
+
     return quant_cls.from_config(config)
 
 
@@ -318,7 +329,7 @@ def np_cache_weights_iterator(
     # dumping the same model weights to numpy at the same time.
     with get_lock(model_name_or_path, cache_dir):
         if not os.path.exists(weight_names_file):
-            weight_names = []
+            weight_names: List[str] = []
             for bin_file in hf_weights_files:
                 state = torch.load(bin_file, map_location="cpu")
                 for name, param in state.items():
