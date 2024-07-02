@@ -8,7 +8,8 @@
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
             "num_prompts": 500,
-            "port": 8000
+            "port": 8000,
+            "fp8": true
         },
         "lmdeploy_server_parameters": {
         },

@@ -54,31 +54,28 @@ cd /tensorrtllm_backend
 cd ./tensorrt_llm/examples/${model_type}
 
 
-if echo "$server_params" | jq -e 'has("qformat")' > /dev/null; then
+if echo "$common_params" | jq -e 'has("fp8")' > /dev/null; then
 
-    echo "Key 'qformat' exists in tensorrt server params. Use quantize.py"
+    echo "Key 'fp8' exists in common params. Use quantize.py instead of convert_checkpoint.py"
     echo "Reference: https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/llama/README.md"
-    qformat=$(echo "$server_params" | jq -r '.qformat')
-    kv_cache_dtype=$(echo "$server_params" | jq -r '.kv_cache_dtype')
-    calib_size=$(echo "$server_params" | jq -r '.calib_size')
     python ../quantization/quantize.py \
         --model_dir ${model_path} \
         --dtype ${model_dtype} \
         --tp_size ${model_tp_size} \
         --output_dir ${trt_model_path} \
-        --qformat ${qformat} \
-        --kv_cache_dtype ${kv_cache_dtype} \
-        --calib_size ${calib_size} \
+        --qformat fp8 \
+        --kv_cache_dtype fp8 \
+        --calib_size 512
 
 else
 
-    echo "Key 'qformat' does not exist in tensorrt server params. Use convert_checkpoint.py"
+    echo "Key 'fp8' exists in common params. Use convert_checkpoint.py"
     python3 convert_checkpoint.py \
         --model_dir ${model_path} \
         --dtype ${model_dtype} \
         --tp_size ${model_tp_size} \
         --output_dir ${trt_model_path}
-        
+
 fi
 
 
