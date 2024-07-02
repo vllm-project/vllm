@@ -129,7 +129,7 @@ class GroupCoordinator:
     pynccl_comm: Optional[Any]  # PyNccl communicator
     ca_comm: Optional[Any]  # Custom allreduce communicator
     shm_broadcaster: Optional[Any]  # shared memory broadcaster
-    use_xla: bool # Whether to use PyTorch XLA communicator
+    use_xla: bool  # Whether to use PyTorch XLA communicator
 
     def __init__(
         self,
