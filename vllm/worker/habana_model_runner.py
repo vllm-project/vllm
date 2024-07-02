@@ -16,7 +16,6 @@ import itertools
 import operator
 import torch
 import habana_frameworks.torch as htorch
-import contextlib
 from vllm.attention import (AttentionMetadata, get_attn_backend)
 from vllm.config import (DeviceConfig, LoadConfig, CacheConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,

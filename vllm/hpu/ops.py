@@ -6,10 +6,9 @@
 ###############################################################################
 import os
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import habana_frameworks.torch as htorch
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import vllm.hpu.utils as hpu_utils
 

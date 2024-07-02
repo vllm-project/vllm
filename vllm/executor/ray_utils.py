@@ -78,8 +78,7 @@ def initialize_ray_cluster(
     else:
         ray.init(address=ray_address,
                  ignore_reinit_error=True,
-                 log_to_driver=not os.environ.get(
-                     'VLLM_RAY_DISABLE_LOG_TO_DRIVER', '0') != '0')
+                 log_to_driver=os.environ.get("VLLM_RAY_DISABLE_LOG_TO_DRIVER", "0") == "0")
     ray_accel_name = "HPU" if is_hpu() else "GPU"
 
     if parallel_config.placement_group:

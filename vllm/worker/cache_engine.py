@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
                         is_pin_memory_available, is_hpu)
 if is_hpu():
-    import habana_frameworks.torch as htorch
+    pass
 
 logger = init_logger(__name__)
 
