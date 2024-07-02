@@ -1,5 +1,3 @@
-# mypy: ignore-errors
-
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
@@ -12,7 +10,7 @@ import operator
 import os
 import time
 from enum import IntEnum
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Any
 
 import habana_frameworks.torch as htorch
 import torch
@@ -48,7 +46,7 @@ _TYPE_CACHE = {}
 # dim is either 'bs' or 'seq'
 # param is either 'min', 'step' or 'max'
 # example env variable: VLLM_DECODE_BS_BUCKET_STEP=128
-def read_bucket_settings(phase: str, dim: str, **defaults: Dict):
+def read_bucket_settings(phase: str, dim: str, **defaults):
     params = ['min', 'step', 'max']
     values = [
         int(
@@ -61,10 +59,11 @@ def read_bucket_settings(phase: str, dim: str, **defaults: Dict):
 def warmup_range(config: Tuple[int, int, int]):
     bmin, bstep, bmax = config
     base = itertools.repeat(2)
-    ramp_up = itertools.accumulate(base, func=operator.mul, initial=bmin)
-    ramp_up = itertools.takewhile(lambda x: x < bstep and x <= bmax, ramp_up)
+    ramp_up_acc = itertools.accumulate(base, func=operator.mul, initial=bmin)
+    ramp_up_tw = itertools.takewhile(lambda x: x < bstep and x <= bmax, \
+        ramp_up_acc)
     stable = range(bstep, bmax + 1, bstep)
-    return list(ramp_up) + list(stable)
+    return list(ramp_up_tw) + list(stable)
 
 
 def warmup_buckets(bs_bucket_config, seq_bucket_config):
@@ -172,16 +171,16 @@ class HpuModelAdapter():
 
 
 class PreparePromptMetadata(NamedTuple):
-    input_tokens: List[int]
-    input_positions: List[int]
+    input_tokens: List[List[int]]
+    input_positions: List[List[int]]
     attn_metadata: Optional[AttentionMetadata]
     seq_lens: List[int]
     query_lens: List[int]
-    lora_index_mapping: List[int]
-    lora_prompt_mapping: List[int]
+    lora_index_mapping: List[List[int]]
+    lora_prompt_mapping: List[List[int]]
     lora_requests: Set[LoRARequest]
     multi_modal_input: Optional[torch.Tensor]
-    slot_mapping: List[int]
+    slot_mapping: List[List[int]]
 
     @classmethod
     def empty(cls):
@@ -200,13 +199,13 @@ class PreparePromptMetadata(NamedTuple):
 
 
 class PrepareDecodeMetadata(NamedTuple):
-    input_tokens: List[int]
-    input_positions: List[int]
+    input_tokens: List[List[int]]
+    input_positions: List[List[int]]
     attn_metadata: Optional[AttentionMetadata]
     lora_index_mapping: List[int]
     lora_prompt_mapping: List[int]
     lora_requests: Set[LoRARequest]
-    slot_mapping: List[int]
+    slot_mapping: List[List[int]]
 
     @classmethod
     def empty(cls):
@@ -363,7 +362,7 @@ class HabanaModelRunner:
                                                           min=self.block_size,
                                                           step=self.block_size,
                                                           max=2048)
-        self.graphed_buckets = set()
+        self.graphed_buckets: Set[Any] = set()
 
         msg = ("Prompt bucket config (min, step, max_warmup) "
                f"bs:{self.prompt_bs_bucket_cfg}, "
@@ -756,8 +755,8 @@ class HabanaModelRunner:
                 lora_prompt_mapping = decode_lora_prompt_mapping
                 lora_requests = decode_lora_requests
 
-            # FIXME: We need to adjust selected_token_indices to accommodate f
-            # or padding
+            # FIXME: We need to adjust selected_token_indices to accommodate
+            # for padding
             max_len = input_tokens.size(1)
             paddings = [max_len - s for s in seq_lens]
             paddings = [0] + paddings[:-1]
@@ -923,8 +922,9 @@ class HabanaModelRunner:
              ) = self.prepare_input_tensors(seq_group_metadata_list)
             is_prompt = attn_metadata.is_prompt
 
-        if self.lora_config:
-            self.set_active_loras(lora_requests, lora_mapping)
+        # NOTE(kzawora): Need to restore this after adding LoRA
+        # if self.lora_config:
+        #    self.set_active_loras(lora_requests, lora_mapping)
 
         batch_size = input_tokens.size(0)
         seq_len = self._seq_len(attn_metadata)
