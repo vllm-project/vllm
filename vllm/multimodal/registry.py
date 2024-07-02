@@ -1,7 +1,5 @@
 import functools
-from typing import Any, Optional, Sequence, Type, TypeVar
-
-from torch import nn
+from typing import TYPE_CHECKING, Any, Optional, Sequence, Type, TypeVar
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -10,10 +8,13 @@ from .base import MultiModalData, MultiModalInputMapper, MultiModalPlugin
 from .image import (ImageFeatureData, ImageFeaturePlugin, ImagePixelData,
                     ImagePixelPlugin)
 
+if TYPE_CHECKING:
+    from torch import nn
+
 logger = init_logger(__name__)
 
 D = TypeVar("D", bound=MultiModalData)
-N = TypeVar("N", bound=Type[nn.Module])
+N = TypeVar("N", bound=Type["nn.Module"])
 
 
 class MultiModalRegistry:
