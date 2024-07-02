@@ -125,6 +125,7 @@ class RejectionSampler(SpecDecodeBaseSampler):
         # NOTE: the recovered_probs are overwritten by this method.
         recovered_token_ids = _multinomial(recovered_probs,
                                            num_samples=1,
+                                           k=k,
                                            generators=generators).reshape(
                                                batch_size, k)
         return accepted, recovered_token_ids
@@ -263,6 +264,7 @@ class RejectionSampler(SpecDecodeBaseSampler):
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
+    k: int,
     generators: List[Optional[torch.Generator]],
 ) -> torch.Tensor:
 
@@ -276,7 +278,8 @@ def _multinomial(
     q = torch.empty_like(probs)
     if any(generator is not None for generator in generators):
         for i, generator in enumerate(generators):
-            q[i].exponential_(1.0, generator=generator)
+            start_idx, end_idx = k*i, k*(i+1)
+            q[start_idx:end_idx].exponential_(1.0, generator=generator)
     else:
         q.exponential_(1.0)
 
