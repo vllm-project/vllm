@@ -574,7 +574,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
-        max_prefill_seq_len = max(prefill_seq_lens, default=0)
         max_decode_seq_len = max(decode_seq_lens, default=0)
 
         # If cuda graph can be used, pad tensors accordingly.
@@ -682,7 +681,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 slot_mapping=slot_mapping_tensor,
                 num_prefill_tokens=num_prefill_tokens,
                 num_decode_tokens=num_decode_tokens,
-                max_prefill_seq_len=max_prefill_seq_len,
                 block_tables=block_tables,
                 paged_kv_indptr=paged_kv_indptr_tensor,
                 paged_kv_indices=paged_kv_indices_tensor,
@@ -706,10 +704,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 num_prefill_tokens=num_prefill_tokens,
                 num_decode_tokens=num_decode_tokens,
                 seq_lens=seq_lens,
-                seq_lens_tensor=seq_lens_tensor,
                 max_query_len=max_query_len,
-                max_prefill_seq_len=max_prefill_seq_len,
-                max_decode_seq_len=max_decode_seq_len,
                 query_start_loc=query_start_loc,
                 seq_start_loc=seq_start_loc,
                 context_lens_tensor=context_lens_tensor,
@@ -880,6 +875,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         slot_mapping.fill_(_PAD_SLOT_ID)
         seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
+        query_start_loc = torch.arange(0,
+                                       max_batch_size + 2,
+                                       dtype=torch.int32,
+                                       device=self.device)
+        seq_start_loc = torch.arange(0,
+                                     max_batch_size + 2,
+                                     dtype=torch.int32,
+                                     device=self.device)
 
         # Prepare buffer for outputs. These will be reused for all batch sizes.
         # It will be filled after the first graph capture.
@@ -947,7 +950,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         slot_mapping=slot_mapping[:batch_size],
                         num_prefill_tokens=0,
                         num_decode_tokens=batch_size,
-                        max_prefill_seq_len=0,
                         block_tables=block_tables,
                         paged_kv_indptr=paged_kv_indptr_tensor_host,
                         paged_kv_indices=paged_kv_indices_tensor_host,
@@ -971,13 +973,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         num_prefill_tokens=0,
                         num_decode_tokens=batch_size,
                         slot_mapping=slot_mapping[:batch_size],
-                        seq_lens=None,
-                        seq_lens_tensor=seq_lens[:batch_size],
-                        max_query_len=None,
-                        max_prefill_seq_len=0,
-                        max_decode_seq_len=self.max_seq_len_to_capture,
-                        query_start_loc=None,
-                        seq_start_loc=None,
+                        seq_lens=seq_lens[:batch_size].tolist(),
+                        max_query_len=1,
+                        query_start_loc=query_start_loc[:batch_size + 1],
+                        seq_start_loc=seq_start_loc[:batch_size + 1],
                         context_lens_tensor=None,
                         block_tables=block_tables[:batch_size],
                         use_cuda_graph=True,
@@ -1122,9 +1121,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
-        prefill_meta = model_input.attn_metadata.prefill_metadata
-        decode_meta = model_input.attn_metadata.decode_metadata
-        if prefill_meta is None and decode_meta.use_cuda_graph:
+        if model_input.attn_metadata.use_cuda_graph:
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
@@ -1160,7 +1157,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             indices = model_input.sampling_metadata.selected_token_indices
             if model_input.is_prompt:
                 hidden_states = hidden_states.index_select(0, indices)
-            elif decode_meta.use_cuda_graph:
+            elif model_input.attn_metadata.use_cuda_graph:
                 hidden_states = hidden_states[:len(indices)]
 
             output.hidden_states = hidden_states
@@ -1251,9 +1248,9 @@ class CUDAGraphRunner:
                 "positions": positions,
                 "kv_caches": kv_caches,
                 "slot_mapping": attn_metadata.slot_mapping,
-                "seq_lens_tensor":
-                attn_metadata.decode_metadata.seq_lens_tensor,
-                "block_tables": attn_metadata.decode_metadata.block_tables,
+                "block_tables": attn_metadata.block_tables,
+                "seq_start_loc": attn_metadata.seq_start_loc,
+                "query_start_loc": attn_metadata.query_start_loc
             }
         self.output_buffers = {"hidden_states": hidden_states}
         return hidden_states
@@ -1275,11 +1272,12 @@ class CUDAGraphRunner:
         self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
                                                  non_blocking=True)
         if self.backend_name != "flashinfer":
-            self.input_buffers["seq_lens_tensor"].copy_(
-                attn_metadata.decode_metadata.seq_lens_tensor,
-                non_blocking=True)
             self.input_buffers["block_tables"].copy_(
-                attn_metadata.decode_metadata.block_tables, non_blocking=True)
+                attn_metadata.block_tables, non_blocking=True)
+            self.input_buffers["query_start_loc"].copy_(
+                attn_metadata.query_start_loc, non_blocking=True)
+            self.input_buffers["seq_start_loc"].copy_(
+                attn_metadata.seq_start_loc, non_blocking=True)
         # Run the graph.
         self.graph.replay()
 
