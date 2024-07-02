@@ -176,7 +176,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 or not layer.process_after_load):
             return
 
-        # If checkpoint is fp/bf16, quantize in place.
+        # If checkpoint is fp/bf16 (not serialized fp8), quantize the weights.
         if not self.quant_config.is_checkpoint_fp8_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                          scale=None)
@@ -186,9 +186,8 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.input_scale = None
             return
 
-        # If checkpoint if fp8, need to handle that we can only pass
-        # one scale to torch._scaled_mm and to cutlass kernels, but we
-        # have N scales for fused layers.
+        # If checkpoint is fp8, requantize the separately quantized logical
+        # weights into a single fp8 weight with a single weight scale.
         else:
             # WEIGHT_SCALE / WEIGHT
             #   Loop over logical weights, requantizing with single scale.
@@ -229,10 +228,9 @@ class Fp8LinearMethod(LinearMethodBase):
             elif self.quant_config.activation_scheme == "static":
                 layer.input_scale = Parameter(layer.input_scale.max(),
                                               requires_grad=False)
-
-            # WEIGHT_SCALE / WEIGHT
-            #   Loop over logical weights, requantizing with single scale.
-            max_w_scale = layer.weight_scale.max()
+            else:
+                raise ValueError(
+                    f"Unknown scheme {self.quant_config.activation_scheme}")
 
     def apply(self,
               layer: torch.nn.Module,
