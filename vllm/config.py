@@ -1203,7 +1203,7 @@ class LoRAConfig:
 
     def __post_init__(self):
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
-        possible_max_ranks = (8, 16, 32, 64)
+        possible_max_ranks = (8, 16, 32, 64, 128)
         possible_lora_extra_vocab_size = (0, 256, 512)
         if self.max_lora_rank not in possible_max_ranks:
             raise ValueError(

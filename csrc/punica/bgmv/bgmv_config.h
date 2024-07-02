@@ -11,7 +11,6 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
 // clang-format off
 
 #define FOR_BGMV_WIDE(f, in_T, out_T, W_T, narrow) \
-    f(in_T, out_T, W_T, narrow, 128) \
     f(in_T, out_T, W_T, narrow, 256) \
     f(in_T, out_T, W_T, narrow, 512) \
     f(in_T, out_T, W_T, narrow, 640) \
@@ -108,7 +107,6 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     // Using it for the fully sharded column
     // parallel LoRA A which splits the rank dim
 #define FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, narrow) \
-    f(in_T, out_T, W_T, 128, narrow) \
     f(in_T, out_T, W_T, 256, narrow) \
     f(in_T, out_T, W_T, 512, narrow) \
     f(in_T, out_T, W_T, 640, narrow) \
@@ -203,7 +201,8 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 8)  \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 16) \
     FOR_BGMV_WIDE(f, in_T, out_T, W_T, 32) \
-    FOR_BGMV_WIDE(f, in_T, out_T, W_T, 64)
+    FOR_BGMV_WIDE(f, in_T, out_T, W_T, 64) \
+    FOR_BGMV_WIDE(f, in_T, out_T, W_T, 128)
 
 
 #define FOR_INST_BGMV_WIDE_NARROW(f, in_T, out_T, W_T) \
@@ -213,6 +212,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 8, 64) \
     f(in_T, out_T, W_T, 16, 64) \
     f(in_T, out_T, W_T, 32, 64) \
-    f(in_T, out_T, W_T, 64, 64)
+    f(in_T, out_T, W_T, 64, 64) \
+    f(in_T, out_T, W_T, 128, 128)
 
 // clang-format on
