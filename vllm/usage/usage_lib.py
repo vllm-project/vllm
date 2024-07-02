@@ -17,6 +17,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.utils import cuda_device_count_stateless
 
 _config_home = envs.VLLM_CONFIG_ROOT
 _USAGE_STATS_JSON_PATH = os.path.join(_config_home, "vllm/usage_stats.json")
@@ -146,7 +147,7 @@ class UsageMessage:
         # Platform information
         if torch.cuda.is_available():
             device_property = torch.cuda.get_device_properties(0)
-            self.gpu_count = torch.cuda.device_count()
+            self.gpu_count = cuda_device_count_stateless()
             self.gpu_type = device_property.name
             self.gpu_memory_per_device = device_property.total_memory
         self.provider = _detect_cloud_provider()
