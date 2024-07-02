@@ -150,7 +150,7 @@ async def audio_transcriptions(
     stream: bool = Form(False),
     raw_request: Request = None,
 ):
-    generator = await openai_serving_chat.create_audio_transcriptions(
+    generator = await openai_serving_whisper.create_audio_transcriptions(
         file=file, 
         language=language,
         response_format=response_format,

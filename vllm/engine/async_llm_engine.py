@@ -278,9 +278,24 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
 
+        if 'whisper_data' in inputs:
+            if self.whisper_config is None:
+                raise ValueError(f"Whisper config is None, must initialize a Whisper model.")
+            if self.whisper_processor is None:
+                raise ValueError(f"Whisper Processor is not initialized.")
+            whisper_data = self.whisper_processor(
+                inputs['whisper_data'], 
+                sampling_rate = self.whisper_config.sample_rate,
+                return_tensors = 'pt',
+            )
+            whisper_data = whisper_data.to(self.model_config.dtype).input_features[0]
+        else:
+            whisper_data = None
+
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=inputs.get("prompt"),
-                         multi_modal_data=inputs.get("multi_modal_data"))
+                         multi_modal_data=inputs.get("multi_modal_data"),
+                         whisper_data=whisper_data)
 
     async def add_request_async(
         self,

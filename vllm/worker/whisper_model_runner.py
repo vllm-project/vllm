@@ -130,7 +130,7 @@ class WhisperModelRunner(ModelRunner):
             
                     whisper_data_list.append(whisper_data)
         
-        whisper_data = torch.cat(whisper_data_list, dim = 1).cuda()
+        whisper_data = whisper_data_list[0].cuda()
 
         return whisper_data
 
