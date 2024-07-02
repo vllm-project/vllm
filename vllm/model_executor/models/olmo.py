@@ -283,15 +283,15 @@ class OlmoForCausalLM(nn.Module):
         self.config = config
         self.model = OlmoModel(config, cache_config, quant_config)
         if config.tie_word_embeddings:
-            self.lm_head_weight = self.model.embed_tokens.weight
+            self.lm_head = self.model.embed_tokens
         else:
             self.unpadded_vocab_size = config.vocab_size
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
+                quant_config=quant_config,
             )
-            self.lm_head_weight = self.lm_head.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -313,7 +313,7 @@ class OlmoForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 

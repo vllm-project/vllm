@@ -412,6 +412,7 @@ class ArcticForCausalLM(nn.Module):
         self.lm_head = ParallelLMHead(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
         )
         self.num_experts = config.num_local_experts
         self.num_experts_per_tok = config.num_experts_per_tok
@@ -434,7 +435,7 @@ class ArcticForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 

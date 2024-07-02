@@ -273,7 +273,7 @@ class JAISLMHeadModel(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.transformer = JAISModel(config, cache_config, quant_config)
-        self.lm_head_weight = self.transformer.wte.weight
+        self.lm_head = self.transformer.wte
         if hasattr(config, "width_scale"):
             self.output_logits_scale = config.width_scale
         else:
@@ -297,7 +297,7 @@ class JAISLMHeadModel(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 

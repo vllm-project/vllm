@@ -253,7 +253,9 @@ class InternLM2ForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.model = InternLM2Model(config, cache_config, quant_config)
-        self.output = ParallelLMHead(config.vocab_size, config.hidden_size)
+        self.output = ParallelLMHead(config.vocab_size,
+                                     config.hidden_size,
+                                     quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -271,7 +273,7 @@ class InternLM2ForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.output.weight, hidden_states,
+        logits = self.logits_processor(self.output, hidden_states,
                                        sampling_metadata)
         return logits
 
