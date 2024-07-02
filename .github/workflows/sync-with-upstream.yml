@@ -79,7 +79,7 @@ jobs:
 
           echo "Checking if PR is up-to-date"
 
-          git fetch ${upstream_url} refs/pull/${pr_number}/head
+          git fetch origin refs/pull/${pr_number}/head
           if git diff --stat --exit-code upstream/main FETCH_HEAD; then
             echo "PR is up-to-date"
             exit 0
