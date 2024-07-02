@@ -91,17 +91,17 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         self,
         method: str,
         *args,
-        async_run_remote_workers_only: bool = False,
+        async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers.
 
         Args:
-            async_run_remote_workers_only: If True the method will be run only
-                in the remote workers, not the driver worker. It will also be
-                run asynchronously and return a list of futures rather than
-                blocking on the results.
+            async_run_tensor_parallel_workers_only: If True the method will be
+                run only in the remote TP workers, not the driver worker.
+                It will also be run asynchronously and return a list of futures
+                rather than blocking on the results.
         """
 
         if max_concurrent_workers:
@@ -114,7 +114,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             for worker in self.workers
         ]
 
-        if async_run_remote_workers_only:
+        if async_run_tensor_parallel_workers_only:
             # Just return futures
             return worker_outputs
 

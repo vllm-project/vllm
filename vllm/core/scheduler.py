@@ -256,6 +256,7 @@ class Scheduler:
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        pipeline_parallel_size: int = 1,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -273,11 +274,19 @@ class Scheduler:
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
 
+        num_gpu_blocks = cache_config.num_gpu_blocks
+        if num_gpu_blocks:
+            num_gpu_blocks //= pipeline_parallel_size
+
+        num_cpu_blocks = cache_config.num_cpu_blocks
+        if num_cpu_blocks:
+            num_cpu_blocks //= pipeline_parallel_size
+
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
-            num_gpu_blocks=self.cache_config.num_gpu_blocks,
-            num_cpu_blocks=self.cache_config.num_cpu_blocks,
+            num_gpu_blocks=num_gpu_blocks,
+            num_cpu_blocks=num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
 

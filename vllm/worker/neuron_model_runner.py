@@ -9,7 +9,8 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
@@ -175,6 +176,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
     ) -> ModelInputForNeuron:
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
@@ -207,6 +209,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self,
         model_input: ModelInputForNeuron,
         kv_caches: Optional[List[torch.Tensor]] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:

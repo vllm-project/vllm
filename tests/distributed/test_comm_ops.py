@@ -32,7 +32,7 @@ def all_reduce_test_worker(tp_size: int, pp_size: int, rank: int,
         (r + 1) for r in range(tp_size)
     ]
     expected = torch.sum(torch.stack(all_tensors, dim=0), dim=0)
-    t = all_tensors[rank]
+    t = all_tensors[rank % tp_size]
     t = tensor_model_parallel_all_reduce(t)
     assert torch.allclose(t, expected)
 
@@ -60,7 +60,7 @@ def all_gather_test_worker(tp_size: int, pp_size: int, rank: int,
             for r in range(tp_size)
         ]
         expected = torch.cat(all_tensors, dim=all_gather_dimension)
-        t = all_tensors[rank]
+        t = all_tensors[rank % tp_size]
         t = tensor_model_parallel_all_gather(t, all_gather_dimension)
         assert torch.allclose(t, expected)
 
@@ -91,7 +91,7 @@ def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
         "f": torch.tensor([], dtype=torch.float32, device="cuda"),
     }
 
-    if rank == 0:
+    if (rank % tp_size) == 0:
         broadcast_tensor_dict(test_dict, src=0)
     else:
         recv_dict = broadcast_tensor_dict(src=0)
@@ -184,3 +184,17 @@ def test_multi_process_tensor_parallel(tp_size, test_target):
     "test_target", [send_recv_test_worker, send_recv_tensor_dict_test_worker])
 def test_multi_process_pipeline_parallel(pp_size, test_target):
     multi_process_parallel(1, pp_size, test_target)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 4,
+                    reason="Need at least 4 GPUs to run the test.")
+@pytest.mark.parametrize("tp_size", [2])
+@pytest.mark.parametrize("pp_size", [2])
+@pytest.mark.parametrize("test_target", [
+    send_recv_test_worker, send_recv_tensor_dict_test_worker,
+    all_reduce_test_worker, all_gather_test_worker,
+    broadcast_tensor_dict_test_worker
+])
+def test_multi_process_tensor_parallel_pipeline_parallel(
+        tp_size, pp_size, test_target):
+    multi_process_parallel(tp_size, pp_size, test_target)

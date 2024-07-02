@@ -32,7 +32,7 @@ def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
 
     output_processor = MultiStepOutputProcessor(
         detokenizer=detokenizer,
-        scheduler=scheduler,
+        scheduler=[scheduler],
         seq_counter=seq_counter,
         get_tokenizer_for_seq=lambda _: mock_tokenizer(),
         stop_checker=stop_checker,
@@ -86,7 +86,7 @@ def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int,
 
     output_processor = MultiStepOutputProcessor(
         detokenizer=detokenizer,
-        scheduler=scheduler,
+        scheduler=[scheduler],
         seq_counter=seq_counter,
         get_tokenizer_for_seq=lambda _: mock_tokenizer(),
         stop_checker=stop_checker,
@@ -148,7 +148,7 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
 
     output_processor = MultiStepOutputProcessor(
         detokenizer=detokenizer,
-        scheduler=scheduler,
+        scheduler=[scheduler],
         seq_counter=seq_counter,
         get_tokenizer_for_seq=lambda _: mock_tokenizer(eos_token_id),
         stop_checker=stop_checker,
@@ -215,7 +215,7 @@ def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
 
     output_processor = MultiStepOutputProcessor(
         detokenizer=detokenizer,
-        scheduler=scheduler,
+        scheduler=[scheduler],
         seq_counter=seq_counter,
         get_tokenizer_for_seq=lambda _: mock_tokenizer(eos_token_id),
         stop_checker=stop_checker,
