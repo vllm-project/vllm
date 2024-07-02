@@ -85,8 +85,10 @@ class TP1DraftModelRunner(ModelRunner):
         TODO: In-place update model_input and remove this function.
         """
         self.cached_seq_group_metadata_list = seq_group_metadata_list
-        return super().prepare_model_input(seq_group_metadata_list,
-                                           finished_requests_ids)
+        return super().prepare_model_input(
+            seq_group_metadata_list,
+            finished_requests_ids=finished_requests_ids
+        )
 
     def update_model_input(
             self, model_input: ModelInputForGPUWithSamplingMetadata,
