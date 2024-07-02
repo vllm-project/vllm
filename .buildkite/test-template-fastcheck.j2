@@ -61,7 +61,7 @@ steps:
 
   {% for step in steps %}
   {% if step.gpu != "a100" %}
-  {% if step.fast_check != "true" %}
+  {% if step.fast_check != true %}
   - block: "Run {{ step.label }}"
     depends_on: image_build
   {% endif %}
