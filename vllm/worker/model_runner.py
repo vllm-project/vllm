@@ -1102,14 +1102,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             [0] * batch_size,
                         )
                         self.set_active_loras(set(), lora_mapping)
-                        
+
                     if self.prompt_adapter_config:
-                      prompt_adapter_mapping = PromptAdapterMapping(
-                          [-1] * batch_size,
-                          [-1] * batch_size,
-                      )
-                      self.set_active_prompt_adapters(set(),
-                                                      prompt_adapter_mapping)
+                        prompt_adapter_mapping = PromptAdapterMapping(
+                            [-1] * batch_size,
+                            [-1] * batch_size,
+                        )
+                        self.set_active_prompt_adapters(
+                            set(), prompt_adapter_mapping)
 
                     graph_runner = CUDAGraphRunner(
                         self.model, self.attn_backend.get_name())
