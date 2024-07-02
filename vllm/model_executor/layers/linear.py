@@ -11,7 +11,6 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
