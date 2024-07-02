@@ -118,8 +118,7 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
     """Abstract class for attention metadata builders."""
 
     @abstractmethod
-    def __init__(self, block_size: int, sliding_window: int,
-                 use_v2_block_manager: bool) -> None:
+    def __init__(self, input_builder) -> None:
         raise NotImplementedError
 
     @abstractmethod

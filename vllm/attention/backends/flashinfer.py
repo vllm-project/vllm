@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
 import numpy as np
 
@@ -22,6 +22,9 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import get_kv_cache_torch_dtype, make_tensor_with_pad
+
+if TYPE_CHECKING:
+    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 class FlashInferBackend(AttentionBackend):
@@ -199,7 +202,7 @@ class FlashInferMetadata(AttentionMetadata):
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
-    def __init__(self, block_size, sliding_window, use_v2_block_manager):
+    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
         self.block_tables: List[List[int]] = []
@@ -207,9 +210,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
 
-        self.sliding_window = sliding_window
-        self.block_size = block_size
-        self.use_v2_block_manager = use_v2_block_manager
+        self.sliding_window = input_builder.sliding_window
+        self.block_size = input_builder.block_size
+        self.use_v2_block_manager = (
+            input_builder.scheduler_config.use_v2_block_manager)
 
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
         # for the precise definition of the following fields.

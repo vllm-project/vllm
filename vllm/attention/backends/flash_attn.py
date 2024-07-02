@@ -1,6 +1,6 @@
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -14,6 +14,9 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
+
+if TYPE_CHECKING:
+    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -197,7 +200,7 @@ class FlashAttentionMetadata(AttentionMetadata):
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
 
-    def __init__(self, block_size, sliding_window, use_v2_block_manager):
+    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
@@ -206,9 +209,10 @@ class FlashAttentionMetadataBuilder(
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
 
-        self.sliding_window = sliding_window
-        self.block_size = block_size
-        self.use_v2_block_manager = use_v2_block_manager
+        self.sliding_window = input_builder.sliding_window
+        self.block_size = input_builder.block_size
+        self.use_v2_block_manager = (
+            input_builder.scheduler_config.use_v2_block_manager)
 
     def add_prefill_seq_group(self, seq_group_metadata: SequenceGroupMetadata,
                               tokens: List[int], seq_id: int, seq_len: int,
@@ -224,6 +228,8 @@ class FlashAttentionMetadataBuilder(
         if prefix_cache_hit:
             assert computed_block_nums is not None
             assert self.sliding_window is None
+            # NOTE(woosuk): For flash-attn, the block table should
+            # include the entries for the incoming prefill tokens.
             block_table = seq_group_metadata.block_tables[seq_id]
         elif (chunked_prefill_enabled
               and seq_group_metadata.block_tables is not None):
