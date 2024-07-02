@@ -80,7 +80,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return False
 
     @property
-    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         return None
 
     @torch.inference_mode()

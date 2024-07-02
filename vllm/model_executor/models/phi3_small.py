@@ -21,7 +21,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
 def load_column_parallel_weight(param: torch.nn.Parameter,
@@ -412,6 +412,7 @@ class Phi3SmallForCausalLM(nn.Module):
         positions: Optional[torch.LongTensor],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         output_hidden_states = self.model(
             input_ids=input_ids,

@@ -24,13 +24,13 @@ TEST_IMAGE_URLS = [
 
 @pytest.fixture(scope="module")
 def ray_ctx():
-    ray.init()
+    ray.init(runtime_env={"working_dir": VLLM_PATH})
     yield
     ray.shutdown()
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(ray_ctx):
     return RemoteOpenAIServer([
         "--model",
         MODEL_NAME,

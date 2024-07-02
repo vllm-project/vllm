@@ -13,7 +13,8 @@ from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
@@ -315,6 +316,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
     ) -> CPUModelInput:
         multi_modal_kwargs = None
         # NOTE: We assume that all sequences in the group are all prompts or
@@ -351,6 +353,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         self,
         model_input: CPUModelInput,
         kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:

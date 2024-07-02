@@ -5,14 +5,14 @@ import openai
 import pytest
 import ray
 
-from ...utils import RemoteOpenAIServer
+from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 EMBEDDING_MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 
 
 @pytest.fixture(scope="module")
 def ray_ctx():
-    ray.init()
+    ray.init(runtime_env={"working_dir": VLLM_PATH})
     yield
     ray.shutdown()
 

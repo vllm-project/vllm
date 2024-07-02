@@ -45,7 +45,8 @@ class GPUExecutor(ExecutorBase):
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             speculative_config=self.speculative_config,
-            is_driver_worker=rank == 0,
+            is_driver_worker=(not self.parallel_config)
+            or (rank % self.parallel_config.tensor_parallel_size == 0),
         )
 
     def _create_worker(self,

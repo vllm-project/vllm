@@ -22,7 +22,7 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          tensorize_vllm_model)
 
 from ..conftest import VllmRunner, cleanup
-from ..utils import RemoteOpenAIServer
+from ..utils import VLLM_PATH, RemoteOpenAIServer
 
 # yapf conflicts with isort for this docstring
 
@@ -219,6 +219,8 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
         "tensorizer", "--model-loader-extra-config",
         json.dumps(model_loader_extra_config),
     ]
+
+    ray.init(runtime_env={"working_dir": VLLM_PATH})
 
     server = RemoteOpenAIServer(openai_args)
     print("Server ready.")

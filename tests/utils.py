@@ -49,7 +49,6 @@ class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
     MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 
-    @ray.remote(num_gpus=1)
     class _RemoteRunner:
 
         def __init__(self, cli_args: List[str], *, wait_url: str,
@@ -92,7 +91,11 @@ class RemoteOpenAIServer:
             if hasattr(self, "proc"):
                 self.proc.terminate()
 
-    def __init__(self, cli_args: List[str], *, auto_port: bool = True) -> None:
+    def __init__(self,
+                 cli_args: List[str],
+                 *,
+                 auto_port: bool = True,
+                 num_gpus: int = 1) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -105,10 +108,11 @@ class RemoteOpenAIServer:
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
-        self._runner = self._RemoteRunner.remote(  # type: ignore
-            cli_args,
-            wait_url=self.url_for("health"),
-            wait_timeout=self.MAX_SERVER_START_WAIT_S)
+        self._runner = ray.remote(num_gpus=num_gpus)(
+            self._RemoteRunner).remote(
+                cli_args,
+                wait_url=self.url_for("health"),
+                wait_timeout=self.MAX_SERVER_START_WAIT_S)
 
         self._wait_until_ready()
 

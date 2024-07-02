@@ -14,7 +14,7 @@ import torch
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
 
-from ...utils import RemoteOpenAIServer
+from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
@@ -77,7 +77,7 @@ def zephyr_lora_files():
 
 @pytest.fixture(scope="module")
 def ray_ctx():
-    ray.init()
+    ray.init(runtime_env={"working_dir": VLLM_PATH})
     yield
     ray.shutdown()
 
