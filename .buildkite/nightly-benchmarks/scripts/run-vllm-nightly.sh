@@ -102,13 +102,13 @@ run_serving_tests() {
     fi
 
     if echo "$common_params" | jq -e 'has("fp8")' > /dev/null; then
-      echo "Key 'fp8' exists in common params."
+      echo "Key 'fp8' exists in common params. Use neuralmagic fp8 model for convenience."
+      model=$(echo "$common_params" | jq -r '.neuralmagic_quantized_model')
       server_command="python3 \
         -m vllm.entrypoints.openai.api_server \
         -tp $tp \
         --model $model \
         --port $port \
-        --quantization fp8 \
         $server_args"
     else
       echo "Key 'fp8' does not exist in common params."
