@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 from torch.nn import Parameter
@@ -149,10 +149,8 @@ class ChannelQuantScaleParameter(_ColumnvLLMParameter):
 
 class PerTensorScaleParameter(BasevLLMParameter):
 
-    def __init__(self, logical_widths: List[int], **kwargs):
-        self.logical_widths = logical_widths
+    def __init__(self, **kwargs):
         self.qkv_idxs = {"q": 0, "k": 1, "v": 2}
-
         super().__init__(**kwargs)
 
     def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
@@ -174,15 +172,23 @@ class PerTensorScaleParameter(BasevLLMParameter):
 
     def _col_shard_splitter(self, loaded_weight: torch.Tensor,
                             shard_id: Union[str, int], **kwargs):
+        """For fused modules (QKV and MLP) we have an array of length
+        N that holds 1 scale for each "logical" matrix. So the param
+        is an array of length N. The loaded_weight corresponds to 
+        one of the shards on disk. Here, we slice the param based on 
+        the shard_id for loading.
+        """
 
         param_data = self.data
         shard_id = self._shard_id_as_int(shard_id)
-        offset = sum(self.logical_widths[:shard_id])
-        size = self.logical_widths[shard_id]
-        # update loaded weight with copies for broadcast.
-        loaded_weight = loaded_weight.repeat(size)
-        param_data = param_data[offset:offset + size]
 
+        # AutoFP8 scales do not have a shape
+        # compressed-tensors scales do have a shape
+        if len(loaded_weight.shape) != 0:
+            assert loaded_weight.shape[0] == 1
+            loaded_weight = loaded_weight[0]
+
+        param_data = param_data[shard_id]
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

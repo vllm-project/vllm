@@ -1,6 +1,7 @@
 from typing import Callable, List, Tuple, Union
 
 import torch
+from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
@@ -46,10 +47,8 @@ class CompressedTensorsW8A8(CompressedTensorsScheme):
                 output_dim=0,
                 weight_loader=weight_loader)
         else:
-            weight_scale = PerTensorScaleParameter(
-                data=weight_scale_data,
-                weight_loader=weight_loader,
-                logical_widths=output_partition_sizes)
+            weight_scale = PerTensorScaleParameter(data=weight_scale_data,
+                                                   weight_loader=weight_loader)
 
         layer.register_parameter("weight", weight)
         layer.register_parameter("weight_scale", weight_scale)
