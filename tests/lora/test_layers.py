@@ -475,10 +475,10 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
 
         lora_result = lora_logits_processor._get_logits(
             hidden_states=torch.cat(inputs),
-            embedding=linear.weight,
+            lm_head=linear,
             embedding_bias=None)
 
-        original_weight = linear.weight.clone()
+        original_lm_head = deepcopy(linear)
 
         linear.weight[logits_processor.
                       org_vocab_size:logits_processor.org_vocab_size +
@@ -490,7 +490,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = logits_processor._get_logits(hidden_states=input_,
-                                                  embedding=linear.weight,
+                                                  lm_head=linear,
                                                   embedding_bias=None)
             result[:, vocab_size + embeddings_tensor_len:] = float("-inf")
             result += input_ @ lora.lora_a @ lora.lora_b * lora.scaling
@@ -519,11 +519,11 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
 
         lora_result = lora_logits_processor._get_logits(
             hidden_states=torch.cat(inputs),
-            embedding=original_weight,
+            lm_head=original_lm_head,
             embedding_bias=None)[:, :vocab_size]
         expected_result = logits_processor._get_logits(
             hidden_states=torch.cat(inputs),
-            embedding=original_weight,
+            lm_head=original_lm_head,
             embedding_bias=None)
 
         rtol, atol = TOLERANCES[lora_result.dtype]

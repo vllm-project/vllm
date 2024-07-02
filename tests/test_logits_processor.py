@@ -83,7 +83,7 @@ def test_logits_processors(seed: int, device: str):
         device=device,
         pin_memory=is_pin_memory_available())
     logits_processor_output = logits_processor(
-        embedding=None,
+        lm_head=None,
         hidden_states=input_tensor,
         sampling_metadata=sampling_metadata)
 
