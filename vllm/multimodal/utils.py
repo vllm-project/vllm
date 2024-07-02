@@ -7,7 +7,7 @@ import aiohttp
 from PIL import Image
 
 from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
-from vllm.multimodal.image import ImagePixelData
+from vllm.multimodal.base import MultiModalDataDict
 
 
 class ImageFetchAiohttp:
@@ -52,12 +52,13 @@ class ImageFetchAiohttp:
                 "Invalid 'image_url': A valid 'image_url' must start "
                 "with either 'data:image' or 'http'.")
 
+        image.load()
         return image
 
 
-async def async_get_and_parse_image(image_url: str) -> ImagePixelData:
-    with await ImageFetchAiohttp.fetch_image(image_url) as image:
-        return ImagePixelData(image)
+async def async_get_and_parse_image(image_url: str) -> MultiModalDataDict:
+    image = await ImageFetchAiohttp.fetch_image(image_url)
+    return {"image": image}
 
 
 def encode_image_base64(image: Image.Image, format: str = 'JPEG') -> str:

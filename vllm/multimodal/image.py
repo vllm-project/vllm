@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import List, Optional, Tuple, Type, TypeVar, Union
+from typing import List, Optional, Tuple, TypeVar
 
 import torch
 from PIL import Image
@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from .base import MultiModalData, MultiModalInputs, MultiModalPlugin
+from .base import MultiModalInputs, MultiModalPlugin
 
 logger = init_logger(__name__)
 
@@ -98,99 +98,34 @@ def repeat_and_pad_image_tokens(
     return new_prompt, new_token_ids
 
 
-class ImagePixelData(MultiModalData):
-    """
-    The pixel data of an image. Can be one of:
+class ImagePlugin(MultiModalPlugin):
 
-    - :class:`PIL.Image.Image`: An image object. Requires that a HuggingFace
-      processor is available to the model.
-    - :class:`torch.Tensor`: The raw pixel data which is passed to the model
-      without additional pre-processing.
-    """
-
-    def __init__(self, image: Union[Image.Image, torch.Tensor]) -> None:
-        if isinstance(image, Image.Image):
-            # So that this class can be created inside the Image context manager
-            image.load()
-
-        self.image = image
-
-    def __repr__(self) -> str:
-        image = self.image
-        if isinstance(image, Image.Image):
-            return f"{type(self).__name__}(image={image})"
-
-        return (f"{type(self).__name__}(image=torch.Tensor(shape="
-                f"{image.shape}, dtype={image.dtype}))")
-
-
-class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
-
-    def get_data_type(self) -> Type[ImagePixelData]:
-        return ImagePixelData
+    def get_data_key(self) -> str:
+        return "image"
 
     def _get_hf_image_processor(self, model_config: ModelConfig):
-        vlm_config = model_config.multimodal_config
-        if vlm_config is None or vlm_config.image_processor is None:
-            return None
-
         return cached_get_image_processor(
-            vlm_config.image_processor,
-            trust_remote_code=model_config.trust_remote_code,
-            revision=vlm_config.image_processor_revision,
-        )
+            model_config.model,
+            trust_remote_code=model_config.trust_remote_code)
 
     def _default_input_mapper(self, ctx: InputContext,
-                              data: ImagePixelData) -> MultiModalInputs:
+                              data: object) -> MultiModalInputs:
         model_config = ctx.model_config
-        image = data.image
-
-        if isinstance(image, Image.Image):
+        if isinstance(data, Image.Image):
             image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available"
                                    "to process the image object")
             try:
                 batch_data = image_processor \
-                    .preprocess(image, return_tensors="pt") \
+                    .preprocess(data, return_tensors="pt") \
                     .data
             except Exception:
-                logger.error("Failed to process image (%s)", image)
+                logger.error("Failed to process image (%s)", data)
                 raise
 
             return MultiModalInputs(batch_data)
-        elif isinstance(image, torch.Tensor):
-            pixel_values = image
+        elif isinstance(data, torch.Tensor):
+            raise NotImplementedError("Embeddings input is not supported yet")
 
-            return MultiModalInputs({"pixel_values": pixel_values})
-
-        raise TypeError(f"Invalid image type: {type(image)}")
-
-
-class ImageFeatureData(MultiModalData):
-    """
-    The feature vector of an image, passed directly to the model.
-
-    This should be the output of the vision tower.
-    """
-
-    def __init__(self, image_features: torch.Tensor) -> None:
-        self.image_features = image_features
-
-    def __repr__(self) -> str:
-        image_features = self.image_features
-
-        return (f"{type(self).__name__}(image_features=torch.Tensor(shape="
-                f"{image_features.shape}, dtype={image_features.dtype}))")
-
-
-class ImageFeaturePlugin(MultiModalPlugin[ImageFeatureData]):
-
-    def get_data_type(self) -> Type[ImageFeatureData]:
-        return ImageFeatureData
-
-    def _default_input_mapper(self, ctx: InputContext,
-                              data: ImageFeatureData) -> MultiModalInputs:
-        image_features = data.image_features
-
-        return MultiModalInputs({"image_features": image_features})
+        raise TypeError(f"Invalid image type: {type(data)}")

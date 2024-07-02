@@ -35,7 +35,6 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",
-        image_input_type="pixel_values",
         image_token_id=32000,
         image_input_shape="1,3,336,336",
         image_feature_size=576,
@@ -47,8 +46,13 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
 
-* ``prompt``: The prompt should follow the same format as that for the HuggingFace version of the model.
-* ``multi_modal_data``: This should be an instance of :class:`~vllm.multimodal.image.ImagePixelData` or :class:`~vllm.multimodal.image.ImageFeatureData`.
+* ``prompt``: The prompt should follow the format that is documented on HuggingFace.
+* ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
+
+.. note::
+
+   ``multi_modal_data`` can accept keys and values beyond the builtin ones, as long as a customized plugin is registered through
+    :class:`vllm.multimodal.MULTIMODAL_REGISTRY`.
 
 .. code-block:: python
 
@@ -60,7 +64,7 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
 
     outputs = llm.generate({
         "prompt": prompt,
-        "multi_modal_data": ImagePixelData(image),
+        "multi_modal_data": {"image": image},
     })
 
     for o in outputs:
@@ -90,7 +94,6 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 
     python -m vllm.entrypoints.openai.api_server \
         --model llava-hf/llava-1.5-7b-hf \
-        --image-input-type pixel_values \
         --image-token-id 32000 \
         --image-input-shape 1,3,336,336 \
         --image-feature-size 576 \

@@ -20,6 +20,7 @@ from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 import numpy as np
 import torch
 import torch.nn as nn
+from PIL import Image
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
@@ -36,11 +37,10 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensors
-from vllm.multimodal.image import (ImageFeatureData, ImagePixelData,
-                                   cached_get_tokenizer)
+from vllm.multimodal.image import cached_get_tokenizer
 from vllm.sequence import SamplerOutput
 
-from .clip import (dummy_pixel_data_for_clip, dummy_seq_data_for_clip,
+from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
 from .interfaces import SupportsVision
 
@@ -336,7 +336,7 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
         image_token_id=32044,
         image_feature_size_override=image_feature_size,
     )
-    mm_data = dummy_pixel_data_for_clip(
+    mm_data = dummy_image_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         image_width_override=dummy_width,
         image_height_override=dummy_height,
@@ -366,29 +366,25 @@ def _get_image_placeholder_token_ids(model_config: ModelConfig,
 
 def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
-    if multi_modal_data is None or not isinstance(
-            multi_modal_data, (ImagePixelData, ImageFeatureData)):
+    if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
 
     model_config = ctx.model_config
     multimodal_config = ctx.get_multimodal_config()
     hf_config = ctx.get_hf_config(PretrainedConfig)
 
-    if isinstance(multi_modal_data, ImagePixelData):
-        image = multi_modal_data.image
-        if isinstance(image, torch.Tensor):
-            _, _, _, h, w = image.shape
-        else:
-            w, h = image.size
-
+    image_data = multi_modal_data["image"]
+    if isinstance(image_data, Image.Image):
+        w, h = image_data.size
         w, h = _calc_hd_transform_size(width=w, height=h)
 
         image_feature_size = get_phi3v_image_feature_size(hf_config,
                                                           input_width=w,
                                                           input_height=h)
+    elif isinstance(image_data, torch.Tensor):
+        raise NotImplementedError("Embeddings input is not supported yet")
     else:
-        image_features = multi_modal_data.image_features
-        image_feature_size = image_features.shape[-2]
+        raise TypeError(f"Invalid image type: {type(image_data)}")
 
     prompt = llm_inputs.get("prompt")
     if prompt is None:
@@ -433,7 +429,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     )
 
 
-@MULTIMODAL_REGISTRY.register_image_pixel_input_mapper()
+@MULTIMODAL_REGISTRY.register_image_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
 class Phi3VForCausalLM(nn.Module, SupportsVision):
@@ -448,14 +444,11 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         self.config = config
         self.vlm_config = vlm_config
 
-        self.model = LlamaModel(config, cache_config, quant_config)
+        # TODO: Optionally initializes this for supporting embeddings.
+        self.vision_embed_tokens = Phi3HDImageEmbedding(
+            vlm_config, config, self.model.embed_tokens)
 
-        if self.vlm_config.image_input_type == (
-                VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_embed_tokens = Phi3HDImageEmbedding(
-                vlm_config, config, self.model.embed_tokens)
-        else:
-            raise TypeError("Image features are not supported by LLaVA-NeXT")
+        self.model = LlamaModel(config, cache_config, quant_config)
 
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -466,29 +459,20 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
 
-        expected_input_type = self.vlm_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
+        if pixel_values is None:
+            return None
 
-        if expected_input_type == ImageInputType.PIXEL_VALUES:
-            if pixel_values is None:
-                return None
+        if not isinstance(pixel_values, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of pixel values. "
+                             f"Got type: {type(pixel_values)}")
 
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
+        if not isinstance(image_sizes, torch.Tensor):
+            raise ValueError("Incorrect type of image sizes. "
+                             f"Got type: {type(image_sizes)}")
 
-            if not isinstance(image_sizes, torch.Tensor):
-                raise ValueError("Incorrect type of image sizes. "
-                                 f"Got type: {type(image_sizes)}")
-
-            return Phi3VImagePixelInputs(type="pixel_values",
-                                         data=pixel_values,
-                                         image_sizes=image_sizes)
-
-        assert expected_input_type != ImageInputType.IMAGE_FEATURES, (
-            "Failed to validate this at initialization time")
-
-        return None
+        return Phi3VImagePixelInputs(type="pixel_values",
+                                     data=pixel_values,
+                                     image_sizes=image_sizes)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],

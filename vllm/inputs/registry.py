@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from torch import nn
 
     from vllm.config import ModelConfig, VisionLanguageConfig
-    from vllm.multimodal import MultiModalData
+    from vllm.multimodal import MultiModalDataDict
     from vllm.sequence import SequenceData
 
 logger = init_logger(__name__)
@@ -67,7 +67,8 @@ class InputContext:
 N = TypeVar("N", bound=Type["nn.Module"])
 
 DummyDataFactory = Callable[[InputContext, int],
-                            Tuple["SequenceData", Optional["MultiModalData"]]]
+                            Tuple["SequenceData",
+                                  Optional["MultiModalDataDict"]]]
 """
 Create dummy data to be inputted into the model.
 
@@ -95,7 +96,7 @@ class InputRegistry:
         self,
         ctx: InputContext,
         seq_len: int,
-    ) -> Tuple["SequenceData", Optional["MultiModalData"]]:
+    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         The default dummy data factory represents the longest possible text
         that can be inputted to the model.
