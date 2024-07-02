@@ -95,9 +95,9 @@ class ModelInputForGPU(ModelRunnerInputBase):
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
+            "virtual_engine": self.virtual_engine,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
-            "virtual_engine": self.virtual_engine,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         return tensor_dict
@@ -131,9 +131,9 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
+            "virtual_engine": self.virtual_engine,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
-            "virtual_engine": self.virtual_engine,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -1032,59 +1032,60 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             use_cuda_graph=True,
                         )
 
-                if self.lora_config:
-                    lora_mapping = LoRAMapping(
-                        [0] * batch_size,
-                        [0] * batch_size,
-                    )
-                    self.set_active_loras(set(), lora_mapping)
+                    if self.lora_config:
+                        lora_mapping = LoRAMapping(
+                            [0] * batch_size,
+                            [0] * batch_size,
+                        )
+                        self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model,
-                                               self.attn_backend.get_name())
+                    graph_runner = CUDAGraphRunner(
+                        self.model, self.attn_backend.get_name())
 
-                if self.attn_backend.get_name() == "flashinfer":
-                    graph_runner.flashinfer_indptr_buffer = indptr_buffer
-                    graph_runner.flashinfer_indices_buffer = indices_buffer
-                    graph_runner.flashinfer_last_page_len_buffer = \
-                        last_page_len_buffer
-                    graph_runner.flashinfer_decode_workspace_buffer = \
-                            decode_workspace_buffer
-                    graph_runner.flashinfer_decode_wrapper = \
-                        decode_wrapper
+                    if self.attn_backend.get_name() == "flashinfer":
+                        graph_runner.flashinfer_indptr_buffer = indptr_buffer
+                        graph_runner.flashinfer_indices_buffer = indices_buffer
+                        graph_runner.flashinfer_last_page_len_buffer = \
+                            last_page_len_buffer
+                        graph_runner.flashinfer_decode_workspace_buffer = \
+                                decode_workspace_buffer
+                        graph_runner.flashinfer_decode_wrapper = \
+                            decode_wrapper
 
-                capture_inputs = {
-                    "input_ids":
-                    input_tokens[:batch_size],
-                    "positions":
-                    input_positions[:batch_size],
-                    "hidden_or_intermediate_states":
-                    hidden_or_intermediate_states[
-                        virtual_engine]  # type: ignore
-                    [:batch_size]
-                    if hidden_or_intermediate_states[virtual_engine]
-                    is not None else None,
-                    "intermediate_inputs":
-                    intermediate_inputs[:batch_size]
-                    if intermediate_inputs is not None else None,
-                    "kv_caches":
-                    kv_caches[virtual_engine],
-                    "attn_metadata":
-                    attn_metadata,
-                    "memory_pool":
-                    self.graph_memory_pool,
-                    "stream":
-                    graph_capture_context.stream
-                }
-                if self.has_seqlen_agnostic:
-                    # Only used by Mamba-based models CUDA graph atm (Jamba).
-                    capture_inputs.update({
-                        "seqlen_agnostic_capture_inputs":
-                        self.model.get_seqlen_agnostic_capture_inputs(
-                            batch_size)
-                    })
-                graph_runner.capture(**capture_inputs)
-                self.graph_memory_pool = graph_runner.graph.pool()
-                self.graph_runners[virtual_engine][batch_size] = (graph_runner)
+                    capture_inputs = {
+                        "input_ids":
+                        input_tokens[:batch_size],
+                        "positions":
+                        input_positions[:batch_size],
+                        "hidden_or_intermediate_states":
+                        hidden_or_intermediate_states[
+                            virtual_engine]  # type: ignore
+                        [:batch_size]
+                        if hidden_or_intermediate_states[virtual_engine]
+                        is not None else None,
+                        "intermediate_inputs":
+                        intermediate_inputs[:batch_size]
+                        if intermediate_inputs is not None else None,
+                        "kv_caches":
+                        kv_caches[virtual_engine],
+                        "attn_metadata":
+                        attn_metadata,
+                        "memory_pool":
+                        self.graph_memory_pool,
+                        "stream":
+                        graph_capture_context.stream
+                    }
+                    if self.has_seqlen_agnostic:
+                        # Only used by Mamba-based models CUDA graph atm (Jamba)
+                        capture_inputs.update({
+                            "seqlen_agnostic_capture_inputs":
+                            self.model.get_seqlen_agnostic_capture_inputs(
+                                batch_size)
+                        })
+                    graph_runner.capture(**capture_inputs)
+                    self.graph_memory_pool = graph_runner.graph.pool()
+                    self.graph_runners[virtual_engine][batch_size] = (
+                        graph_runner)
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
