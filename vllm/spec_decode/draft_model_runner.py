@@ -6,7 +6,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.logger import init_logger
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
 
@@ -74,9 +75,9 @@ class TP1DraftModelRunner(ModelRunner):
             List[SequenceGroupMetadata]] = None
 
     def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> ModelInputForGPUWithSamplingMetadata:
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            virtual_engine: int = 0) -> ModelInputForGPUWithSamplingMetadata:
         """A temporary solution that caches the seq_group_metadata_list
         for multi-step execution.
         TODO: In-place update model_input and remove this function.
@@ -115,6 +116,7 @@ class TP1DraftModelRunner(ModelRunner):
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         # Since we do not broadcast data inside execute_model anymore,
@@ -130,6 +132,7 @@ class TP1DraftModelRunner(ModelRunner):
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
 
+        virtual_engine = model_input.virtual_engine
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
             # Currently cuda graph is only supported by the decode phase.
@@ -139,7 +142,8 @@ class TP1DraftModelRunner(ModelRunner):
             if prefill_meta is None and decode_meta.use_cuda_graph:
                 assert model_input.input_tokens is not None
                 graph_batch_size = model_input.input_tokens.shape[0]
-                model_executable = self.graph_runners[graph_batch_size]
+                model_executable = (
+                    self.graph_runners[virtual_engine][graph_batch_size])
             else:
                 model_executable = self.model
 
@@ -149,6 +153,7 @@ class TP1DraftModelRunner(ModelRunner):
                 positions=model_input.input_positions,
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
+                intermediate_tensors=intermediate_tensors,
                 **multi_modal_kwargs,
             )
 
