@@ -1,207 +1,264 @@
 # Based on code from https://github.com/punica-ai/punica
 
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 
-from vllm import _custom_ops as ops
-from vllm.utils import get_device_capability_stateless
+_PARAMS_CACHE: Dict[int, Tuple] = {}
 
 
-def _check_punica_support():
-    if ops.is_custom_op_supported("_punica_C::dispatch_bgmv"):
-        return
+def _compute_params(
+    token_lora_tensor: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, ]:
+    """
+    Get the information required for the sgmv kernel. With the  features:
+    1. If consecutive requests in the batch use the same LoRA, this function 
+    will combine them into a single request, improving sgmv kernel inference 
+    performance.
+    2. At the beginning of each prefilling stage inference, recalculations are 
+    needed based on the input, but only once. 
+    """
+    pointer = token_lora_tensor.data_ptr()
+    if pointer not in _PARAMS_CACHE:
+        lora_indices_tensor, seq_length_tensor = torch.unique_consecutive(
+            token_lora_tensor, return_counts=True)
+        cum_result = torch.cumsum(seq_length_tensor, dim=0)
+        b_seq_start_tensor = torch.zeros_like(seq_length_tensor)
+        b_seq_start_tensor[1:].copy_(cum_result[:-1])
+        max_length = seq_length_tensor.max().item()
+        batch_size = lora_indices_tensor.size(0)
+        _PARAMS_CACHE[pointer] = (
+            b_seq_start_tensor,
+            seq_length_tensor,
+            lora_indices_tensor,
+            batch_size,
+            max_length,
+        )
+    return _PARAMS_CACHE[pointer]
 
-    if get_device_capability_stateless() < (8, 0):
-        raise ImportError(
-            "punica LoRA kernels require compute capability >= 8.0")
-    else:
-        raise ImportError(
-            "punica LoRA kernels could not be imported. If you built vLLM "
-            "from source, make sure VLLM_INSTALL_PUNICA_KERNELS=1 env var "
-            "was set.")
+
+def reset_params_cache():
+    """At the beginning of the prefilling stage, we need  clear the
+    cache explicitly
+    """
+    _PARAMS_CACHE.clear()
+    torch.cuda.empty_cache()
 
 
-def bgmv(
+def _get_prefilling_params(token_lora_tensor: torch.Tensor,
+                           cache_clear: bool = False):
+    if cache_clear:
+        reset_params_cache()
+    return _compute_params(token_lora_tensor)
+
+
+def add_shrink(
     y: torch.Tensor,
     x: torch.Tensor,
     w_t_all: torch.Tensor,
-    indicies: torch.LongTensor,
+    lora_indices_tensor: torch.Tensor,
     layer_idx: int,
     scale: float,
+    is_prefilling: bool,
+    cache_clear: bool = False,
+):
+    """
+    y=x@w_t_all
+    When `is_prefilling` is True, will launch `sgmv_shrink`
+    """
+    from vllm.lora.ops.bgmv_shrink import bgmv_shrink
+    from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+
+    if is_prefilling:
+        (
+            b_seq_start_tensor,
+            seq_length_tensor,
+            last_lora_indices_tensor,
+            batch_size,
+            max_length,
+        ) = _get_prefilling_params(lora_indices_tensor, cache_clear)
+        sgmv_shrink(
+            x,
+            w_t_all,
+            y,
+            b_seq_start_tensor,
+            seq_length_tensor,
+            last_lora_indices_tensor,
+            batch_size,
+            max_length,
+            scale,
+        )
+    else:
+        bgmv_shrink(x, w_t_all, y, lora_indices_tensor, scale)
+
+
+def add_expand(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    layer_idx: int,
+    is_prefilling: bool,
+    add_input: bool = True,
+    cache_clear: bool = False,
+):
+    """
+    y+=x@w_t_all
+    When `is_prefilling` is True, will launch `sgmv_expand`, 
+    """
+    from vllm.lora.ops.bgmv_expand import bgmv_expand
+    from vllm.lora.ops.sgmv_expand import sgmv_expand
+    if is_prefilling:
+        (
+            b_seq_start_tensor,
+            seq_length_tensor,
+            last_lora_indices_tensor,
+            batch_size,
+            max_length,
+        ) = _get_prefilling_params(lora_indices_tensor, cache_clear)
+        sgmv_expand(
+            x,
+            w_t_all,
+            y,
+            b_seq_start_tensor,
+            seq_length_tensor,
+            last_lora_indices_tensor,
+            batch_size,
+            max_length,
+            add_input,
+        )
+    else:
+        bgmv_expand(x, w_t_all, y, lora_indices_tensor, add_inputs=add_input)
+
+
+def add_expand_slice(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    layer_idx: int,
+    is_prefilling: bool,
+    y_offset: Optional[int],
+    y_slice_size: Optional[int],
+    add_input: bool = True,
+    cache_clear: bool = False,
+):
+    """
+    y+=x@w_t_all
+    """
+    from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
+    from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
+    if is_prefilling:
+        (
+            b_seq_start_tensor,
+            seq_length_tensor,
+            last_lora_indices_tensor,
+            batch_size,
+            max_length,
+        ) = _get_prefilling_params(lora_indices_tensor, cache_clear)
+        sgmv_expand_slice(
+            x,
+            w_t_all,
+            y,
+            b_seq_start_tensor,
+            seq_length_tensor,
+            last_lora_indices_tensor,
+            batch_size,
+            max_length,
+            y_offset,
+            y_slice_size,
+            add_input,
+        )
+    else:
+        bgmv_expand_slice(
+            x,
+            w_t_all,
+            y,
+            lora_indices_tensor,
+            y_offset,
+            y_slice_size,
+            add_inputs=add_input,
+        )
+
+
+def add_lora(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    layer_idx: int,
+    scale: float,
+    is_prefilling: bool,
+    y_offset: Optional[int] = None,
+    y_slice_size: Optional[int] = None,
+    *,
+    buffer: Optional[torch.Tensor] = None,
+    cache_clear: bool = False,
 ):
     """
     Semantics:
       y[i] += (
           x[i].unsqueeze(0)
-          @ w_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
-          * scale
-        ).squeeze(0)
-
-    Args:
-      y: Shape: `[B, H2]`. Output vectors. Will be changed in-place.
-      x: Shape: `[B, H1]`. Input vectors.
-      w_t_all: Shape: `[None, L, H2, H1]`. All of the transposed weight
-        matrices.
-      indicies: Shape: `[B]`. Indices of the weight matrices.
-      layer_idx: Layer index of the weight matrices.
-      scale: Scaling factor.
-    """
-    _check_punica_support()
-
-    ops.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
-
-
-def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
-                            w_t_all: torch.Tensor, indicies: torch.LongTensor,
-                            layer_idx: int, scale: float, y_offset: int,
-                            y_slice_size: int):
-    """
-    Same as `bgmv` but you can operate on slices of y.
-    Pass whole y, define y_offset and y_slice_size.
-
-    Semantics:
-      y[i] += (
-          x[i].unsqueeze(0)
-          @ w_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
-          * scale
-        ).squeeze(0)
-
-    Args:
-      y: Shape: `[B, H2]`. Output vectors. Will be changed in-place.
-      x: Shape: `[B, H1]`. Input vectors.
-      w_t_all: Shape: `[None, L, y_slice_size, H1]`. Column partition of
-        all of the transposed LoRA matrices.
-      indicies: Shape: `[B]`. Indices of the LoRA weights.
-      layer_idx: Layer index of LoRA weights.
-      scale: Scaling factor.
-      y_offset: Offset to apply to the starting column of y.
-      y_slice_size: Size of the y column slice.
-    """
-    _check_punica_support()
-
-    ops.dispatch_bgmv_low_level(
-        y,
-        x,
-        w_t_all,
-        indicies,
-        layer_idx,
-        scale,
-        x.size(1),
-        y_slice_size,
-        y_offset,
-    )
-
-
-def add_lora(y: torch.Tensor,
-             x: torch.Tensor,
-             wa_t_all: torch.Tensor,
-             wb_t_all: torch.Tensor,
-             indicies: torch.LongTensor,
-             layer_idx: int,
-             scale: float,
-             *,
-             buffer: Optional[torch.Tensor] = None):
-    """
-    Semantics:
-      y[i] += (
-          x[i].unsqueeze(0)
           @ wa_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
           @ wb_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
           * scale
         ).squeeze(0)
-
     Args:
-      y: Shape: `[B, H2]`. Output vectors. Will be changed in-place.
-      x: Shape: `[B, H1]`. Input vectors.
-      wa_t_all: Shape: `[None, L, R, H1]`. All of the transposed
-        LoRA A matrices.
-      wb_t_all: Shape: `[None, L, H2, R]`. All of the transposed
-        LoRA B matrices.
-      indicies: Shape: `[B]`. Indices of the LoRA weights.
-      layer_idx: Layer index of LoRA weights.
-      scale: Scaling factor.
-      buffer: Optional. Shape: `[B, R]`. Temporary buffer.
+        y (torch.Tensor):  Output tensor. Will be changed in-place.
+        x (torch.Tensor): Input tensor
+        wa_t_all (torch.Tensor): lora_a's weight
+        wb_t_all (torch.Tensor): lora_b's weight
+        lora_indices_tensor (torch.Tensor): _description_
+        layer_idx (int): Layer index of LoRA weights.
+        scale (float): Scaling factor.
+        is_prefilling (bool): prefiling stage
+        y_offset (Optional[int], optional): Offset to apply to the starting 
+            column of y.
+        y_slice_size (Optional[int], optional): Size of the y column slice..
+        buffer (Optional[torch.Tensor], optional): Defaults to None.
+        cache_clear (bool, optional):  Defaults to False.
     """
-    _check_punica_support()
 
     r = wb_t_all.size(-1)
     if buffer is None:
-        # We set the buffer to be float32 by default to avoid
-        # numerical inaccuracies that would otherwise happen
-        # due to downcasting.
+        # We set the buffer to be float32 by default ,refer to:
+        # https://github.com/triton-lang/triton/issues/1387
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
-    ops.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
-    ops.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx, scale)
 
-
-def add_lora_slice(y: torch.Tensor,
-                   x: torch.Tensor,
-                   wa_t_all: torch.Tensor,
-                   wb_t_all: torch.Tensor,
-                   indicies: torch.LongTensor,
-                   layer_idx: int,
-                   scale: float,
-                   y_offset: int,
-                   y_slice_size: int,
-                   *,
-                   buffer: Optional[torch.Tensor] = None):
-    """
-    Same as `add_lora` but you can operate on slices of y.
-    Pass whole y, define y_offset and y_slice_size.
-
-    Semantics:
-      y[i] += (
-          x[i].unsqueeze(0)
-          @ wa_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
-          @ wb_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
-          * scale
-        ).squeeze(0)
-
-    Args:
-      y: Shape: `[B, H2]`. Output vectors. Will be changed in-place.
-      x: Shape: `[B, H1]`. Input vectors.
-      wa_t_all: Shape: `[None, L, R, H1]`. All of the transposed
-        LoRA A matrices.
-      wb_t_all: Shape: `[None, L, H2, R]`. All of the transposed
-        LoRA B matrices.
-      indicies: Shape: `[B]`. Indices of the LoRA weights.
-      layer_idx: Layer index of LoRA weights.
-      scale: Scaling factor.
-      y_offset: Offset to apply to the starting column of y.
-      y_slice_size: Size of the y column slice.
-    """
-    _check_punica_support()
-
-    r = wb_t_all.size(-1)
-    if buffer is None:
-        # We set the buffer to be float32 by default to avoid
-        # numerical inaccuracies that would otherwise happen
-        # due to downcasting.
-        buffer = torch.zeros((x.size(0), r),
-                             dtype=torch.float32,
-                             device=x.device)
-    ops.dispatch_bgmv_low_level(
+    add_shrink(
         buffer,
         x,
         wa_t_all,
-        indicies,
-        layer_idx,
-        1.0,
-        x.size(1),
-        buffer.size(1),
+        lora_indices_tensor,
         0,
-    )
-    ops.dispatch_bgmv_low_level(
-        y,
-        buffer,
-        wb_t_all,
-        indicies,
-        layer_idx,
         scale,
-        buffer.size(1),
-        y_slice_size,
-        y_offset,
+        is_prefilling,
+        cache_clear=cache_clear,
     )
+    if y_offset is None and y_slice_size is None:
+        add_expand(
+            y,
+            buffer,
+            wb_t_all,
+            lora_indices_tensor,
+            0,
+            is_prefilling,
+            add_input=True,
+            cache_clear=cache_clear,
+        )
+    else:
+        add_expand_slice(
+            y,
+            buffer,
+            wb_t_all,
+            lora_indices_tensor,
+            0,
+            is_prefilling,
+            y_offset,
+            y_slice_size,
+            add_input=True,
+            cache_clear=cache_clear,
+        )
