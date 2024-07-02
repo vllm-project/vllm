@@ -57,7 +57,7 @@ def warmup_range(config: Tuple[int, int, int]):
     base = itertools.repeat(2)
     ramp_up = itertools.accumulate(base, func=operator.mul, initial=bmin)
     ramp_up = itertools.takewhile(lambda x: x < bstep and x <= bmax, ramp_up)
-    stable = range(bstep, bmax + 1, bstep)
+    stable = range(max(bmin, bstep), bmax + 1, bstep)
     return list(ramp_up) + list(stable)
 
 
