@@ -1,26 +1,8 @@
-{% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
+{% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:0a9bafad36c1c46d62515e5abfe6acde9707bf5f" %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 
 steps:
-  - label: ":docker: build image"
-    key: image-build
-    agents:
-      queue: cpu_queue
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --tag {{ docker_image }} --target test --progress plain ."
-      - "docker push {{ docker_image }}"
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 5
-        - exit_status: -10  # Agent was lost
-          limit: 5
-  - wait
-
   - label: "Neuron Test"
     depends_on: ~
     agents:
@@ -48,6 +30,7 @@ steps:
   {% endif %}
 
   - label: "{{ step.label }}"
+    priority: 10000
     agents:
       {% if step.label == "Documentation Build" %}
       queue: small_cpu_queue
