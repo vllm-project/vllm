@@ -12,6 +12,8 @@ client = OpenAI(
 
 models = client.models.list()
 model = models.data[0].id
+
+
 tools = [{
     "type": "function",
     "function": {
@@ -38,8 +40,7 @@ tools = [{
     }
 }]
 
-chat_completion = client.chat.completions.create(
-    messages=[
+messages = [
         {
             "role": "user",
             "content": "Hi! How are you doing today?"
@@ -52,7 +53,10 @@ chat_completion = client.chat.completions.create(
             "role": "user",
             "content": "Can you tell me what the weather will be in Dallas Texas?"
         }
-    ],
+    ]
+
+chat_completion = client.chat.completions.create(
+    messages=messages,
     model=model,
     tools=tools
 )
