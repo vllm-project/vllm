@@ -18,13 +18,7 @@ from openai.types.chat import (ChatCompletionContentPartImageParam,
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionContentPartParam, ChatCompletionLogProb,
-    ChatCompletionLogProbs, ChatCompletionLogProbsContent,
-    ChatCompletionMessageParam, ChatCompletionNamedToolChoiceParam,
-    ChatCompletionRequest, ChatCompletionResponse,
-    ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-    FunctionCall, ToolCall, UsageInfo)
+    Segment, TranscriptionVerboseJsonResponse, TranscriptionJsonResponse)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.inputs import PromptInputs
@@ -78,7 +72,7 @@ class OpenAIServingWhisper(OpenAIServing):
                  engine: AsyncLLMEngine,
                  model_config: ModelConfig,
                  served_model_names: List[str],
-                 max_size_whisper: 100,
+                 max_size_mb_whisper: 200,
                  ):
         super().__init__(engine=engine,
                          model_config=model_config,
@@ -87,7 +81,7 @@ class OpenAIServingWhisper(OpenAIServing):
         
         self._check_whisper_mode(model_config.whisper_mode)
         self.model_config = model_config
-        self.max_size_whisper = max_size_whisper * 1024 * 1024
+        self.max_size_mb_whisper = max_size_mb_whisper * 1024 * 1024
     
     def _check_whisper_mode(self, whisper_mode: bool):
         if not whisper_mode:
@@ -107,8 +101,8 @@ class OpenAIServingWhisper(OpenAIServing):
         raw_request: Optional[Request] = None
     ):
 
-        if len(file) > self.max_size_whisper:
-            return self.create_error_response(f"maximum size for `file` is {self.max_size_whisper}MB only")
+        if len(file) > self.max_size_mb_whisper:
+            return self.create_error_response(f"maximum size for `file` is {self.max_size_mb_whisper}MB only")
         
         if timestamp_granularities.lower().strip() != 'segment':
             return self.create_error_response("currently `timestamp_granularities` only support `segment`")
@@ -216,8 +210,7 @@ class OpenAIServingWhisper(OpenAIServing):
             lang_token = final_res.outputs[0].token_ids[0]
             language = self.tokenizer.decode([lang_token])[2:-2]
         else:
-            lang_token = self.tokenizer.encode(
-                lang_token = f'<|{language}|>', add_special_tokens = False)[0]
+            lang_token = self.tokenizer.encode(f'<|{language}|>', add_special_tokens = False)[0]
 
         prompt_ids = [50258, lang_token, 50360, 50365]
         inputs: PromptInputs = {
@@ -241,7 +234,7 @@ class OpenAIServingWhisper(OpenAIServing):
             if response_format == 'json':
                 text = json.dumps({'token': texts})
             
-            yield f"data: {text}\n\n"
+            yield text
         
         """
         [CompletionOutput(index=0, text=' and', token_ids=[293], cumulative_logprob=-1.7037980556488037, logprobs=None, finish_reason=None, stop_reason=None)]
@@ -278,14 +271,14 @@ class OpenAIServingWhisper(OpenAIServing):
 
                             combined = ''.join(r) + '\n'
                             last_i += 1
-                            yield f"data: {combined}\n\n"
+                            yield combined
                         
                         texts = text.split('|>')[-2] + '|>'
                 else:
                     if response_format == 'json':
                         text = json.dumps({'token': text})
 
-                    yield f"data: {text}\n\n"
+                    yield text
 
 
     async def audio_transcription_stream_generator(
@@ -318,7 +311,7 @@ class OpenAIServingWhisper(OpenAIServing):
                         trace_headers=trace_headers,
                         raw_request=raw_request,
                     ):
-                        yield t
+                        yield f"data: {t}\n\n"
                         last_i += 1
 
                     last_timestamp += audio_len
@@ -336,7 +329,7 @@ class OpenAIServingWhisper(OpenAIServing):
                     trace_headers=trace_headers,
                     raw_request=raw_request,
                 ):
-                    yield t
+                    yield f"data: {t}\n\n"
                     last_i += 1
 
         except ValueError as e:
@@ -345,3 +338,69 @@ class OpenAIServingWhisper(OpenAIServing):
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
+    
+    async def audio_transcription_full_generator(
+        self,
+        sampling_params, 
+        stream_iterator, 
+        language,
+        response_format,
+        request_id: str,
+        trace_headers,
+        raw_request,
+    ):
+        tokens = []
+        async for data in self.audio_transcription_stream_generator(
+            sampling_params=sampling_params,
+            stream_iterator=stream_iterator,
+            language=language,
+            response_format='json',
+            request_id=request_id,
+            trace_headers=trace_headers,
+            raw_request=raw_request,
+        ):
+            if isinstance(data, str):
+                if '[DONE]' in data:
+                    break
+                data = json.loads(data.split('data:')[1].strip())
+                tokens.append(data['token'])
+
+        tokens = ''.join(tokens)
+        lang = tokens.split('|')[1]
+        matches = re.findall(pattern_pair, tokens)
+        print(matches)
+        segments = []
+        all_texts = []
+        for no, (start, substring, end) in enumerate(matches):
+            start_timestamp = float(start)
+            end_timestamp = float(end)
+            segment = Segment(
+                id=no,
+                seek=0,
+                start=start_timestamp,
+                end=end_timestamp,
+                text=substring.strip(),
+                tokens=self.tokenizer.encode(substring.strip(), add_special_tokens=False),
+                temperature=0.0,
+                avg_logprob=0.0,
+                compression_ratio=1.0,
+                no_speech_prob=0.0,
+            )
+            segments.append(segment)
+            all_texts.append(substring)
+
+        all_texts = ''.join(all_texts).strip()
+        if response_format == 'verbose_json':
+            return TranscriptionVerboseJsonResponse(
+                task='transcribe',
+                language=lang,
+                duration=segments[-1].end,
+                text=all_texts,
+                segments=segments
+            )
+        elif response_format == 'json':
+            return TranscriptionJsonResponse(
+                text=all_texts
+            )
+        else:
+            return all_texts

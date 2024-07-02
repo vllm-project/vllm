@@ -71,9 +71,9 @@ def make_arg_parser():
                         help="The file path to the chat template, "
                         "or the template in single-line form "
                         "for the specified model")
-    parser.add_argument("--max-size-whisper",
+    parser.add_argument("--max-size-mb-whisper",
                         type=int,
-                        default=100,
+                        default=200,
                         help="max size of audio to transcribe using Whisper in term of MB.")
     parser.add_argument("--response-role",
                         type=nullable_str,

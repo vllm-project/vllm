@@ -23,6 +23,8 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               CompletionRequest,
+                                              TranscriptionVerboseJsonResponse,
+                                              TranscriptionJsonResponse,
                                               EmbeddingRequest, ErrorResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -143,6 +145,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 @app.post("/audio/transcriptions")
 async def audio_transcriptions(
     file: bytes = File(),
+    model: str = 'whisper',
     language: str = Form(None),
     response_format: str = Form('text'),
     timestamp_granularities: str = Form('segment'),
@@ -166,8 +169,10 @@ async def audio_transcriptions(
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
     else:
-        assert isinstance(generator, ChatCompletionResponse)
-        return JSONResponse(content=generator.model_dump())
+        if isinstance(generator, str):
+            return generator
+        else:
+            return JSONResponse(content=generator.model_dump())
         
 if __name__ == "__main__":
     args = parse_args()
@@ -251,7 +256,7 @@ if __name__ == "__main__":
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
                                                       served_model_names)
     openai_serving_whisper = OpenAIServingWhisper(
-        engine, model_config, served_model_names, args.max_size_whisper)
+        engine, model_config, served_model_names, args.max_size_mb_whisper)
     app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,

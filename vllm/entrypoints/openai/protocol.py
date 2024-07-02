@@ -699,3 +699,25 @@ class BatchRequestOutput(OpenAIBaseModel):
     # For requests that failed with a non-HTTP error, this will contain more
     # information on the cause of the failure.
     error: Optional[Any]
+
+class Segment(BaseModel):
+    id: int
+    seek: int
+    start: float
+    end: float
+    text: str
+    tokens: list[int]
+    temperature: float
+    avg_logprob: float
+    compression_ratio: float
+    no_speech_prob: float
+
+class TranscriptionVerboseJsonResponse(BaseModel):
+    task: str = "transcribe"
+    language: str
+    duration: float
+    text: str
+    segments: list[Segment]
+
+class TranscriptionJsonResponse(BaseModel):
+    text: str
