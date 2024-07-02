@@ -39,8 +39,6 @@ def server():
         "--max-model-len",
         "4096",
         "--enforce-eager",
-        "--image-input-type",
-        "pixel_values",
         "--image-token-id",
         "32000",
         "--image-input-shape",
