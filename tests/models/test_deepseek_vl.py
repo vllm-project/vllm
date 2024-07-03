@@ -210,7 +210,7 @@ def run_test(
             enforce_eager=True,
             **vlm_config.as_cli_args_dict(),
     ) as vllm_model:
-        vllm_images = [asset.for_vllm(vlm_config) for asset in image_assets]
+        vllm_images = [asset.for_vllm() for asset in image_assets]
         vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
                                                   max_tokens,
                                                   images=vllm_images)
@@ -222,14 +222,12 @@ def run_test(
     hf_model = hf_model.to("cuda").eval()
     prepare_input_one = get_input(
         tokenizer,
-        HF_IMAGE_PROMPTS[0].replace("<image_placeholder>",
-                                    "<image_placeholder>" * 576),
+        vllm_image_prompts[0],
         hf_images,
     )
     prepare_input_two = get_input(
         tokenizer,
-        HF_IMAGE_PROMPTS[1].replace("<image_placeholder>",
-                                    "<image_placeholder>" * 576),
+        vllm_image_prompts[1],
         hf_images,
     )
     prepare_input_one = hf_model.prepare_inputs_embeds(**prepare_input_one)
