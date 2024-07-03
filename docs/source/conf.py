@@ -96,6 +96,7 @@ autodoc_mock_imports = [
     'triton',
     "tqdm",
     "tensorizer",
+    "pynvml",
 ]
 
 for mock_target in autodoc_mock_imports:
