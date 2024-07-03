@@ -1297,12 +1297,12 @@ class HabanaModelRunner(
         multi_modal_input = model_input.multi_modal_kwargs
         real_batch_size = model_input.real_batch_size
         batch_size_padded = model_input.batch_size_padded
-        is_prompt = model_input.is_prompt
         assert input_tokens is not None
         assert input_positions is not None
-        assert attn_metadata is not None
-        assert is_prompt is not None
         assert sampling_metadata is not None
+        assert attn_metadata is not None
+        is_prompt = attn_metadata.is_prompt
+        assert is_prompt is not None
         batch_size = input_tokens.size(0)
         seq_len = self._seq_len(attn_metadata)
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
