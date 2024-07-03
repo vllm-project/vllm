@@ -135,10 +135,8 @@ class OpenAIServingChat(OpenAIServing):
         the model architecture."""
 
         model_type = self.model_config.hf_config.model_type
-        if model_type in ("llava", "llava_next"):
+        if model_type in ("llava", "llava_next", "phi3_v"):
             full_prompt = f"{image_token_str}\n{text_prompt}"
-        elif model_type == 'phi3_v':
-            full_prompt = f"{image_token_str}<s>\n{text_prompt}"
         else:
             # The model does not require image token in the prompt
             # e.g, "blip-2", "chatglm"
