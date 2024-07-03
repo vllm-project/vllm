@@ -7,8 +7,8 @@ import torch
 from vllm.model_executor.layers.ops.sample import get_num_triton_sampler_splits
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData, SequenceGroupMetadata
-from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
-                        maybe_expand_dim, is_hpu)
+from vllm.utils import (async_tensor_h2d, is_hpu, is_pin_memory_available,
+                        maybe_expand_dim)
 
 _SAMPLING_EPS = 1e-5
 _SEED_0_REPLACEMENT = 3403598558
@@ -510,7 +510,8 @@ class SamplingTensors:
             dtype=torch.int,
             pin_memory=pin_memory,
         )
-        idx_dtype = torch.long if not is_hpu() else torch.int # Gaudi doesn't have full native int64 support 
+        idx_dtype = torch.long if not is_hpu(
+        ) else torch.int  # Gaudi doesn't have full native int64 support
         sample_indices_t = torch.tensor(
             sample_indices,
             device="cpu",
@@ -598,7 +599,8 @@ class SamplingTensors:
             else:
                 generator = random.Random(str((seed, ) + extra_entropy))
                 randint_fn = generator.randint
-            idx_dtype = torch.long if not is_hpu() else torch.int # Gaudi doesn't have full native int64 support 
+            idx_dtype = torch.long if not is_hpu(
+            ) else torch.int  # Gaudi doesn't have full native int64 support
             lo, hi = torch.iinfo(idx_dtype).min, torch.iinfo(idx_dtype).max
             # If the user/random sets seed = 0 but request should
             # have sampling, we need to change it to something

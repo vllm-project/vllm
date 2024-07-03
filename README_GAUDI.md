@@ -132,7 +132,7 @@ If you experience device out-of-memory issues or want to attempt inference at hi
    cache blocks you have available, and therefore reduces the effective
    maximum number of tokens you can handle at a given time.
 
--  If this methon is not efficient, you can disable `HPUGraph` completely. With
+-  If this method is not efficient, you can disable `HPUGraph` completely. With
    HPU Graphs disabled, you are trading latency and throughput at lower
    batches for potentially higher throughput on higher batches. You can do
    that by adding `--enforce-eager` flag to server (for

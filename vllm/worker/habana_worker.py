@@ -6,13 +6,13 @@ import gc
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import torch
 import habana_frameworks.torch as htorch
+import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig, SpeculativeConfig)
+                         SpeculativeConfig, VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -70,17 +70,18 @@ class HabanaWorker(WorkerBase):
         if self.vision_language_config:
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
-            assert False, "To be tested: vision language model on HPU"
+            raise AssertionError("To be tested: vision language model on HPU")
 
-        self.model_runner = HabanaModelRunner(model_config,
-                                              parallel_config,
-                                              scheduler_config,
-                                              device_config,
-                                              load_config=load_config,
-                                              cache_config=cache_config,
-                                              lora_config=self.lora_config,
-                                              kv_cache_dtype=self.cache_config.cache_dtype,
-                                              is_driver_worker=is_driver_worker)
+        self.model_runner = HabanaModelRunner(
+            model_config,
+            parallel_config,
+            scheduler_config,
+            device_config,
+            load_config=load_config,
+            cache_config=cache_config,
+            lora_config=self.lora_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
+            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: CacheEngine
@@ -124,19 +125,26 @@ class HabanaWorker(WorkerBase):
         self.model_runner.profile_run()
         torch.hpu.synchronize()
 
-        # At this point we should've allocated the maximum workspace for all recipes
-        # we will use the extra memory for graphs/blocks
+        # At this point we should've allocated the maximum workspace for all
+        # recipes we will use the extra memory for graphs/blocks
         free_hpu_memory = torch.hpu.mem_get_info()[0]
 
         cache_block_size = self.get_cache_block_size_bytes()
-        graph_headroom = 1 - (float(os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.4')) if not self.model_config.enforce_eager else 0)
-        num_hpu_blocks = int(free_hpu_memory * graph_headroom * self.cache_config.gpu_memory_utilization // cache_block_size)
+        graph_headroom = 1 - (float(
+            os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.4'))
+                              if not self.model_config.enforce_eager else 0)
+        num_hpu_blocks = int(free_hpu_memory * graph_headroom *
+                             self.cache_config.gpu_memory_utilization //
+                             cache_block_size)
         num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                              cache_block_size)
         num_hpu_blocks = max(num_hpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
+
+        # NOTE(kzawora): Restore this once LoRA support is added
+        # if self.model_runner.lora_manager:
+        #     self.model_runner.remove_all_loras()
+
         gc.collect()
         return num_hpu_blocks, num_cpu_blocks
 
@@ -159,9 +167,12 @@ class HabanaWorker(WorkerBase):
     def _init_cache_engine(self) -> None:
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config, self.device_config)
+                                        self.parallel_config,
+                                        self.device_config)
         self.hpu_cache = self.cache_engine.gpu_cache
-        htorch.hpu.synchronize() # we want to materialize cache tensors before we proceed with graph capture/execution
+        # we want to materialize cache tensors before we proceed with
+        # graph capture/execution
+        htorch.hpu.synchronize()
 
     def _warm_up_model(self) -> None:
         self.model_runner.warmup_model(self.hpu_cache)
@@ -260,7 +271,6 @@ class HabanaWorker(WorkerBase):
         self.model_runner.execute_model(None, self.hpu_cache)
         return True
 
-
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
 
@@ -296,8 +306,11 @@ def init_worker_distributed_environment(
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
-    init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank, backend='hccl')
+    init_distributed_environment(parallel_config.world_size,
+                                 rank,
+                                 distributed_init_method,
+                                 local_rank,
+                                 backend='hccl')
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)

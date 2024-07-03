@@ -6,10 +6,11 @@ import torch
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
-                        is_pin_memory_available, is_hpu)
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, is_hpu,
+                        is_pin_memory_available)
+
 if is_hpu():
-    import habana_frameworks.torch as htorch
+    pass
 
 logger = init_logger(__name__)
 
@@ -76,11 +77,11 @@ class CacheEngine:
         for _ in range(self.num_layers):
             if device == 'hpu':
                 key_cache = torch.zeros(kv_cache_shape,
-                        dtype=self.dtype,
-                        device=device)
+                                        dtype=self.dtype,
+                                        device=device)
                 value_cache = torch.zeros(kv_cache_shape,
-                        dtype=self.dtype,
-                        device=device)
+                                          dtype=self.dtype,
+                                          device=device)
                 kv_layer = (key_cache, value_cache)
                 kv_cache.append(kv_layer)
             else:

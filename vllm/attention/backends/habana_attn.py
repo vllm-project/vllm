@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
-import vllm.hpu.ops as ops
 
+import vllm.hpu.ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,
@@ -43,7 +43,8 @@ class HabanaAttentionBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: Dict[int, int],
     ) -> None:
-        HabanaPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        HabanaPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache,
+                                         src_to_dst)
 
     @staticmethod
     def copy_blocks(
@@ -104,7 +105,7 @@ class HabanaAttentionMetadata(AttentionMetadata, HabanaPagedAttentionMetadata):
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
         # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[List[torch.Tensor]] = None
+        self.attn_bias: Optional[torch.Tensor] = None
 
 
 class HabanaAttentionImpl(AttentionImpl):
@@ -134,7 +135,7 @@ class HabanaAttentionImpl(AttentionImpl):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
-        max_seq_len : Optional[int] = 4096,
+        max_seq_len: int = 4096,
     ) -> None:
         self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
@@ -143,13 +144,15 @@ class HabanaAttentionImpl(AttentionImpl):
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
         self.position_bias = None
-        if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.bfloat16)
-            self.position_bias = _make_alibi_bias(alibi_slopes,
-                                                  num_kv_heads,
-                                                  alibi_slopes.dtype,
-                                                  max_seq_len)
         self.alibi_slopes = alibi_slopes
+        if alibi_slopes is not None:
+            alibi_slopes_tensor = torch.tensor(alibi_slopes,
+                                               dtype=torch.bfloat16)
+            self.position_bias = _make_alibi_bias(alibi_slopes_tensor,
+                                                  num_kv_heads,
+                                                  alibi_slopes_tensor.dtype,
+                                                  max_seq_len)
+            self.alibi_slopes = alibi_slopes_tensor
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
@@ -164,9 +167,9 @@ class HabanaAttentionImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: HabanaAttentionMetadata,
-        kv_scale: float,
+        kv_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -192,23 +195,27 @@ class HabanaAttentionImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            HabanaPagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                      value_cache,
-                                                      attn_metadata.slot_mapping,
-                                                      self.kv_cache_dtype,
-                                                      attn_metadata.is_prompt)
+            HabanaPagedAttention.write_to_paged_cache(
+                key, value, key_cache, value_cache, attn_metadata.slot_mapping,
+                self.kv_cache_dtype, attn_metadata.is_prompt)
 
         if attn_metadata.is_prompt:
             # Prompt run.
             if kv_cache is None or attn_metadata.block_tables.numel() == 0:
                 # TODO: move this outside of model
-                assert attn_metadata.attn_bias is not None, 'attn_bias must be set before calling model.forward!'
+                assert attn_metadata.attn_bias is not None, \
+                       'attn_bias must be set before calling model.forward!'
                 attn_bias = attn_metadata.attn_bias
-                if self.alibi_slopes is not None:
-                    attn_bias.add_(self.position_bias[:, :, -attn_bias.size(2):, -attn_bias.size(3):])
+                if self.alibi_slopes is not None and \
+                   self.position_bias is not None:
+                    attn_bias.add_(self.position_bias[:, :,
+                                                      -attn_bias.size(2):,
+                                                      -attn_bias.size(3):])
 
-                query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
-                kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
+                query_shape = (batch_size, seq_len, self.num_heads,
+                               self.head_size)
+                kv_shape = (batch_size, seq_len_kv, self.num_kv_heads,
+                            self.head_size)
                 out = ops.prompt_attention(
                     query.view(query_shape),
                     key.view(kv_shape),
@@ -236,17 +243,9 @@ class HabanaAttentionImpl(AttentionImpl):
         else:
             # Decoding run.
             output = HabanaPagedAttention.forward_decode(
-                query,
-                key_cache,
-                value_cache,
-                attn_metadata.block_tables,
-                attn_metadata.seq_lens_tensor,
-                self.kv_cache_dtype,
-                self.num_kv_heads,
-                self.scale,
-                self.position_bias,
-                kv_scale
-            )
+                query, key_cache, value_cache, attn_metadata.block_tables,
+                attn_metadata.seq_lens_tensor, self.kv_cache_dtype,
+                self.num_kv_heads, self.scale, self.position_bias, kv_scale)
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
 

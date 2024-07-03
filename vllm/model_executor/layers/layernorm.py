@@ -6,12 +6,14 @@ import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
 from vllm.utils import is_hpu
+
 if is_hpu():
     try:
-        from habana_frameworks.torch.hpex.normalization import FusedRMSNorm as FusedRMSNorm
+        from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
     except ImportError:
         print("Not using HPU fused kernel for RMSNorm")
         FusedRMSNorm = None
+
 
 class RMSNorm(CustomOp):
     """Root mean square normalization.
@@ -86,7 +88,8 @@ class RMSNorm(CustomOp):
                 orig_shape = x.shape
                 residual += x.view(residual.shape)
                 # Note: FusedRMSNorm requires 3D tensors as inputs
-                x = FusedRMSNorm.apply(residual.float(), self.weight.float(), self.variance_epsilon)
+                x = FusedRMSNorm.apply(residual.float(), self.weight.float(),
+                                       self.variance_epsilon)
                 return x.to(orig_dtype).view(orig_shape), residual
             ops.fused_add_rms_norm(
                 x,
@@ -97,7 +100,8 @@ class RMSNorm(CustomOp):
             return x, residual
         if x.device.type == "hpu" and FusedRMSNorm:
             orig_dtype = x.dtype
-            x = FusedRMSNorm.apply(x.float(), self.weight.float(), self.variance_epsilon)
+            x = FusedRMSNorm.apply(x.float(), self.weight.float(),
+                                   self.variance_epsilon)
             return x.to(orig_dtype)
         out = torch.empty_like(x)
         ops.rms_norm(

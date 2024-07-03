@@ -28,9 +28,11 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
-from vllm.utils import is_tpu, is_hpu
+from vllm.utils import is_hpu, is_tpu
+
 if is_hpu():
     from vllm.hpu.rotary_embed import HpuRotaryEmbedding
+
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., :x.shape[-1] // 2]
@@ -763,11 +765,11 @@ def get_rope(
         return _ROPE_DICT[key]
     if rope_scaling is None:
         if is_hpu():
-            rotary_emb = HpuRotaryEmbedding(head_size, rotary_dim, max_position, base,
-                                            is_neox_style)
+            rotary_emb = HpuRotaryEmbedding(head_size, rotary_dim,
+                                            max_position, base, is_neox_style)
         else:
-            rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
-                                            is_neox_style, dtype)
+            rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position,
+                                         base, is_neox_style, dtype)
     else:
         scaling_type = rope_scaling["type"]
         # The correct one should be "longrope" but keep "su" here

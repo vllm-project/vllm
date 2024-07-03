@@ -207,11 +207,14 @@ class cmake_build_ext(build_ext):
 
 def _is_hpu() -> bool:
     is_hpu_available = True
-    return is_hpu_available # FIXME(kzawora): HPU autodetection sporadically fails on certain clients. Find the cause and fix it.
+    # FIXME(kzawora): HPU autodetection sporadically fails on certain clients.
+    # Need to find the cause and fix it.
+    return is_hpu_available
     try:
         subprocess.run(["hl-smi"], capture_output=True, check=True)
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
-        if not os.path.exists('/dev/accel/accel0') and not os.path.exists('/dev/accel/accel_controlD0'):
+        if not os.path.exists('/dev/accel/accel0') and not os.path.exists(
+                '/dev/accel/accel_controlD0'):
             is_hpu_available = False
     return is_hpu_available
 
@@ -331,17 +334,23 @@ def find_version(filepath: str) -> str:
             return version_match.group(1)
         raise RuntimeError("Unable to find version string.")
 
+
 def get_gaudi_sw_version():
     """
     Returns the driver version.
     """
     # Enable console printing for `hl-smi` check
-    output = subprocess.run(
-        "hl-smi", shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={"ENABLE_CONSOLE": "true"}
-    )
+    output = subprocess.run("hl-smi",
+                            shell=True,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            env={"ENABLE_CONSOLE": "true"})
     if output.returncode == 0 and output.stdout:
-        return output.stdout.split("\n")[2].replace(" ", "").split(":")[1][:-1].split("-")[0]
-    return "0.0.0" # when hl-smi is not available
+        return output.stdout.split("\n")[2].replace(
+            " ", "").split(":")[1][:-1].split("-")[0]
+    return "0.0.0"  # when hl-smi is not available
+
 
 def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "version.py"))
@@ -365,7 +374,7 @@ def get_vllm_version() -> str:
             version += f"+neuron{neuron_version_str}"
     elif _is_hpu():
         # Get the Intel Gaudi Software Suite version
-        gaudi_sw_version = str(get_gaudi_sw_version()) 
+        gaudi_sw_version = str(get_gaudi_sw_version())
         if gaudi_sw_version != MAIN_CUDA_VERSION:
             gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
             version += f"+gaudi{gaudi_sw_version}"

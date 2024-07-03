@@ -283,10 +283,6 @@ class RayHabanaExecutor(DistributedGPUExecutor):
             raise RuntimeError("At least one Worker is dead. "
                                f"Dead Workers: {dead_actors}. ")
 
-    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
-        """Wait for futures returned from _run_workers() with
-        async_run_remote_workers_only to complete."""
-        ray.get(parallel_worker_tasks)
 
 class RayHabanaExecutorAsync(RayHabanaExecutor, DistributedGPUExecutorAsync):
 

@@ -7,7 +7,9 @@
 
 import habana_frameworks.torch as htorch
 
+
 def with_mark_steps(fn):
+
     def wrapped(*args, **kwargs):
         htorch.core.mark_step()
         result = fn(*args, **kwargs)
@@ -15,4 +17,5 @@ def with_mark_steps(fn):
         del kwargs
         htorch.core.mark_step()
         return result
+
     return wrapped

@@ -54,24 +54,13 @@ class HabanaPagedAttention:
         return key_cache, value_cache
 
     @staticmethod
-    def write_to_paged_cache(
-        key: torch.Tensor,
-        value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        kv_cache_dtype: str,
-        is_prompt: bool
-    ) -> None:
-        cache_ops.reshape_and_cache(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
-            kv_cache_dtype,
-            is_prompt
-        )
+    def write_to_paged_cache(key: torch.Tensor, value: torch.Tensor,
+                             key_cache: torch.Tensor,
+                             value_cache: torch.Tensor,
+                             slot_mapping: torch.Tensor, kv_cache_dtype: str,
+                             is_prompt: bool) -> None:
+        cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
+                                    slot_mapping, kv_cache_dtype, is_prompt)
 
     @staticmethod
     def forward_decode(
@@ -115,7 +104,8 @@ class HabanaPagedAttention:
         alibi_slopes: Optional[torch.Tensor],
         sliding_window: Optional[int],
     ) -> torch.Tensor:
-        raise NotImplementedError("forward_prefix is not implemented for HabanaPagedAttention")
+        raise NotImplementedError(
+            "forward_prefix is not implemented for HabanaPagedAttention")
 
     @staticmethod
     def swap_blocks(
