@@ -180,7 +180,9 @@ class OpenAIServingChat(OpenAIServing):
                         "Skipping prompt formatting.")
                 else:
                     text_prompt = self._get_full_image_text_prompt(
-                        image_token_str=image_token_str, text_prompt=text_prompt)
+                        image_token_str=image_token_str,
+                        text_prompt=text_prompt,
+                    )
 
         messages = [ConversationMessage(role=role, content=text_prompt)]
 
