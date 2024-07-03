@@ -3,7 +3,7 @@ from typing import (ClassVar, Dict, List, Literal, Optional, Protocol, Type,
 
 from typing_extensions import TypeGuard
 
-from vllm.config import LoRAConfig, VisionLanguageConfig
+from vllm.config import LoRAConfig, MultiModalConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -22,7 +22,7 @@ class SupportsVision(Protocol):
         MRO of your model class.
     """
 
-    def __init__(self, *, vlm_config: VisionLanguageConfig) -> None:
+    def __init__(self, *, multimodal_config: MultiModalConfig) -> None:
         ...
 
 
@@ -32,7 +32,7 @@ class SupportsVision(Protocol):
 class _SupportsVisionType(Protocol):
     supports_vision: Literal[True]
 
-    def __call__(self, *, vlm_config: VisionLanguageConfig) -> None:
+    def __call__(self, *, multimodal_config: MultiModalConfig) -> None:
         ...
 
 

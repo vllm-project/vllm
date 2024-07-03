@@ -8,18 +8,6 @@ vLLM provides experimental support for Vision Language Models (VLMs). This docum
 .. important::
     We are actively iterating on VLM support. Expect breaking changes to VLM usage and development in upcoming releases without prior deprecation.
 
-Engine Arguments
-----------------
-
-The following :ref:`engine arguments <engine_args>` are specific to VLMs:
-
-.. argparse::
-    :module: vllm.engine.arg_utils
-    :func: _vlm_engine_args_parser
-    :prog: -m vllm.entrypoints.openai.api_server
-    :nodefaultconst:
-
-.. important::
     Currently, the support for vision language models on vLLM has the following limitations:
 
     * Only single image input is supported per text prompt.
@@ -33,20 +21,17 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 
 .. code-block:: python
 
-    llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf",
-        image_token_id=32000,
-        image_input_shape="1,3,336,336",
-        image_feature_size=576,
-    )
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
 
 .. important::
-    Currently, you have to specify ``image_feature_size`` to support memory profiling.
-    To avoid OOM during runtime, you should set this to the maximum value supported by the model.
-    The calculation of feature size is specific to the model. For more details, please refer to
-    the function :code:`get_<model_name>_image_feature_size` inside the corresponding model file.
+    We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
+    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified, and internally we will construct data structures for
+    every model to perform profiling with.
 
-    We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
+    This work is still ongoing. In the meantime, we internally hardcode ``image_feature_size = 3000`` through 
+    :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
+    for every model to be conservative in terms of GPU memory consumption. This hardcoded value will be replaced 
+    with a more accurate profiling strategy in the future.
 
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
@@ -54,23 +39,39 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
 * ``prompt``: The prompt should follow the format that is documented on HuggingFace.
 * ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
 
-.. note::
-
-   ``multi_modal_data`` can accept keys and values beyond the builtin ones, as long as a customized plugin is registered through
-    :class:`vllm.multimodal.MULTIMODAL_REGISTRY`.
-
 .. code-block:: python
 
     # Refer to the HuggingFace repo for the correct format to use
     prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     # Load the image using PIL.Image
-    image = ...
-
+    image = PIL.Image.open(...)
+    
+    # Single prompt inference
     outputs = llm.generate({
         "prompt": prompt,
         "multi_modal_data": {"image": image},
     })
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    
+    # Batch inference
+    image_1 = PIL.Image.open(...)
+    image_2 = PIL.Image.open(...)
+    outputs = llm.generate(
+        [
+            {
+                "prompt": "USER: <image>\nWhat is the content of this image?\nASSISTANT:",
+                "multi_modal_data": {"image": image_1},
+            },
+            {
+                "prompt": "USER: <image>\nWhat's the color of this image?\nASSISTANT:",
+                "multi_modal_data": {"image": image_2},
+            }
+        ]
+    )
 
     for o in outputs:
         generated_text = o.outputs[0].text
@@ -99,18 +100,17 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 
     python -m vllm.entrypoints.openai.api_server \
         --model llava-hf/llava-1.5-7b-hf \
-        --image-token-id 32000 \
-        --image-input-shape 1,3,336,336 \
-        --image-feature-size 576 \
         --chat-template template_llava.jinja
 
 .. important::
-    Currently, you have to specify ``image_feature_size`` to support memory profiling.
-    To avoid OOM during runtime, you should set this to the maximum value supported by the model.
-    The calculation of feature size is specific to the model. For more details, please refer to
-    the function :code:`get_<model_name>_image_feature_size` inside the corresponding model file.
+    We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
+    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified, and internally we will construct data structures for
+    every model to perform profiling with.
 
-    We will remove most of the vision-specific arguments in a future release as they can be inferred from the HuggingFace configuration.
+    This work is still ongoing. In the meantime, we internally hardcode ``image_feature_size = 3000`` through 
+    :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
+    for every model to be conservative in terms of GPU memory consumption. This hardcoded value will be replaced 
+    with a more accurate profiling strategy in the future.
 
 To consume the server, you can use the OpenAI client like in the example below:
 

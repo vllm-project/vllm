@@ -7,13 +7,7 @@ from vllm import LLM, SamplingParams
 
 
 def run_llava_next():
-    llm = LLM(
-        model="llava-hf/llava-v1.6-mistral-7b-hf",
-        image_token_id=32000,
-        image_input_shape="1,3,336,336",
-        # Use the maximum possible value for memory profiling
-        image_feature_size=2928,
-    )
+    llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf", max_model_len=4096)
 
     prompt = "[INST] <image>\nWhat is shown in this image? [/INST]"
     url = "https://h2o-release.s3.amazonaws.com/h2ogpt/bigben.jpg"

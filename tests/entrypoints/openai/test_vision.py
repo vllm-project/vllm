@@ -39,12 +39,6 @@ def server(ray_ctx):
         "--max-model-len",
         "4096",
         "--enforce-eager",
-        "--image-token-id",
-        "32000",
-        "--image-input-shape",
-        "1,3,336,336",
-        "--image-feature-size",
-        "576",
         "--chat-template",
         str(LLAVA_CHAT_TEMPLATE),
     ])

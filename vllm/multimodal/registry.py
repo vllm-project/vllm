@@ -120,3 +120,10 @@ class MultiModalRegistry:
         Create an input mapper (see :meth:`map_input`) for a specific model.
         """
         return functools.partial(self.map_input, model_config)
+
+    def get_num_input_tokens(self):
+        """
+        Get the number of input tokens for profiling purposes.
+        """
+        # TODO: Provide this number on a per model basis.
+        return 3000
