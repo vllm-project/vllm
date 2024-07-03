@@ -816,6 +816,22 @@ def cuda_device_count_stateless() -> int:
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
+def error_on_invalid_device_count_status():
+    if torch.cuda.device_count.cache_info().currsize != 0:
+        # the function is already called, and the result is cached
+        remembered = torch.cuda.device_count()
+        current = cuda_device_count_stateless()
+        if remembered > current:
+            raise RuntimeError(
+                "The number of CUDA devices has changed since the first "
+                "call to torch.cuda.device_count(). This is not allowed "
+                "and may result in undefined behavior. Please check out "
+                "https://github.com/vllm-project/vllm/issues/6056 to "
+                "find the first call to torch.cuda.device_count() "
+                "and defer it as late as possible. Or you can set "
+                "CUDA_VISIBLE_DEVICES to the GPUs you want to use.")
+
+
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
