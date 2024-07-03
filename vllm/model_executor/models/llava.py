@@ -5,7 +5,7 @@ import torch.nn as nn
 from transformers import CLIPVisionConfig, LlavaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -108,13 +108,13 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: LlavaConfig,
-                 vlm_config: VisionLanguageConfig,
+                 multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
 
         self.config = config
-        self.vlm_config = vlm_config
+        self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = CLIPVisionModel(config.vision_config)
@@ -138,14 +138,13 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
         self.sampler = Sampler()
 
     def _validate_image_data(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[1:]) != list(self.vlm_config.image_input_shape[1:]):
+        if list(data.shape)[1:] != [
+                3, self.config.vision_config.image_size,
+                self.config.vision_config.image_size
+        ]:
             raise ValueError(
-                f"The expected image tensor shape is batch dimension plus "
-                f"{self.vlm_config.image_input_shape[1:]}. "
-                f"You supplied {data.shape}. "
-                f"If you are using vLLM's entrypoint, make sure your "
-                f"supplied image input is consistent with "
-                f"image_input_shape in engine args.")
+                "The expected image tensor shape is batch dimension plus "
+                "channel, height and width.")
 
         return data
 
@@ -244,7 +243,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
             inputs_embeds = merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
-                self.vlm_config.image_token_id)
+                self.config.image_token_index)
 
             input_ids = None
         else:

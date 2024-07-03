@@ -6,11 +6,11 @@ from typing import List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, TokenizerPoolConfig,
-                         VisionLanguageConfig)
+                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         SchedulerConfig, SpeculativeConfig,
+                         TokenizerPoolConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.utils import FlexibleArgumentParser, str_to_int_tuple
+from vllm.utils import FlexibleArgumentParser
 
 
 def nullable_str(val: str):
@@ -78,11 +78,6 @@ class EngineArgs:
     model_loader_extra_config: Optional[dict] = None
     preemption_mode: Optional[str] = None
 
-    # Related to Vision-language models such as llava
-    image_token_id: Optional[int] = None
-    image_input_shape: Optional[str] = None
-    image_feature_size: Optional[int] = None
-
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
@@ -105,27 +100,6 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
-
-    @staticmethod
-    def add_cli_args_for_vlm(
-            parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        parser.add_argument('--image-token-id',
-                            type=int,
-                            default=None,
-                            help=('Input id for image token.'))
-        parser.add_argument(
-            '--image-input-shape',
-            type=nullable_str,
-            default=None,
-            help=('The biggest image input shape (worst for memory footprint) '
-                  'given an input type. Only used for vLLM\'s profile_run.'))
-        parser.add_argument(
-            '--image-feature-size',
-            type=int,
-            default=None,
-            help=('The image feature size along the context dimension.'))
-
-        return parser
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -484,9 +458,6 @@ class EngineArgs:
                             ],
                             help='Device type for vLLM execution.')
 
-        # Related to Vision-language models such as llava
-        parser = EngineArgs.add_cli_args_for_vlm(parser)
-
         parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
@@ -648,19 +619,7 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
-        if self.image_token_id is not None:
-            if (not self.image_input_shape or not self.image_feature_size):
-                raise ValueError(
-                    'Specify `image_input_shape` and '
-                    '`image_feature_size` together with `image_token_id`.')
-
-            vision_language_config = VisionLanguageConfig(
-                image_token_id=self.image_token_id,
-                image_input_shape=str_to_int_tuple(self.image_input_shape),
-                image_feature_size=self.image_feature_size,
-            )
-        else:
-            vision_language_config = None
+        multimodal_config = MultiModalConfig()
 
         device_config = DeviceConfig(device=self.device)
         model_config = ModelConfig(
@@ -685,7 +644,7 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
-            multimodal_config=vision_language_config)
+            multimodal_config=multimodal_config)
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -787,7 +746,7 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            vision_language_config=vision_language_config,
+            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
             decoding_config=decoding_config,
@@ -831,7 +790,3 @@ def _engine_args_parser():
 def _async_engine_args_parser():
     return AsyncEngineArgs.add_cli_args(FlexibleArgumentParser(),
                                         async_args_only=True)
-
-
-def _vlm_engine_args_parser():
-    return EngineArgs.add_cli_args_for_vlm(FlexibleArgumentParser())

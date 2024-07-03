@@ -7,9 +7,9 @@ from typing import Set, Type, TypeVar, Union
 from transformers import PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+                         LoRAConfig, ModelConfig, MultiModalConfig,
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -87,8 +87,8 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        vision_language_config (Optional): The configuration related to vision
-            language models.
+        multimodal_config (Optional): The configuration related to multimodal 
+            models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
@@ -157,7 +157,7 @@ class LLMEngine:
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
+        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
@@ -215,7 +215,7 @@ class LLMEngine:
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -247,7 +247,7 @@ class LLMEngine:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            vision_language_config=vision_language_config,
+            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
         )

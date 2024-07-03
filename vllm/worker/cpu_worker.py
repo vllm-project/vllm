@@ -6,8 +6,8 @@ import torch.distributed
 
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -131,7 +131,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ) -> None:
@@ -145,7 +145,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
-        self.vision_language_config = vision_language_config
+        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -162,7 +162,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             cache_config,
             load_config=self.load_config,
             lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
+            multimodal_config=self.multimodal_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
