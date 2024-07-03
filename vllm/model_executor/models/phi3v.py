@@ -52,7 +52,6 @@ _KEYS_TO_MODIFY_MAPPING = {
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 32044
-_INPUT_RESOLUTION = 336
 
 CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      hidden_act="quick_gelu",
@@ -469,7 +468,8 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
 
         def _validate_shape(data: torch.Tensor):
             if list(data.shape)[2:] != [
-                    3, _INPUT_RESOLUTION, _INPUT_RESOLUTION
+                    3, CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size,
+                    CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size
             ]:
                 raise ValueError(
                     "The expected pixel value tensor shape is batch dimension "
