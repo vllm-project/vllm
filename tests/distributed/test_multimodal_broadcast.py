@@ -20,9 +20,9 @@ from vllm.utils import cuda_device_count_stateless
 model = os.environ["TEST_DIST_MODEL"]
 
 if model.startswith("llava-hf/llava"):
-    from ..models.test_llava import model_and_vl_config, run_test
+    from ..models.test_llava import models, run_test
 elif model.startswith("microsoft/Phi-3-vision"):
-    from ..models.test_phi3v import model_and_vl_config, run_test
+    from ..models.test_phi3v import models, run_test
 else:
     raise NotImplementedError(f"Unsupported model: {model}")
 
@@ -44,7 +44,7 @@ def test_models(hf_runner, vllm_runner, image_assets,
         hf_runner,
         vllm_runner,
         image_assets,
-        model_and_config=model_and_vl_config[0],
+        model=models[0],
         size_factors=[1.0],
         dtype=dtype,
         max_tokens=max_tokens,
