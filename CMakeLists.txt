@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
-option(VLLM_TARGET_DEVICE "Target device backend for vLLM" "cuda")
+# CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
+set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
@@ -32,8 +33,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # versions are derived from Dockerfile.rocm
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.3.0")
-set(TORCH_SUPPORTED_VERSION_ROCM_5X "2.0.1")
-set(TORCH_SUPPORTED_VERSION_ROCM_6X "2.1.1")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.4.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -98,18 +98,11 @@ elseif(HIP_FOUND)
   # .hip extension automatically, HIP must be enabled explicitly.
   enable_language(HIP)
 
-  # ROCm 5.x
-  if (ROCM_VERSION_DEV_MAJOR EQUAL 5 AND
-      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_5X})
-    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_5X} "
-      "expected for ROCMm 5.x build, saw ${Torch_VERSION} instead.")
-  endif()
-
-  # ROCm 6.x
-  if (ROCM_VERSION_DEV_MAJOR EQUAL 6 AND
-      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM_6X})
-    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM_6X} "
-      "expected for ROCMm 6.x build, saw ${Torch_VERSION} instead.")
+  # ROCm 5.X and 6.X
+  if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
+      NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_ROCM})
+    message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_ROCM} "
+      "expected for ROCm build, saw ${Torch_VERSION} instead.")
   endif()
 else()
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")

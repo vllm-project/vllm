@@ -12,8 +12,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_perms import (
     marlin_perm, marlin_scale_perm, marlin_scale_perm_single)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_pack_factor, quantize_weights, sort_weights)
+from vllm.platforms import current_platform
 
-__cuda_arch = torch.cuda.get_device_capability()
+__cuda_arch = current_platform.get_device_capability()
 
 MARLIN_TILE = 16
 

@@ -66,6 +66,10 @@ def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
     torch.ops._C.gelu_new(out, x)
 
 
+def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
+    torch.ops._C.gelu_quick(out, x)
+
+
 # page attention ops
 def paged_attention_v1(
     out: torch.Tensor,
@@ -212,9 +216,16 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # cutlass
-def cutlass_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor,
+def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
+
+
+def cutlass_scaled_mm(a: torch.Tensor,
+                      b: torch.Tensor,
+                      scale_a: torch.Tensor,
                       scale_b: torch.Tensor,
-                      out_dtype: Type[torch.dtype]) -> torch.Tensor:
+                      out_dtype: Type[torch.dtype],
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
 
@@ -222,7 +233,8 @@ def cutlass_scaled_mm(a: torch.Tensor, b: torch.Tensor, scale_a: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b)
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+
     return out
 
 

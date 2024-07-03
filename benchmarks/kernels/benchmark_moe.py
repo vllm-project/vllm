@@ -10,6 +10,7 @@ from ray.experimental.tqdm_ray import tqdm
 from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.utils import FlexibleArgumentParser
 
 
 class BenchmarkConfig(TypedDict):
@@ -315,7 +316,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = FlexibleArgumentParser()
     parser.add_argument("--model",
                         type=str,
                         default="mistralai/Mixtral-8x7B-Instruct-v0.1")

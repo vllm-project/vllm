@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
@@ -49,7 +50,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
+
+from .interfaces import SupportsLoRA
 
 
 class MiniCPMMoE(nn.Module):
@@ -388,7 +391,7 @@ class MiniCPMModel(nn.Module):
         return hidden_states
 
 
-class MiniCPMForCausalLM(nn.Module):
+class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -418,13 +421,16 @@ class MiniCPMForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.num_experts = getattr(self.config, "num_experts", 0)
         self.quant_config = quant_config
         self.model = MiniCPMModel(config,
@@ -443,6 +449,7 @@ class MiniCPMForCausalLM(nn.Module):
                 # We need bigger padding if using lora for kernel
                 # compatibility
                 if not lora_config else lora_config.lora_vocab_padding_size,
+                quant_config=quant_config,
             )
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
 
@@ -456,6 +463,7 @@ class MiniCPMForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
@@ -465,10 +473,10 @@ class MiniCPMForCausalLM(nn.Module):
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         hidden_states = hidden_states / self.scale_width
         if self.config.tie_word_embeddings:
-            lm_head_weight = self.model.embed_tokens.weight
+            lm_head = self.model.embed_tokens
         else:
-            lm_head_weight = self.lm_head.weight
-        logits = self.logits_processor(lm_head_weight, hidden_states,
+            lm_head = self.lm_head
+        logits = self.logits_processor(lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
