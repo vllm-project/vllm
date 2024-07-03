@@ -1032,11 +1032,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         )
 
                     if self.lora_config:
-                        lora_mapping = LoRAMapping(
-                            [0] * batch_size,
-                            [0] * batch_size,
-                            False
-                        )
+                        lora_mapping = LoRAMapping([0] * batch_size,
+                                                   [0] * batch_size, False)
                         self.set_active_loras(set(), lora_mapping)
 
                     graph_runner = CUDAGraphRunner(
