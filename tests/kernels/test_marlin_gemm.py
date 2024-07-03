@@ -12,9 +12,9 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
     GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
-from vllm.model_executor.layers.quantization.utils.marlin_perms import (
+from vllm.model_executor.layers.quantization.test_utils.marlin_perms import (
     marlin_perm)
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+from vllm.model_executor.layers.quantization.test_utils.marlin_utils import (
     MarlinWorkspace, compute_max_diff, is_marlin_supported, marlin_24_quantize,
     marlin_quantize, marlin_weights)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (

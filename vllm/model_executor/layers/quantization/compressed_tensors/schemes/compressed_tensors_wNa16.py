@@ -6,7 +6,7 @@ from torch.nn import Parameter
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
-from vllm.model_executor.layers.quantization.gptq_marlin import (
+from vllm.model_executor.layers.quantization.utils.marlin import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N, GPTQMarlinState,
     marlin_permute_scales)
 from vllm.model_executor.utils import set_weight_attrs
@@ -20,10 +20,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def __init__(self,
                  strategy: str,
                  num_bits: int,
-                 group_size: Optional[int] = None):
+                 group_size: Optional[int] = None,
+                 act_order: bool = False):
         self.num_bits = num_bits
         self.strategy = strategy
         self.group_size = group_size
+        self.act_order = act_order
 
         if self.strategy == "group" and self.group_size is None:
             raise ValueError(
@@ -73,6 +75,23 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             })
         layer.register_parameter("weight_packed", weight)
 
+        # Activation order
+        g_idx = Parameter(
+            torch.empty(
+                input_size_per_partition,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            g_idx, { 
+                "input_dim": 0,
+                "weight_loader": weight_loader,
+                "ignore_warning": True
+            },
+        )
+        layer.register_parameter("weight_g_idx", g_idx)
+
         weight_scale = Parameter(
             torch.empty(
                 output_size_per_partition,
@@ -107,6 +126,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.input_size = input_size
         layer.marlin_state = GPTQMarlinState.REPACK
         layer.is_k_full = True
+        if self.act_order:
+            assert self.quant_config.group_size != -1
+            layer.is_k_full = input_size_per_partition == input_size
         layer.group_size = group_size
 
         max_workspace_size = (
@@ -124,6 +146,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         size_m = reshaped_x.shape[0]
         part_size_n = layer.output_size_per_partition
         part_size_k = layer.input_size_per_partition
+        full_size_k = layer.input_size
 
         out_shape = x.shape[:-1] + (part_size_n, )
 
@@ -141,33 +164,49 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
             cur_device = layer.weight_packed.device
 
-            # Reset g_idx related tensors
-            layer.g_idx = Parameter(torch.empty(0,
-                                                dtype=torch.int,
-                                                device=cur_device),
-                                    requires_grad=False)
-            layer.g_idx_sort_indices = Parameter(torch.empty(
-                0, dtype=torch.int, device=cur_device),
-                                                 requires_grad=False)
+            # Process act_order
+            if self.act_order:
+                g_idx_sort_indices = Parameter(
+                    torch.argsort(layer.weight_g_idx).to(torch.int),
+                    requires_grad=False)
+
+                sorted_g_idx = layer.g_idx[g_idx_sort_indices]
+                replace_tensor("weight_g_idx", sorted_g_idx)
+                
+            else:
+                layer.weight_g_idx = Parameter(
+                    torch.empty(0, dtype=torch.int, device=cur_device),
+                    requires_grad=False)
+                layer.g_idx_sort_indices = Parameter(
+                    torch.empty(0, dtype=torch.int, device=cur_device),
+                    requires_grad=False)
 
             # Repack weights
             marlin_qweight = ops.gptq_marlin_repack(
-                layer.weight_packed.t().contiguous(), layer.g_idx_sort_indices,
-                part_size_k, part_size_n, self.num_bits)
+                layer.weight_packed.t().contiguous(),
+                layer.g_idx_sort_indices,
+                part_size_k,
+                part_size_n,
+                self.num_bits)
 
             replace_tensor("weight_packed", marlin_qweight)
 
             # Permute scales
             scales_size_k = part_size_k
             scales_size_n = part_size_n
+            if self.act_order:
+                scales_size_k = full_size_k
 
             marlin_scales = marlin_permute_scales(
-                layer.weight_scale.squeeze().t().contiguous(), scales_size_k,
-                scales_size_n, layer.group_size, self.num_bits)
+                layer.weight_scale.squeeze().t().contiguous(),
+                scales_size_k,
+                scales_size_n,
+                self.group_size, 
+                self.num_bits)
             replace_tensor("weight_scale", marlin_scales)
 
         output = ops.gptq_marlin_gemm(reshaped_x, layer.weight_packed,
-                                      layer.weight_scale, layer.g_idx,
+                                      layer.weight_scale, layer.weight_g_idx,
                                       layer.g_idx_sort_indices,
                                       layer.workspace, self.num_bits, size_m,
                                       part_size_n, part_size_k,
