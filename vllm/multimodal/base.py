@@ -101,6 +101,10 @@ MultiModalInputMapper = Callable[[InputContext, object], MultiModalInputs]
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
 and processors in HuggingFace Transformers."""
 
+MultiModalTokensCalc = Union[int, Callable[[InputContext], int]]
+"""Calculate the maximum number of multimodal tokens input to the language
+model. This does not include the tokens that correspond to the input text."""
+
 N = TypeVar("N", bound=Type[nn.Module])
 
 
@@ -117,6 +121,7 @@ class MultiModalPlugin(ABC):
 
     def __init__(self) -> None:
         self._input_mappers: Dict[Type[nn.Module], MultiModalInputMapper] = {}
+        self._max_mm_tokens: Dict[Type[nn.Module], MultiModalTokensCalc] = {}
 
     @abstractmethod
     def get_data_key(self) -> str:
@@ -188,3 +193,63 @@ class MultiModalPlugin(ABC):
                            f"model class {model_cls.__name__}.")
 
         return mapper(InputContext(model_config), data)
+
+    def register_max_multimodal_tokens(
+        self,
+        max_mm_tokens: MultiModalTokensCalc,
+    ):
+        """
+        Register the maximum number of multi-modal tokens input to the
+        language model for a model class.
+
+        See also:
+            :ref:`adding_a_new_multimodal_model`
+        """
+
+        def wrapper(model_cls: N) -> N:
+            if model_cls in self._input_mappers:
+                logger.warning(
+                    "Model class %s already calculates maximum number of "
+                    "tokens in %s. It is overwritten by the new one.",
+                    model_cls, self)
+
+            self._max_mm_tokens[model_cls] = max_mm_tokens
+
+            return model_cls
+
+        return wrapper
+
+    def get_max_multimodal_tokens(
+        self,
+        model_config: ModelConfig,
+        default: int,
+    ):
+        """
+        Get the maximum number of multi-modal tokens
+        for profiling the memory usage of a model.
+
+        If this registry is not applicable to the model,
+        instead return the ``default`` value.
+
+        The model is identified by ``model_config``.
+
+        See also:
+            :ref:`adding_a_new_multimodal_model`
+        """
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_architecture
+
+        model_cls, _ = get_model_architecture(model_config)
+
+        if model_cls not in self._input_mappers:
+            return default
+
+        max_mm_tokens = self._max_mm_tokens.get(model_cls)
+        if max_mm_tokens is None:
+            raise KeyError(f"No maximum number of multi-modal tokens is given "
+                           f"for model class {model_cls.__name__} in {self}.")
+
+        if isinstance(max_mm_tokens, int):
+            return max_mm_tokens
+
+        return max_mm_tokens(InputContext(model_config))
