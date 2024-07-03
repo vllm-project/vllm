@@ -148,7 +148,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        mm_config: Optional[MultiModalConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
         kv_cache_dtype: Optional[ov.Type] = ov.Type.undefined,
         is_driver_worker: bool = False,
     ) -> None:
@@ -162,7 +162,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -180,7 +180,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
             cache_config,
             load_config=self.load_config,
             lora_config=self.lora_config,
-            mm_config=self.mm_config,
+            multimodal_config=self.multimodal_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
         )

@@ -43,7 +43,7 @@ class Worker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        mm_config: Optional[MultiModalConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
@@ -66,7 +66,7 @@ class Worker(LocalOrDistributedWorkerBase):
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
@@ -91,7 +91,7 @@ class Worker(LocalOrDistributedWorkerBase):
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
-            mm_config=mm_config,
+            multimodal_config=multimodal_config,
             **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by

@@ -619,7 +619,7 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
-        mm_config = MultiModalConfig()
+        multimodal_config = MultiModalConfig()
 
         device_config = DeviceConfig(device=self.device)
         model_config = ModelConfig(
@@ -644,7 +644,7 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
-            multimodal_config=mm_config)
+            multimodal_config=multimodal_config)
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -746,7 +746,7 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            mm_config=mm_config,
+            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
             decoding_config=decoding_config,

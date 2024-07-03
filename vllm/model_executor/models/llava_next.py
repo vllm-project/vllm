@@ -204,13 +204,13 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: LlavaNextConfig,
-                 mm_config: MultiModalConfig,
+                 multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
 
         self.config = config
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = CLIPVisionModel(config=config.vision_config)

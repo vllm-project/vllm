@@ -26,7 +26,7 @@ class XPUExecutor(GPUExecutor):
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        mm_config: Optional[MultiModalConfig],
+        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         assert device_config.device_type == "xpu"
@@ -42,7 +42,7 @@ class XPUExecutor(GPUExecutor):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
         self.speculative_config = None
 
         # Instantiate the worker and load the model to GPU.

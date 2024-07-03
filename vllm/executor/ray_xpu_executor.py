@@ -43,7 +43,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        mm_config: Optional[MultiModalConfig],
+        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         assert device_config.device_type == "xpu"
@@ -57,7 +57,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
 
         placement_group = self.parallel_config.placement_group
 
@@ -199,7 +199,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
                     rank=rank,
                     distributed_init_method=distributed_init_method,
                     lora_config=self.lora_config,
-                    mm_config=self.mm_config,
+                    multimodal_config=self.multimodal_config,
                     is_driver_worker=rank == 0,
                 ))
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)

@@ -26,7 +26,7 @@ class ExecutorBase(ABC):
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        mm_config: Optional[MultiModalConfig],
+        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         self.model_config = model_config
@@ -36,7 +36,7 @@ class ExecutorBase(ABC):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
         self.speculative_config = speculative_config
 
         self._init_executor()
@@ -120,7 +120,7 @@ class ExecutorAsyncBase(ExecutorBase):
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        mm_config: Optional[MultiModalConfig],
+        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         # This locks each pipeline parallel stage so multiple virtual engines
@@ -132,7 +132,7 @@ class ExecutorAsyncBase(ExecutorBase):
 
         super().__init__(model_config, cache_config, parallel_config,
                          scheduler_config, device_config, load_config,
-                         lora_config, mm_config, speculative_config)
+                         lora_config, multimodal_config, speculative_config)
 
     @abstractmethod
     async def execute_model_async(

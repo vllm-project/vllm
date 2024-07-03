@@ -22,7 +22,7 @@ class SupportsVision(Protocol):
         MRO of your model class.
     """
 
-    def __init__(self, *, mm_config: MultiModalConfig) -> None:
+    def __init__(self, *, multimodal_config: MultiModalConfig) -> None:
         ...
 
 
@@ -32,7 +32,7 @@ class SupportsVision(Protocol):
 class _SupportsVisionType(Protocol):
     supports_vision: Literal[True]
 
-    def __call__(self, *, mm_config: MultiModalConfig) -> None:
+    def __call__(self, *, multimodal_config: MultiModalConfig) -> None:
         ...
 
 

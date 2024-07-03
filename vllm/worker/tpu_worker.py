@@ -31,7 +31,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
-        mm_config: Optional[MultiModalConfig],
+        multimodal_config: Optional[MultiModalConfig],
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -43,7 +43,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.device_config = device_config
         self.cache_config = cache_config
         self.load_config = load_config
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -62,7 +62,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
                                            device_config,
                                            cache_config,
                                            load_config,
-                                           mm_config,
+                                           multimodal_config,
                                            is_driver_worker=is_driver_worker)
 
     def init_device(self) -> None:

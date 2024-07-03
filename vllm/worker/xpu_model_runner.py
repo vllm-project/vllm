@@ -86,7 +86,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        mm_config: Optional[MultiModalConfig],
+        multimodal_config: Optional[MultiModalConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         *args,
@@ -98,7 +98,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.lora_config = lora_config
         self.load_config = load_config
         self.cache_config = cache_config
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
         self.sliding_window = model_config.get_sliding_window()
@@ -135,7 +135,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 device_config=self.device_config,
                 load_config=self.load_config,
                 lora_config=self.lora_config,
-                mm_config=self.mm_config,
+                multimodal_config=self.multimodal_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
                 cache_config=self.cache_config,

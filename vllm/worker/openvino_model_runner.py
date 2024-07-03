@@ -48,7 +48,7 @@ class OpenVINOModelRunner:
         cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        mm_config: Optional[MultiModalConfig],
+        multimodal_config: Optional[MultiModalConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         *args,
@@ -60,7 +60,7 @@ class OpenVINOModelRunner:
         self.device_config = device_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
 

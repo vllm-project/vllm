@@ -47,7 +47,7 @@ class TP1DraftModelRunner(ModelRunner):
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        mm_config: Optional[MultiModalConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
     ):
         if return_hidden_states:
@@ -65,7 +65,7 @@ class TP1DraftModelRunner(ModelRunner):
             lora_config=lora_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
-            mm_config=mm_config,
+            multimodal_config=multimodal_config,
             return_hidden_states=return_hidden_states,
         )
 

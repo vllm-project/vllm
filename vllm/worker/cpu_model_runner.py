@@ -79,7 +79,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        mm_config: Optional[MultiModalConfig],
+        multimodal_config: Optional[MultiModalConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         *args,
@@ -93,7 +93,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         self.device_config = device_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
 
@@ -123,7 +123,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         self.model = get_model(model_config=self.model_config,
                                load_config=self.load_config,
                                device_config=self.device_config,
-                               mm_config=self.mm_config,
+                               multimodal_config=self.multimodal_config,
                                lora_config=self.lora_config,
                                parallel_config=self.parallel_config,
                                scheduler_config=self.scheduler_config,

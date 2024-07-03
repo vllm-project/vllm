@@ -172,7 +172,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        mm_config: Optional[MultiModalConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
     ):
         self.model_config = model_config
@@ -183,7 +183,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
         self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
@@ -245,7 +245,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 device_config=self.device_config,
                 load_config=self.load_config,
                 lora_config=self.lora_config,
-                mm_config=self.mm_config,
+                multimodal_config=self.multimodal_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
                 cache_config=self.cache_config,

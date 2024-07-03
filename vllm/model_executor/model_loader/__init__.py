@@ -15,13 +15,13 @@ def get_model(*, model_config: ModelConfig, load_config: LoadConfig,
               device_config: DeviceConfig, parallel_config: ParallelConfig,
               scheduler_config: SchedulerConfig,
               lora_config: Optional[LoRAConfig],
-              mm_config: Optional[MultiModalConfig],
+              multimodal_config: Optional[MultiModalConfig],
               cache_config: CacheConfig) -> nn.Module:
     loader = get_model_loader(load_config)
     return loader.load_model(model_config=model_config,
                              device_config=device_config,
                              lora_config=lora_config,
-                             mm_config=mm_config,
+                             multimodal_config=multimodal_config,
                              parallel_config=parallel_config,
                              scheduler_config=scheduler_config,
                              cache_config=cache_config)

@@ -434,13 +434,13 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 mm_config: MultiModalConfig,
+                 multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
 
         self.config = config
-        self.mm_config = mm_config
+        self.multimodal_config = multimodal_config
 
         self.model = LlamaModel(config, cache_config, quant_config)
 
