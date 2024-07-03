@@ -153,7 +153,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 proposer_worker = CPUMultiStepWorker(**cpu_draft_worker_kwargs)
             else:
                 if draft_tp == 1:
-                    draft_worker_kwargs["model_runner_cls"] = TP1DraftModelRunner
+                    draft_worker_kwargs[
+                        "model_runner_cls"] = TP1DraftModelRunner
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)

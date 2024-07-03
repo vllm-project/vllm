@@ -621,11 +621,10 @@ class EngineArgs:
             type=str,
             default=None,
             help='Target URL to which OpenTelemetry traces will be sent.')
-        parser.add_argument(
-            '--cpu_draft_worker',
-            type=bool,
-            default=EngineArgs.cpu_draft_worker,
-            help='Run draft model on CPU.')
+        parser.add_argument('--cpu_draft_worker',
+                            type=bool,
+                            default=EngineArgs.cpu_draft_worker,
+                            help='Run draft model on CPU.')
 
         return parser
 
