@@ -1,7 +1,5 @@
 """Tests for rejection sampling."""
 from typing import List, Tuple
-import time
-import numpy as np
 
 import pytest
 import torch
@@ -186,26 +184,15 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
     seeded_mask = torch.rand(batch_size, dtype=torch.float32) <= frac_seeded
 
     results = []
-    times = []
     for _ in range(n_rep):
         generators = [
             torch.Generator(
                 device=device).manual_seed(i) if seeded_mask[i] else None
             for i in range(batch_size)
         ]
-        t0 = time.time_ns()
-        output = rejection_sampler(target_probs, bonus_token_ids, draft_probs,
-                              draft_token_ids, generators)
-        t_elap = time.time_ns()-t0
-        results.append(output)
-        times.append(t_elap)
-        '''
         results.append(
             rejection_sampler(target_probs, bonus_token_ids, draft_probs,
                               draft_token_ids, generators))
-        '''
-
-    print("k: %d, vocab_size: %d, batch_size: %3d, frac_seeded: %.2f, t_elap: %6.2f ms" % (k, vocab_size, batch_size, frac_seeded, np.median(times)/1000.0/1000.0))
 
     for i in range(batch_size):
         if seeded_mask[i]:
