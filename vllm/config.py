@@ -7,8 +7,8 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple,
 import torch
 from transformers import PretrainedConfig
 
-from vllm.distributed import get_current_tp_rank_partition_size
 import vllm.envs as envs
+from vllm.distributed import get_current_tp_rank_partition_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
