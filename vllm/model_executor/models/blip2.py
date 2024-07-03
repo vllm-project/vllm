@@ -609,8 +609,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.get_lm_head(),
-                                       hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.get_lm_head(), hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(
