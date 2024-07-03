@@ -26,9 +26,9 @@ def with_nvml_context(fn):
 class CudaPlatform(Platform):
     _enum = PlatformEnum.CUDA
 
+    @staticmethod
     @lru_cache(maxsize=8)
     @with_nvml_context
-    @staticmethod
     def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
         handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
         return pynvml.nvmlDeviceGetCudaComputeCapability(handle)
