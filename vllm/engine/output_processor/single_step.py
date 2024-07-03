@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -33,7 +33,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         self,
         scheduler_config: SchedulerConfig,
         detokenizer: Detokenizer,
-        scheduler: Scheduler,
+        scheduler: List[Scheduler],
         seq_counter: Counter,
         stop_checker: StopChecker,
     ):
@@ -95,7 +95,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 # not be used in the future iterations.
                 parent.status = SequenceStatus.FINISHED_ABORTED
                 seq_group.remove(parent.seq_id)
-                self.scheduler.free_seq(parent)
+                for scheduler in self.scheduler:
+                    scheduler.free_seq(parent)
                 continue
             # Fork the parent sequence if there are multiple child samples.
             for child_sample in child_samples[:-1]:
@@ -133,7 +134,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 if seq is not parent:
                     seq_group.add(seq)
                     if not seq.is_finished():
-                        self.scheduler.fork_seq(parent, seq)
+                        for scheduler in self.scheduler:
+                            scheduler.fork_seq(parent, seq)
 
             # Free the finished and selected parent sequences' memory in block
             # manager. Keep them in the sequence group as candidate output.
@@ -141,13 +143,14 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             # old sequences.
             for seq, parent in child_seqs:
                 if seq is parent and seq.is_finished():
-                    self.scheduler.free_seq(seq)
+                    for scheduler in self.scheduler:
+                        scheduler.free_seq(seq)
             return
 
         # Beam search case
         # Select the child sequences to keep in the sequence group.
-        selected_child_seqs = []
-        unselected_child_seqs = []
+        selected_child_seqs: List[Tuple[Sequence, Optional[Sequence]]] = []
+        unselected_child_seqs: List[Tuple[Sequence, Optional[Sequence]]] = []
         beam_width = seq_group.sampling_params.best_of
         length_penalty = seq_group.sampling_params.length_penalty
 
@@ -226,13 +229,15 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             if seq is not parent:
                 seq_group.add(seq)
                 if not seq.is_finished():
-                    self.scheduler.fork_seq(parent, seq)
+                    for scheduler in self.scheduler:
+                        scheduler.fork_seq(parent, seq)
 
         # Free the finished and selected parent sequences' memory in block
         # manager. Keep them in the sequence group as candidate output.
         for seq, parent in selected_child_seqs:
             if seq is parent and seq.is_finished():
-                self.scheduler.free_seq(seq)
+                for scheduler in self.scheduler:
+                    scheduler.free_seq(seq)
 
         # Remove the unselected parent sequences from the sequence group and
         # free their memory in block manager.
@@ -241,7 +246,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 # Remove the parent sequence if it is not selected for next
                 # iteration
                 seq_group.remove(seq.seq_id)
-                self.scheduler.free_seq(seq)
+                for scheduler in self.scheduler:
+                    scheduler.free_seq(seq)
 
     def _check_beam_search_early_stopping(
         self,

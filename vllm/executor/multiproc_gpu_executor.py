@@ -9,8 +9,10 @@ from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        get_vllm_instance_id, make_async)
+from vllm.utils import (cuda_device_count_stateless,
+                        get_distributed_init_method, get_open_port,
+                        get_vllm_instance_id, make_async,
+                        update_environment_variables)
 
 logger = init_logger(__name__)
 
@@ -24,8 +26,9 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
         if "CUDA_VISIBLE_DEVICES" not in os.environ:
-            os.environ["CUDA_VISIBLE_DEVICES"] = (",".join(
-                map(str, range(world_size))))
+            update_environment_variables({
+                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
+            })
 
         # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
         os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()
@@ -33,12 +36,14 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
-        from torch.cuda import device_count
-        assert world_size <= device_count(), (
+        assert world_size <= cuda_device_count_stateless(), (
             "please set tensor_parallel_size to less than max local gpu count")
 
+        # Multiprocessing-based executor does not support multi-node setting.
+        # Since it only works for single node, we can use the loopback address
+        # 127.0.0.1 for communication.
         distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
+            "127.0.0.1", get_open_port())
 
         if world_size == 1:
             self.workers = []
@@ -73,32 +78,30 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             worker_monitor.close()
 
     def _driver_execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+        self, execute_model_req: Optional[ExecuteModelRequest]
+    ) -> Optional[List[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution
         loop running in each of the remote workers.
         """
-        return self.driver_worker.execute_model(
-            execute_model_req=execute_model_req)
+        return self.driver_worker.execute_model(execute_model_req)
 
     def _run_workers(
         self,
         method: str,
         *args,
-        async_run_remote_workers_only: bool = False,
+        async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers.
 
         Args:
-            async_run_remote_workers_only: If True the method will be run only
-                in the remote workers, not the driver worker. It will also be
-                run asynchronously and return a list of futures rather than
-                blocking on the results.
+            async_run_tensor_parallel_workers_only: If True the method will be
+                run only in the remote TP workers, not the driver worker.
+                It will also be run asynchronously and return a list of futures
+                rather than blocking on the results.
         """
 
         if max_concurrent_workers:
@@ -111,7 +114,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             for worker in self.workers
         ]
 
-        if async_run_remote_workers_only:
+        if async_run_tensor_parallel_workers_only:
             # Just return futures
             return worker_outputs
 

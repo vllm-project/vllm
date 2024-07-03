@@ -1,4 +1,4 @@
-from abc import abstractproperty
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Hashable, Optional, TypeVar
 
 from torch import nn
@@ -9,12 +9,12 @@ from vllm.utils import LRUCache
 logger = init_logger(__name__)
 
 
-class AdapterModel:
+class AdapterModel(ABC):
 
     def __init__(self, model_id=None):
         self.id = model_id
 
-    @classmethod
+    @abstractmethod
     def from_local_checkpoint(cls, model_dir, model_id=None, **kwargs):
         # Common initialization code
         # Load weights or embeddings from local checkpoint
@@ -37,7 +37,7 @@ class AdapterLRUCache(LRUCache[T]):
         return super()._on_remove(key, value)
 
 
-class AdapterModelManager:
+class AdapterModelManager(ABC):
 
     def __init__(
         self,
@@ -57,52 +57,48 @@ class AdapterModelManager:
     def __len__(self) -> int:
         return len(self._registered_adapters)
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def adapter_slots(self):
         ...
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def capacity(self):
         ...
 
-    def _deactivate_adapter(self, adapter_id: int):
-        raise NotImplementedError("Subclasses must implement this method.")
-
-    def deactivate_adapter(self, adapter_id: int) -> bool:
-        if adapter_id in self._active_adapters:
-            self._deactivate_adapter(adapter_id)
-            self._active_adapters.pop(adapter_id)
-            return True
-        return False
-
+    @abstractmethod
     def activate_adapter(self, adapter_id: int) -> bool:
-        raise NotImplementedError("Subclasses must implement this method.")
+        ...
 
-    def _add_adapter(self, adapter: Any):
-        raise NotImplementedError("Subclasses must implement this method.")
+    @abstractmethod
+    def deactivate_adapter(self, adapter_id: int) -> bool:
+        ...
 
+    @abstractmethod
     def add_adapter(self, adapter: Any) -> bool:
-        if adapter.id not in self._registered_adapters:
-            if len(self._registered_adapters) >= self.capacity:
-                raise RuntimeError("No free " + self.adapter_type + " slots.")
-            self._add_adapter(adapter)
-            return True
-        return False
+        ...
 
+    @abstractmethod
     def set_adapter_mapping(self, mapping: Any) -> None:
-        if self._last_mapping != mapping:
-            self._set_adapter_mapping(mapping)
-        self._last_mapping = mapping
+        ...
 
-    def _set_adapter_mapping(self, mapping: Any) -> None:
-        raise NotImplementedError("Subclasses must implement this method.")
-
+    @abstractmethod
     def remove_adapter(self, adapter_id: int) -> bool:
-        self.deactivate_adapter(adapter_id)
-        return bool(self._registered_adapters.pop(adapter_id, None))
+        ...
 
-    def list_adapters(self) -> Dict[int, Any]:
-        return dict(self._registered_adapters)
+    @abstractmethod
+    def remove_all_adapters(self):
+        ...
 
+    @abstractmethod
     def get_adapter(self, adapter_id: int) -> Optional[Any]:
-        return self._registered_adapters.get(adapter_id, None)
+        ...
+
+    @abstractmethod
+    def list_adapters(self) -> Dict[int, Any]:
+        ...
+
+    @abstractmethod
+    def pin_adapter(self, adapter_id: int) -> bool:
+        ...

@@ -4,7 +4,7 @@ from typing import List
 import torch
 
 from vllm.attention import get_attn_backend
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
                         is_pin_memory_available)
@@ -25,10 +25,12 @@ class CacheEngine:
         cache_config: CacheConfig,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
+        device_config: DeviceConfig,
     ) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.device_config = device_config
 
         self.head_size = model_config.get_head_size()
         self.num_layers = model_config.get_num_layers(parallel_config)
@@ -36,7 +38,11 @@ class CacheEngine:
 
         self.block_size = cache_config.block_size
         self.num_gpu_blocks = cache_config.num_gpu_blocks
+        if self.num_gpu_blocks:
+            self.num_gpu_blocks //= parallel_config.pipeline_parallel_size
         self.num_cpu_blocks = cache_config.num_cpu_blocks
+        if self.num_cpu_blocks:
+            self.num_cpu_blocks //= parallel_config.pipeline_parallel_size
 
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
@@ -55,7 +61,8 @@ class CacheEngine:
         )
 
         # Initialize the cache.
-        self.gpu_cache = self._allocate_kv_cache(self.num_gpu_blocks, "cuda")
+        self.gpu_cache = self._allocate_kv_cache(
+            self.num_gpu_blocks, self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
     def _allocate_kv_cache(

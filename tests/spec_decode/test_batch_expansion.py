@@ -1,3 +1,5 @@
+from typing import List
+
 import pytest
 import torch
 
@@ -38,14 +40,14 @@ def test_get_token_ids_to_score(k: int):
         device='cuda',
     )
 
-    expected_output = [
+    expected_output: List[List[int]] = [
         [],
     ]
     for i in range(proposal_token_ids.shape[0]):
         expected_output.append(proposal_token_ids[:i + 1].tolist())
 
     scorer = BatchExpansionTop1Scorer(mock_worker(), 'cuda:0', 32_000)
-    actual_output = scorer._get_token_ids_to_score(proposal_token_ids)  # pylint: disable=protected-access
+    actual_output = scorer._get_token_ids_to_score(proposal_token_ids.tolist())  # pylint: disable=protected-access
 
     actual_output = [
         x.tolist() if isinstance(x, torch.Tensor) else x for x in actual_output
@@ -88,10 +90,10 @@ def test_create_single_target_seq_group_metadata(k: int):
 
     assert output.request_id == input_seq_group_metadata.request_id
     assert len(output.seq_data) == 1
-    assert output.seq_data[target_seq_id].get_prompt_token_ids(
-    ) == prompt_tokens
-    assert output.seq_data[target_seq_id].get_output_token_ids(
-    ) == prev_output_tokens + token_ids
+    assert output.seq_data[target_seq_id].get_prompt_token_ids() == tuple(
+        prompt_tokens)
+    assert output.seq_data[target_seq_id].get_output_token_ids() == tuple(
+        prev_output_tokens + token_ids)
 
     assert len(output.block_tables) == 1
     assert output.block_tables[

@@ -86,6 +86,9 @@ class CPUExecutor(ExecutorBase):
     def remove_lora(self, lora_id: int) -> bool:
         return self.driver_worker.remove_lora(lora_id)
 
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.driver_worker.pin_lora(lora_id)
+
     def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
 
@@ -98,6 +101,9 @@ class CPUExecutor(ExecutorBase):
 
     def list_prompt_adapters(self) -> Set[int]:
         return self.driver_worker.list_prompt_adapters()
+
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        return self.driver_worker.pin_prompt_adapter(prompt_adapter_id)
 
     def check_health(self) -> None:
         # CPUExecutor will always be healthy as long as

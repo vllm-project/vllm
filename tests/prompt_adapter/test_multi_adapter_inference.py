@@ -41,8 +41,8 @@ def do_sample(engine):
     return results
 
 
-def test_twitter_prompt_adapter():
-    engine_args = EngineArgs(model="bigscience/bloomz-560m",
+def test_multi_prompt_adapters():
+    engine_args = EngineArgs(model=MODEL_PATH,
                              max_prompt_adapters=3,
                              enable_prompt_adapter=True)
     engine = LLMEngine.from_engine_args(engine_args)

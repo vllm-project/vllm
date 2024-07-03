@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from vllm.utils import is_cpu, is_hip, is_tpu
+from vllm.utils import is_cpu, is_hip, is_tpu, is_xpu
 
 
 class CustomOp(nn.Module):
@@ -29,9 +29,7 @@ class CustomOp(nn.Module):
         return self.forward_cuda(*args, **kwargs)
 
     def forward_xpu(self, *args, **kwargs):
-        # By default, we assume that XPU ops are compatible with CUDA ops.
-        # NOTE(woosuk): This is a placeholder for future extensions.
-        return self.forward_cuda(*args, **kwargs)
+        raise NotImplementedError
 
     def forward_cpu(self, *args, **kwargs):
         # By default, we assume that CPU ops are compatible with CUDA ops.
@@ -58,5 +56,7 @@ class CustomOp(nn.Module):
             return self.forward_cpu
         elif is_tpu():
             return self.forward_tpu
+        elif is_xpu():
+            return self.forward_xpu
         else:
             return self.forward_cuda

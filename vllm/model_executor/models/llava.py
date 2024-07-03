@@ -1,13 +1,12 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
-# TODO(xwjiang): We should port CLIPVisionModel's code over to not depend on
-# transformers' impl.
-from transformers import CLIPVisionModel, LlavaConfig
+from transformers import CLIPVisionConfig, LlavaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -15,13 +14,14 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import get_dummy_image_data
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
-from .vlm_base import VisionLanguageModelBase
+from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
+from .interfaces import SupportsVision
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -75,34 +75,43 @@ class LlavaImagePixelInputs(TypedDict):
     """Shape: (batch_size, num_channels, height, width)"""
 
 
-class LlavaImageFeatureInputs(TypedDict):
-    type: Literal["image_features"]
-    data: torch.Tensor
-    """Shape: (batch_size, image_feature_size, hidden_size)"""
+LlavaImageInputs = LlavaImagePixelInputs
 
 
-LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
+def dummy_data_for_llava(ctx: InputContext, seq_len: int):
+    hf_config = ctx.get_hf_config(LlavaConfig)
+    vision_config = hf_config.vision_config
+
+    if isinstance(vision_config, CLIPVisionConfig):
+        seq_data = dummy_seq_data_for_clip(
+            vision_config,
+            seq_len,
+            image_token_id=hf_config.image_token_index,
+        )
+
+        mm_data = dummy_image_for_clip(vision_config)
+        return seq_data, mm_data
+
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
 
 
-@MULTIMODAL_REGISTRY.register_image_feature_input()
-@MULTIMODAL_REGISTRY.register_image_pixel_input()
-@MULTIMODAL_REGISTRY.register_dummy_data(get_dummy_image_data)
-class LlavaForConditionalGeneration(VisionLanguageModelBase):
+@MULTIMODAL_REGISTRY.register_image_input_mapper()
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
+class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
     def __init__(self,
                  config: LlavaConfig,
-                 vision_language_config: VisionLanguageConfig,
+                 vlm_config: VisionLanguageConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
-        super().__init__(vision_language_config)
+        super().__init__()
 
         self.config = config
+        self.vlm_config = vlm_config
 
-        if self.vision_language_config.image_input_type == (
-                VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
-            self.vision_tower = CLIPVisionModel(config.vision_config)
-        else:
-            self.vision_tower = None
+        # TODO: Optionally initializes this for supporting embeddings.
+        self.vision_tower = CLIPVisionModel(config.vision_config)
 
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
@@ -123,11 +132,10 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         self.sampler = Sampler()
 
     def _validate_image_data(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[1:]) != list(
-                self.vision_language_config.image_input_shape[1:]):
+        if list(data.shape[1:]) != list(self.vlm_config.image_input_shape[1:]):
             raise ValueError(
                 f"The expected image tensor shape is batch dimension plus "
-                f"{self.vision_language_config.image_input_shape[1:]}. "
+                f"{self.vlm_config.image_input_shape[1:]}. "
                 f"You supplied {data.shape}. "
                 f"If you are using vLLM's entrypoint, make sure your "
                 f"supplied image input is consistent with "
@@ -138,44 +146,18 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
-        image_features = kwargs.pop("image_features", None)
 
-        expected_input_type = self.vision_language_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
+        if pixel_values is None:
+            return None
 
-        if expected_input_type == ImageInputType.PIXEL_VALUES:
-            if image_features is not None:
-                raise ValueError(
-                    "Expected pixel values but got image features")
-            if pixel_values is None:
-                return None
+        if not isinstance(pixel_values, torch.Tensor):
+            raise ValueError("Incorrect type of pixel values. "
+                             f"Got type: {type(pixel_values)}")
 
-            if not isinstance(pixel_values, torch.Tensor):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
-            return LlavaImagePixelInputs(
-                type="pixel_values",
-                data=self._validate_image_data(pixel_values),
-            )
-
-        if expected_input_type == ImageInputType.IMAGE_FEATURES:
-            if pixel_values is not None:
-                raise ValueError(
-                    "Expected image features but got pixel values")
-            if image_features is None:
-                return None
-
-            if not isinstance(image_features, torch.Tensor):
-                raise ValueError("Incorrect type of image features. "
-                                 f"Got type: {type(image_features)}")
-
-            return LlavaImageFeatureInputs(
-                type="image_features",
-                data=self._validate_image_data(image_features),
-            )
-
-        return None
+        return LlavaImagePixelInputs(
+            type="pixel_values",
+            data=self._validate_image_data(pixel_values),
+        )
 
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
@@ -189,12 +171,11 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     def _image_pixels_to_features(self, vision_tower: CLIPVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
-        # TODO(xwjiang): Maybe port minimal CLIPVisionModel over.
-        image_outputs = vision_tower(pixel_values.to(vision_tower.device),
-                                     output_hidden_states=True)
 
-        image_features = image_outputs.hidden_states[
-            self.config.vision_feature_layer]
+        # NOTE: we skip the step to select the vision feature layer since
+        # this is already done inside the vision tower
+        image_features = vision_tower(pixel_values,
+                                      self.config.vision_feature_layer)
 
         return self._select_image_features(
             image_features,
@@ -211,12 +192,8 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     def _process_image_input(self,
                              image_input: LlavaImageInputs) -> torch.Tensor:
-        if image_input["type"] == "pixel_values":
-            assert self.vision_tower is not None
-            image_features = self._process_image_pixels(image_input)
-        else:
-            image_features = image_input["data"]
-
+        assert self.vision_tower is not None
+        image_features = self._process_image_pixels(image_input)
         return self.multi_modal_projector(image_features)
 
     def forward(
@@ -225,9 +202,10 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> SamplerOutput:
-        """Run forward pass for Llava 1.5.
+        """Run forward pass for LLaVA-1.5.
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted image embeddings.
@@ -247,22 +225,10 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
 
-        The model takes two types of image inputs:
-        PIXEL_VALUES and IMAGE_FEATURES.
-        The following shows how each maps to huggingface implementation.
-        PIXEL_VALUES:
-        - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L353
-        IMAGE_FEATURES:
-        - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L430
-        before going through the multi modal projector.
-
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
-            pixel_values: For PIXEL_VALUES, expects a batch with shape
-                [1, 3, 336, 336].
-            image_features: For IMAGE_FEATURES, expects a batch with shape
-                [1, 576, 1024].
+            pixel_values: The pixels in each input image.
         """
         image_input = self._parse_and_validate_image_input(**kwargs)
 
@@ -272,7 +238,7 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
             inputs_embeds = merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
-                self.vision_language_config.image_token_id)
+                self.vlm_config.image_token_id)
 
             input_ids = None
         else:
@@ -282,6 +248,7 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
                                             positions,
                                             kv_caches,
                                             attn_metadata,
+                                            None,
                                             inputs_embeds=inputs_embeds)
 
         return hidden_states
@@ -313,6 +280,9 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            # post_layernorm is not needed in CLIPVisionModel
+            if "vision_model.post_layernorm" in name:
                 continue
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:

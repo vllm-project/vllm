@@ -47,7 +47,8 @@ class GPUExecutor(ExecutorBase):
             vision_language_config=self.vision_language_config,
             speculative_config=self.speculative_config,
             prompt_adapter_config=self.prompt_adapter_config,
-            is_driver_worker=rank == 0,
+            is_driver_worker=(not self.parallel_config)
+            or (rank % self.parallel_config.tensor_parallel_size == 0),
         )
 
     def _create_worker(self,
@@ -89,7 +90,7 @@ class GPUExecutor(ExecutorBase):
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
-    ) -> List[Union[SamplerOutput, PoolerOutput]]:
+    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 
@@ -100,6 +101,10 @@ class GPUExecutor(ExecutorBase):
     def remove_lora(self, lora_id: int) -> bool:
         assert lora_id > 0, "lora_id must be greater than 0."
         return self.driver_worker.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self.driver_worker.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
@@ -114,6 +119,11 @@ class GPUExecutor(ExecutorBase):
         assert prompt_adapter_id > 0, \
             "prompt_adapter_id must be greater than 0."
         return self.driver_worker.remove_prompt_adapter(prompt_adapter_id)
+
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        assert prompt_adapter_id > 0, \
+                "prompt_adapter_id must be greater than 0."
+        return self.driver_worker.pin_prompt_adapter(prompt_adapter_id)
 
     def list_prompt_adapters(self) -> Set[int]:
         return self.driver_worker.list_prompt_adapters()

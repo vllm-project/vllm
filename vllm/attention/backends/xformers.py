@@ -28,8 +28,8 @@ class XFormersBackend(AttentionBackend):
         return XFormersImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "XFormersMetadata":
-        return XFormersMetadata(*args, **kwargs)
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return XFormersMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -431,8 +431,8 @@ def _make_alibi_bias(
     num_kv_heads: int,
     dtype: torch.dtype,
     seq_lens: List[int],
-) -> LowerTriangularMaskWithTensorBias:
-    attn_biases = []
+) -> List[AttentionBias]:
+    attn_biases: List[AttentionBias] = []
     for seq_len in seq_lens:
         bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses

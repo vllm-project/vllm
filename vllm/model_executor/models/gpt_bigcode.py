@@ -39,7 +39,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
+
+from .interfaces import SupportsLoRA
 
 
 class GPTBigCodeAttention(nn.Module):
@@ -230,7 +232,7 @@ class GPTBigCodeModel(nn.Module):
         return hidden_states
 
 
-class GPTBigCodeForCausalLM(nn.Module):
+class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
     supported_lora_modules = ["c_fc", "c_proj", "wte", "lm_head", "c_attn"]
@@ -250,7 +252,10 @@ class GPTBigCodeForCausalLM(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.quant_config = quant_config
         self.transformer = GPTBigCodeModel(config, cache_config, quant_config,
                                            lora_config)
@@ -268,6 +273,7 @@ class GPTBigCodeForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata)
@@ -299,4 +305,10 @@ class GPTBigCodeForCausalLM(nn.Module):
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader(param, loaded_weight)
+            # TODO (@robertgshaw2-neuralmagic): move to fp8 linear method
+            if "c_attn.input_scale" in name or "c_attn.weight_scale" in name:
+                weight_loader(param, loaded_weight, 'q')
+                weight_loader(param, loaded_weight, 'k')
+                weight_loader(param, loaded_weight, 'v')
+            else:
+                weight_loader(param, loaded_weight)

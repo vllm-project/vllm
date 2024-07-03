@@ -51,8 +51,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import print_warning_once
+
+from .interfaces import SupportsLoRA
 
 
 class MixtralMoE(nn.Module):
@@ -472,7 +474,7 @@ class MixtralModel(nn.Module):
         return hidden_states
 
 
-class MixtralForCausalLM(nn.Module):
+class MixtralForCausalLM(nn.Module, SupportsLoRA):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -504,7 +506,10 @@ class MixtralForCausalLM(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
@@ -531,6 +536,7 @@ class MixtralForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)

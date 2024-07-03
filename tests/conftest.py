@@ -1,9 +1,12 @@
 import contextlib
 import gc
 import os
-import subprocess
-import sys
-from typing import Any, Dict, List, Optional, Tuple, TypeVar
+from collections import UserList
+from dataclasses import dataclass
+from functools import cached_property
+from pathlib import Path
+from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple,
+                    TypedDict, TypeVar)
 
 import pytest
 import torch
@@ -11,18 +14,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForVision2Seq,
-                          AutoProcessor, AutoTokenizer, BatchEncoding)
+                          AutoTokenizer, BatchEncoding)
 
 from vllm import LLM, SamplingParams
-from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
+from vllm.config import TokenizerPoolConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalData
-from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu
+from vllm.utils import cuda_device_count_stateless, is_cpu
+
+if TYPE_CHECKING:
+    # it will call torch.cuda.device_count()
+    from vllm.multimodal import MultiModalDataDict
 
 logger = init_logger(__name__)
 
@@ -30,27 +35,55 @@ _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
-# Multi modal related
-# You can use `.buildkite/download-images.sh` to download the assets
-PIXEL_VALUES_FILES = [
-    os.path.join(_TEST_DIR, "images", filename) for filename in
-    ["stop_sign_pixel_values.pt", "cherry_blossom_pixel_values.pt"]
-]
-IMAGE_FEATURES_FILES = [
-    os.path.join(_TEST_DIR, "images", filename) for filename in
-    ["stop_sign_image_features.pt", "cherry_blossom_image_features.pt"]
-]
-IMAGE_FILES = [
-    os.path.join(_TEST_DIR, "images", filename)
-    for filename in ["stop_sign.jpg", "cherry_blossom.jpg"]
-]
-assert len(PIXEL_VALUES_FILES) == len(IMAGE_FEATURES_FILES) == len(IMAGE_FILES)
+_IMAGE_DIR = Path(_TEST_DIR) / "images"
+"""You can use `.buildkite/download-images.sh` to download the assets."""
 
 
 def _read_prompts(filename: str) -> List[str]:
     with open(filename, "r") as f:
         prompts = f.readlines()
         return prompts
+
+
+@dataclass(frozen=True)
+class ImageAsset:
+    name: Literal["stop_sign", "cherry_blossom"]
+
+    @cached_property
+    def pil_image(self) -> Image.Image:
+        return Image.open(_IMAGE_DIR / f"{self.name}.jpg")
+
+    def for_hf(self) -> Image.Image:
+        return self.pil_image
+
+    def for_vllm(self) -> Dict[str, Any]:
+        return {"image": self.pil_image}
+
+
+class _ImageAssetPrompts(TypedDict):
+    stop_sign: str
+    cherry_blossom: str
+
+
+class _ImageAssets(UserList[ImageAsset]):
+
+    def __init__(self) -> None:
+        super().__init__(
+            [ImageAsset("stop_sign"),
+             ImageAsset("cherry_blossom")])
+
+    def prompts(self, prompts: _ImageAssetPrompts) -> List[str]:
+        """
+        Convenience method to define the prompt for each test image.
+
+        The order of the returned prompts matches the order of the
+        assets when iterating through this object.
+        """
+        return [prompts["stop_sign"], prompts["cherry_blossom"]]
+
+
+IMAGE_ASSETS = _ImageAssets()
+"""Singleton instance of :class:`_ImageAssets`."""
 
 
 def cleanup():
@@ -83,31 +116,6 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
         cleanup()
 
 
-@pytest.fixture(scope="session")
-def hf_images() -> List[Image.Image]:
-    return [Image.open(filename) for filename in IMAGE_FILES]
-
-
-@pytest.fixture()
-def vllm_images(request) -> List[MultiModalData]:
-    vision_language_config = request.getfixturevalue("model_and_config")[1]
-    if vision_language_config.image_input_type == (
-            VisionLanguageConfig.ImageInputType.IMAGE_FEATURES):
-        return [
-            ImageFeatureData(torch.load(filename))
-            for filename in IMAGE_FEATURES_FILES
-        ]
-    else:
-        return [
-            ImagePixelData(Image.open(filename)) for filename in IMAGE_FILES
-        ]
-
-
-@pytest.fixture()
-def vllm_image_tensors(request) -> List[torch.Tensor]:
-    return [torch.load(filename) for filename in PIXEL_VALUES_FILES]
-
-
 @pytest.fixture
 def example_prompts() -> List[str]:
     prompts = []
@@ -122,6 +130,11 @@ def example_long_prompts() -> List[str]:
     for filename in _LONG_PROMPTS:
         prompts += _read_prompts(filename)
     return prompts
+
+
+@pytest.fixture(scope="session")
+def image_assets() -> _ImageAssets:
+    return IMAGE_ASSETS
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -146,8 +159,10 @@ class HfRunner:
         model_name: str,
         dtype: str = "half",
         *,
+        model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
+        is_sparseml_model: bool = False,
     ) -> None:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
@@ -165,14 +180,19 @@ class HfRunner:
         else:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
+            elif is_sparseml_model:
+                from sparseml.transformers import SparseAutoModelForCausalLM
+                auto_cls = SparseAutoModelForCausalLM
             else:
                 auto_cls = AutoModelForCausalLM
 
+            model_kwargs = model_kwargs if model_kwargs is not None else {}
             self.model = self.wrap_device(
                 auto_cls.from_pretrained(
                     model_name,
                     torch_dtype=torch_dtype,
                     trust_remote_code=True,
+                    **model_kwargs,
                 ))
 
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -182,6 +202,9 @@ class HfRunner:
         )
 
         try:
+            # don't put this import at the top level
+            # it will call torch.cuda.device_count()
+            from transformers import AutoProcessor  # noqa: F401
             self.processor = AutoProcessor.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
@@ -232,11 +255,13 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[List[Image.Image]] = None,
+        **kwargs,
     ) -> List[Tuple[List[int], str]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
                                 max_new_tokens=max_tokens,
-                                images=images)
+                                images=images,
+                                **kwargs)
 
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
@@ -364,7 +389,7 @@ class HfRunner:
         cleanup()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def hf_runner():
     return HfRunner
 
@@ -384,6 +409,7 @@ class VllmRunner:
         block_size: int = 16,
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
+        enforce_eager: bool = False,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -392,6 +418,7 @@ class VllmRunner:
             trust_remote_code=True,
             dtype=dtype,
             swap_space=swap_space,
+            enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
             max_model_len=max_model_len,
@@ -404,7 +431,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[List[MultiModalData]] = None,
+        images: Optional[List["MultiModalDataDict"]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -425,7 +452,7 @@ class VllmRunner:
             req_sample_output_strs: List[str] = []
             for sample in req_output.outputs:
                 output_str = sample.text
-                output_ids = sample.token_ids
+                output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
                 req_sample_output_strs.append(prompt_str + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
@@ -453,7 +480,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[List[MultiModalData]] = None,
+        images: Optional[List["MultiModalDataDict"]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)
@@ -539,15 +566,4 @@ def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
 
-    try:
-        out = subprocess.run([
-            sys.executable, "-c",
-            "import torch; print(torch.cuda.device_count())"
-        ],
-                             capture_output=True,
-                             check=True,
-                             text=True)
-    except subprocess.CalledProcessError as e:
-        logger.warning("Failed to get number of GPUs.", exc_info=e)
-        return 0
-    return int(out.stdout.strip())
+    return cuda_device_count_stateless()
