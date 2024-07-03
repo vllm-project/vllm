@@ -208,7 +208,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         # Activation order
         g_idx = Parameter(
             torch.empty(
-                input_size_per_partition if self.quant_config.desc_act else 0,
+                input_size_per_partition,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -294,6 +294,12 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         if self.quant_config.desc_act:
             # Get sorting based on g_idx
             sort_g_idx(layer, "g_idx", "g_idx_sort_indices")
+        else:
+            # Reset g_idx to empty
+            layer.g_idx = Parameter(
+                torch.empty(0, dtype=torch.int), requires_grad=False)
+            layer.g_idx_sort_indices = Parameter(
+                torch.empty(0, dtype=torch.int), requires_grad=False)
 
         # Repack weights into marlin format
         marlin_qweight = ops.gptq_marlin_repack(
