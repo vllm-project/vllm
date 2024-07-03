@@ -114,7 +114,6 @@ class Fp8LinearMethod(LinearMethodBase):
         del input_size, output_size
         output_size_per_partition = sum(output_partition_sizes)
 
-        layer.process_after_load = True
         layer.logical_widths = output_partition_sizes
 
         # WEIGHT
@@ -147,9 +146,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("input_scale", scale)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        if (not hasattr(layer, "process_after_load")
-                or not layer.process_after_load):
-            return
 
         # If checkpoint not serialized fp8, quantize the weights.
         if not self.quant_config.is_checkpoint_fp8_serialized:
@@ -213,8 +209,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-
-        layer.process_after_load = True
 
         if self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -280,9 +274,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.a2_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        if (not hasattr(layer, "process_after_load")
-                or not layer.process_after_load):
-            return
 
         # If checkpoint is fp16, quantize in place.
         if not self.quant_config.is_checkpoint_fp8_serialized:
