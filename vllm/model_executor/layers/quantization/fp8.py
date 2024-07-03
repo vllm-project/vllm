@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch.nn import Module
@@ -9,18 +9,18 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   fused_moe)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    fp8_apply, requantize_with_max_scale, all_close_1d, 
-    per_tensor_dequantize, per_tensor_quantize, create_scale_param,
-    cutlass_fp8_supported)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    all_close_1d, create_scale_param, cutlass_fp8_supported, fp8_apply,
+    per_tensor_dequantize, per_tensor_quantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
+
 
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
@@ -142,7 +142,7 @@ class Fp8LinearMethod(LinearMethodBase):
             # INPUT ACTIVATION SCALE
             if self.quant_config.activation_scheme == "static":
                 scale = create_scale_param(output_partition_sizes,
-                                       **extra_weight_attrs)
+                                           **extra_weight_attrs)
                 layer.register_parameter("input_scale", scale)
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -151,7 +151,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if not self.quant_config.is_checkpoint_fp8_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                          scale=None)
-            
+
             # Update the layer with the new values.
             layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
@@ -161,7 +161,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # If checkpoint is fp8, requantize the separately quantized logical
         # weights into a single fp8 weight with a single weight scale.
         else:
-            # Dequant -> Quant with max scale.            
+            # Dequant -> Quant with max scale.
             max_w_scale, weight = requantize_with_max_scale(
                 weight=layer.weight,
                 weight_scale=layer.weight_scale,
