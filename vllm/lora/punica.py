@@ -4,22 +4,16 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
-<<<<<<< HEAD
 from vllm.lora.ops.bgmv_expand import bgmv_expand
 from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
 from vllm.lora.ops.bgmv_shrink import bgmv_shrink
 from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
 from vllm.lora.ops.sgmv_shrink import sgmv_shrink
-=======
-from vllm import _custom_ops as ops
-from vllm.platforms import current_platform
->>>>>>> origin/main
 
 _PARAMS_CACHE: Dict[int, Tuple] = {}
 
 
-<<<<<<< HEAD
 def _compute_params(
     token_lora_tensor: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, ]:
@@ -48,16 +42,6 @@ def _compute_params(
             max_length,
         )
     return _PARAMS_CACHE[pointer]
-=======
-    if current_platform.get_device_capability() < (8, 0):
-        raise ImportError(
-            "punica LoRA kernels require compute capability >= 8.0")
-    else:
-        raise ImportError(
-            "punica LoRA kernels could not be imported. If you built vLLM "
-            "from source, make sure VLLM_INSTALL_PUNICA_KERNELS=1 env var "
-            "was set.")
->>>>>>> origin/main
 
 
 def reset_params_cache():
