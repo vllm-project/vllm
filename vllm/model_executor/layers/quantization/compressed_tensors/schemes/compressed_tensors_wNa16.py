@@ -20,12 +20,10 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def __init__(self,
                  strategy: str,
                  num_bits: int,
-                 group_size: Optional[int] = None,
-                 act_order: bool = False):
+                 group_size: Optional[int] = None):
         self.num_bits = num_bits
         self.strategy = strategy
         self.group_size = group_size
-        self.act_order = act_order
 
         if self.strategy == "group" and self.group_size is None:
             raise ValueError(
@@ -74,23 +72,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 "weight_loader": weight_loader
             })
         layer.register_parameter("weight_packed", weight)
-
-        # Activation order
-        g_idx = Parameter(
-            torch.empty(
-                input_size_per_partition,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            g_idx, { 
-                "input_dim": 0,
-                "weight_loader": weight_loader,
-                "ignore_warning": True
-            },
-        )
-        layer.register_parameter("weight_g_idx", g_idx)
 
         weight_scale = Parameter(
             torch.empty(
