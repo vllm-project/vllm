@@ -143,9 +143,6 @@ class OpenAIServingChat(OpenAIServing):
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
 
-        # lazy import to avoid calling `torch.cuda.device_count()`
-        from vllm.multimodal.utils import (async_get_and_parse_image,
-                                           get_full_image_text_prompt)
         texts: List[str] = []
         mm_futures: List[Awaitable[MultiModalDataDict]] = []
 
