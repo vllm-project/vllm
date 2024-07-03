@@ -1,6 +1,5 @@
 #!/bin/bash
 
-set -x
 
 server_params=$1
 common_params=$2

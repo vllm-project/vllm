@@ -1,6 +1,5 @@
 #!/bin/bash
 
-set -ex
 set -o pipefail
 
 check_gpus() {

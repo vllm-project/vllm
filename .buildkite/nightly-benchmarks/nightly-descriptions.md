@@ -6,6 +6,17 @@ The main goal of this benchmarking is two-fold:
 - Reproducible: one can run the exact same set of benchmarking commands inside the exact same docker by following reproducing instructions in [reproduce.md]().
 
 
+## Versions
+
+We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following docker images:
+- vllm/vllm-openai:v0.5.0.post1
+- nvcr.io/nvidia/tritonserver:24.04-trtllm-python-py3
+- openmmlab/lmdeploy:v0.5.0
+- ghcr.io/huggingface/text-generation-inference:2.1
+
+Check `nightly-pipeline.yaml` artifact for more details.
+
+
 ## Workload description
 
 We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following workload:
@@ -16,6 +27,12 @@ We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following workload:
 - Average QPS (query per second): 4, 8 for 8B model and 1, 4 for larger models. For each QPS, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
 - Models: llama-3 8B, llama-3 70B, mixtral 8x7B.
 - Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
+
+
+## Known crashes
+
+- TGI v2.1 crashes when running mixtral model [TGI PR #2122](https://github.com/huggingface/text-generation-inference/issues/2122)
+- 
 
 
 ## Results
