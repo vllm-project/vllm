@@ -276,10 +276,10 @@ class ModelConfig:
                 "Pipeline parallelism is only supported for the following "
                 f" architectures: {_PP_SUPPORTED_MODELS}.")
 
-        if total_num_hidden_layers % pipeline_parallel_size != 0:
+        if total_num_hidden_layers < pipeline_parallel_size:
             raise ValueError(
                 f"Total number of hidden layers ({total_num_hidden_layers}) "
-                "must be divisible by pipeline parallel size "
+                "must be larger than the pipeline parallel size "
                 f"({pipeline_parallel_size}).")
 
         if self.quantization == "bitsandbytes" and (
@@ -388,7 +388,12 @@ class ModelConfig:
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = getattr(self.hf_text_config,
                                           "num_hidden_layers", 0)
-        return total_num_hidden_layers // parallel_config.pipeline_parallel_size
+        from vllm.distributed import get_pp_group, get_pp_indices
+        pp_group = get_pp_group()
+        start, end = get_pp_indices(total_num_hidden_layers,
+                                    pp_group.rank_in_group,
+                                    pp_group.world_size)
+        return end - start
 
     def contains_seqlen_agnostic_layers(
             self, parallel_config: "ParallelConfig") -> bool:
