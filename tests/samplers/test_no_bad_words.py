@@ -103,7 +103,7 @@ class TestTwoTokenBadWord:
 
             output_token_ids = self._generate(
                 llm,
-                bad_words=[self.TARGET_TOKEN1, self.TARGET_TOKEN2])
+                bad_words=[f'{self.TARGET_TOKEN1} {self.TARGET_TOKEN2}'])
             assert output_token_ids[0] == self.target_token_id1
             assert output_token_ids[:2] != [
                 self.target_token_id1, self.target_token_id2
