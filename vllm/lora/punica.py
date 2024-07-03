@@ -4,13 +4,6 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
-from vllm.lora.ops.bgmv_expand import bgmv_expand
-from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
-from vllm.lora.ops.bgmv_shrink import bgmv_shrink
-from vllm.lora.ops.sgmv_expand import sgmv_expand
-from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
-from vllm.lora.ops.sgmv_shrink import sgmv_shrink
-
 _PARAMS_CACHE: Dict[int, Tuple] = {}
 
 
@@ -73,6 +66,9 @@ def add_shrink(
     y=x@w_t_all
     When `is_prefilling` is True, will launch `sgmv_shrink`
     """
+    from vllm.lora.ops.bgmv_shrink import bgmv_shrink
+    from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+
     if is_prefilling:
         (
             b_seq_start_tensor,
@@ -110,6 +106,8 @@ def add_expand(
     y+=x@w_t_all
     When `is_prefilling` is True, will launch `sgmv_expand`, 
     """
+    from vllm.lora.ops.bgmv_expand import bgmv_expand
+    from vllm.lora.ops.sgmv_expand import sgmv_expand
     if is_prefilling:
         (
             b_seq_start_tensor,
@@ -148,6 +146,8 @@ def add_expand_slice(
     """
     y+=x@w_t_all
     """
+    from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
+    from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
     if is_prefilling:
         (
             b_seq_start_tensor,
