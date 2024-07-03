@@ -24,16 +24,14 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
     llm = LLM(model="llava-hf/llava-1.5-7b-hf")
 
 .. important::
-    We have removed all vision language related cli args in the new release. This is a breaking change, so please update your code to follow
-    the above snippet. 
+    We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
+    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified, and internally we will construct data structures for
+    every model to perform profiling with.
 
-    Specifically, no need to specify `image_feature_size` for profiling purposes anymore. Internally we will construct data structures for
-    every model to do profiling with, to hide our users from this detail at the API layer.
-
-    This work is still ongoing. In the meantime, we internally hardcode `image_feature_size = 3000` through 
+    This work is still ongoing. In the meantime, we internally hardcode ``image_feature_size = 3000`` through 
     :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
-    for every model to be conservative in terms of GPU memory consumption. 
-    This hardcoded value will be replaced with a more accurate profiling strategy.
+    for every model to be conservative in terms of GPU memory consumption. This hardcoded value will be replaced 
+    with a more accurate profiling strategy in the future.
 
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
@@ -41,23 +39,39 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
 * ``prompt``: The prompt should follow the format that is documented on HuggingFace.
 * ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
 
-.. note::
-
-   ``multi_modal_data`` can accept keys and values beyond the builtin ones, as long as a customized plugin is registered through
-    :class:`vllm.multimodal.MULTIMODAL_REGISTRY`.
-
 .. code-block:: python
 
     # Refer to the HuggingFace repo for the correct format to use
     prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     # Load the image using PIL.Image
-    image = ...
-
+    image = PIL.Image.open(...)
+    
+    # Single prompt inference
     outputs = llm.generate({
         "prompt": prompt,
         "multi_modal_data": {"image": image},
     })
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    
+    # Batch inference
+    image_1 = PIL.Image.open(...)
+    image_2 = PIL.Image.open(...)
+    outputs = llm.generate(
+        [
+            {
+                "prompt": "USER: <image>\nWhat is the content of this image?\nASSISTANT:",
+                "multi_modal_data": {"image": image_1},
+            },
+            {
+                "prompt": "USER: <image>\nWhat's the color of this image?\nASSISTANT:",
+                "multi_modal_data": {"image": image_2},
+            }
+        ]
+    )
 
     for o in outputs:
         generated_text = o.outputs[0].text
@@ -89,16 +103,14 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
         --chat-template template_llava.jinja
 
 .. important::
-    We have removed all vision language related cli args in the new release. This is a breaking change, so please update your code to follow
-    the above snippet. 
+    We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
+    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified, and internally we will construct data structures for
+    every model to perform profiling with.
 
-    Specifically, no need to specify `image_feature_size` for profiling purposes anymore. Internally we will construct data structures for
-    every model to do profiling with, to hide our users from this detail at the API layer.
-
-    This work is still ongoing. In the meantime, we internally hardcode `image_feature_size = 3000` through 
+    This work is still ongoing. In the meantime, we internally hardcode ``image_feature_size = 3000`` through 
     :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
-    for every model to be conservative in terms of GPU memory consumption. 
-    This hardcoded value will be replaced with a more accurate profiling strategy.
+    for every model to be conservative in terms of GPU memory consumption. This hardcoded value will be replaced 
+    with a more accurate profiling strategy in the future.
 
 To consume the server, you can use the OpenAI client like in the example below:
 
