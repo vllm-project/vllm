@@ -56,7 +56,7 @@ class CPUExecutor(ExecutorBase):
         result_handler = ResultHandler()
         self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
         self.workers = []
-        
+
         if is_async:
             self.workers = [
                 ProcessWorkerWrapper(
@@ -73,7 +73,7 @@ class CPUExecutor(ExecutorBase):
         else:
             self.driver_worker = self._create_worker()
             self.driver_method_invoker = _driver_method_invoker
-        
+
             if world_size != 1:
                 self.workers = [
                     ProcessWorkerWrapper(
@@ -90,7 +90,8 @@ class CPUExecutor(ExecutorBase):
                 async_worker_list = self.workers + [self.driver_worker]
             else:
                 async_worker_list = self.workers
-            self.worker_monitor = WorkerMonitor(async_worker_list, result_handler)
+            self.worker_monitor = WorkerMonitor(async_worker_list,
+                                                result_handler)
             result_handler.start()
             self.worker_monitor.start()
 
@@ -165,7 +166,8 @@ class CPUExecutor(ExecutorBase):
             # Just return futures
             return worker_outputs
 
-        driver_worker_output = self.driver_method_invoker(self.driver_worker, method, *args, **kwargs)
+        driver_worker_output = self.driver_method_invoker(
+            self.driver_worker, method, *args, **kwargs)
 
         # Get the results of the workers.
         return [driver_worker_output
@@ -175,7 +177,8 @@ class CPUExecutor(ExecutorBase):
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        return self.driver_method_invoker(self.driver_worker, "determine_num_available_blocks")
+        return self.driver_method_invoker(self.driver_worker,
+                                          "determine_num_available_blocks")
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -196,13 +199,14 @@ class CPUExecutor(ExecutorBase):
     def execute_model(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        if (self.parallel_config.tensor_parallel_size > 1 and 
-            self.parallel_worker_tasks is None):
+        if (self.parallel_config.tensor_parallel_size > 1
+                and self.parallel_worker_tasks is None):
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
                 async_run_remote_workers_only=True,
             )
-        output = self.driver_method_invoker(self.driver_worker, "execute_model", execute_model_req)
+        output = self.driver_method_invoker(self.driver_worker,
+                                            "execute_model", execute_model_req)
         return output
 
     def stop_remote_worker_execution_loop(self) -> None:
@@ -265,6 +269,7 @@ class CPUExecutor(ExecutorBase):
         for result in parallel_worker_tasks:
             result.get()
 
+
 class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
@@ -321,8 +326,10 @@ def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
 
     return config
 
+
 def _driver_method_invoker(driver, method: str, *args, **kwargs):
     return getattr(driver, method)(*args, **kwargs)
+
 
 def _async_driver_method_invoker(driver, method: str, *args, **kwargs):
     return driver.execute_method(method, *args, **kwargs).get()
